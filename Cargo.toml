@@ -1,3 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["distvirt-worker"]
+members = ["distvirt-worker", "guest-image/guest-init"]
+
+[profile.guest]
+inherits = "release"
+panic = "abort"
+lto = true
+strip = true
+opt-level = "s"
+
