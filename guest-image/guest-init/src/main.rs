@@ -1,4 +1,4 @@
-mod protocol;
+mod container;
 mod vsock;
 
 use std::ffi::CString;
@@ -6,9 +6,8 @@ use std::ptr;
 
 use anyhow::{bail, Context};
 
-use protocol::{GuestMessage, HostMessage};
-
-const VSOCK_PORT: u32 = 1024;
+use container::ContainerManager;
+use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_PORT};
 
 fn mount(source: &str, target: &str, fstype: &str, flags: libc::c_ulong, data: Option<&str>) -> anyhow::Result<()> {
     let source_c = CString::new(source).unwrap();
@@ -59,19 +58,70 @@ fn mount_essential_filesystems() {
     }
 }
 
-fn handle_message(msg: HostMessage, stream: &mut vsock::VsockStream) -> anyhow::Result<bool> {
+/// Block SIGCHLD and return a signalfd that fires when children exit.
+fn setup_signalfd() -> anyhow::Result<i32> {
+    unsafe {
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut mask);
+        libc::sigaddset(&mut mask, libc::SIGCHLD);
+
+        // Block SIGCHLD so it's delivered via signalfd instead of the default handler.
+        if libc::sigprocmask(libc::SIG_BLOCK, &mask, ptr::null_mut()) != 0 {
+            bail!("sigprocmask: {}", std::io::Error::last_os_error());
+        }
+
+        let fd = libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK);
+        if fd < 0 {
+            bail!("signalfd: {}", std::io::Error::last_os_error());
+        }
+        Ok(fd)
+    }
+}
+
+/// Drain all pending signals from the signalfd.
+fn drain_signalfd(fd: i32) {
+    let mut buf = [0u8; std::mem::size_of::<libc::signalfd_siginfo>()];
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            break;
+        }
+    }
+}
+
+fn handle_message(
+    msg: HostMessage,
+    stream: &mut vsock::VsockStream,
+    containers: &mut ContainerManager,
+) -> anyhow::Result<bool> {
     match msg {
         HostMessage::AddContainer { id, device } => {
-            log::info!("AddContainer: id={}, device={} (not yet implemented)", id, device);
-            stream.send(&GuestMessage::Error {
-                message: "AddContainer not yet implemented".into(),
-            })?;
+            log::info!("AddContainer: id={}, device={}", id, device);
+            match containers.add(id.clone(), device) {
+                Ok(()) => {
+                    stream.send(&GuestMessage::ContainerAdded { id })?;
+                }
+                Err(e) => {
+                    log::error!("AddContainer failed: {:#}", e);
+                    stream.send(&GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    })?;
+                }
+            }
         }
-        HostMessage::StartContainer { id, .. } => {
-            log::info!("StartContainer: id={} (not yet implemented)", id);
-            stream.send(&GuestMessage::Error {
-                message: "StartContainer not yet implemented".into(),
-            })?;
+        HostMessage::StartContainer { id, entrypoint, args } => {
+            log::info!("StartContainer: id={}, entrypoint={}", id, entrypoint);
+            match containers.start(&id, &entrypoint, &args) {
+                Ok(pid) => {
+                    stream.send(&GuestMessage::ContainerStarted { id, pid })?;
+                }
+                Err(e) => {
+                    log::error!("StartContainer failed: {:#}", e);
+                    stream.send(&GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    })?;
+                }
+            }
         }
         HostMessage::Shutdown => {
             log::info!("shutdown requested");
@@ -84,6 +134,8 @@ fn handle_message(msg: HostMessage, stream: &mut vsock::VsockStream) -> anyhow::
 fn run() -> anyhow::Result<()> {
     mount_essential_filesystems();
 
+    let sigfd = setup_signalfd().context("setup signalfd")?;
+
     log::info!("starting vsock listener on port {}", VSOCK_PORT);
     let listener = vsock::VsockListener::bind(VSOCK_PORT)
         .context("bind vsock listener")?;
@@ -94,18 +146,62 @@ fn run() -> anyhow::Result<()> {
     log::info!("host connected, sending Ready");
     stream.send(&GuestMessage::Ready)?;
 
-    loop {
-        let msg: HostMessage = stream.recv().context("receive host message")?;
-        log::info!("received: {:?}", msg);
+    let mut containers = ContainerManager::new();
 
-        match handle_message(msg, &mut stream) {
-            Ok(true) => break,
-            Ok(false) => {}
-            Err(e) => {
-                log::error!("error handling message: {:#}", e);
-                let _ = stream.send(&GuestMessage::Error {
-                    message: format!("{:#}", e),
-                });
+    loop {
+        // Poll for vsock messages and child exits.
+        let mut fds = [
+            libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: sigfd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+
+        // If the BufReader has buffered data, don't block on poll —
+        // there may be a complete message already available.
+        let timeout = if stream.has_buffered_data() { 0 } else { -1 };
+
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            bail!("poll: {}", err);
+        }
+
+        // Handle child exits.
+        if fds[1].revents & libc::POLLIN != 0 {
+            drain_signalfd(sigfd);
+        }
+        // Always try to reap, even without signalfd event (handles races).
+        for exit in containers.reap_children() {
+            let _ = stream.send(&GuestMessage::ContainerExited {
+                id: exit.id,
+                code: exit.code,
+            });
+        }
+
+        // Handle vsock messages.
+        if fds[0].revents & libc::POLLIN != 0 || stream.has_buffered_data() {
+            let msg: HostMessage = stream.recv().context("receive host message")?;
+            log::info!("received: {:?}", msg);
+
+            match handle_message(msg, &mut stream, &mut containers) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => {
+                    log::error!("error handling message: {:#}", e);
+                    let _ = stream.send(&GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    });
+                }
             }
         }
     }
@@ -127,7 +223,7 @@ fn main() {
 
     log::info!("powering off");
     unsafe { libc::sync(); }
-    unsafe { libc::reboot(libc::RB_POWER_OFF); }
+    unsafe { libc::reboot(libc::RB_AUTOBOOT); }
     loop {
         unsafe { libc::pause(); }
     }

@@ -69,13 +69,25 @@ impl VsockListener {
 pub struct VsockStream {
     reader: BufReader<std::fs::File>,
     writer: BufWriter<std::fs::File>,
+    raw_fd: i32,
 }
 
 impl VsockStream {
     fn new(file: std::fs::File) -> Self {
+        let raw_fd = file.as_raw_fd();
         let reader = BufReader::new(file.try_clone().expect("clone vsock fd"));
         let writer = BufWriter::new(file);
-        VsockStream { reader, writer }
+        VsockStream { reader, writer, raw_fd }
+    }
+
+    pub fn as_raw_fd(&self) -> i32 {
+        self.raw_fd
+    }
+
+    /// Returns true if the internal read buffer has data available,
+    /// meaning recv() can be called without blocking on the fd.
+    pub fn has_buffered_data(&self) -> bool {
+        self.reader.buffer().len() > 0
     }
 
     /// Send a length-prefixed JSON message.
