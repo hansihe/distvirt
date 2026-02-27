@@ -5,7 +5,7 @@ use anyhow::Context;
 use compose_spec::Compose;
 use compose_spec::service::Command;
 use compose_spec::service::ports;
-use distvirt::deployment::{Dependency, Deployment, PortMapping, PortProtocol, ServiceSpec};
+use distvirt_types::{Dependency, Deployment, PortMapping, PortProtocol, ServiceSpec};
 
 /// Parse a Docker Compose file into a [`Deployment`].
 pub fn parse(path: &Path) -> anyhow::Result<Deployment> {

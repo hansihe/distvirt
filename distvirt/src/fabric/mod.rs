@@ -1,7 +1,12 @@
-pub mod dns;
-pub mod gateway;
-pub mod port;
-pub mod switch;
+pub(crate) mod dns;
+pub(crate) mod gateway;
+pub(crate) mod port;
+pub(crate) mod switch;
+pub(crate) mod tun;
+
+pub use dns::DnsRegistry;
+pub use gateway::FabricGateway;
+pub use port::{FramePort, Port, PortId};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -10,7 +15,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::tap::TapDevice;
-use port::{FramePort, Port, PortId};
 use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, format_mac, is_broadcast, parse_ethernet_header};
 
 /// Shared port handle that can be used by any reader task to send frames.

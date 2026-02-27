@@ -5,7 +5,7 @@ use anyhow::{bail, Context};
 
 use distvirt_guest_protocol::{
     IoMode, IoSessionRequest, IoSessionResponse, STREAM_EOF, STREAM_STDERR, STREAM_STDOUT,
-    IO_FRAME_MAX_PAYLOAD,
+    IO_FRAME_HEADER_SIZE, IO_FRAME_MAX_PAYLOAD, parse_io_frame_header,
 };
 
 /// An event received from the guest I/O stream.
@@ -72,14 +72,14 @@ impl IoSession {
     /// Returns an error if the connection is broken.
     pub async fn next_event(&mut self) -> anyhow::Result<IoEvent> {
         // Read frame header: [1 byte stream_id] [2 bytes LE length]
-        let mut header = [0u8; 3];
+        let mut header = [0u8; IO_FRAME_HEADER_SIZE];
         self.reader
             .read_exact(&mut header)
             .await
             .context("read I/O frame header")?;
 
-        let stream_id = header[0];
-        let payload_len = u16::from_le_bytes([header[1], header[2]]) as usize;
+        let (stream_id, payload_len_u16) = parse_io_frame_header(&header);
+        let payload_len = payload_len_u16 as usize;
 
         if stream_id == STREAM_EOF {
             return Ok(IoEvent::Eof);

@@ -82,3 +82,45 @@ pub const STREAM_STDERR: u8 = 2;
 
 /// Maximum payload size for an I/O frame.
 pub const IO_FRAME_MAX_PAYLOAD: usize = 8192;
+
+/// Size of an I/O frame header: [stream_id: u8][length: u16 LE].
+pub const IO_FRAME_HEADER_SIZE: usize = 3;
+
+/// Encode a single I/O frame: `[stream_id][u16 LE length][payload]`.
+///
+/// Panics if `payload.len() > IO_FRAME_MAX_PAYLOAD`.
+pub fn encode_io_frame(stream_id: u8, payload: &[u8]) -> Vec<u8> {
+    assert!(
+        payload.len() <= IO_FRAME_MAX_PAYLOAD,
+        "payload exceeds IO_FRAME_MAX_PAYLOAD"
+    );
+    let mut frame = Vec::with_capacity(IO_FRAME_HEADER_SIZE + payload.len());
+    frame.push(stream_id);
+    frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Chunk `data` into one or more frames, each with at most `IO_FRAME_MAX_PAYLOAD` bytes.
+pub fn encode_io_frames(stream_id: u8, data: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while offset < data.len() {
+        let chunk_len = (data.len() - offset).min(IO_FRAME_MAX_PAYLOAD);
+        frames.push(encode_io_frame(stream_id, &data[offset..offset + chunk_len]));
+        offset += chunk_len;
+    }
+    frames
+}
+
+/// Encode an EOF frame (stream_id=STREAM_EOF, length=0).
+pub fn encode_eof_frame() -> [u8; IO_FRAME_HEADER_SIZE] {
+    [STREAM_EOF, 0, 0]
+}
+
+/// Parse a 3-byte frame header into `(stream_id, payload_length)`.
+pub fn parse_io_frame_header(header: &[u8; IO_FRAME_HEADER_SIZE]) -> (u8, u16) {
+    let stream_id = header[0];
+    let length = u16::from_le_bytes([header[1], header[2]]);
+    (stream_id, length)
+}

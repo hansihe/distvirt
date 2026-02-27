@@ -2,10 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use tokio::sync::mpsc;
 
-use distvirt::orchestrate::ImageOverrides;
 use distvirt::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider;
 use distvirt::image_provider::rootfs_dir::RootfsDirProvider;
+use distvirt::orchestrate::ImageOverrides;
+use distvirt::protocol::WorkerEvent;
+use distvirt::worker::Worker;
 
 #[derive(Parser)]
 #[command(name = "distvirt", about = "Lightweight VM-based container runner")]
@@ -57,6 +60,30 @@ enum Commands {
         /// Hostname for the container
         #[arg(long)]
         hostname: Option<String>,
+        /// Path to the firecracker binary
+        #[arg(long, default_value = "firecracker")]
+        firecracker: PathBuf,
+    },
+    /// Run a Docker Compose deployment
+    ComposeUp {
+        /// Path to the compose file (e.g. docker-compose.yml)
+        #[arg(short, long, default_value = "docker-compose.yml")]
+        file: PathBuf,
+        /// Path to the kernel (vmlinux)
+        #[arg(long)]
+        kernel: PathBuf,
+        /// Path to the guest rootfs ext4 image
+        #[arg(long)]
+        rootfs_image: PathBuf,
+        /// Path to the containerd socket
+        #[arg(long, default_value = "/run/containerd/containerd.sock")]
+        containerd_socket: PathBuf,
+        /// Containerd namespace
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// Set up host NAT routing for guest internet access
+        #[arg(long)]
+        setup_routing: bool,
         /// Path to the firecracker binary
         #[arg(long, default_value = "firecracker")]
         firecracker: PathBuf,
@@ -154,6 +181,45 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::ComposeUp {
+            file,
+            kernel,
+            rootfs_image,
+            containerd_socket,
+            namespace,
+            setup_routing,
+            firecracker,
+        } => {
+            if setup_routing {
+                setup_host_routing().context("setup host routing")?;
+            }
+
+            let deployment = distvirt_compose::parse(&file)
+                .with_context(|| format!("parsing compose file '{}'", file.display()))?;
+
+            let vmm = distvirt::vmm::firecracker::Firecracker::new(firecracker);
+            let image_provider = ContainerdOverlayfsProvider {
+                socket: containerd_socket.to_str().unwrap().to_string(),
+                namespace,
+            };
+
+            let (event_tx, mut event_rx) = mpsc::channel::<WorkerEvent>(256);
+            let mut worker = Worker::new(
+                kernel,
+                rootfs_image,
+                event_tx,
+                vmm,
+                image_provider,
+            );
+
+            distvirt::orchestrate_compose::run_compose(
+                &deployment,
+                &mut worker,
+                &mut event_rx,
+            )
+            .await
+            .context("compose up")?;
+        }
         Commands::BuildImage { rootfs, output } => {
             distvirt::image::build_ext4_image(&rootfs, &output)
                 .context("build ext4 image")?;

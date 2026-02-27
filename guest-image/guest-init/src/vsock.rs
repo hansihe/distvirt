@@ -54,6 +54,22 @@ impl VsockListener {
         Ok(VsockListener { fd })
     }
 
+    /// Set the listener socket to non-blocking mode.
+    ///
+    /// Required when using `accept_nonblocking` in a loop, since `accept4`
+    /// with `SOCK_NONBLOCK` only sets the *accepted* connection non-blocking,
+    /// not the accept call itself.
+    pub fn set_nonblocking(&self) -> anyhow::Result<()> {
+        let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            bail!("fcntl(F_GETFL): {}", io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            bail!("fcntl(F_SETFL): {}", io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn accept(&self) -> anyhow::Result<VsockStream> {
         let fd = unsafe {
             libc::accept(self.fd.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut())

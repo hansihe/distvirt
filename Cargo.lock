@@ -589,6 +589,7 @@ dependencies = [
  "anyhow",
  "containerd-client",
  "distvirt-guest-protocol",
+ "distvirt-types",
  "libc",
  "log",
  "oci-spec",
@@ -607,6 +608,7 @@ dependencies = [
  "anyhow",
  "clap",
  "distvirt",
+ "distvirt-compose",
  "env_logger",
  "log",
  "tokio",
@@ -618,7 +620,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "compose_spec",
- "distvirt",
+ "distvirt-types",
  "log",
  "tempfile",
 ]
@@ -629,6 +631,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "distvirt-types"
+version = "0.1.0"
 
 [[package]]
 name = "distvirt-worker"

@@ -249,6 +249,7 @@ async fn run_with_image(
             netmask: "255.255.255.0".to_string(),
             gateway: "172.16.0.1".to_string(),
         }),
+        serial_console: true,
     };
 
     let mut instance = vmm.launch(&vm_config).await.context("launch VM")?;

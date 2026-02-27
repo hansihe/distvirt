@@ -367,34 +367,54 @@ async fn mount_rootfs(
         std::ffi::CString::new(mount.source.as_str()).context("mount source")?;
     let target_c =
         std::ffi::CString::new(mount_dir.to_str().unwrap()).context("mount target")?;
-    let fstype_c =
-        std::ffi::CString::new(mount.r#type.as_str()).context("mount type")?;
     let options = mount.options.join(",");
-    let options_c = std::ffi::CString::new(options.as_str()).context("mount options")?;
+    log::debug!(
+        "snapshot mount: source={:?}, type={:?}, target={:?}, options={:?}",
+        mount.source, mount.r#type, mount_dir, options
+    );
+
+    // Containerd returns "bind" type for single-layer images, which needs
+    // MS_BIND flag rather than a filesystem type string.
+    let is_bind = mount.r#type == "bind";
+    let mut flags = libc::MS_RDONLY;
+    let fstype_c;
+    if is_bind {
+        flags |= libc::MS_BIND;
+        fstype_c = std::ffi::CString::new("").context("mount type")?;
+    } else {
+        fstype_c = std::ffi::CString::new(mount.r#type.as_str()).context("mount type")?;
+    };
+
+    // Parse option flags like "rbind" and "ro" into mount flags.
+    let mut data_options = Vec::new();
+    for opt in &mount.options {
+        match opt.as_str() {
+            "rbind" => flags |= libc::MS_BIND | libc::MS_REC,
+            "ro" => flags |= libc::MS_RDONLY,
+            other => data_options.push(other),
+        }
+    }
+    let data_str = data_options.join(",");
+    let options_c = std::ffi::CString::new(data_str.as_str()).context("mount options")?;
 
     let ret = unsafe {
         libc::mount(
             source_c.as_ptr(),
             target_c.as_ptr(),
             fstype_c.as_ptr(),
-            libc::MS_RDONLY,
+            flags,
             options_c.as_ptr() as *const libc::c_void,
         )
     };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENODEV) {
-            bail!(
-                "mount overlayfs at {:?}: {}. The 'overlay' kernel module may not be loaded. \
-                 Try running: sudo modprobe overlay",
-                mount_dir,
-                err
-            );
-        }
         bail!(
-            "mount overlayfs at {:?}: {}",
+            "mount at {:?}: {} (source={:?}, type={:?}, options={:?})",
             mount_dir,
-            err
+            err,
+            mount.source,
+            mount.r#type,
+            options
         );
     }
 

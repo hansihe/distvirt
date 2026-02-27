@@ -6,6 +6,8 @@ pub mod image_provider;
 pub mod io_session;
 pub mod log_collector;
 pub mod orchestrate;
+pub mod orchestrate_compose;
+pub mod protocol;
 pub mod tap;
 pub mod vmm;
 pub mod vsock_client;

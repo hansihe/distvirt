@@ -1,11 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::io::RawFd;
 
 use anyhow::Context;
 
 use distvirt_guest_protocol::{
-    IoSessionRequest, IoSessionResponse, STREAM_EOF, STREAM_STDERR, STREAM_STDOUT,
-    IO_FRAME_MAX_PAYLOAD, VSOCK_IO_PORT,
+    IoSessionRequest, IoSessionResponse, STREAM_STDERR, STREAM_STDOUT, VSOCK_IO_PORT,
+    encode_eof_frame, encode_io_frames,
 };
 
 use crate::vsock::{VsockListener, VsockStream};
@@ -68,17 +68,22 @@ pub struct IoSessionManager {
     sessions: HashMap<String, IoSession>,
     /// Buffered output for containers without an active session.
     buffers: HashMap<String, OutputBuffer>,
+    /// Containers that have exited but whose buffer hasn't been consumed by a session yet.
+    exited_containers: HashSet<String>,
 }
 
 impl IoSessionManager {
     pub fn new() -> anyhow::Result<Self> {
         let listener = VsockListener::bind(VSOCK_IO_PORT)
             .context("bind vsock I/O listener")?;
+        listener.set_nonblocking()
+            .context("set I/O listener non-blocking")?;
         log::info!("I/O session listener bound on port {}", VSOCK_IO_PORT);
         Ok(IoSessionManager {
             listener,
             sessions: HashMap::new(),
             buffers: HashMap::new(),
+            exited_containers: HashSet::new(),
         })
     }
 
@@ -137,15 +142,27 @@ impl IoSessionManager {
             if !buf.is_empty() {
                 let stdout_data = buf.drain_stdout();
                 if !stdout_data.is_empty() {
-                    let _ = write_frames(&mut stream, STREAM_STDOUT, &stdout_data);
+                    if let Err(e) = write_frames(&mut stream, STREAM_STDOUT, &stdout_data) {
+                        log::warn!("failed to flush buffered stdout for {}: {:#}", request.container_id, e);
+                    }
                 }
                 let stderr_data = buf.drain_stderr();
                 if !stderr_data.is_empty() {
-                    let _ = write_frames(&mut stream, STREAM_STDERR, &stderr_data);
+                    if let Err(e) = write_frames(&mut stream, STREAM_STDERR, &stderr_data) {
+                        log::warn!("failed to flush buffered stderr for {}: {:#}", request.container_id, e);
+                    }
                 }
             }
         }
 
+        // If the container already exited, send EOF and don't keep the session.
+        if self.exited_containers.remove(&request.container_id) {
+            log::info!("I/O session: container {} already exited, sending EOF", request.container_id);
+            if let Err(e) = write_eof_frame(&mut stream) {
+                log::warn!("failed to send EOF for {}: {:#}", request.container_id, e);
+            }
+            return Ok(true);
+        }
         self.sessions.insert(
             request.container_id.clone(),
             IoSession {
@@ -192,11 +209,17 @@ impl IoSessionManager {
     }
 
     /// Send EOF frame and clean up session for a container that has exited.
+    /// If no session is connected, keep the buffer so a late-connecting session can consume it.
     pub fn container_exited(&mut self, container_id: &str) {
         if let Some(mut session) = self.sessions.remove(container_id) {
-            let _ = write_eof_frame(&mut session.stream);
+            if let Err(e) = write_eof_frame(&mut session.stream) {
+                log::warn!("failed to send EOF for {}: {:#}", container_id, e);
+            }
+            self.buffers.remove(container_id);
+        } else {
+            // No active session — mark as exited so try_accept() can send EOF after flushing.
+            self.exited_containers.insert(container_id.to_string());
         }
-        self.buffers.remove(container_id);
     }
 
     /// Check if a session fd has disconnected. Returns container IDs of disconnected sessions.
@@ -232,25 +255,14 @@ impl IoSessionManager {
 
 /// Write data as one or more I/O frames.
 fn write_frames(stream: &mut VsockStream, stream_id: u8, data: &[u8]) -> anyhow::Result<()> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let chunk_len = (data.len() - offset).min(IO_FRAME_MAX_PAYLOAD);
-        let chunk = &data[offset..offset + chunk_len];
-
-        let mut frame = Vec::with_capacity(3 + chunk_len);
-        frame.push(stream_id);
-        frame.extend_from_slice(&(chunk_len as u16).to_le_bytes());
-        frame.extend_from_slice(chunk);
-
+    for frame in encode_io_frames(stream_id, data) {
         stream.write_raw(&frame).context("write I/O frame")?;
-        offset += chunk_len;
     }
     Ok(())
 }
 
 /// Write an EOF frame (stream_id=0, length=0).
 fn write_eof_frame(stream: &mut VsockStream) -> anyhow::Result<()> {
-    let frame = [STREAM_EOF, 0, 0];
-    stream.write_raw(&frame).context("write EOF frame")?;
+    stream.write_raw(&encode_eof_frame()).context("write EOF frame")?;
     Ok(())
 }

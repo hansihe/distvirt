@@ -261,14 +261,16 @@ fn run() -> anyhow::Result<()> {
         for exit in containers.reap_children() {
             // Drain remaining pipe data before sending EOF.
             if let Some(fd) = containers.stdout_fd(&exit.id) {
-                let data = read_pipe(fd);
-                if !data.is_empty() {
+                loop {
+                    let data = read_pipe(fd);
+                    if data.is_empty() { break; }
                     io_manager.forward_pipe_data(&exit.id, STREAM_STDOUT, &data);
                 }
             }
             if let Some(fd) = containers.stderr_fd(&exit.id) {
-                let data = read_pipe(fd);
-                if !data.is_empty() {
+                loop {
+                    let data = read_pipe(fd);
+                    if data.is_empty() { break; }
                     io_manager.forward_pipe_data(&exit.id, STREAM_STDERR, &data);
                 }
             }

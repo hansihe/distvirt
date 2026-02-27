@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 compose_spec = "0.3"
-distvirt = { path = "../distvirt" }
+distvirt-types = { path = "../distvirt-types" }
 log = "0.4"
 
 [dev-dependencies]

@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -33,6 +34,7 @@ impl Vmm for Firecracker {
         let config_vcpu = config.vcpu_count;
         let config_mem = config.mem_size_mib;
         let config_net = config.net.as_ref().map(|n| (n.guest_ip.clone(), n.netmask.clone(), n.gateway.clone()));
+        let config_serial = config.serial_console;
 
         tokio::task::spawn_blocking(move || {
             launch_sync(
@@ -43,6 +45,7 @@ impl Vmm for Firecracker {
                 config_vcpu,
                 config_mem,
                 config_net.as_ref(),
+                config_serial,
             )
         })
         .await
@@ -58,6 +61,7 @@ fn launch_sync(
     vcpu_count: u32,
     mem_size_mib: u32,
     net: Option<&(String, String, String)>,
+    serial_console: bool,
 ) -> anyhow::Result<FirecrackerInstance> {
     let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
@@ -74,12 +78,30 @@ fn launch_sync(
     let api_socket = tmpdir.path().join("firecracker.sock");
     let vsock_uds_path = tmpdir.path().join("vsock.sock");
 
-    // Start firecracker process using tokio::process::Command so we get a tokio Child.
-    let child = tokio::process::Command::new(firecracker_bin)
-        .arg("--api-sock")
-        .arg(&api_socket)
-        .spawn()
-        .context("spawn firecracker")?;
+    // Start firecracker process. Container output is captured separately via vsock I/O sessions.
+    // When serial_console is enabled, pipe stdout so we can forward kernel boot logs.
+    let mut cmd = tokio::process::Command::new(firecracker_bin);
+    cmd.arg("--api-sock").arg(&api_socket);
+    if serial_console {
+        cmd.stdout(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null());
+    }
+    cmd.stderr(Stdio::null());
+    let mut child = cmd.spawn().context("spawn firecracker")?;
+
+    // Forward serial console output (kernel boot logs via ttyS0) to log::debug.
+    if serial_console {
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log::debug!("[serial] {}", line);
+                }
+            });
+        }
+    }
 
     // Wait for API socket to appear.
     wait_for_file(&api_socket, Duration::from_secs(5))

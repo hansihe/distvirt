@@ -1,0 +1,14 @@
+name: test
+services:
+  web:
+    image: docker.io/library/nginx:latest
+    ports:
+      - "8080:80"
+
+  app:
+    image: docker.io/library/alpine:latest
+    command: ["sh", "-c", "while true; do echo hello from app; wget -qO- http://web:80 > /dev/null && echo 'reached web!'; sleep 2; done"]
+    depends_on:
+      - web
+    environment:
+      MY_VAR: "testing"

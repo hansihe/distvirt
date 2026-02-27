@@ -23,6 +23,8 @@ pub struct VmConfig {
     pub vcpu_count: u32,
     pub mem_size_mib: u32,
     pub net: Option<NetConfig>,
+    /// If true, forward the VM serial console (kernel boot logs) to the host log at debug level.
+    pub serial_console: bool,
 }
 
 /// A VMM implementation that can launch VMs.

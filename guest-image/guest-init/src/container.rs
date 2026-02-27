@@ -358,12 +358,13 @@ fn child_exec_inner(
         // Open /dev/null for stdin.
         let devnull = CString::new("/dev/null").unwrap();
         let null_fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY) };
-        if null_fd >= 0 {
-            unsafe {
-                libc::dup2(null_fd, 0);
-                if null_fd > 2 {
-                    libc::close(null_fd);
-                }
+        if null_fd < 0 {
+            bail!("open /dev/null: {}", std::io::Error::last_os_error());
+        }
+        unsafe {
+            libc::dup2(null_fd, 0);
+            if null_fd > 2 {
+                libc::close(null_fd);
             }
         }
         unsafe {

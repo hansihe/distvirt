@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 containerd-client = "0.8"
 distvirt-guest-protocol = { path = "../distvirt-guest-protocol" }
+distvirt-types = { path = "../distvirt-types" }
 libc = "0.2"
 log = "0.4"
 oci-spec = "0.8"
