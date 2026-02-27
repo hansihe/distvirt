@@ -37,15 +37,15 @@ pub struct ImageOverrides {
 /// and if it returns an OCI config, that config is merged with the overrides.
 /// If no OCI config is available (bare rootfs), the overrides must supply at
 /// least an entrypoint.
-pub fn run(
+pub async fn run(
     vmm: &impl Vmm,
     kernel_path: &Path,
     rootfs_image_path: &Path,
-    provider: &dyn ImageProvider,
+    provider: &impl ImageProvider,
     image_ref: &str,
     overrides: &ImageOverrides,
 ) -> anyhow::Result<i32> {
-    let artifact = provider.prepare(image_ref).context("preparing image")?;
+    let artifact = provider.prepare(image_ref).await.context("preparing image")?;
 
     let config = if let Some(ref oci_config) = artifact.oci_config {
         merge_config(oci_config, overrides)?
@@ -53,11 +53,11 @@ pub fn run(
         config_from_overrides(overrides)?
     };
 
-    run_with_image(vmm, kernel_path, rootfs_image_path, &artifact.image_path, &config)
+    run_with_image(vmm, kernel_path, rootfs_image_path, &artifact.image_path, &config).await
 }
 
 /// Run a container from a pre-built ext4 image.
-fn run_with_image(
+async fn run_with_image(
     vmm: &impl Vmm,
     kernel_path: &Path,
     rootfs_image_path: &Path,
@@ -77,17 +77,42 @@ fn run_with_image(
         }),
     };
 
-    let mut instance = vmm.launch(&vm_config).context("launch VM")?;
-    log::info!("VM launched, connecting vsock");
+    let mut instance = vmm.launch(&vm_config).await.context("launch VM")?;
+    log::info!("VM launched");
+
+    // Start the L2 fabric switch and gateway before vsock (guest boot takes seconds).
+    let _fabric = if let Some(tap) = instance.take_tap() {
+        let mut fabric = crate::fabric::Fabric::new();
+
+        // Start the fabric gateway (smoltcp + TUN + DNS forwarding).
+        // Must be set up before add_port so port tasks get the gateway channel.
+        let (gateway, egress_tx, ingress_rx) =
+            crate::fabric::gateway::FabricGateway::new()
+                .context("create fabric gateway")?;
+        fabric.set_gateway(egress_tx, ingress_rx);
+        tokio::spawn(gateway.run());
+
+        let tap_name = tap.name.clone();
+        fabric
+            .add_port(tap)
+            .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
+
+        log::info!("fabric: started L2 switch with gateway on {}", tap_name);
+        Some(fabric)
+    } else {
+        None
+    };
 
     // Connect to guest over vsock.
+    log::info!("connecting vsock");
     let stream = instance
         .connect_vsock(VSOCK_PORT)
+        .await
         .context("connect vsock")?;
     let mut conn = GuestConnection::new(stream);
 
     // Wait for Ready.
-    let msg: GuestMessage = conn.recv().context("receive Ready")?;
+    let msg: GuestMessage = conn.recv().await.context("receive Ready")?;
     match msg {
         GuestMessage::Ready => log::info!("guest is ready"),
         other => bail!("expected Ready, got {:?}", other),
@@ -101,9 +126,10 @@ fn run_with_image(
             netmask: net_config.netmask.clone(),
             gateway: net_config.gateway.clone(),
         })
+        .await
         .context("send ConfigureNetwork")?;
 
-        let msg: GuestMessage = conn.recv().context("receive NetworkConfigured")?;
+        let msg: GuestMessage = conn.recv().await.context("receive NetworkConfigured")?;
         match msg {
             GuestMessage::NetworkConfigured => log::info!("guest network configured"),
             GuestMessage::Error { message } => bail!("ConfigureNetwork failed: {}", message),
@@ -116,10 +142,12 @@ fn run_with_image(
     conn.send(&HostMessage::AddContainer {
         id: container_id.clone(),
         device: "/dev/vdb".to_string(),
+        dns_servers: vec!["172.16.0.1".to_string()],
     })
+    .await
     .context("send AddContainer")?;
 
-    let msg: GuestMessage = conn.recv().context("receive ContainerAdded")?;
+    let msg: GuestMessage = conn.recv().await.context("receive ContainerAdded")?;
     match msg {
         GuestMessage::ContainerAdded { id } => log::info!("container added: {}", id),
         GuestMessage::Error { message } => bail!("AddContainer failed: {}", message),
@@ -137,9 +165,10 @@ fn run_with_image(
         gid: config.gid,
         hostname: config.hostname.clone(),
     })
+    .await
     .context("send StartContainer")?;
 
-    let msg: GuestMessage = conn.recv().context("receive ContainerStarted")?;
+    let msg: GuestMessage = conn.recv().await.context("receive ContainerStarted")?;
     match msg {
         GuestMessage::ContainerStarted { id, pid } => {
             log::info!("container {} started with pid {}", id, pid)
@@ -148,29 +177,8 @@ fn run_with_image(
         other => bail!("expected ContainerStarted, got {:?}", other),
     }
 
-    // Start the L2 fabric switch for this VM's TAP device.
-    let _fabric = if let Some(tap) = instance.take_tap() {
-        let mut fabric = crate::fabric::Fabric::new();
-        let rt = tokio::runtime::Runtime::new().context("create tokio runtime for fabric")?;
-        let tap_name = tap.name.clone();
-        rt.block_on(async {
-            fabric.add_port(tap)
-        }).map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
-        log::info!("fabric: started L2 switch on {}", tap_name);
-        // Keep the runtime alive in a background thread so fabric tasks run.
-        let fabric = std::sync::Arc::new(std::sync::Mutex::new(Some(fabric)));
-        let _fabric_ref = fabric.clone();
-        std::thread::spawn(move || {
-            // Block this thread on the tokio runtime until fabric is dropped.
-            rt.block_on(std::future::pending::<()>());
-        });
-        Some(fabric)
-    } else {
-        None
-    };
-
     // Wait for container to exit.
-    let msg: GuestMessage = conn.recv().context("receive ContainerExited")?;
+    let msg: GuestMessage = conn.recv().await.context("receive ContainerExited")?;
     let exit_code = match msg {
         GuestMessage::ContainerExited { id, code } => {
             log::info!("container {} exited with code {}", id, code);
@@ -182,10 +190,11 @@ fn run_with_image(
 
     // Shut down the guest.
     conn.send(&HostMessage::Shutdown)
+        .await
         .context("send Shutdown")?;
 
     // Wait for the VM to exit.
-    instance.wait().context("wait for VM")?;
+    instance.wait().await.context("wait for VM")?;
 
     Ok(exit_code)
 }
@@ -252,4 +261,3 @@ fn merge_config(
         hostname: overrides.hostname.clone(),
     })
 }
-

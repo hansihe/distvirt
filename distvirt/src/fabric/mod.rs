@@ -1,17 +1,16 @@
+pub mod gateway;
 pub mod port;
 pub mod switch;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::tap::TapDevice;
 use port::{Port, PortId};
-use switch::{
-    MacTable, build_arp_reply, format_mac, is_arp_request_for_gateway, is_broadcast,
-    parse_ethernet_header,
-};
+use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, format_mac, is_broadcast, parse_ethernet_header};
 
 /// Shared port handle that can be used by any reader task to send frames.
 type SharedPort = Arc<Port>;
@@ -26,6 +25,7 @@ pub struct Fabric {
     mac_table: Arc<Mutex<MacTable>>,
     tasks: HashMap<PortId, JoinHandle<()>>,
     next_port_id: PortId,
+    gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 impl Fabric {
@@ -36,6 +36,7 @@ impl Fabric {
             mac_table: Arc::new(Mutex::new(MacTable::new())),
             tasks: HashMap::new(),
             next_port_id: 0,
+            gateway_tx: None,
         }
     }
 
@@ -58,6 +59,7 @@ impl Fabric {
             Arc::clone(&port),
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
+            self.gateway_tx.clone(),
         ));
 
         self.tasks.insert(port_id, task);
@@ -74,6 +76,26 @@ impl Fabric {
         let mut ports = self.ports.lock().unwrap();
         ports.remove(&port_id);
         log::info!("fabric: removed port {}", port_id);
+    }
+
+    /// Connect an output gateway to the fabric.
+    ///
+    /// `egress_tx` is stored so port read loops can forward gateway-destined frames.
+    /// `ingress_rx` is consumed by a spawned task that injects returning frames
+    /// back into the fabric via MAC lookup or flooding.
+    pub fn set_gateway(
+        &mut self,
+        egress_tx: mpsc::Sender<Vec<u8>>,
+        ingress_rx: mpsc::Receiver<Vec<u8>>,
+    ) {
+        self.gateway_tx = Some(egress_tx);
+
+        let ports = Arc::clone(&self.ports);
+        let mac_table = Arc::clone(&self.mac_table);
+
+        tokio::spawn(gateway_ingress_task(ingress_rx, ports, mac_table));
+
+        log::info!("fabric: gateway connected");
     }
 }
 
@@ -92,8 +114,9 @@ async fn port_read_loop(
     port: SharedPort,
     ports: Arc<Mutex<HashMap<PortId, SharedPort>>>,
     mac_table: Arc<Mutex<MacTable>>,
+    gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
 ) {
-    let mut buf = vec![0u8; 1514]; // max Ethernet frame
+    let mut buf = vec![0u8; VNET_HDR_SZ + 1514]; // vnet header + max Ethernet frame
 
     loop {
         let n = match port.recv_frame(&mut buf).await {
@@ -108,9 +131,13 @@ async fn port_read_loop(
             }
         };
 
+        if n < VNET_HDR_SZ {
+            continue; // too short to contain vnet header
+        }
+
         let frame = &buf[..n];
 
-        let (dst_mac, src_mac, ethertype) = match parse_ethernet_header(frame) {
+        let (dst_mac, src_mac, ethertype) = match parse_ethernet_header(&frame[VNET_HDR_SZ..]) {
             Some(h) => h,
             None => continue, // runt frame
         };
@@ -130,25 +157,19 @@ async fn port_read_loop(
             table.learn(src_mac, port_id);
         }
 
-        // Handle ARP requests for the gateway.
-        if is_arp_request_for_gateway(frame) {
-            log::debug!(
-                "fabric: port {} ARP request for gateway from {}",
-                port_id,
-                format_mac(&src_mac),
-            );
-            if let Some(reply) = build_arp_reply(frame) {
-                if let Err(e) = port.send_frame(&reply).await {
-                    log::warn!("fabric: port {} ARP reply send error: {}", port_id, e);
-                }
-            }
-            continue;
-        }
-
         // Forward or flood.
         if is_broadcast(&dst_mac) || dst_mac[0] & 0x01 != 0 {
-            // Broadcast/multicast: flood to all other ports.
+            // Broadcast/multicast: flood to all other ports and also to gateway.
             flood_frame(frame, port_id, &ports).await;
+            if let Some(ref gw_tx) = gateway_tx {
+                let _ = gw_tx.try_send(frame.to_vec());
+            }
+        } else if dst_mac == GATEWAY_MAC {
+            // Gateway-destined frame: send to gateway via channel.
+            if let Some(ref gw_tx) = gateway_tx {
+                let _ = gw_tx.try_send(frame.to_vec());
+            }
+            continue;
         } else {
             // Unicast lookup.
             let dst_port_id = {
@@ -179,6 +200,52 @@ async fn port_read_loop(
             }
         }
     }
+}
+
+/// Task that reads frames from the gateway ingress channel and forwards them
+/// into the fabric via MAC lookup or flooding.
+async fn gateway_ingress_task(
+    mut ingress_rx: mpsc::Receiver<Vec<u8>>,
+    ports: Arc<Mutex<HashMap<PortId, SharedPort>>>,
+    mac_table: Arc<Mutex<MacTable>>,
+) {
+    while let Some(frame) = ingress_rx.recv().await {
+        if frame.len() < VNET_HDR_SZ {
+            continue;
+        }
+        let (dst_mac, _src_mac, _ethertype) = match parse_ethernet_header(&frame[VNET_HDR_SZ..]) {
+            Some(h) => h,
+            None => continue,
+        };
+
+        if is_broadcast(&dst_mac) || dst_mac[0] & 0x01 != 0 {
+            // Broadcast/multicast: flood to all ports.
+            // Use PortId::MAX as the "source" so no port is excluded.
+            flood_frame(&frame, PortId::MAX, &ports).await;
+        } else {
+            let dst_port_id = {
+                let table = mac_table.lock().unwrap();
+                table.lookup(&dst_mac)
+            };
+
+            if let Some(dst_id) = dst_port_id {
+                let dst_port = {
+                    let ports = ports.lock().unwrap();
+                    ports.get(&dst_id).cloned()
+                };
+                if let Some(dst_port) = dst_port {
+                    if let Err(e) = dst_port.send_frame(&frame).await {
+                        log::warn!("fabric: gateway ingress send to port {} error: {}", dst_id, e);
+                    }
+                }
+            } else {
+                // Unknown unicast: flood.
+                flood_frame(&frame, PortId::MAX, &ports).await;
+            }
+        }
+    }
+
+    log::info!("fabric: gateway ingress task ended");
 }
 
 /// Send a frame to all ports except the source port.

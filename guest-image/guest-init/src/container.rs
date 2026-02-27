@@ -27,8 +27,8 @@ impl ContainerManager {
         }
     }
 
-    /// Mount the block device as ext4 at /containers/<id>.
-    pub fn add(&mut self, id: String, device: String) -> anyhow::Result<()> {
+    /// Mount the block device as ext4 at /containers/<id> and write resolv.conf.
+    pub fn add(&mut self, id: String, device: String, dns_servers: &[String]) -> anyhow::Result<()> {
         if self.containers.contains_key(&id) {
             bail!("container {} already exists", id);
         }
@@ -60,6 +60,35 @@ impl ContainerManager {
         }
 
         log::info!("mounted {} at {}", device, mount_point);
+
+        // Ensure /etc exists in the rootfs.
+        let etc_dir = format!("{}/etc", mount_point);
+        let _ = std::fs::create_dir_all(&etc_dir);
+
+        // Write /etc/resolv.conf with DNS nameservers.
+        if !dns_servers.is_empty() {
+            let resolv_path = format!("{}/etc/resolv.conf", mount_point);
+            let mut content = String::new();
+            for server in dns_servers {
+                content.push_str(&format!("nameserver {}\n", server));
+            }
+            std::fs::write(&resolv_path, &content)
+                .with_context(|| format!("writing {}", resolv_path))?;
+            log::info!("wrote {} with {} nameserver(s)", resolv_path, dns_servers.len());
+        }
+
+        // Write /etc/hostname with the container id.
+        let hostname_path = format!("{}/etc/hostname", mount_point);
+        std::fs::write(&hostname_path, format!("{}\n", id))
+            .with_context(|| format!("writing {}", hostname_path))?;
+        log::info!("wrote {}", hostname_path);
+
+        // Write /etc/hosts with localhost entries.
+        let hosts_path = format!("{}/etc/hosts", mount_point);
+        std::fs::write(&hosts_path, "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n")
+            .with_context(|| format!("writing {}", hosts_path))?;
+        log::info!("wrote {}", hosts_path);
+
         self.containers.insert(
             id.clone(),
             Container {

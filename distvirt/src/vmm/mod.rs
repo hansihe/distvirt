@@ -1,7 +1,8 @@
 pub mod firecracker;
 
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+
+use tokio::net::UnixStream;
 
 use crate::tap::TapDevice;
 
@@ -23,21 +24,23 @@ pub struct VmConfig {
 }
 
 /// A VMM implementation that can launch VMs.
-pub trait Vmm {
+#[allow(async_fn_in_trait)]
+pub trait Vmm: Send + Sync {
     type Instance: VmInstance;
-    fn launch(&self, config: &VmConfig) -> anyhow::Result<Self::Instance>;
+    async fn launch(&self, config: &VmConfig) -> anyhow::Result<Self::Instance>;
 }
 
 /// A running VM instance.
-pub trait VmInstance {
+#[allow(async_fn_in_trait)]
+pub trait VmInstance: Send {
     /// Connect to the guest's vsock on the given port.
-    fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream>;
+    async fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream>;
     /// Get the TAP device for host-side L2 frame I/O, if networking is configured.
     fn tap(&self) -> Option<&TapDevice>;
     /// Take ownership of the TAP device, if networking is configured.
     fn take_tap(&mut self) -> Option<TapDevice>;
     /// Wait for the VM process to exit.
-    fn wait(&mut self) -> anyhow::Result<()>;
+    async fn wait(&mut self) -> anyhow::Result<()>;
     /// Kill the VM process.
-    fn kill(&mut self) -> anyhow::Result<()>;
+    async fn kill(&mut self) -> anyhow::Result<()>;
 }

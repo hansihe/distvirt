@@ -58,6 +58,7 @@ pub struct PreparedImage {
     snapshot_key: String,
     channel: Channel,
     namespace: String,
+    handle: tokio::runtime::Handle,
 }
 
 impl Drop for PreparedImage {
@@ -69,12 +70,11 @@ impl Drop for PreparedImage {
         }
         let _ = std::fs::remove_dir(&self.rootfs_path);
 
-        // Remove the snapshot view.
+        // Remove the snapshot view (fire-and-forget, best-effort cleanup).
         let channel = self.channel.clone();
         let namespace = self.namespace.clone();
         let snapshot_key = self.snapshot_key.clone();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        self.handle.spawn(async move {
             let mut snapshots = SnapshotsClient::new(channel);
             let req = RemoveSnapshotRequest {
                 snapshotter: "overlayfs".to_string(),
@@ -86,16 +86,7 @@ impl Drop for PreparedImage {
 }
 
 /// Pull an image via containerd, parse its config, and mount a read-only rootfs view.
-pub fn prepare_image(
-    socket: &str,
-    namespace: &str,
-    image_ref: &str,
-) -> anyhow::Result<PreparedImage> {
-    let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
-    rt.block_on(prepare_image_async(socket, namespace, image_ref))
-}
-
-async fn prepare_image_async(
+pub async fn prepare_image(
     socket: &str,
     namespace: &str,
     image_ref: &str,
@@ -120,6 +111,7 @@ async fn prepare_image_async(
         snapshot_key,
         channel,
         namespace: namespace.to_string(),
+        handle: tokio::runtime::Handle::current(),
     })
 }
 

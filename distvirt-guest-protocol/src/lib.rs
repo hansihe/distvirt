@@ -9,6 +9,8 @@ pub enum HostMessage {
     AddContainer {
         id: String,
         device: String,
+        #[serde(default)]
+        dns_servers: Vec<String>,
     },
     StartContainer {
         id: String,

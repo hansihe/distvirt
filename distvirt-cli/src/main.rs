@@ -96,13 +96,56 @@ enum Commands {
         /// Containerd namespace
         #[arg(long, default_value = "default")]
         namespace: String,
+        /// Set up host NAT routing (ip_forward + iptables masquerade) for guest internet access
+        #[arg(long)]
+        setup_routing: bool,
         /// Path to the firecracker binary
         #[arg(long, default_value = "firecracker")]
         firecracker: PathBuf,
     },
 }
 
-fn main() -> anyhow::Result<()> {
+/// Set up host NAT so the 172.16.0.0/24 subnet can reach the internet.
+///
+/// Enables ip_forward and adds an iptables MASQUERADE rule. This is
+/// intentionally simple and not cleaned up on exit — meant for local testing.
+fn setup_host_routing() -> anyhow::Result<()> {
+    use std::process::Command;
+
+    log::info!("setting up host NAT routing for 172.16.0.0/24");
+
+    // Enable IP forwarding.
+    std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
+        .context("enable ip_forward (are you root?)")?;
+
+    // Add iptables MASQUERADE rule (idempotent: check first).
+    let check = Command::new("iptables")
+        .args(["-t", "nat", "-C", "POSTROUTING", "-s", "172.16.0.0/24", "!", "-o", "tun+", "-j", "MASQUERADE"])
+        .output()
+        .context("run iptables -C")?;
+
+    if !check.status.success() {
+        let add = Command::new("iptables")
+            .args(["-t", "nat", "-A", "POSTROUTING", "-s", "172.16.0.0/24", "!", "-o", "tun+", "-j", "MASQUERADE"])
+            .output()
+            .context("run iptables -A")?;
+
+        if !add.status.success() {
+            anyhow::bail!(
+                "iptables -A MASQUERADE failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            );
+        }
+        log::info!("added iptables MASQUERADE rule for 172.16.0.0/24");
+    } else {
+        log::info!("iptables MASQUERADE rule already exists");
+    }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
@@ -148,6 +191,7 @@ fn main() -> anyhow::Result<()> {
                 container_rootfs.to_str().unwrap(),
                 &overrides,
             )
+            .await
             .context("run container")?;
 
             log::info!("container exited with code {}", exit_code);
@@ -165,8 +209,13 @@ fn main() -> anyhow::Result<()> {
             hostname,
             containerd_socket,
             namespace,
+            setup_routing,
             firecracker,
         } => {
+            if setup_routing {
+                setup_host_routing().context("setup host routing")?;
+            }
+
             let (uid, gid) = if let Some(ref u) = user {
                 distvirt::containerd::parse_user_numeric(u)
                     .context("parsing --user")?
@@ -196,6 +245,7 @@ fn main() -> anyhow::Result<()> {
                 &image,
                 &overrides,
             )
+            .await
             .context("run image")?;
 
             log::info!("container exited with code {}", exit_code);

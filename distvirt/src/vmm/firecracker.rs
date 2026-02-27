@@ -1,10 +1,9 @@
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context};
+use tokio::net::UnixStream;
 
 use super::{VmConfig, VmInstance, Vmm};
 use crate::tap::TapDevice;
@@ -25,177 +24,202 @@ impl Firecracker {
 impl Vmm for Firecracker {
     type Instance = FirecrackerInstance;
 
-    fn launch(&self, config: &VmConfig) -> anyhow::Result<FirecrackerInstance> {
-        let tmpdir = tempfile::tempdir().context("create tmpdir")?;
+    async fn launch(&self, config: &VmConfig) -> anyhow::Result<FirecrackerInstance> {
+        // The Firecracker API is sync HTTP over UDS — wrap in spawn_blocking.
+        let firecracker_bin = self.firecracker_bin.clone();
+        let config_kernel = config.kernel_path.clone();
+        let config_rootfs = config.rootfs_image_path.clone();
+        let config_container = config.container_image_path.clone();
+        let config_vcpu = config.vcpu_count;
+        let config_mem = config.mem_size_mib;
+        let config_net = config.net.as_ref().map(|n| (n.guest_ip.clone(), n.netmask.clone(), n.gateway.clone()));
 
-        // Copy rootfs image to tmpdir (Firecracker needs writable).
-        let rootfs_path = tmpdir.path().join("rootfs.ext4");
-        std::fs::copy(&config.rootfs_image_path, &rootfs_path).with_context(|| {
-            format!(
-                "copy rootfs from {}",
-                config.rootfs_image_path.display()
+        tokio::task::spawn_blocking(move || {
+            launch_sync(
+                &firecracker_bin,
+                &config_kernel,
+                &config_rootfs,
+                &config_container,
+                config_vcpu,
+                config_mem,
+                config_net.as_ref(),
             )
-        })?;
-        // Ensure the copy is writable (source may be read-only, e.g. from nix store).
-        let mut perms = std::fs::metadata(&rootfs_path)?.permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&rootfs_path, perms)?;
-
-        let api_socket = tmpdir.path().join("firecracker.sock");
-        let vsock_uds_path = tmpdir.path().join("vsock.sock");
-
-        // Start firecracker process.
-        let child = Command::new(&self.firecracker_bin)
-            .arg("--api-sock")
-            .arg(&api_socket)
-            .spawn()
-            .context("spawn firecracker")?;
-
-        // Wait for API socket to appear.
-        wait_for_file(&api_socket, Duration::from_secs(5))
-            .context("waiting for firecracker API socket")?;
-
-        // Configure the VM via the API.
-        let api = |path: &str, body: &serde_json::Value| -> anyhow::Result<()> {
-            api_put(&api_socket, path, body)
-        };
-
-        api(
-            "/boot-source",
-            &serde_json::json!({
-                "kernel_image_path": config.kernel_path.to_str().unwrap(),
-                "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init"
-            }),
-        )
-        .context("configure boot-source")?;
-
-        api(
-            "/drives/rootfs",
-            &serde_json::json!({
-                "drive_id": "rootfs",
-                "path_on_host": rootfs_path.to_str().unwrap(),
-                "is_root_device": true,
-                "is_read_only": false
-            }),
-        )
-        .context("configure rootfs drive")?;
-
-        api(
-            "/drives/container",
-            &serde_json::json!({
-                "drive_id": "container",
-                "path_on_host": config.container_image_path.to_str().unwrap(),
-                "is_root_device": false,
-                "is_read_only": false
-            }),
-        )
-        .context("configure container drive")?;
-
-        api(
-            "/vsock",
-            &serde_json::json!({
-                "guest_cid": 3,
-                "uds_path": vsock_uds_path.to_str().unwrap()
-            }),
-        )
-        .context("configure vsock")?;
-
-        api(
-            "/machine-config",
-            &serde_json::json!({
-                "vcpu_count": config.vcpu_count,
-                "mem_size_mib": config.mem_size_mib
-            }),
-        )
-        .context("configure machine")?;
-
-        // Configure network interface if requested.
-        // Create a persistent TAP device so Firecracker can open it by name.
-        // We use an AF_PACKET socket bound to the TAP for host-side L2 I/O.
-        let tap_name = if let Some(ref net_config) = config.net {
-            let tap_name = crate::tap::create_persistent_tap()
-                .context("create TAP device")?;
-
-            crate::tap::bring_interface_up(&tap_name)
-                .context("bring TAP interface up")?;
-
-            api(
-                "/network-interfaces/eth0",
-                &serde_json::json!({
-                    "iface_id": "eth0",
-                    "host_dev_name": tap_name,
-                    "guest_mac": "06:00:AC:10:00:02"
-                }),
-            )
-            .context("configure network interface")?;
-
-            log::info!(
-                "configured network: tap={}, guest_ip={}",
-                tap_name,
-                net_config.guest_ip
-            );
-            Some(tap_name)
-        } else {
-            None
-        };
-
-        api(
-            "/actions",
-            &serde_json::json!({
-                "action_type": "InstanceStart"
-            }),
-        )
-        .context("start instance")?;
-
-        // Open AF_PACKET socket on the TAP for host-side L2 frame I/O.
-        // This must happen after Firecracker starts (the interface needs to exist).
-        let tap = if let Some(ref name) = tap_name {
-            Some(crate::tap::open_packet_socket(name).context("open packet socket on TAP")?)
-        } else {
-            None
-        };
-
-        Ok(FirecrackerInstance {
-            child,
-            vsock_uds_path,
-            tap,
-            _tmpdir: tmpdir,
         })
+        .await
+        .context("spawn_blocking launch")?
     }
 }
 
+fn launch_sync(
+    firecracker_bin: &Path,
+    kernel_path: &Path,
+    rootfs_image_path: &Path,
+    container_image_path: &Path,
+    vcpu_count: u32,
+    mem_size_mib: u32,
+    net: Option<&(String, String, String)>,
+) -> anyhow::Result<FirecrackerInstance> {
+    let tmpdir = tempfile::tempdir().context("create tmpdir")?;
+
+    // Copy rootfs image to tmpdir (Firecracker needs writable).
+    let rootfs_path = tmpdir.path().join("rootfs.ext4");
+    std::fs::copy(rootfs_image_path, &rootfs_path).with_context(|| {
+        format!("copy rootfs from {}", rootfs_image_path.display())
+    })?;
+    // Ensure the copy is writable (source may be read-only, e.g. from nix store).
+    let mut perms = std::fs::metadata(&rootfs_path)?.permissions();
+    perms.set_readonly(false);
+    std::fs::set_permissions(&rootfs_path, perms)?;
+
+    let api_socket = tmpdir.path().join("firecracker.sock");
+    let vsock_uds_path = tmpdir.path().join("vsock.sock");
+
+    // Start firecracker process using tokio::process::Command so we get a tokio Child.
+    let child = tokio::process::Command::new(firecracker_bin)
+        .arg("--api-sock")
+        .arg(&api_socket)
+        .spawn()
+        .context("spawn firecracker")?;
+
+    // Wait for API socket to appear.
+    wait_for_file(&api_socket, Duration::from_secs(5))
+        .context("waiting for firecracker API socket")?;
+
+    // Configure the VM via the API.
+    let api = |path: &str, body: &serde_json::Value| -> anyhow::Result<()> {
+        api_put(&api_socket, path, body)
+    };
+
+    api(
+        "/boot-source",
+        &serde_json::json!({
+            "kernel_image_path": kernel_path.to_str().unwrap(),
+            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init"
+        }),
+    )
+    .context("configure boot-source")?;
+
+    api(
+        "/drives/rootfs",
+        &serde_json::json!({
+            "drive_id": "rootfs",
+            "path_on_host": rootfs_path.to_str().unwrap(),
+            "is_root_device": true,
+            "is_read_only": false
+        }),
+    )
+    .context("configure rootfs drive")?;
+
+    api(
+        "/drives/container",
+        &serde_json::json!({
+            "drive_id": "container",
+            "path_on_host": container_image_path.to_str().unwrap(),
+            "is_root_device": false,
+            "is_read_only": false
+        }),
+    )
+    .context("configure container drive")?;
+
+    api(
+        "/vsock",
+        &serde_json::json!({
+            "guest_cid": 3,
+            "uds_path": vsock_uds_path.to_str().unwrap()
+        }),
+    )
+    .context("configure vsock")?;
+
+    api(
+        "/machine-config",
+        &serde_json::json!({
+            "vcpu_count": vcpu_count,
+            "mem_size_mib": mem_size_mib
+        }),
+    )
+    .context("configure machine")?;
+
+    // Configure network interface if requested.
+    let tap_name = if let Some((guest_ip, _netmask, _gateway)) = net {
+        let tap_name = crate::tap::create_persistent_tap()
+            .context("create TAP device")?;
+
+        crate::tap::bring_interface_up(&tap_name)
+            .context("bring TAP interface up")?;
+
+        api(
+            "/network-interfaces/eth0",
+            &serde_json::json!({
+                "iface_id": "eth0",
+                "host_dev_name": tap_name,
+                "guest_mac": "06:00:AC:10:00:02"
+            }),
+        )
+        .context("configure network interface")?;
+
+        log::info!(
+            "configured network: tap={}, guest_ip={}",
+            tap_name,
+            guest_ip
+        );
+        Some(tap_name)
+    } else {
+        None
+    };
+
+    api(
+        "/actions",
+        &serde_json::json!({
+            "action_type": "InstanceStart"
+        }),
+    )
+    .context("start instance")?;
+
+    // Open AF_PACKET socket on the TAP for host-side L2 frame I/O.
+    let tap = if let Some(ref name) = tap_name {
+        Some(crate::tap::open_packet_socket(name).context("open packet socket on TAP")?)
+    } else {
+        None
+    };
+
+    Ok(FirecrackerInstance {
+        child,
+        vsock_uds_path,
+        tap,
+        _tmpdir: tmpdir,
+    })
+}
+
 pub struct FirecrackerInstance {
-    child: Child,
+    child: tokio::process::Child,
     vsock_uds_path: PathBuf,
     tap: Option<TapDevice>,
     _tmpdir: tempfile::TempDir,
 }
 
 impl VmInstance for FirecrackerInstance {
-    fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream> {
-        // For host-initiated connections to a guest listener, Firecracker
-        // requires connecting to the vsock UDS and sending a CONNECT handshake.
-        let sock_path = &self.vsock_uds_path;
+    async fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream> {
+        let sock_path = self.vsock_uds_path.clone();
 
         log::info!("connecting to guest vsock port {} via {}", port, sock_path.display());
 
         // Retry loop — the guest needs time to boot and start listening.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
-            match try_vsock_connect(sock_path, port) {
+            match try_vsock_connect(&sock_path, port).await {
                 Ok(stream) => {
                     log::info!("vsock connected");
                     return Ok(stream);
                 }
                 Err(_) => {
-                    if Instant::now() >= deadline {
+                    if tokio::time::Instant::now() >= deadline {
                         bail!(
                             "timeout connecting to guest vsock port {} via {}",
                             port,
                             sock_path.display()
                         );
                     }
-                    std::thread::sleep(Duration::from_millis(200));
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             }
         }
@@ -209,42 +233,42 @@ impl VmInstance for FirecrackerInstance {
         self.tap.take()
     }
 
-    fn wait(&mut self) -> anyhow::Result<()> {
-        self.child.wait().context("wait for firecracker")?;
+    async fn wait(&mut self) -> anyhow::Result<()> {
+        self.child.wait().await.context("wait for firecracker")?;
         Ok(())
     }
 
-    fn kill(&mut self) -> anyhow::Result<()> {
-        self.child.kill().context("kill firecracker")?;
+    async fn kill(&mut self) -> anyhow::Result<()> {
+        self.child.kill().await.context("kill firecracker")?;
         Ok(())
     }
 }
 
-/// Connect to a guest vsock listener via Firecracker's UDS.
-///
-/// The host connects to the vsock UDS and sends `CONNECT <port>\n`.
-/// Firecracker responds with `OK <port>\n` on success.
-fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Result<UnixStream> {
-    use std::io::BufRead;
+/// Connect to a guest vsock listener via Firecracker's UDS using async I/O.
+async fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Result<UnixStream> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let mut stream = UnixStream::connect(sock_path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let stream = UnixStream::connect(sock_path).await?;
 
     let connect_cmd = format!("CONNECT {}\n", port);
-    stream.write_all(connect_cmd.as_bytes())?;
-    stream.flush()?;
+    let (reader, mut writer) = stream.into_split();
+    writer.write_all(connect_cmd.as_bytes()).await?;
+    writer.flush().await?;
 
-    let mut reader = std::io::BufReader::new(&stream);
+    let mut reader = BufReader::new(reader);
     let mut response = String::new();
-    reader.read_line(&mut response)?;
+    // Use tokio::time::timeout to avoid hanging forever.
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut response))
+        .await
+        .context("timeout reading vsock CONNECT response")?
+        .context("read vsock CONNECT response")?;
 
     if !response.starts_with("OK ") {
         bail!("vsock CONNECT failed: {}", response.trim());
     }
 
-    // Clear the read timeout for normal operation.
-    stream.set_read_timeout(None)?;
-    Ok(stream)
+    // Reunite the split halves.
+    Ok(reader.into_inner().reunite(writer)?)
 }
 
 /// Send a PUT request to the Firecracker API over a Unix socket.
@@ -260,7 +284,7 @@ fn api_put(socket_path: &Path, path: &str, body: &serde_json::Value) -> anyhow::
         body_bytes.len()
     );
 
-    let mut stream = UnixStream::connect(socket_path)
+    let mut stream = std::os::unix::net::UnixStream::connect(socket_path)
         .with_context(|| format!("connect to API socket {}", socket_path.display()))?;
 
     stream.write_all(request.as_bytes())?;
@@ -269,7 +293,6 @@ fn api_put(socket_path: &Path, path: &str, body: &serde_json::Value) -> anyhow::
 
     // Read the response.
     let mut response = Vec::new();
-    // Set a read timeout so we don't hang forever.
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     loop {
         let mut buf = [0u8; 4096];
@@ -280,11 +303,8 @@ fn api_put(socket_path: &Path, path: &str, body: &serde_json::Value) -> anyhow::
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
             Err(e) => return Err(e).context("read API response"),
         }
-        // Check if we've received the full response (look for end of HTTP body).
         if let Ok(s) = std::str::from_utf8(&response) {
             if s.contains("\r\n\r\n") {
-                // For our purposes, once we have headers + any body, we're done.
-                // Check if we have Content-Length and have read enough.
                 if let Some(cl) = parse_content_length(s) {
                     if let Some(body_start) = s.find("\r\n\r\n") {
                         let body_received = response.len() - body_start - 4;
@@ -293,7 +313,6 @@ fn api_put(socket_path: &Path, path: &str, body: &serde_json::Value) -> anyhow::
                         }
                     }
                 } else {
-                    // No content-length, the headers-only response is complete.
                     break;
                 }
             }
@@ -302,7 +321,6 @@ fn api_put(socket_path: &Path, path: &str, body: &serde_json::Value) -> anyhow::
 
     let response_str = String::from_utf8_lossy(&response);
 
-    // Check for HTTP error status.
     if let Some(status_line) = response_str.lines().next() {
         if !status_line.contains("204") && !status_line.contains("200") {
             bail!(
@@ -329,9 +347,9 @@ fn parse_content_length(headers: &str) -> Option<usize> {
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
+    let deadline = std::time::Instant::now() + timeout;
     while !path.exists() {
-        if Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             bail!("timeout waiting for {}", path.display());
         }
         std::thread::sleep(Duration::from_millis(50));

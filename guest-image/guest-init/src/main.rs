@@ -96,9 +96,13 @@ fn handle_message(
     containers: &mut ContainerManager,
 ) -> anyhow::Result<bool> {
     match msg {
-        HostMessage::AddContainer { id, device } => {
+        HostMessage::AddContainer {
+            id,
+            device,
+            dns_servers,
+        } => {
             log::info!("AddContainer: id={}, device={}", id, device);
-            match containers.add(id.clone(), device) {
+            match containers.add(id.clone(), device, &dns_servers) {
                 Ok(()) => {
                     stream.send(&GuestMessage::ContainerAdded { id })?;
                 }

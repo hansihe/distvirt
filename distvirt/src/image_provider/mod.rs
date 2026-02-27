@@ -34,6 +34,7 @@ impl PreparedArtifact {
 ///
 /// Implementations interpret `image_ref` according to their backend
 /// (e.g. a directory path, an OCI image reference, etc).
-pub trait ImageProvider {
-    fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact>;
+#[allow(async_fn_in_trait)]
+pub trait ImageProvider: Send + Sync {
+    async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact>;
 }

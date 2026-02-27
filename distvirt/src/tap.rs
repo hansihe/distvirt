@@ -227,8 +227,29 @@ pub fn open_packet_socket(tap_name: &str) -> anyhow::Result<TapDevice> {
         );
     }
 
+    // Enable PACKET_VNET_HDR so each recv/send includes a 10-byte virtio-net
+    // header, preserving checksum offload metadata (NEEDS_CSUM, csum_start, etc.).
+    const PACKET_VNET_HDR: libc::c_int = 15;
+    let val: libc::c_int = 1;
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_PACKET,
+            PACKET_VNET_HDR,
+            &val as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        bail!(
+            "setsockopt PACKET_VNET_HDR on {}: {}",
+            tap_name,
+            std::io::Error::last_os_error()
+        );
+    }
+
     log::info!(
-        "opened AF_PACKET socket on {} (ifindex={})",
+        "opened AF_PACKET socket on {} (ifindex={}) with PACKET_VNET_HDR",
         tap_name,
         ifindex
     );
