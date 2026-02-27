@@ -4,37 +4,80 @@ use anyhow::{bail, Context};
 
 use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_PORT};
 
-use crate::image;
-use crate::vmm::{VmConfig, VmInstance, Vmm};
+use crate::containerd::{parse_user_numeric, ImageConfig};
+use crate::image_provider::ImageProvider;
+use crate::vmm::{NetConfig, VmConfig, VmInstance, Vmm};
 use crate::vsock_client::GuestConnection;
 
-/// Run a container end-to-end: build image, launch VM, execute container, shut down.
-pub fn run_container(
+/// Container execution configuration.
+struct ContainerConfig {
+    pub entrypoint: String,
+    pub args: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: Option<String>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub hostname: Option<String>,
+}
+
+/// Overrides that can be specified on the CLI to override image config.
+pub struct ImageOverrides {
+    pub entrypoint: Option<String>,
+    pub args: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: Option<String>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub hostname: Option<String>,
+}
+
+/// Run a container using an image provider.
+///
+/// The provider prepares the container filesystem (ext4 image or block device),
+/// and if it returns an OCI config, that config is merged with the overrides.
+/// If no OCI config is available (bare rootfs), the overrides must supply at
+/// least an entrypoint.
+pub fn run(
     vmm: &impl Vmm,
     kernel_path: &Path,
     rootfs_image_path: &Path,
-    container_rootfs: &Path,
-    entrypoint: &str,
-    args: &[String],
+    provider: &dyn ImageProvider,
+    image_ref: &str,
+    overrides: &ImageOverrides,
 ) -> anyhow::Result<i32> {
-    // Build ext4 image from container rootfs.
-    let container_image = tempfile::NamedTempFile::new().context("create temp file")?;
-    let container_image_path = container_image.path().to_path_buf();
-    image::build_ext4_image(container_rootfs, &container_image_path)
-        .context("build container image")?;
+    let artifact = provider.prepare(image_ref).context("preparing image")?;
 
-    log::info!("built container image at {}", container_image_path.display());
-
-    // Launch VM.
-    let config = VmConfig {
-        kernel_path: kernel_path.to_path_buf(),
-        rootfs_image_path: rootfs_image_path.to_path_buf(),
-        container_image_path,
-        vcpu_count: 1,
-        mem_size_mib: 128,
+    let config = if let Some(ref oci_config) = artifact.oci_config {
+        merge_config(oci_config, overrides)?
+    } else {
+        config_from_overrides(overrides)?
     };
 
-    let mut instance = vmm.launch(&config).context("launch VM")?;
+    run_with_image(vmm, kernel_path, rootfs_image_path, &artifact.image_path, &config)
+}
+
+/// Run a container from a pre-built ext4 image.
+fn run_with_image(
+    vmm: &impl Vmm,
+    kernel_path: &Path,
+    rootfs_image_path: &Path,
+    container_image_path: &Path,
+    config: &ContainerConfig,
+) -> anyhow::Result<i32> {
+    let vm_config = VmConfig {
+        kernel_path: kernel_path.to_path_buf(),
+        rootfs_image_path: rootfs_image_path.to_path_buf(),
+        container_image_path: container_image_path.to_path_buf(),
+        vcpu_count: 1,
+        mem_size_mib: 128,
+        net: Some(NetConfig {
+            guest_ip: "172.16.0.2".to_string(),
+            netmask: "255.255.255.0".to_string(),
+            gateway: "172.16.0.1".to_string(),
+        }),
+    };
+
+    let mut instance = vmm.launch(&vm_config).context("launch VM")?;
     log::info!("VM launched, connecting vsock");
 
     // Connect to guest over vsock.
@@ -48,6 +91,24 @@ pub fn run_container(
     match msg {
         GuestMessage::Ready => log::info!("guest is ready"),
         other => bail!("expected Ready, got {:?}", other),
+    }
+
+    // Configure network if enabled.
+    if let Some(ref net_config) = vm_config.net {
+        conn.send(&HostMessage::ConfigureNetwork {
+            interface: "eth0".to_string(),
+            ip: net_config.guest_ip.clone(),
+            netmask: net_config.netmask.clone(),
+            gateway: net_config.gateway.clone(),
+        })
+        .context("send ConfigureNetwork")?;
+
+        let msg: GuestMessage = conn.recv().context("receive NetworkConfigured")?;
+        match msg {
+            GuestMessage::NetworkConfigured => log::info!("guest network configured"),
+            GuestMessage::Error { message } => bail!("ConfigureNetwork failed: {}", message),
+            other => bail!("expected NetworkConfigured, got {:?}", other),
+        }
     }
 
     // Add container (second virtio block device = /dev/vdb).
@@ -68,8 +129,13 @@ pub fn run_container(
     // Start container.
     conn.send(&HostMessage::StartContainer {
         id: container_id.clone(),
-        entrypoint: entrypoint.to_string(),
-        args: args.to_vec(),
+        entrypoint: config.entrypoint.clone(),
+        args: config.args.clone(),
+        env: config.env.clone(),
+        working_dir: config.working_dir.clone(),
+        uid: config.uid,
+        gid: config.gid,
+        hostname: config.hostname.clone(),
     })
     .context("send StartContainer")?;
 
@@ -80,6 +146,38 @@ pub fn run_container(
         }
         GuestMessage::Error { message } => bail!("StartContainer failed: {}", message),
         other => bail!("expected ContainerStarted, got {:?}", other),
+    }
+
+    // Spawn a thread to print L2 packets from the TAP device.
+    if let Some(tap) = instance.tap() {
+        let tap_fd = tap.as_raw_fd();
+        let tap_name = tap.name.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1514]; // max ethernet frame
+            loop {
+                let n = unsafe {
+                    libc::recv(tap_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
+                };
+                if n <= 0 {
+                    break;
+                }
+                let n = n as usize;
+                if n < 14 {
+                    continue; // too short for ethernet header
+                }
+                let dst_mac = &buf[0..6];
+                let src_mac = &buf[6..12];
+                let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
+                log::trace!(
+                    "[{}] L2 frame: {} -> {}, ethertype=0x{:04x}, len={}",
+                    tap_name,
+                    format_mac(src_mac),
+                    format_mac(dst_mac),
+                    ethertype,
+                    n,
+                );
+            }
+        });
     }
 
     // Wait for container to exit.
@@ -101,4 +199,75 @@ pub fn run_container(
     instance.wait().context("wait for VM")?;
 
     Ok(exit_code)
+}
+
+/// Build a ContainerConfig from overrides only (no OCI image config).
+fn config_from_overrides(overrides: &ImageOverrides) -> anyhow::Result<ContainerConfig> {
+    let entrypoint = overrides
+        .entrypoint
+        .clone()
+        .context("no entrypoint specified and image has no OCI config")?;
+
+    Ok(ContainerConfig {
+        entrypoint,
+        args: overrides.args.clone(),
+        env: overrides.env.clone(),
+        working_dir: overrides.working_dir.clone(),
+        uid: overrides.uid,
+        gid: overrides.gid,
+        hostname: overrides.hostname.clone(),
+    })
+}
+
+/// Merge image config with CLI overrides following OCI entrypoint/cmd resolution rules.
+fn merge_config(
+    image: &ImageConfig,
+    overrides: &ImageOverrides,
+) -> anyhow::Result<ContainerConfig> {
+    let (entrypoint, args) = if let Some(ref ep) = overrides.entrypoint {
+        (ep.clone(), overrides.args.clone())
+    } else if !image.entrypoint.is_empty() {
+        let args = if !overrides.args.is_empty() {
+            overrides.args.clone()
+        } else {
+            image.cmd.clone()
+        };
+        (image.entrypoint[0].clone(), {
+            let mut a: Vec<String> = image.entrypoint[1..].to_vec();
+            a.extend(args);
+            a
+        })
+    } else if !image.cmd.is_empty() {
+        (image.cmd[0].clone(), image.cmd[1..].to_vec())
+    } else {
+        bail!("image has no entrypoint or cmd, and none was specified on the command line");
+    };
+
+    let mut env = image.env.clone();
+    env.extend(overrides.env.iter().cloned());
+
+    let (img_uid, img_gid) = image
+        .user
+        .as_deref()
+        .map(parse_user_numeric)
+        .transpose()?
+        .unwrap_or((None, None));
+
+    Ok(ContainerConfig {
+        entrypoint,
+        args,
+        env,
+        working_dir: overrides.working_dir.clone().or_else(|| image.working_dir.clone()),
+        uid: overrides.uid.or(img_uid),
+        gid: overrides.gid.or(img_gid),
+        hostname: overrides.hostname.clone(),
+    })
+}
+
+fn format_mac(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(":")
 }

@@ -14,6 +14,22 @@ pub enum HostMessage {
         id: String,
         entrypoint: String,
         args: Vec<String>,
+        #[serde(default)]
+        env: Vec<String>,
+        #[serde(default)]
+        working_dir: Option<String>,
+        #[serde(default)]
+        uid: Option<u32>,
+        #[serde(default)]
+        gid: Option<u32>,
+        #[serde(default)]
+        hostname: Option<String>,
+    },
+    ConfigureNetwork {
+        interface: String,
+        ip: String,
+        netmask: String,
+        gateway: String,
     },
     Shutdown,
 }
@@ -26,5 +42,6 @@ pub enum GuestMessage {
     ContainerAdded { id: String },
     ContainerStarted { id: String, pid: u32 },
     ContainerExited { id: String, code: i32 },
+    NetworkConfigured,
     Error { message: String },
 }

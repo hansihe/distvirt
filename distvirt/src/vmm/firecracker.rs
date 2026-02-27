@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 
 use super::{VmConfig, VmInstance, Vmm};
+use crate::tap::TapDevice;
 
 /// Firecracker VMM implementation.
 pub struct Firecracker {
@@ -108,6 +109,36 @@ impl Vmm for Firecracker {
         )
         .context("configure machine")?;
 
+        // Configure network interface if requested.
+        // Create a persistent TAP device so Firecracker can open it by name.
+        // We use an AF_PACKET socket bound to the TAP for host-side L2 I/O.
+        let tap_name = if let Some(ref net_config) = config.net {
+            let tap_name = crate::tap::create_persistent_tap()
+                .context("create TAP device")?;
+
+            crate::tap::bring_interface_up(&tap_name)
+                .context("bring TAP interface up")?;
+
+            api(
+                "/network-interfaces/eth0",
+                &serde_json::json!({
+                    "iface_id": "eth0",
+                    "host_dev_name": tap_name,
+                    "guest_mac": "06:00:AC:10:00:02"
+                }),
+            )
+            .context("configure network interface")?;
+
+            log::info!(
+                "configured network: tap={}, guest_ip={}",
+                tap_name,
+                net_config.guest_ip
+            );
+            Some(tap_name)
+        } else {
+            None
+        };
+
         api(
             "/actions",
             &serde_json::json!({
@@ -116,9 +147,18 @@ impl Vmm for Firecracker {
         )
         .context("start instance")?;
 
+        // Open AF_PACKET socket on the TAP for host-side L2 frame I/O.
+        // This must happen after Firecracker starts (the interface needs to exist).
+        let tap = if let Some(ref name) = tap_name {
+            Some(crate::tap::open_packet_socket(name).context("open packet socket on TAP")?)
+        } else {
+            None
+        };
+
         Ok(FirecrackerInstance {
             child,
             vsock_uds_path,
+            tap,
             _tmpdir: tmpdir,
         })
     }
@@ -127,6 +167,7 @@ impl Vmm for Firecracker {
 pub struct FirecrackerInstance {
     child: Child,
     vsock_uds_path: PathBuf,
+    tap: Option<TapDevice>,
     _tmpdir: tempfile::TempDir,
 }
 
@@ -158,6 +199,10 @@ impl VmInstance for FirecrackerInstance {
                 }
             }
         }
+    }
+
+    fn tap(&self) -> Option<&TapDevice> {
+        self.tap.as_ref()
     }
 
     fn wait(&mut self) -> anyhow::Result<()> {

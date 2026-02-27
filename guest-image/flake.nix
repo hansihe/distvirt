@@ -30,6 +30,30 @@
         cargoBuildProfileFlag = "--profile guest";
       };
 
+      kernelSrc = pkgs.runCommand "linux-src" {} ''
+        mkdir $out
+        tar -xf ${pkgs.linux_latest.src} --strip-components=1 -C $out
+      '';
+
+      # Script to run `make olddefconfig` on guest-kernel.config using the
+      # same kernel source as the build.  Usage: just run `nix run .#kernel-olddefconfig`
+      # from the guest-image directory (or pass the config path as $1).
+      kernel-olddefconfig = pkgs.writeShellScriptBin "kernel-olddefconfig" ''
+        set -euo pipefail
+        export PATH="${pkgs.lib.makeBinPath [ pkgs.gnumake pkgs.gcc pkgs.flex pkgs.bison pkgs.pkg-config pkgs.bc ]}:$PATH"
+        CONFIG="''${1:-$(pwd)/guest-kernel.config}"
+        if [ ! -f "$CONFIG" ]; then
+          echo "error: config not found: $CONFIG" >&2
+          exit 1
+        fi
+        TMPDIR=$(mktemp -d)
+        trap 'rm -rf "$TMPDIR"' EXIT
+        cp "$CONFIG" "$TMPDIR/.config"
+        make -C ${kernelSrc} O="$TMPDIR" olddefconfig
+        cp "$TMPDIR/.config" "$CONFIG"
+        echo "updated $CONFIG"
+      '';
+
       guestRootfsImage = pkgs.runCommand "guest-rootfs.ext4" {
         nativeBuildInputs = [ pkgs.e2fsprogs ];
       } ''
@@ -44,7 +68,7 @@
     in
     {
       packages.${system} = {
-        inherit guestKernel guestInit guestRootfsImage;
+        inherit guestKernel guestInit guestRootfsImage kernel-olddefconfig;
       };
     };
 }

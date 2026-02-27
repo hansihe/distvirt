@@ -1,4 +1,5 @@
 mod container;
+mod net;
 mod vsock;
 
 use std::ffi::CString;
@@ -109,14 +110,28 @@ fn handle_message(
                 }
             }
         }
-        HostMessage::StartContainer { id, entrypoint, args } => {
+        HostMessage::StartContainer { id, entrypoint, args, env, working_dir, uid, gid, hostname } => {
             log::info!("StartContainer: id={}, entrypoint={}", id, entrypoint);
-            match containers.start(&id, &entrypoint, &args) {
+            match containers.start(&id, &entrypoint, &args, &env, working_dir.as_deref(), uid, gid, hostname.as_deref()) {
                 Ok(pid) => {
                     stream.send(&GuestMessage::ContainerStarted { id, pid })?;
                 }
                 Err(e) => {
                     log::error!("StartContainer failed: {:#}", e);
+                    stream.send(&GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    })?;
+                }
+            }
+        }
+        HostMessage::ConfigureNetwork { interface, ip, netmask, gateway } => {
+            log::info!("ConfigureNetwork: {}={}, netmask={}, gw={}", interface, ip, netmask, gateway);
+            match net::configure_network(&interface, &ip, &netmask, &gateway) {
+                Ok(()) => {
+                    stream.send(&GuestMessage::NetworkConfigured)?;
+                }
+                Err(e) => {
+                    log::error!("ConfigureNetwork failed: {:#}", e);
                     stream.send(&GuestMessage::Error {
                         message: format!("{:#}", e),
                     })?;
