@@ -205,6 +205,10 @@ impl VmInstance for FirecrackerInstance {
         self.tap.as_ref()
     }
 
+    fn take_tap(&mut self) -> Option<TapDevice> {
+        self.tap.take()
+    }
+
     fn wait(&mut self) -> anyhow::Result<()> {
         self.child.wait().context("wait for firecracker")?;
         Ok(())

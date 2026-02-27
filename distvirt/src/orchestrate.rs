@@ -148,37 +148,26 @@ fn run_with_image(
         other => bail!("expected ContainerStarted, got {:?}", other),
     }
 
-    // Spawn a thread to print L2 packets from the TAP device.
-    if let Some(tap) = instance.tap() {
-        let tap_fd = tap.as_raw_fd();
+    // Start the L2 fabric switch for this VM's TAP device.
+    let _fabric = if let Some(tap) = instance.take_tap() {
+        let mut fabric = crate::fabric::Fabric::new();
+        let rt = tokio::runtime::Runtime::new().context("create tokio runtime for fabric")?;
         let tap_name = tap.name.clone();
+        rt.block_on(async {
+            fabric.add_port(tap)
+        }).map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
+        log::info!("fabric: started L2 switch on {}", tap_name);
+        // Keep the runtime alive in a background thread so fabric tasks run.
+        let fabric = std::sync::Arc::new(std::sync::Mutex::new(Some(fabric)));
+        let _fabric_ref = fabric.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 1514]; // max ethernet frame
-            loop {
-                let n = unsafe {
-                    libc::recv(tap_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-                };
-                if n <= 0 {
-                    break;
-                }
-                let n = n as usize;
-                if n < 14 {
-                    continue; // too short for ethernet header
-                }
-                let dst_mac = &buf[0..6];
-                let src_mac = &buf[6..12];
-                let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
-                log::trace!(
-                    "[{}] L2 frame: {} -> {}, ethertype=0x{:04x}, len={}",
-                    tap_name,
-                    format_mac(src_mac),
-                    format_mac(dst_mac),
-                    ethertype,
-                    n,
-                );
-            }
+            // Block this thread on the tokio runtime until fabric is dropped.
+            rt.block_on(std::future::pending::<()>());
         });
-    }
+        Some(fabric)
+    } else {
+        None
+    };
 
     // Wait for container to exit.
     let msg: GuestMessage = conn.recv().context("receive ContainerExited")?;
@@ -264,10 +253,3 @@ fn merge_config(
     })
 }
 
-fn format_mac(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join(":")
-}

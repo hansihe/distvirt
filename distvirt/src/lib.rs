@@ -1,4 +1,5 @@
 pub mod containerd;
+pub mod fabric;
 pub mod image;
 pub mod image_provider;
 pub mod orchestrate;

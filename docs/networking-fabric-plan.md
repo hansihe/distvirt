@@ -2,7 +2,7 @@
 
 ## Current State
 
-TAP device creation and AF_PACKET sockets work. L2 frames flow from guest VMs and are read in a diagnostic loop in `orchestrate.rs`. Guest networking is configured over vsock with hardcoded IPs. Nothing is routed or forwarded.
+**Phase 1 is implemented.** The diagnostic loop in `orchestrate.rs` has been replaced with the fabric L2 switch. Guest ARP requests for the gateway (172.16.0.1) get synthetic replies. MAC learning and frame forwarding/flooding between ports works. The fabric runs on a dedicated tokio runtime in a background thread.
 
 ## Architecture
 
@@ -94,12 +94,20 @@ The existing synchronous VMM/vsock/orchestration code can coexist initially and 
 
 ## Implementation Order
 
-### Phase 1: Port + Basic Switch
+### Phase 1: Port + Basic Switch ✓ DONE
 - Move diagnostic loop from `orchestrate.rs` into `fabric/`
 - Wrap TapDevice socket in tokio `AsyncFd`
 - Implement MAC table and frame forwarding
 - ARP responder for gateway IP
 - Result: two VMs on the same subnet can communicate
+
+#### Implementation notes
+- `Port` uses `dup()` on the AF_PACKET socket fd — one fd stays in `TapDevice` (which owns Drop cleanup for the TAP device), the dup'd fd goes into `AsyncFd`. Both are set `O_NONBLOCK`.
+- `VmInstance` trait gained `take_tap(&mut self) -> Option<TapDevice>` so the orchestrator can transfer ownership to the fabric.
+- Per-port architecture: each port spawns its own tokio task that reads frames and does MAC learning + forwarding inline (no central forwarding task). Shared state is `Arc<Mutex<MacTable>>` and `Arc<Mutex<HashMap<PortId, SharedPort>>>` — locks held only briefly for lookups.
+- The orchestrator creates a separate `tokio::runtime::Runtime` for the fabric and runs it in a background thread via `rt.block_on(pending())`. The fabric and runtime are kept alive via `Arc`.
+- Gateway ARP: responds to ARP requests for 172.16.0.1 with synthetic MAC `02:00:00:00:00:01`. ARP replies are sent back on the same port (no forwarding). Gateway doesn't actually route yet — that's Phase 2.
+- Rust 2024 edition: closure patterns on `HashMap::iter()` can't use `(&id, _)` — the edition's implicit borrow rules require either explicit `&` on the outer pattern or avoiding destructuring. Used a `for` loop instead of iterator chains for clarity.
 
 ### Phase 2: External Connectivity
 - Gateway port that provides NAT or bridge to host networking

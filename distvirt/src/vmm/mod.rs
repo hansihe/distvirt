@@ -34,6 +34,8 @@ pub trait VmInstance {
     fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream>;
     /// Get the TAP device for host-side L2 frame I/O, if networking is configured.
     fn tap(&self) -> Option<&TapDevice>;
+    /// Take ownership of the TAP device, if networking is configured.
+    fn take_tap(&mut self) -> Option<TapDevice>;
     /// Wait for the VM process to exit.
     fn wait(&mut self) -> anyhow::Result<()>;
     /// Kill the VM process.
