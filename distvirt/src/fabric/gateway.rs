@@ -14,6 +14,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket as TokioUdpSocket;
 use tokio::sync::mpsc;
 
+use super::dns::{self, DnsRegistry};
 use super::switch::{ETH_HEADER_LEN, GATEWAY_IP, GATEWAY_MAC, VNET_HDR_SZ};
 
 /// TUN device ioctl constants.
@@ -136,6 +137,9 @@ pub struct FabricGateway {
     egress_rx: mpsc::Receiver<Vec<u8>>,
     ingress_tx: mpsc::Sender<Vec<u8>>,
 
+    // Local DNS registry (service name -> IP)
+    registry: DnsRegistry,
+
     // DNS upstream forwarding
     upstream_socket: TokioUdpSocket,
     upstream_servers: Vec<SocketAddr>,
@@ -151,7 +155,7 @@ impl FabricGateway {
     /// Returns the gateway and channel endpoints for the fabric:
     /// - `egress_tx`: send frames destined for the gateway here
     /// - `ingress_rx`: receive frames from the gateway to inject into the fabric
-    pub fn new() -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
+    pub fn new(registry: DnsRegistry) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create TUN device for internet egress.
         let (tun_fd, tun_name) = create_tun()?;
         configure_tun_ip(&tun_name, GATEWAY_IP, [255, 255, 255, 0])?;
@@ -239,6 +243,7 @@ impl FabricGateway {
                 ip_mac_table: HashMap::new(),
                 egress_rx,
                 ingress_tx,
+                registry,
                 upstream_socket,
                 upstream_servers,
                 pending_dns: HashMap::new(),
@@ -288,6 +293,18 @@ impl FabricGateway {
             let query_id = u16::from_be_bytes([query[0], query[1]]);
             log::info!("gateway: DNS query id={} from {}", query_id, endpoint);
 
+            // Try local registry first.
+            if let Some(response) = dns::try_resolve(&self.registry, &query) {
+                log::info!("gateway: DNS query id={} resolved locally", query_id);
+                let sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
+                if let Err(e) = sock.send_slice(&response, endpoint) {
+                    log::warn!("gateway: DNS local response send: {:?}", e);
+                }
+                self.poll_and_drain();
+                continue;
+            }
+
+            // Fall back to upstream.
             self.pending_dns.insert(query_id, endpoint);
 
             if let Some(upstream) = self.upstream_servers.first() {

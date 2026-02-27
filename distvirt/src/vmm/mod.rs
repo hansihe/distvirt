@@ -1,5 +1,6 @@
 pub mod firecracker;
 
+use std::future::Future;
 use std::path::PathBuf;
 
 use tokio::net::UnixStream;
@@ -7,6 +8,7 @@ use tokio::net::UnixStream;
 use crate::tap::TapDevice;
 
 /// Network configuration for a VM.
+#[derive(Clone)]
 pub struct NetConfig {
     pub guest_ip: String,
     pub netmask: String,
@@ -31,16 +33,15 @@ pub trait Vmm: Send + Sync {
 }
 
 /// A running VM instance.
-#[allow(async_fn_in_trait)]
-pub trait VmInstance: Send {
+pub trait VmInstance: Send + 'static {
     /// Connect to the guest's vsock on the given port.
-    async fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream>;
+    fn connect_vsock(&self, port: u32) -> impl Future<Output = anyhow::Result<UnixStream>> + Send;
     /// Get the TAP device for host-side L2 frame I/O, if networking is configured.
     fn tap(&self) -> Option<&TapDevice>;
     /// Take ownership of the TAP device, if networking is configured.
     fn take_tap(&mut self) -> Option<TapDevice>;
     /// Wait for the VM process to exit.
-    async fn wait(&mut self) -> anyhow::Result<()>;
+    fn wait(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
     /// Kill the VM process.
-    async fn kill(&mut self) -> anyhow::Result<()>;
+    fn kill(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
 }

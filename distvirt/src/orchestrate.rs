@@ -258,8 +258,9 @@ async fn run_with_image(
     let _fabric = if let Some(tap) = instance.take_tap() {
         let mut fabric = crate::fabric::Fabric::new();
 
+        let registry = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::<String, std::net::Ipv4Addr>::new()));
         let (gateway, egress_tx, ingress_rx) =
-            crate::fabric::gateway::FabricGateway::new()
+            crate::fabric::gateway::FabricGateway::new(registry)
                 .context("create fabric gateway")?;
         fabric.set_gateway(egress_tx, ingress_rx);
         tokio::spawn(gateway.run());
