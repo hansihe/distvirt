@@ -644,14 +644,14 @@ fn adjust_vnet_csum_start(vnet_hdr: &mut [u8; 10], delta: i16) {
 fn parse_resolv_conf() -> Vec<SocketAddr> {
     let content = match std::fs::read_to_string("/etc/resolv.conf") {
         Ok(c) => c,
-        Err(_) => {
-            return vec![SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
-                53,
-            )];
-        }
+        Err(_) => return parse_resolv_conf_content(""),
     };
+    parse_resolv_conf_content(&content)
+}
 
+/// Parse the content of a resolv.conf file for nameserver entries.
+/// Falls back to 8.8.8.8:53 if no valid nameservers are found.
+fn parse_resolv_conf_content(content: &str) -> Vec<SocketAddr> {
     let mut servers = Vec::new();
     for line in content.lines() {
         let line = line.trim();
@@ -671,4 +671,109 @@ fn parse_resolv_conf() -> Vec<SocketAddr> {
     }
 
     servers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- adjust_vnet_csum_start tests ---
+
+    #[test]
+    fn adjust_vnet_csum_start_with_needs_csum_negative_delta() {
+        // Simulate fabric→TUN path: subtract ETH_HEADER_LEN (14) from csum_start
+        let mut hdr = [0u8; 10];
+        hdr[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM; // flags = NEEDS_CSUM
+        let csum_start: u16 = 24; // e.g., offset to TCP header in fabric frame
+        hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
+
+        adjust_vnet_csum_start(&mut hdr, -(ETH_HEADER_LEN as i16));
+        let result = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(result, 10); // 24 - 14 = 10
+    }
+
+    #[test]
+    fn adjust_vnet_csum_start_with_needs_csum_positive_delta() {
+        // Simulate TUN→fabric path: add ETH_HEADER_LEN (14) to csum_start
+        let mut hdr = [0u8; 10];
+        hdr[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+        let csum_start: u16 = 10;
+        hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
+
+        adjust_vnet_csum_start(&mut hdr, ETH_HEADER_LEN as i16);
+        let result = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(result, 24); // 10 + 14 = 24
+    }
+
+    #[test]
+    fn adjust_vnet_csum_start_without_needs_csum_unchanged() {
+        let mut hdr = [0u8; 10];
+        hdr[0] = 0; // no NEEDS_CSUM flag
+        let csum_start: u16 = 42;
+        hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
+
+        adjust_vnet_csum_start(&mut hdr, 100);
+        let result = u16::from_le_bytes([hdr[6], hdr[7]]);
+        assert_eq!(result, 42); // unchanged
+    }
+
+    // --- parse_resolv_conf_content tests ---
+
+    #[test]
+    fn parse_resolv_conf_single_nameserver() {
+        let content = "nameserver 1.1.1.1\n";
+        let servers = parse_resolv_conf_content(content);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0],
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53)
+        );
+    }
+
+    #[test]
+    fn parse_resolv_conf_multiple_nameservers() {
+        let content = "nameserver 1.1.1.1\nnameserver 8.8.4.4\n";
+        let servers = parse_resolv_conf_content(content);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(
+            servers[0],
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53)
+        );
+        assert_eq!(
+            servers[1],
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 4, 4)), 53)
+        );
+    }
+
+    #[test]
+    fn parse_resolv_conf_empty_falls_back() {
+        let servers = parse_resolv_conf_content("");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0],
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 53)
+        );
+    }
+
+    #[test]
+    fn parse_resolv_conf_comments_and_other_lines_ignored() {
+        let content = "# comment\nsearch example.com\nnameserver 9.9.9.9\noptions ndots:5\n";
+        let servers = parse_resolv_conf_content(content);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0],
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9)), 53)
+        );
+    }
+
+    #[test]
+    fn parse_resolv_conf_ipv6_nameserver() {
+        let content = "nameserver 2001:4860:4860::8888\n";
+        let servers = parse_resolv_conf_content(content);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0],
+            SocketAddr::new("2001:4860:4860::8888".parse::<IpAddr>().unwrap(), 53)
+        );
+    }
 }

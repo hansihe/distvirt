@@ -2,15 +2,16 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 
-use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_PORT};
+use distvirt_guest_protocol::{GuestMessage, HostMessage, IoMode, VSOCK_CONTROL_PORT, VSOCK_IO_PORT};
 
 use crate::containerd::{parse_user_numeric, ImageConfig};
 use crate::image_provider::ImageProvider;
+use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, VmConfig, VmInstance, Vmm};
 use crate::vsock_client::GuestConnection;
 
 /// Container execution configuration.
-struct ContainerConfig {
+pub struct ContainerConfig {
     pub entrypoint: String,
     pub args: Vec<String>,
     pub env: Vec<String>,
@@ -18,6 +19,7 @@ struct ContainerConfig {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub hostname: Option<String>,
+    pub capture_output: bool,
 }
 
 /// Overrides that can be specified on the CLI to override image config.
@@ -29,6 +31,178 @@ pub struct ImageOverrides {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub hostname: Option<String>,
+}
+
+/// A launched VM with an established vsock connection.
+///
+/// Encapsulates the single-VM lifecycle: launch, protocol handshake,
+/// network configuration, container management, and shutdown.
+pub struct ManagedVm<I> {
+    instance: I,
+    conn: GuestConnection,
+}
+
+impl<I: VmInstance> ManagedVm<I> {
+    /// Create a ManagedVm from an already-launched VM instance.
+    ///
+    /// Connects to the guest over vsock and waits for the Ready message.
+    /// The caller should take the TAP device (via `instance.take_tap()`)
+    /// before calling this if fabric networking is needed, since the fabric
+    /// must be running before the guest finishes booting.
+    pub async fn connect(instance: I) -> anyhow::Result<Self> {
+        log::info!("connecting vsock");
+        let stream = instance
+            .connect_vsock(VSOCK_CONTROL_PORT)
+            .await
+            .context("connect vsock")?;
+        let mut conn = GuestConnection::new(stream);
+
+        let msg: GuestMessage = conn.recv().await.context("receive Ready")?;
+        match msg {
+            GuestMessage::Ready => log::info!("guest is ready"),
+            other => bail!("expected Ready, got {:?}", other),
+        }
+
+        Ok(ManagedVm { instance, conn })
+    }
+
+    /// Configure the guest's network interface.
+    pub async fn configure_network(
+        &mut self,
+        interface: &str,
+        net_config: &NetConfig,
+    ) -> anyhow::Result<()> {
+        self.conn
+            .send(&HostMessage::ConfigureNetwork {
+                interface: interface.to_string(),
+                ip: net_config.guest_ip.clone(),
+                netmask: net_config.netmask.clone(),
+                gateway: net_config.gateway.clone(),
+            })
+            .await
+            .context("send ConfigureNetwork")?;
+
+        let msg: GuestMessage = self
+            .conn
+            .recv()
+            .await
+            .context("receive NetworkConfigured")?;
+        match msg {
+            GuestMessage::NetworkConfigured => log::info!("guest network configured"),
+            GuestMessage::Error { message } => bail!("ConfigureNetwork failed: {}", message),
+            other => bail!("expected NetworkConfigured, got {:?}", other),
+        }
+
+        Ok(())
+    }
+
+    /// Add a container filesystem to the guest.
+    pub async fn add_container(
+        &mut self,
+        id: &str,
+        device: &str,
+        dns_servers: &[String],
+    ) -> anyhow::Result<()> {
+        self.conn
+            .send(&HostMessage::AddContainer {
+                id: id.to_string(),
+                device: device.to_string(),
+                dns_servers: dns_servers.to_vec(),
+            })
+            .await
+            .context("send AddContainer")?;
+
+        let msg: GuestMessage = self.conn.recv().await.context("receive ContainerAdded")?;
+        match msg {
+            GuestMessage::ContainerAdded { id } => log::info!("container added: {}", id),
+            GuestMessage::Error { message } => bail!("AddContainer failed: {}", message),
+            other => bail!("expected ContainerAdded, got {:?}", other),
+        }
+
+        Ok(())
+    }
+
+    /// Start a container process inside the guest.
+    ///
+    /// Returns the PID of the container process inside the guest.
+    pub async fn start_container(
+        &mut self,
+        id: &str,
+        config: &ContainerConfig,
+    ) -> anyhow::Result<u32> {
+        self.conn
+            .send(&HostMessage::StartContainer {
+                id: id.to_string(),
+                entrypoint: config.entrypoint.clone(),
+                args: config.args.clone(),
+                env: config.env.clone(),
+                working_dir: config.working_dir.clone(),
+                uid: config.uid,
+                gid: config.gid,
+                hostname: config.hostname.clone(),
+                capture_output: config.capture_output,
+            })
+            .await
+            .context("send StartContainer")?;
+
+        let msg: GuestMessage = self
+            .conn
+            .recv()
+            .await
+            .context("receive ContainerStarted")?;
+        match msg {
+            GuestMessage::ContainerStarted { id, pid } => {
+                log::info!("container {} started with pid {}", id, pid);
+                Ok(pid)
+            }
+            GuestMessage::Error { message } => bail!("StartContainer failed: {}", message),
+            other => bail!("expected ContainerStarted, got {:?}", other),
+        }
+    }
+
+    /// Wait for a container to exit.
+    ///
+    /// Returns the (container_id, exit_code).
+    pub async fn wait_container_exit(&mut self) -> anyhow::Result<(String, i32)> {
+        let msg: GuestMessage = self
+            .conn
+            .recv()
+            .await
+            .context("receive ContainerExited")?;
+        match msg {
+            GuestMessage::ContainerExited { id, code } => {
+                log::info!("container {} exited with code {}", id, code);
+                Ok((id, code))
+            }
+            GuestMessage::Error { message } => bail!("container error: {}", message),
+            other => bail!("expected ContainerExited, got {:?}", other),
+        }
+    }
+
+    /// Open a log streaming session for a container.
+    ///
+    /// Connects to the guest's I/O port and returns an IoSession that
+    /// can be polled for stdout/stderr events.
+    pub async fn stream_logs(&self, container_id: &str) -> anyhow::Result<IoSession> {
+        let stream = self
+            .instance
+            .connect_vsock(VSOCK_IO_PORT)
+            .await
+            .context("connect vsock I/O port")?;
+        IoSession::connect(stream, container_id, IoMode::Logs)
+            .await
+            .context("I/O session handshake")
+    }
+
+    /// Shut down the guest and wait for the VM to exit.
+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
+        self.conn
+            .send(&HostMessage::Shutdown)
+            .await
+            .context("send Shutdown")?;
+        self.instance.wait().await.context("wait for VM")?;
+        Ok(())
+    }
 }
 
 /// Run a container using an image provider.
@@ -84,8 +258,6 @@ async fn run_with_image(
     let _fabric = if let Some(tap) = instance.take_tap() {
         let mut fabric = crate::fabric::Fabric::new();
 
-        // Start the fabric gateway (smoltcp + TUN + DNS forwarding).
-        // Must be set up before add_port so port tasks get the gateway channel.
         let (gateway, egress_tx, ingress_rx) =
             crate::fabric::gateway::FabricGateway::new()
                 .context("create fabric gateway")?;
@@ -103,98 +275,26 @@ async fn run_with_image(
         None
     };
 
-    // Connect to guest over vsock.
-    log::info!("connecting vsock");
-    let stream = instance
-        .connect_vsock(VSOCK_PORT)
-        .await
-        .context("connect vsock")?;
-    let mut conn = GuestConnection::new(stream);
-
-    // Wait for Ready.
-    let msg: GuestMessage = conn.recv().await.context("receive Ready")?;
-    match msg {
-        GuestMessage::Ready => log::info!("guest is ready"),
-        other => bail!("expected Ready, got {:?}", other),
-    }
+    // Connect to guest and wait for ready.
+    let mut vm = ManagedVm::connect(instance).await?;
 
     // Configure network if enabled.
     if let Some(ref net_config) = vm_config.net {
-        conn.send(&HostMessage::ConfigureNetwork {
-            interface: "eth0".to_string(),
-            ip: net_config.guest_ip.clone(),
-            netmask: net_config.netmask.clone(),
-            gateway: net_config.gateway.clone(),
-        })
-        .await
-        .context("send ConfigureNetwork")?;
-
-        let msg: GuestMessage = conn.recv().await.context("receive NetworkConfigured")?;
-        match msg {
-            GuestMessage::NetworkConfigured => log::info!("guest network configured"),
-            GuestMessage::Error { message } => bail!("ConfigureNetwork failed: {}", message),
-            other => bail!("expected NetworkConfigured, got {:?}", other),
-        }
+        vm.configure_network("eth0", net_config).await?;
     }
 
-    // Add container (second virtio block device = /dev/vdb).
-    let container_id = "default".to_string();
-    conn.send(&HostMessage::AddContainer {
-        id: container_id.clone(),
-        device: "/dev/vdb".to_string(),
-        dns_servers: vec!["172.16.0.1".to_string()],
-    })
-    .await
-    .context("send AddContainer")?;
+    // Add and start container.
+    let container_id = "default";
+    vm.add_container(container_id, "/dev/vdb", &["172.16.0.1".to_string()])
+        .await?;
 
-    let msg: GuestMessage = conn.recv().await.context("receive ContainerAdded")?;
-    match msg {
-        GuestMessage::ContainerAdded { id } => log::info!("container added: {}", id),
-        GuestMessage::Error { message } => bail!("AddContainer failed: {}", message),
-        other => bail!("expected ContainerAdded, got {:?}", other),
-    }
-
-    // Start container.
-    conn.send(&HostMessage::StartContainer {
-        id: container_id.clone(),
-        entrypoint: config.entrypoint.clone(),
-        args: config.args.clone(),
-        env: config.env.clone(),
-        working_dir: config.working_dir.clone(),
-        uid: config.uid,
-        gid: config.gid,
-        hostname: config.hostname.clone(),
-    })
-    .await
-    .context("send StartContainer")?;
-
-    let msg: GuestMessage = conn.recv().await.context("receive ContainerStarted")?;
-    match msg {
-        GuestMessage::ContainerStarted { id, pid } => {
-            log::info!("container {} started with pid {}", id, pid)
-        }
-        GuestMessage::Error { message } => bail!("StartContainer failed: {}", message),
-        other => bail!("expected ContainerStarted, got {:?}", other),
-    }
+    vm.start_container(container_id, config).await?;
 
     // Wait for container to exit.
-    let msg: GuestMessage = conn.recv().await.context("receive ContainerExited")?;
-    let exit_code = match msg {
-        GuestMessage::ContainerExited { id, code } => {
-            log::info!("container {} exited with code {}", id, code);
-            code
-        }
-        GuestMessage::Error { message } => bail!("container error: {}", message),
-        other => bail!("expected ContainerExited, got {:?}", other),
-    };
+    let (_id, exit_code) = vm.wait_container_exit().await?;
 
     // Shut down the guest.
-    conn.send(&HostMessage::Shutdown)
-        .await
-        .context("send Shutdown")?;
-
-    // Wait for the VM to exit.
-    instance.wait().await.context("wait for VM")?;
+    vm.shutdown().await?;
 
     Ok(exit_code)
 }
@@ -214,11 +314,12 @@ fn config_from_overrides(overrides: &ImageOverrides) -> anyhow::Result<Container
         uid: overrides.uid,
         gid: overrides.gid,
         hostname: overrides.hostname.clone(),
+        capture_output: false,
     })
 }
 
 /// Merge image config with CLI overrides following OCI entrypoint/cmd resolution rules.
-fn merge_config(
+pub fn merge_config(
     image: &ImageConfig,
     overrides: &ImageOverrides,
 ) -> anyhow::Result<ContainerConfig> {
@@ -259,5 +360,6 @@ fn merge_config(
         uid: overrides.uid.or(img_uid),
         gid: overrides.gid.or(img_gid),
         hostname: overrides.hostname.clone(),
+        capture_output: false,
     })
 }

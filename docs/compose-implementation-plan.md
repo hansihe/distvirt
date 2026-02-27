@@ -1,5 +1,29 @@
 # Compose Implementation Plan — Milestone 1
 
+## Progress
+
+| Step | Task | Status | Notes |
+|------|------|--------|-------|
+| 1 | Refactor orchestrate.rs → ManagedVm + core types | **Done** | `ManagedVm<I>` extracted (generic over VmInstance), `Deployment`/`ServiceSpec`/`ServiceRegistry` in `deployment.rs`. `ContainerConfig` and `merge_config` made public. `run()`/`run_with_image()` reimplemented on ManagedVm. FabricPort trait deferred — current Port + channel-based gateway works; trait needed when tunnel ports arrive. |
+| 2 | Compose parser crate | **Done** | `distvirt-compose` crate with `parse(path) → Deployment`. Uses `compose_spec` crate. Extracts image, command, entrypoint, environment, ports, depends_on, hostname, user, working_dir. Warns on unsupported fields (build, volumes, healthcheck, restart, configs, secrets, networks). 11 unit tests. |
+| 3 | Planning (IP assignment, ordering) | **Done** | `plan(deployment) → ExecutionPlan` in `deployment.rs`. Topological sort via Kahn's algorithm (alphabetical within same level, cycle-tolerant). IPs from 172.16.0.2+ (gateway .1), deterministic MACs `06:00:AC:10:00:{octet}`. Max 253 services (/24 subnet). 11 unit tests. |
+| 4 | Worker + compose up | Not started | |
+| 5 | smoltcp gateway | **Done** | `FabricGateway` with TUN egress, DNS forwarding, ARP via smoltcp. Integrated into fabric via channels. |
+| 5a | DNS service discovery | Partial | Gateway has UDP :53 socket and upstream forwarding, but no `ServiceRegistry` lookup yet. |
+| 6 | `/etc/resolv.conf` injection | **Done** | `AddContainer` has `dns_servers` field, guest-init writes resolv.conf. |
+| 7 | Port forwarding (in-fabric) | Not started | |
+| 8 | Stdout/stderr streaming | **Done** | Multi-connection vsock transport: control port 1024 + I/O port 1025. Pipe-based capture in guest, binary-framed streaming, host-side IoSession + LogCollector. |
+| 9 | CLI commands | Not started | |
+
+### Design deviations from original plan
+
+- **ManagedVm is generic (`ManagedVm<I: VmInstance>`)** rather than holding `Box<dyn VmInstance>`. The VmInstance trait uses native async-in-trait and isn't object-safe. Generic approach works for milestone 1; dynamic dispatch (ServiceHandle trait, `Box<dyn ServiceHandle>`) will be introduced when Worker/RemoteVm need it.
+- **FabricPort trait deferred.** The gateway integrates via mpsc channels, TAP ports use the concrete `Port` struct. This works well and avoids premature abstraction. The trait becomes useful when tunnel ports arrive for distributed mode.
+- **`merge_config` made public** so compose can resolve image configs into `ContainerConfig` from outside orchestrate.rs.
+- **`PlannedService` is simpler than originally planned.** No embedded `spec`, `port_forwards`, or `depends_on` fields — the service spec is looked up from `Deployment` by name, and port forwards will be added when step 7 is implemented.
+
+---
+
 ## Goal
 
 `distvirt compose up` launches a multi-service environment from a standard `compose.yaml`. Services run in individual Firecracker VMs, connected by the existing L2 fabric with DNS-based service discovery. No suspend/resume, no scale-to-zero — just "compose up starts everything, compose down stops everything."
@@ -60,17 +84,19 @@ The conceptual model is still L2 — identity-based forwarding, learning which w
 ```
 distvirt/                  CORE — orchestration primitives + fabric
   src/
-    deployment.rs          NEW — Deployment, ServiceSpec, ServiceRegistry
-    orchestrate.rs         refactor: extract ManagedVm as trait impl
-    worker.rs              NEW — Worker struct (owns VMM, fabric, runs VMs)
+    deployment.rs          ✅ Deployment, ServiceSpec, ServiceRegistry
+    orchestrate.rs         ✅ ManagedVm<I>, ContainerConfig, run()/run_with_image()
+    io_session.rs          ✅ Host-side IoSession (connect, handshake, frame decoding)
+    log_collector.rs       ✅ LogCollector (multi-service log aggregation)
+    worker.rs              TODO — Worker struct (owns VMM, fabric, runs VMs)
     fabric/
-      mod.rs               refactor: FabricPort trait
-      port.rs              TapPort implements FabricPort
-      switch.rs            existing L2 switch (uses FabricPort trait)
-      gateway.rs           NEW — smoltcp-based gateway (implements FabricPort)
-    vmm/                   (no changes expected)
-    image_provider/        (no changes expected)
-    vsock_client.rs        (no changes expected)
+      mod.rs               Fabric struct, port management, gateway via channels
+      port.rs              Port (async TAP wrapper, concrete struct)
+      switch.rs            L2 switch (MacTable, frame parsing)
+      gateway.rs           ✅ FabricGateway (smoltcp + TUN + DNS forwarding)
+    vmm/                   Vmm/VmInstance traits, Firecracker impl
+    image_provider/        ImageProvider trait, containerd + rootfs impls
+    vsock_client.rs        GuestConnection (length-prefixed JSON over vsock)
 
 distvirt-compose/          NEW — compose file parser ONLY
   src/
@@ -84,10 +110,10 @@ distvirt-worker/           EXISTING stub — worker binary
                            future: standalone binary connecting to orchestrator
 
 distvirt-guest-protocol/   EXISTING — shared types
-    add: Output message for stdout/stderr streaming
+    ✅ IoSessionRequest/Response, IoMode, stream constants, capture_output
 
 guest-image/guest-init/    EXISTING — guest agent
-    add: pipe stdout/stderr, send Output messages over vsock
+    ✅ pipe-based capture, IoSessionManager, multi-fd poll, binary framing
 
 distvirt-cli/              EXISTING — CLI
     add: `compose up`, `compose down`, `compose logs` commands
@@ -98,9 +124,9 @@ distvirt-cli/              EXISTING — CLI
 
 **`distvirt` (core)** owns:
 - `Deployment` / `ServiceSpec` — the runtime representation of "a set of named services with IPs, ports, dependencies." This is what compose parses *into*, and what a distributed orchestrator would also produce. It's the shared vocabulary.
-- `ServiceRegistry` — name→IP mapping. The DNS server queries this. Compose populates it, but so could a distributed orchestrator or a splice command.
-- `Worker` — a struct that owns a VMM, a local fabric segment, and an image provider. It receives "start service X" commands and executes them locally. In milestone 1, the CLI creates a Worker in-process. In the distributed case, `distvirt-worker` is a standalone binary that creates a Worker and connects to a remote orchestrator.
-- `ManagedVm` — a local VM with vsock connection. Implements a `ServiceHandle` trait so the orchestrator doesn't assume locality.
+- `ServiceRegistry` — name→IP mapping. The DNS server queries this. The orchestrator owns the authoritative copy; workers hold a projected copy kept in sync via the worker protocol.
+- `Worker` — a command-driven executor that owns a VMM, local fabric segments (one per namespace), and an image provider. It receives commands (`LaunchPod`, `CreateNamespace`, etc.) and emits events (`PodRunning`, `PodExited`, etc.). In milestone 1, the CLI embeds a trivial orchestrator that drives a Worker in-process via channels. In the distributed case, `distvirt-worker` is a standalone binary that creates a Worker and connects to a remote orchestrator. See `docs/worker-protocol.md`.
+- `ManagedVm` — a local VM with vsock connection. The Worker uses this internally to manage pod VMs.
 - `Fabric` + `FabricPort` trait — the L2 switch with pluggable port types (TAP, smoltcp, future: tunnel).
 - smoltcp gateway, DNS server, port forwarding — fabric-level capabilities, not compose-specific.
 
@@ -123,13 +149,11 @@ distvirt-cli/              EXISTING — CLI
 ### Key abstractions
 
 ```rust
-// distvirt/src/deployment.rs — the "what"
+// distvirt/src/deployment.rs — the "what" ✅ IMPLEMENTED
 
-/// A set of services to run. Source-agnostic — could come from compose,
-/// API calls, or a distributed orchestrator.
 pub struct Deployment {
     pub name: String,
-    pub services: IndexMap<String, ServiceSpec>,
+    pub services: HashMap<String, ServiceSpec>,
 }
 
 pub struct ServiceSpec {
@@ -144,80 +168,68 @@ pub struct ServiceSpec {
     pub working_dir: Option<String>,
 }
 
-/// Name→IP mapping, shared between DNS server, orchestrator, and workers.
 pub struct ServiceRegistry {
     services: HashMap<String, Ipv4Addr>,
 }
+// Methods: new(), register(), lookup(), iter()
 ```
 
 ```rust
-// distvirt/src/orchestrate.rs — the "how" (local execution)
+// distvirt/src/orchestrate.rs — the "how" (local execution) ✅ IMPLEMENTED
 
-/// Trait for interacting with a running service, regardless of location.
-#[async_trait]
-pub trait ServiceHandle {
-    async fn configure_network(&mut self, cfg: NetConfig) -> Result<()>;
-    async fn add_container(&mut self, id: &str, device: &str, dns: &[String]) -> Result<()>;
-    async fn start_container(&mut self, cfg: ContainerConfig) -> Result<u32>;
-    async fn shutdown(self: Box<Self>) -> Result<()>;
+/// A launched VM with an established vsock connection.
+/// Generic over VmInstance (static dispatch for now).
+pub struct ManagedVm<I> {
+    instance: I,
+    conn: GuestConnection,
 }
 
-/// Local implementation — a VM on this machine with a vsock connection.
-pub struct ManagedVm {
-    instance: Box<dyn VmInstance>,
-    vsock: GuestConnection,
+impl<I: VmInstance> ManagedVm<I> {
+    pub async fn connect(instance: I) -> Result<Self>;          // vsock + wait Ready
+    pub async fn configure_network(&mut self, ...) -> Result<()>;
+    pub async fn add_container(&mut self, ...) -> Result<()>;
+    pub async fn start_container(&mut self, ...) -> Result<u32>;
+    pub async fn wait_container_exit(&mut self) -> Result<(String, i32)>;
+    pub async fn stream_logs(&self, container_id: &str) -> Result<IoSession>; // ✅ step 8
+    pub async fn shutdown(mut self) -> Result<()>;
 }
 
-impl ServiceHandle for ManagedVm { ... }
-
-// Future: RemoteVm that talks to a worker over RPC
-// pub struct RemoteVm { worker_client: WorkerClient, vm_id: VmId }
-// impl ServiceHandle for RemoteVm { ... }
+// Future: ServiceHandle trait + RemoteVm for distributed mode
+// Introduced when Worker needs dynamic dispatch over local vs remote VMs.
 ```
 
 ```rust
-// distvirt/src/fabric/mod.rs — pluggable port abstraction
+// distvirt/src/fabric/ — L2 switch + gateway ✅ IMPLEMENTED
 
-/// A source/sink of Ethernet frames on the fabric.
-#[async_trait]
-pub trait FabricPort: Send {
-    async fn recv_frame(&mut self) -> Result<BytesMut>;
-    async fn send_frame(&mut self, frame: &[u8]) -> Result<()>;
-}
+// Fabric manages ports (concrete Port struct) and gateway (mpsc channels).
+// Gateway is FabricGateway (smoltcp + TUN + DNS forwarding).
+// FabricPort trait deferred — current design works, trait needed for tunnel ports.
 
-/// TAP device port (existing, refactored to implement trait).
-pub struct TapPort { ... }
-impl FabricPort for TapPort { ... }
-
-/// smoltcp gateway port (new).
-pub struct SmoltcpPort { ... }
-impl FabricPort for SmoltcpPort { ... }
-
-// Future: tunnel port for distributed fabric
-// pub struct TunnelPort { ... }  // WireGuard/VXLAN to remote worker
-// impl FabricPort for TunnelPort { ... }
+// Future: FabricPort trait, TunnelPort for distributed fabric
 ```
 
 ```rust
-// distvirt/src/worker.rs — the "where" (local execution engine)
+// distvirt/src/worker.rs — the "where" (local execution engine) TODO
+// See docs/worker-protocol.md for the full protocol design.
 
-/// A worker manages VMs and a local fabric segment on one machine.
 pub struct Worker {
     vmm: Box<dyn Vmm>,
     image_provider: Box<dyn ImageProvider>,
-    fabric: Fabric,
-    registry: ServiceRegistry,
-    // smoltcp gateway, DNS, port forwards
+    namespaces: HashMap<String, NamespaceState>,  // namespace_id → local state
 }
 
+struct NamespaceState {
+    fabric: Fabric,
+    gateway: FabricGateway,
+    registry: ServiceRegistry,        // projected copy, orchestrator-owned
+    pods: HashMap<String, ManagedVm>, // pod_id → running VM
+}
+
+// Worker is command-driven. It receives WorkerCommand, emits WorkerEvent.
+// No planning, no scheduling — just executes what the orchestrator tells it.
 impl Worker {
-    /// Start a service on this worker.
-    pub async fn start_service(&mut self, name: &str, spec: &ServiceSpec) -> Result<Box<dyn ServiceHandle>>;
-
-    /// Stop a service.
-    pub async fn stop_service(&mut self, name: &str) -> Result<()>;
-
-    /// Shut down all services and the fabric.
+    pub async fn handle_command(&mut self, cmd: WorkerCommand) -> Result<()>;
+    pub async fn recv_event(&mut self) -> WorkerEvent;
     pub async fn shutdown(self) -> Result<()>;
 }
 ```
@@ -226,97 +238,99 @@ impl Worker {
 
 ## Implementation Steps
 
-### Step 1: Refactor `orchestrate.rs` + introduce core abstractions
+### Step 1: Refactor `orchestrate.rs` + introduce core abstractions — ✅ DONE
 
-Extract the single-VM lifecycle into `ManagedVm` implementing `ServiceHandle`. Introduce the `Deployment`, `ServiceSpec`, and `ServiceRegistry` types. Keep the existing `run()` working as-is by reimplementing it on top of the new primitives.
+Extracted the single-VM lifecycle into `ManagedVm<I>` (generic over VmInstance). Introduced `Deployment`, `ServiceSpec`, `ServiceRegistry` in `deployment.rs`. Made `ContainerConfig` and `merge_config` public. Reimplemented `run()`/`run_with_image()` on top of ManagedVm.
 
-Also introduce the `FabricPort` trait and refactor the existing TAP port handling to implement it. The switch logic uses `FabricPort` instead of directly managing TAP file descriptors.
+**Deferred:** FabricPort trait — the current concrete Port + channel-based gateway integration works well. The trait abstraction is needed when tunnel ports arrive for distributed mode, not before.
 
-This is a refactor — no new functionality, no behavior change.
+**Deferred:** ServiceHandle trait — ManagedVm is generic (static dispatch) rather than trait-object-based. VmInstance uses native async-in-trait which isn't object-safe. Dynamic dispatch will be introduced when Worker needs to handle both local and remote VMs.
 
-**Validation:** existing `distvirt run` and `distvirt run-image` CLI commands still work identically.
+**Validated:** builds clean, no warnings. Existing `run` and `run-image` CLI commands unchanged.
 
-### Step 2: Add `distvirt-compose` crate — parser only
+### Step 2: Add `distvirt-compose` crate — parser only — ✅ DONE
 
-Add `compose_spec` dependency. The crate has one job: parse a compose file into a `Deployment`.
-
-```rust
-// distvirt-compose/src/lib.rs
-
-pub fn parse(path: &Path) -> Result<Deployment>;
-```
+`distvirt-compose` crate implemented with `compose_spec = "0.3"` dependency. Single public API: `parse(path: &Path) -> Result<Deployment>`.
 
 The `parse()` function:
 1. Reads and deserializes the compose file via `compose_spec`
-2. Validates that all referenced images exist / are pullable
-3. Warns on unsupported fields (anything we don't extract)
+2. Derives deployment name from compose `name` field or parent directory
+3. Warns on unsupported fields (build, volumes, healthcheck, restart, configs, secrets, networks)
 4. Converts `compose_spec` types into core `Deployment` / `ServiceSpec`
+5. Handles command (string and list), environment, ports (TCP/UDP), depends_on
 
-**Validation:** unit tests parsing real compose files, round-trip checks.
+**Validated:** 11 unit tests covering minimal parse, name derivation, command formats, environment, ports, dependencies, missing image validation, and full service extraction.
 
-### Step 3: Planning — IP assignment and port mapping
+### Step 3: Planning — IP assignment and port mapping — ✅ DONE
 
-This lives in core (`distvirt`) since it's not compose-specific — any deployment source needs IP assignment.
+Lives in core (`distvirt/src/deployment.rs`) since it's not compose-specific.
 
 ```rust
-// distvirt/src/deployment.rs (or a planning module)
-
 pub struct ExecutionPlan {
     pub services: Vec<PlannedService>,
 }
 
 pub struct PlannedService {
     pub name: String,
-    pub spec: ServiceSpec,
     pub ip: Ipv4Addr,
     pub mac: [u8; 6],
-    pub port_forwards: Vec<PortForward>,
-    pub depends_on: Vec<String>,
 }
 
 pub fn plan(deployment: &Deployment) -> Result<ExecutionPlan>;
 ```
 
 The planner:
-1. Orders services so dependencies come first (best-effort topological order, not strict DAG — cycles aren't fatal)
+1. Orders services via Kahn's algorithm (topological sort, alphabetical within same dependency level, deterministic output)
 2. Assigns IPs from 172.16.0.0/24 subnet (gateway .1, services .2, .3, ...)
-3. Derives MAC addresses deterministically
-4. Resolves port mappings
+3. Derives MAC addresses deterministically (`06:00:AC:10:00:{last_octet}`)
+4. Validates max 253 services (per /24 subnet)
+5. Cycles don't cause failure — remaining services appended alphabetically with warning
+6. Unknown dependencies ignored gracefully
 
-**Validation:** unit tests for ordering, IP assignment.
+**Note:** `PlannedService` is lighter than originally planned — no `spec`, `port_forwards`, or `depends_on` fields. The service spec is looked up from the `Deployment` by name. Port forwards will be added when step 7 is implemented.
+
+**Validated:** 11 unit tests covering single/multi-service IP assignment, dependency ordering, diamond dependencies, cycle detection, service limits, unknown dependencies.
 
 ### Step 4: Worker + `compose up` — multi-VM orchestration
 
-Introduce the `Worker` struct and wire up `compose up`.
+**Updated:** The Worker now follows the worker protocol design (see `docs/worker-protocol.md`). The Worker is a dumb executor driven by commands from the orchestrator. For milestone 1, the CLI acts as a trivial in-process orchestrator that sends commands via channels.
+
+The Worker receives `WorkerCommand` messages and emits `WorkerEvent` messages. It does NOT do planning, IP assignment, or dependency ordering — that's the orchestrator's job.
 
 ```rust
 // distvirt/src/worker.rs
 
 impl Worker {
-    pub fn new(vmm: Box<dyn Vmm>, image_provider: Box<dyn ImageProvider>) -> Self;
-    pub async fn start_service(&mut self, name: &str, spec: &ServiceSpec, plan: &PlannedService) -> Result<()>;
+    pub fn new(config: WorkerConfig) -> Self;
+
+    /// Process a single command from the orchestrator.
+    /// Returns events produced in response.
+    pub async fn handle_command(&mut self, cmd: WorkerCommand) -> Result<()>;
+
+    /// Receive the next event from the worker (pod started, exited, output, etc.)
+    pub async fn recv_event(&mut self) -> WorkerEvent;
+
     pub async fn shutdown(self) -> Result<()>;
 }
 ```
 
-The CLI's `compose up` flow:
+The CLI's `compose up` flow (CLI acts as orchestrator):
 1. Parse compose file → `Deployment`
-2. Plan → `ExecutionPlan`
-3. Create a `Worker` (in-process for milestone 1)
-4. For each service (respecting dependency order):
-   a. `worker.start_service(name, spec, plan)` which internally:
-      - `image_provider.prepare(image)`
-      - `ManagedVm::start(vmm, config)`
-      - Take TAP → add to fabric as `TapPort`
-      - Register in `ServiceRegistry`
-      - Configure network, add container, start container
-5. Wait for ctrl-c, then `worker.shutdown()`
+2. Plan → `ExecutionPlan` (IP/MAC assignment, dependency ordering)
+3. Create a `Worker` in-process
+4. Send `CreateNamespace` with network config
+5. Send `RegistrySync` with all service name→IP mappings
+6. For each pod (respecting dependency order):
+   a. Send `LaunchPod { namespace, pod_id, ip, mac, containers }`
+   b. Wait for `PodRunning` event before launching dependents
+7. Stream `PodOutput` events to terminal
+8. On Ctrl-C, send `StopPod` for each pod, then `DestroyNamespace`
 
 **Validation:** launch a two-service compose file (e.g., alpine pinging alpine), verify both start, verify fabric connects them.
 
-### Step 5: Userspace IP stack in the fabric (smoltcp)
+### Step 5: Userspace IP stack in the fabric (smoltcp) — ✅ DONE
 
-The fabric currently operates at L2 only. Add `smoltcp` as a userspace TCP/IP stack, attached to the fabric as a `SmoltcpPort` (implementing `FabricPort`) with the gateway identity (IP 172.16.0.1, MAC 02:00:00:00:00:01).
+`FabricGateway` implemented with smoltcp interface, TUN device for internet egress, DNS forwarding to upstream servers, and ARP handling. Integrated into fabric via mpsc channels (not FabricPort trait). Gateway runs as a spawned tokio task.
 
 ```rust
 // distvirt/src/fabric/gateway.rs
@@ -360,18 +374,9 @@ The DNS server queries the `ServiceRegistry` (which lives in core, not compose):
 
 **Validation:** launch a VM, `nslookup service-name 172.16.0.1` returns correct IP.
 
-### Step 6: `/etc/resolv.conf` injection
+### Step 6: `/etc/resolv.conf` injection — ✅ DONE
 
-Protocol extension — the host tells the guest what DNS server to use:
-
-```
-AddContainer { id, device, dns_servers: Vec<String> }
-```
-
-Guest agent writes `/containers/<id>/etc/resolv.conf` after mount:
-```
-nameserver 172.16.0.1
-```
+`AddContainer` message has `dns_servers: Vec<String>` field. Guest-init writes `/etc/resolv.conf` with the specified nameservers after mounting the container filesystem.
 
 ### Step 7: Port forwarding (in-fabric)
 
@@ -387,30 +392,34 @@ Future benefit: for scale-to-zero, the host listener can hold incoming connectio
 
 **Validation:** compose file with `ports: ["8080:80"]`, curl localhost:8080 reaches the container.
 
-### Step 8: Stdout/stderr streaming
+### Step 8: Stdout/stderr streaming — ✅ DONE
 
-**Protocol extension:**
+Uses a **multi-connection vsock transport**: the existing control channel (port 1024) stays as-is for JSON control messages, and a new I/O port (1025) accepts per-container streaming sessions. This cleanly separates control from data and supports future PTY attach sessions.
 
-```rust
-// distvirt-guest-protocol
-GuestMessage::Output { id: String, stream: u8, data: Vec<u8> }
-// stream: 1 = stdout, 2 = stderr
-```
+**Protocol changes (`distvirt-guest-protocol`):**
+- `VSOCK_CONTROL_PORT` (1024) and `VSOCK_IO_PORT` (1025) constants (`VSOCK_PORT` kept as compat alias)
+- `capture_output: bool` field on `StartContainer` (serde default false)
+- `IoSessionRequest`/`IoSessionResponse` for handshake (length-prefixed JSON)
+- Binary I/O frame format after handshake: `[1 byte stream_id][2 bytes LE length][payload]`
+  - stream_id: 0=EOF, 1=stdout, 2=stderr. Max payload 8192 bytes.
 
-**Guest agent changes:**
-- Create pipes for stdout and stderr before `fork()`
-- Child: dup2 pipe write ends to fd 1 and 2
-- Parent: add pipe read ends to the `poll()` set
-- On readable: read into buffer, send `Output` message over vsock
+**Guest-init changes:**
+- `container.rs`: When `capture_output=true`, creates `pipe()` pairs for stdout/stderr. Child dup2's write ends to fd 1/2 (stdin gets `/dev/null`). Parent stores non-blocking read ends. When `capture_output=false`, legacy `/dev/console` behavior preserved.
+- `io_session.rs` (new): `IoSessionManager` owns VsockListener on port 1025. Accepts sessions, performs handshake, forwards pipe data as binary frames. Buffers up to 64KB per stream when no session connected (drops oldest on overflow). Sends EOF frame on container exit.
+- `main.rs`: Refactored to dynamic multi-fd poll: control vsock + signalfd + I/O listener + per-container pipe fds + per-session fds. On child exit: drains pipes, sends EOF, closes fds.
+- `vsock.rs`: Added `accept_nonblocking()`, `as_raw_fd()` on VsockListener, `write_raw()` on VsockStream.
 
-**Host-side:** The `ManagedVm` runs a background message-dispatching loop:
-- `ContainerExited` → notify the worker
-- `Output` → forward to log collector
-- `Error` → forward to log collector
+**Host-side changes:**
+- `io_session.rs` (new): `IoSession` with async connect + handshake + binary frame decoding. `IoEvent` enum: `Stdout(Vec<u8>)`, `Stderr(Vec<u8>)`, `Eof`.
+- `orchestrate.rs`: `ManagedVm::stream_logs(container_id)` connects to I/O port and returns an `IoSession`. `ContainerConfig` has `capture_output` field (defaults false in existing config builders).
+- `log_collector.rs` (new): `LogCollector` aggregates output from multiple containers via tokio mpsc. `collect()` spawns a task per IoSession forwarding events as `LogLine { service, stream, data }`.
 
-The log collector aggregates output from all VMs, prefixes with service name, writes to terminal.
+**Design for future extension (not implemented):**
+- PTY attach: `IoMode::Attach` — guest allocates PTY, bidirectional raw bytes
+- Stdin: `stream_id=3` for host→guest stdin
+- Exec: `ExecInContainer` control message + virtual container ID for I/O session
 
-**Validation:** `distvirt compose logs` shows interleaved output from multiple services.
+**Validated:** builds clean, no warnings.
 
 ### Step 9: CLI commands
 
@@ -445,28 +454,28 @@ Foreground-only for milestone 1. Detach mode is a follow-up.
 ## Dependency graph (implementation order)
 
 ```
-Step 1: Refactor orchestrate.rs → ManagedVm/ServiceHandle + FabricPort trait
+Step 1: Refactor orchestrate.rs → ManagedVm + core types              ✅ DONE
   │
-  ├── Step 2: Compose parser (independent of step 1)
+  ├── Step 2: Compose parser                                           ✅ DONE
   │     │
-  │     └── Step 3: Planning / IP assignment (in core)
+  │     └── Step 3: Planning / IP assignment (in core)                 ✅ DONE
   │
-  ├── Step 5: smoltcp gateway as FabricPort (independent of compose)
+  ├── Step 5: smoltcp gateway                                          ✅ DONE
   │     │
-  │     ├── Step 5a: DNS server (queries ServiceRegistry)
+  │     ├── Step 5a: DNS service discovery (wire ServiceRegistry in)   ← needs Step 4
   │     │
   │     └── Step 7: Port forwarding (fabric capability)
   │
-  ├── Step 6: resolv.conf injection (protocol + guest agent)
+  ├── Step 6: resolv.conf injection                                    ✅ DONE
   │
-  └── Step 4: Worker + compose up (needs steps 1, 2, 3, 5)
+  └── Step 4: Worker + compose up (needs steps 2, 3)                   ← UNBLOCKED, NEXT
         │
-        └── Step 8: Stdout/stderr streaming (protocol + guest agent)
+        └── Step 8: Stdout/stderr streaming                            ✅ DONE
               │
               └── Step 9: CLI commands (integrates everything)
 ```
 
-Steps 1, 2, 5, 6, 8 touch different parts of the codebase and can be developed concurrently. Step 5 (smoltcp gateway) is the most significant new infrastructure.
+**Next up:** Step 4 (Worker + compose up) is now unblocked. Steps 2, 3, and 8 are complete.
 
 ---
 
@@ -475,17 +484,16 @@ Steps 1, 2, 5, 6, 8 touch different parts of the codebase and can be developed c
 The architecture is designed so the distributed case is "put the orchestrator in a server, put workers on N machines, add RPC between them" — not a rewrite.
 
 **What changes for distributed:**
-- `distvirt-worker` binary becomes a standalone process that connects to a remote orchestrator instead of being started in-process by the CLI
-- `ServiceHandle` gets a `RemoteVm` implementation that talks to a worker over RPC
-- `FabricPort` gets a `TunnelPort` implementation (WireGuard/VXLAN) for inter-worker traffic
-- `ServiceRegistry` becomes distributed (orchestrator is the source of truth, workers cache)
-- The orchestrator gains scheduling policy (which worker runs which service) and autoscaling
+- `distvirt-worker` binary becomes a standalone process that connects to a remote orchestrator over TCP/TLS instead of being driven in-process via channels
+- `FabricPort` gets a `TunnelPort` implementation for inter-worker traffic
+- The orchestrator gains scheduling policy (which worker runs which pod), fabric route management, and autoscaling
+- Workers connect to the orchestrator (not the other way around) — see `docs/worker-protocol.md`
 
 **What stays the same:**
-- `Worker` struct and its local VM management
-- `ManagedVm` and the vsock protocol
+- `Worker` struct and the `WorkerCommand`/`WorkerEvent` protocol — same messages whether local or remote
+- `ManagedVm` and the vsock guest protocol
 - `Fabric` and `FabricPort` trait
-- `Deployment` / `ServiceSpec` / `ExecutionPlan`
+- `Deployment` / `ServiceSpec` / `ExecutionPlan` (orchestrator-side)
 - smoltcp gateway, DNS, port forwarding
 - Guest agent, protocol, image providers
 

@@ -1,7 +1,10 @@
 pub mod containerd;
+pub mod deployment;
 pub mod fabric;
 pub mod image;
 pub mod image_provider;
+pub mod io_session;
+pub mod log_collector;
 pub mod orchestrate;
 pub mod tap;
 pub mod vmm;

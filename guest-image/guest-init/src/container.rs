@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::os::unix::io::RawFd;
 use std::ptr;
 
 use anyhow::{bail, Context};
@@ -8,6 +9,10 @@ struct Container {
     id: String,
     mount_point: String,
     pid: Option<libc::pid_t>,
+    /// Read end of stdout pipe (when capture_output is enabled).
+    pub stdout_fd: Option<RawFd>,
+    /// Read end of stderr pipe (when capture_output is enabled).
+    pub stderr_fd: Option<RawFd>,
 }
 
 pub struct ContainerManager {
@@ -95,6 +100,8 @@ impl ContainerManager {
                 id,
                 mount_point,
                 pid: None,
+                stdout_fd: None,
+                stderr_fd: None,
             },
         );
         Ok(())
@@ -111,6 +118,7 @@ impl ContainerManager {
         uid: Option<u32>,
         gid: Option<u32>,
         hostname: Option<&str>,
+        capture_output: bool,
     ) -> anyhow::Result<u32> {
         let container = self
             .containers
@@ -121,23 +129,79 @@ impl ContainerManager {
             bail!("container {} is already running", id);
         }
 
+        // Create pipes for stdout/stderr if capture_output is requested.
+        let mut stdout_pipe: [libc::c_int; 2] = [-1, -1];
+        let mut stderr_pipe: [libc::c_int; 2] = [-1, -1];
+
+        if capture_output {
+            if unsafe { libc::pipe(stdout_pipe.as_mut_ptr()) } != 0 {
+                bail!("pipe(stdout): {}", std::io::Error::last_os_error());
+            }
+            if unsafe { libc::pipe(stderr_pipe.as_mut_ptr()) } != 0 {
+                // Clean up stdout pipe on failure.
+                unsafe {
+                    libc::close(stdout_pipe[0]);
+                    libc::close(stdout_pipe[1]);
+                }
+                bail!("pipe(stderr): {}", std::io::Error::last_os_error());
+            }
+        }
+
         let pid = unsafe { libc::fork() };
         if pid < 0 {
+            if capture_output {
+                unsafe {
+                    libc::close(stdout_pipe[0]);
+                    libc::close(stdout_pipe[1]);
+                    libc::close(stderr_pipe[0]);
+                    libc::close(stderr_pipe[1]);
+                }
+            }
             bail!("fork: {}", std::io::Error::last_os_error());
         }
 
         if pid == 0 {
-            // Child process — set up container environment and exec.
-            // Any error here must _exit, not unwind.
-            child_exec(&container.mount_point, entrypoint, args, env, working_dir, uid, gid, hostname);
+            // Child process — set up pipe write ends if capturing.
+            if capture_output {
+                // Close read ends in child.
+                unsafe {
+                    libc::close(stdout_pipe[0]);
+                    libc::close(stderr_pipe[0]);
+                }
+            }
+            child_exec(
+                &container.mount_point,
+                entrypoint,
+                args,
+                env,
+                working_dir,
+                uid,
+                gid,
+                hostname,
+                if capture_output { Some(stdout_pipe[1]) } else { None },
+                if capture_output { Some(stderr_pipe[1]) } else { None },
+            );
         }
 
-        // Parent
+        // Parent — close write ends, store read ends.
+        if capture_output {
+            unsafe {
+                libc::close(stdout_pipe[1]);
+                libc::close(stderr_pipe[1]);
+            }
+            // Set read ends non-blocking for poll-based I/O.
+            set_nonblocking(stdout_pipe[0]);
+            set_nonblocking(stderr_pipe[0]);
+            container.stdout_fd = Some(stdout_pipe[0]);
+            container.stderr_fd = Some(stderr_pipe[0]);
+        }
+
         container.pid = Some(pid);
         log::info!(
-            "container {} started with pid {}",
+            "container {} started with pid {}{}",
             id,
-            pid
+            pid,
+            if capture_output { " (output captured)" } else { "" },
         );
         Ok(pid as u32)
     }
@@ -179,6 +243,46 @@ impl ContainerManager {
         }
         exits
     }
+
+    /// Get the stdout pipe read fd for a container, if capture_output was enabled.
+    pub fn stdout_fd(&self, id: &str) -> Option<RawFd> {
+        self.containers.get(id).and_then(|c| c.stdout_fd)
+    }
+
+    /// Get the stderr pipe read fd for a container, if capture_output was enabled.
+    pub fn stderr_fd(&self, id: &str) -> Option<RawFd> {
+        self.containers.get(id).and_then(|c| c.stderr_fd)
+    }
+
+    /// Close and remove pipe fds for a container (called after container exits and pipes are drained).
+    pub fn close_pipes(&mut self, id: &str) {
+        if let Some(c) = self.containers.get_mut(id) {
+            if let Some(fd) = c.stdout_fd.take() {
+                unsafe { libc::close(fd); }
+            }
+            if let Some(fd) = c.stderr_fd.take() {
+                unsafe { libc::close(fd); }
+            }
+        }
+    }
+
+    /// Return all container IDs that have capture output enabled (have pipe fds).
+    pub fn captured_container_ids(&self) -> Vec<String> {
+        self.containers
+            .values()
+            .filter(|c| c.stdout_fd.is_some() || c.stderr_fd.is_some())
+            .map(|c| c.id.clone())
+            .collect()
+    }
+}
+
+fn set_nonblocking(fd: RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
 }
 
 /// Runs in the child process after fork. Never returns.
@@ -191,10 +295,14 @@ fn child_exec(
     uid: Option<u32>,
     gid: Option<u32>,
     hostname: Option<&str>,
+    stdout_write_fd: Option<RawFd>,
+    stderr_write_fd: Option<RawFd>,
 ) -> ! {
-    let result = child_exec_inner(mount_point, entrypoint, args, env, working_dir, uid, gid, hostname);
+    let result = child_exec_inner(
+        mount_point, entrypoint, args, env, working_dir, uid, gid, hostname,
+        stdout_write_fd, stderr_write_fd,
+    );
     if let Err(e) = result {
-        // Can't use log here since we may have forked in a bad state for the logger.
         eprintln!("container child exec failed: {:#}", e);
     }
     unsafe { libc::_exit(127) }
@@ -209,6 +317,8 @@ fn child_exec_inner(
     uid: Option<u32>,
     gid: Option<u32>,
     hostname: Option<&str>,
+    stdout_write_fd: Option<RawFd>,
+    stderr_write_fd: Option<RawFd>,
 ) -> anyhow::Result<()> {
     // New session so the container process is a session leader.
     unsafe { libc::setsid() };
@@ -243,15 +353,35 @@ fn child_exec_inner(
     // Mount /tmp as tmpfs.
     mount_in_container("tmpfs", "/tmp", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV)?;
 
-    // Acquire /dev/console as the controlling terminal so that Ctrl+C
-    // on the serial console delivers SIGINT to the container process.
-    {
+    if let (Some(stdout_fd), Some(stderr_fd)) = (stdout_write_fd, stderr_write_fd) {
+        // Capture mode: redirect stdout/stderr to pipes.
+        // Open /dev/null for stdin.
+        let devnull = CString::new("/dev/null").unwrap();
+        let null_fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY) };
+        if null_fd >= 0 {
+            unsafe {
+                libc::dup2(null_fd, 0);
+                if null_fd > 2 {
+                    libc::close(null_fd);
+                }
+            }
+        }
+        unsafe {
+            libc::dup2(stdout_fd, 1);
+            libc::dup2(stderr_fd, 2);
+            if stdout_fd > 2 {
+                libc::close(stdout_fd);
+            }
+            if stderr_fd > 2 {
+                libc::close(stderr_fd);
+            }
+        }
+    } else {
+        // Legacy mode: use /dev/console for all I/O.
         let console = CString::new("/dev/console").unwrap();
         let fd = unsafe { libc::open(console.as_ptr(), libc::O_RDWR) };
         if fd >= 0 {
-            // TIOCSCTTY: set controlling terminal for this session.
             unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) };
-            // Point stdin/stdout/stderr at the console.
             unsafe {
                 libc::dup2(fd, 0);
                 libc::dup2(fd, 1);

@@ -1,5 +1,5 @@
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use anyhow::{bail, Context};
 
@@ -46,7 +46,7 @@ impl VsockListener {
             bail!("bind(vsock port {}): {}", port, io::Error::last_os_error());
         }
 
-        let ret = unsafe { libc::listen(fd.as_raw_fd(), 1) };
+        let ret = unsafe { libc::listen(fd.as_raw_fd(), 4) };
         if ret != 0 {
             bail!("listen: {}", io::Error::last_os_error());
         }
@@ -63,6 +63,39 @@ impl VsockListener {
         }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         Ok(VsockStream::new(file))
+    }
+
+    /// Non-blocking accept. Returns Ok(None) if no connection is pending.
+    pub fn accept_nonblocking(&self) -> anyhow::Result<Option<VsockStream>> {
+        let fd = unsafe {
+            libc::accept4(
+                self.fd.as_raw_fd(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            bail!("accept: {}", err);
+        }
+        // Remove SOCK_NONBLOCK — we want blocking I/O for the stream itself
+        // since we use poll() to know when it's readable.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Ok(Some(VsockStream::new(file)))
+    }
+
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 }
 
@@ -111,5 +144,12 @@ impl VsockStream {
         let mut buf = vec![0u8; len];
         self.reader.read_exact(&mut buf).context("read payload")?;
         serde_json::from_slice(&buf).context("deserialize message")
+    }
+
+    /// Write raw bytes (for binary I/O frames).
+    pub fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.writer.write_all(data).context("write raw")?;
+        self.writer.flush().context("flush")?;
+        Ok(())
     }
 }

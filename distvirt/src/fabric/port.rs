@@ -8,6 +8,14 @@ use crate::tap::TapDevice;
 /// Unique identifier for a port within the fabric.
 pub type PortId = usize;
 
+/// Trait abstracting async L2 frame send/receive.
+///
+/// Implemented by `Port` for real TAP devices and by test doubles in tests.
+pub trait FramePort: Send + Sync + 'static {
+    fn recv_frame(&self, buf: &mut [u8]) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+    fn send_frame(&self, buf: &[u8]) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+}
+
 /// An async L2 port wrapping a TapDevice's AF_PACKET socket.
 ///
 /// Uses tokio's `AsyncFd` for readiness notification, then performs
@@ -100,5 +108,15 @@ impl Port {
                 Err(_would_block) => continue,
             }
         }
+    }
+}
+
+impl FramePort for Port {
+    async fn recv_frame(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.recv_frame(buf).await
+    }
+
+    async fn send_frame(&self, buf: &[u8]) -> io::Result<usize> {
+        self.send_frame(buf).await
     }
 }
