@@ -1,5 +1,6 @@
 use std::ffi::CString;
 use std::net::Ipv4Addr;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::{bail, Context};
 
@@ -10,15 +11,13 @@ pub fn configure_network(
     netmask: &str,
     gateway: &str,
 ) -> anyhow::Result<()> {
-    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if sock < 0 {
         bail!("socket: {}", std::io::Error::last_os_error());
     }
+    let sock = unsafe { OwnedFd::from_raw_fd(sock) };
 
-    let result = configure_network_inner(sock, interface, ip, netmask, gateway);
-
-    unsafe { libc::close(sock) };
-    result
+    configure_network_inner(sock.as_raw_fd(), interface, ip, netmask, gateway)
 }
 
 fn configure_network_inner(

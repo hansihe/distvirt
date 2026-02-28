@@ -269,21 +269,25 @@ impl<V: Vmm, P: ImageProvider> Worker<V, P> {
         let pid = pod_id.clone();
         let cid = container_id.to_string();
 
-        let io_session = match vm.stream_logs(container_id).await {
-            Ok(session) => Some(session),
-            Err(e) => {
-                log::error!("pod '{}': failed to connect log stream: {:#}", pid, e);
-                let _ = event_tx
-                    .send(WorkerEvent::PodLogStreamError {
-                        namespace_id: ns_id.clone(),
-                        pod_id: pid.clone(),
-                        container_id: cid.clone(),
-                        phase: "connect".to_string(),
-                        error: format!("{:#}", e),
-                    })
-                    .await;
-                None
+        let io_session = if config.capture_output {
+            match vm.accept_output_stream().await {
+                Ok((_cid, session)) => Some(session),
+                Err(e) => {
+                    log::error!("pod '{}': failed to accept output stream: {:#}", pid, e);
+                    let _ = event_tx
+                        .send(WorkerEvent::PodLogStreamError {
+                            namespace_id: ns_id.clone(),
+                            pod_id: pid.clone(),
+                            container_id: cid.clone(),
+                            phase: "connect".to_string(),
+                            error: format!("{:#}", e),
+                        })
+                        .await;
+                    None
+                }
             }
+        } else {
+            None
         };
 
         // Emit PodRunning event.

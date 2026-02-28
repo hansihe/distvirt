@@ -17,3 +17,6 @@ tempfile = "3"
 smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-udp", "alloc", "log"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util", "time", "process"] }
 tonic = "0.12"
+yamux = "0.13.9"
+tokio-util = { version = "0.7.18", features = ["compat"] }
+futures-lite = "2.6.1"

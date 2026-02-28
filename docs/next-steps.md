@@ -1,2 +1,3 @@
 1. Config-from-file for the guest agent — biggest bang for buck on boot latency. Bake container config into the rootfs (or a small config virtio-blk device) so the guest can mount+fork immediately without waiting for vsock. Vsock becomes a runtime control channel, not the boot critical path.
 2. libkrun backend — macOS support for dev experience, and it validates the VMM trait abstraction with a second implementation.
+3. Flow control on IO stream from VMs

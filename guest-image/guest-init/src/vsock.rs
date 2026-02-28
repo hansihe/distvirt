@@ -1,7 +1,8 @@
-use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::io;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use anyhow::{bail, Context};
+use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 
 const AF_VSOCK: i32 = 40;
 const VMADDR_CID_ANY: u32 = u32::MAX;
@@ -21,7 +22,7 @@ pub struct VsockListener {
 
 impl VsockListener {
     pub fn bind(port: u32) -> anyhow::Result<Self> {
-        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
             bail!("socket(AF_VSOCK): {}", io::Error::last_os_error());
         }
@@ -54,118 +55,62 @@ impl VsockListener {
         Ok(VsockListener { fd })
     }
 
-    /// Set the listener socket to non-blocking mode.
-    ///
-    /// Required when using `accept_nonblocking` in a loop, since `accept4`
-    /// with `SOCK_NONBLOCK` only sets the *accepted* connection non-blocking,
-    /// not the accept call itself.
-    pub fn set_nonblocking(&self) -> anyhow::Result<()> {
-        let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0 {
-            bail!("fcntl(F_GETFL): {}", io::Error::last_os_error());
-        }
-        if unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            bail!("fcntl(F_SETFL): {}", io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    pub fn accept(&self) -> anyhow::Result<VsockStream> {
-        let fd = unsafe {
-            libc::accept(self.fd.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut())
-        };
-        if fd < 0 {
-            bail!("accept: {}", io::Error::last_os_error());
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        Ok(VsockStream::new(file))
-    }
-
-    /// Non-blocking accept. Returns Ok(None) if no connection is pending.
-    pub fn accept_nonblocking(&self) -> anyhow::Result<Option<VsockStream>> {
+    /// Blocking accept — returns a raw File for the accepted connection.
+    pub fn accept(&self) -> anyhow::Result<std::fs::File> {
         let fd = unsafe {
             libc::accept4(
                 self.fd.as_raw_fd(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                libc::SOCK_NONBLOCK,
+                libc::SOCK_CLOEXEC,
             )
         };
         if fd < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            bail!("accept: {}", err);
+            bail!("accept: {}", io::Error::last_os_error());
         }
-        // Remove SOCK_NONBLOCK — we want blocking I/O for the stream itself
-        // since we use poll() to know when it's readable.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-            }
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        Ok(Some(VsockStream::new(file)))
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
     }
+}
 
-    pub fn as_raw_fd(&self) -> RawFd {
+impl AsFd for VsockListener {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for VsockListener {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-pub struct VsockStream {
-    reader: BufReader<std::fs::File>,
-    writer: BufWriter<std::fs::File>,
-    raw_fd: i32,
+/// Send a length-prefixed JSON message over an async writer.
+pub async fn send_msg<T: serde::Serialize>(
+    writer: &mut (impl futures_lite::io::AsyncWrite + Unpin),
+    msg: &T,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_vec(msg).context("serialize message")?;
+    if json.len() > 1024 * 1024 {
+        bail!("message too large to send: {} bytes", json.len());
+    }
+    let len = (json.len() as u32).to_le_bytes();
+    writer.write_all(&len).await.context("write length")?;
+    writer.write_all(&json).await.context("write payload")?;
+    writer.flush().await.context("flush")?;
+    Ok(())
 }
 
-impl VsockStream {
-    fn new(file: std::fs::File) -> Self {
-        let raw_fd = file.as_raw_fd();
-        let reader = BufReader::new(file.try_clone().expect("clone vsock fd"));
-        let writer = BufWriter::new(file);
-        VsockStream { reader, writer, raw_fd }
+/// Receive a length-prefixed JSON message from an async reader.
+pub async fn recv_msg<T: serde::de::DeserializeOwned>(
+    reader: &mut (impl futures_lite::io::AsyncRead + Unpin),
+) -> anyhow::Result<T> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await.context("read length")?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > 1024 * 1024 {
+        bail!("message too large: {} bytes", len);
     }
-
-    pub fn as_raw_fd(&self) -> i32 {
-        self.raw_fd
-    }
-
-    /// Returns true if the internal read buffer has data available,
-    /// meaning recv() can be called without blocking on the fd.
-    pub fn has_buffered_data(&self) -> bool {
-        self.reader.buffer().len() > 0
-    }
-
-    /// Send a length-prefixed JSON message.
-    pub fn send<T: serde::Serialize>(&mut self, msg: &T) -> anyhow::Result<()> {
-        let json = serde_json::to_vec(msg).context("serialize message")?;
-        let len = (json.len() as u32).to_le_bytes();
-        self.writer.write_all(&len).context("write length")?;
-        self.writer.write_all(&json).context("write payload")?;
-        self.writer.flush().context("flush")?;
-        Ok(())
-    }
-
-    /// Receive a length-prefixed JSON message.
-    pub fn recv<T: serde::de::DeserializeOwned>(&mut self) -> anyhow::Result<T> {
-        let mut len_buf = [0u8; 4];
-        self.reader.read_exact(&mut len_buf).context("read length")?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > 1024 * 1024 {
-            bail!("message too large: {} bytes", len);
-        }
-        let mut buf = vec![0u8; len];
-        self.reader.read_exact(&mut buf).context("read payload")?;
-        serde_json::from_slice(&buf).context("deserialize message")
-    }
-
-    /// Write raw bytes (for binary I/O frames).
-    pub fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.writer.write_all(data).context("write raw")?;
-        self.writer.flush().context("flush")?;
-        Ok(())
-    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf).await.context("read payload")?;
+    serde_json::from_slice(&buf).context("deserialize message")
 }

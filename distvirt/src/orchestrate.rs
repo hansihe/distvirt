@@ -2,13 +2,13 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 
-use distvirt_guest_protocol::{GuestMessage, HostMessage, IoMode, VSOCK_CONTROL_PORT, VSOCK_IO_PORT};
+use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 
 use crate::containerd::{parse_user_numeric, ImageConfig};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, VmConfig, VmInstance, Vmm};
-use crate::vsock_client::GuestConnection;
+use crate::vsock_client::GuestSession;
 
 /// Container execution configuration.
 pub struct ContainerConfig {
@@ -33,37 +33,35 @@ pub struct ImageOverrides {
     pub hostname: Option<String>,
 }
 
-/// A launched VM with an established vsock connection.
-///
-/// Encapsulates the single-VM lifecycle: launch, protocol handshake,
-/// network configuration, container management, and shutdown.
+/// A launched VM with an established yamux session.
 pub struct ManagedVm<I> {
     instance: I,
-    conn: GuestConnection,
+    session: GuestSession,
 }
 
 impl<I: VmInstance> ManagedVm<I> {
     /// Create a ManagedVm from an already-launched VM instance.
     ///
-    /// Connects to the guest over vsock and waits for the Ready message.
-    /// The caller should take the TAP device (via `instance.take_tap()`)
-    /// before calling this if fabric networking is needed, since the fabric
-    /// must be running before the guest finishes booting.
+    /// Connects to the guest over vsock, establishes a yamux session,
+    /// and waits for the Ready message.
     pub async fn connect(instance: I) -> anyhow::Result<Self> {
         log::info!("connecting vsock");
         let stream = instance
             .connect_vsock(VSOCK_CONTROL_PORT)
             .await
             .context("connect vsock")?;
-        let mut conn = GuestConnection::new(stream);
 
-        let msg: GuestMessage = conn.recv().await.context("receive Ready")?;
+        let mut session = GuestSession::new(stream)
+            .await
+            .context("establish yamux session")?;
+
+        let msg: GuestMessage = session.recv().await.context("receive Ready")?;
         match msg {
             GuestMessage::Ready => log::info!("guest is ready"),
             other => bail!("expected Ready, got {:?}", other),
         }
 
-        Ok(ManagedVm { instance, conn })
+        Ok(ManagedVm { instance, session })
     }
 
     /// Configure the guest's network interface.
@@ -72,7 +70,7 @@ impl<I: VmInstance> ManagedVm<I> {
         interface: &str,
         net_config: &NetConfig,
     ) -> anyhow::Result<()> {
-        self.conn
+        self.session
             .send(&HostMessage::ConfigureNetwork {
                 interface: interface.to_string(),
                 ip: net_config.guest_ip.clone(),
@@ -83,7 +81,7 @@ impl<I: VmInstance> ManagedVm<I> {
             .context("send ConfigureNetwork")?;
 
         let msg: GuestMessage = self
-            .conn
+            .session
             .recv()
             .await
             .context("receive NetworkConfigured")?;
@@ -103,7 +101,7 @@ impl<I: VmInstance> ManagedVm<I> {
         device: &str,
         dns_servers: &[String],
     ) -> anyhow::Result<()> {
-        self.conn
+        self.session
             .send(&HostMessage::AddContainer {
                 id: id.to_string(),
                 device: device.to_string(),
@@ -112,7 +110,7 @@ impl<I: VmInstance> ManagedVm<I> {
             .await
             .context("send AddContainer")?;
 
-        let msg: GuestMessage = self.conn.recv().await.context("receive ContainerAdded")?;
+        let msg: GuestMessage = self.session.recv().await.context("receive ContainerAdded")?;
         match msg {
             GuestMessage::ContainerAdded { id } => log::info!("container added: {}", id),
             GuestMessage::Error { message } => bail!("AddContainer failed: {}", message),
@@ -123,14 +121,12 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 
     /// Start a container process inside the guest.
-    ///
-    /// Returns the PID of the container process inside the guest.
     pub async fn start_container(
         &mut self,
         id: &str,
         config: &ContainerConfig,
     ) -> anyhow::Result<u32> {
-        self.conn
+        self.session
             .send(&HostMessage::StartContainer {
                 id: id.to_string(),
                 entrypoint: config.entrypoint.clone(),
@@ -146,7 +142,7 @@ impl<I: VmInstance> ManagedVm<I> {
             .context("send StartContainer")?;
 
         let msg: GuestMessage = self
-            .conn
+            .session
             .recv()
             .await
             .context("receive ContainerStarted")?;
@@ -161,11 +157,9 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 
     /// Wait for a container to exit.
-    ///
-    /// Returns the (container_id, exit_code).
     pub async fn wait_container_exit(&mut self) -> anyhow::Result<(String, i32)> {
         let msg: GuestMessage = self
-            .conn
+            .session
             .recv()
             .await
             .context("receive ContainerExited")?;
@@ -179,24 +173,23 @@ impl<I: VmInstance> ManagedVm<I> {
         }
     }
 
-    /// Open a log streaming session for a container.
+    /// Accept the next output stream opened by the guest.
     ///
-    /// Connects to the guest's I/O port and returns an IoSession that
-    /// can be polled for stdout/stderr events.
-    pub async fn stream_logs(&self, container_id: &str) -> anyhow::Result<IoSession> {
-        let stream = self
-            .instance
-            .connect_vsock(VSOCK_IO_PORT)
+    /// The guest opens an output stream when starting a container with
+    /// `capture_output=true`. Returns an `IoSession` ready for reading
+    /// stdout/stderr events.
+    pub async fn accept_output_stream(&mut self) -> anyhow::Result<(String, IoSession)> {
+        let (container_id, stream) = self
+            .session
+            .accept_output_stream()
             .await
-            .context("connect vsock I/O port")?;
-        IoSession::connect(stream, container_id, IoMode::Logs)
-            .await
-            .context("I/O session handshake")
+            .context("accept output stream")?;
+        Ok((container_id, IoSession::new(stream)))
     }
 
     /// Shut down the guest and wait for the VM to exit.
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
-        self.conn
+        self.session
             .send(&HostMessage::Shutdown)
             .await
             .context("send Shutdown")?;
@@ -206,11 +199,6 @@ impl<I: VmInstance> ManagedVm<I> {
 }
 
 /// Run a container using an image provider.
-///
-/// The provider prepares the container filesystem (ext4 image or block device),
-/// and if it returns an OCI config, that config is merged with the overrides.
-/// If no OCI config is available (bare rootfs), the overrides must supply at
-/// least an entrypoint.
 pub async fn run(
     vmm: &impl Vmm,
     kernel_path: &Path,
