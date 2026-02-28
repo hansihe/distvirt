@@ -506,24 +506,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "distvirt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "distvirt-types",
- "distvirt-worker-protocol",
- "futures-lite",
- "log",
- "tokio",
-]
-
-[[package]]
 name = "distvirt-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "distvirt",
  "distvirt-compose",
  "distvirt-worker",
  "distvirt-worker-protocol",
@@ -538,9 +525,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "compose_spec",
- "distvirt-types",
+ "distvirt-worker-protocol",
+ "futures-lite",
  "log",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -549,10 +538,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
 ]
-
-[[package]]
-name = "distvirt-types"
-version = "0.1.0"
 
 [[package]]
 name = "distvirt-worker"

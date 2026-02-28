@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-distvirt-types = { path = "../distvirt-types" }
+distvirt-compose = { path = "../distvirt-compose" }
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
 futures-lite = "2.6.1"
 log = "0.4"

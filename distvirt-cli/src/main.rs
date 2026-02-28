@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("connect orchestrator")?;
 
-            let result = distvirt::orchestrate_compose::run_compose(&deployment, &mut conn).await;
+            let result = distvirt_compose::orchestrate::run_compose(&deployment, &mut conn).await;
 
             // The worker task will end when the connection drops.
             drop(conn);

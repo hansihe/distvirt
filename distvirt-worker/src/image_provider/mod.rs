@@ -7,7 +7,7 @@ use std::any::Any;
 use std::future::Future;
 use std::path::PathBuf;
 
-use crate::image_provider::containerd::ImageConfig;
+use self::containerd::ImageConfig;
 
 /// A prepared container filesystem artifact ready for Firecracker.
 pub struct PreparedArtifact {

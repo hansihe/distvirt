@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use anyhow::bail;
 
-pub use distvirt_compose::{Dependency, Deployment, PortMapping, PortProtocol, ServiceSpec};
+use crate::types::Deployment;
 
 // Default network constants for single-worker namespaces.
 pub const DEFAULT_SUBNET: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 0);
@@ -122,6 +122,7 @@ fn topo_sort(deployment: &Deployment) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Dependency, ServiceSpec};
 
     fn make_service(deps: Vec<&str>) -> ServiceSpec {
         ServiceSpec {
@@ -230,4 +231,3 @@ mod tests {
         assert_eq!(p.services[0].name, "web");
     }
 }
-

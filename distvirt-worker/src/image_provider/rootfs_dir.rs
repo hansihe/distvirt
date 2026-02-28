@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use tempfile::NamedTempFile;
 
-use crate::image_provider::image;
+use super::image;
 use super::{ImageProvider, PreparedArtifact};
 
 /// Provides a container filesystem by building an ext4 image from a rootfs directory.

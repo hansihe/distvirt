@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-distvirt = { path = "../distvirt" }
 distvirt-compose = { path = "../distvirt-compose" }
 distvirt-worker = { path = "../distvirt-worker" }
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
