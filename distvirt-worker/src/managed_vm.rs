@@ -1,26 +1,12 @@
-use std::path::Path;
-
 use anyhow::{bail, Context};
 
 use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
+use distvirt_worker_protocol::ContainerConfig;
 
 use crate::containerd::{parse_user_numeric, ImageConfig};
-use crate::image_provider::ImageProvider;
 use crate::io_session::IoSession;
-use crate::vmm::{NetConfig, VmConfig, VmInstance, Vmm};
+use crate::vmm::{NetConfig, VmInstance};
 use crate::vsock_client::GuestSession;
-
-/// Container execution configuration.
-pub struct ContainerConfig {
-    pub entrypoint: String,
-    pub args: Vec<String>,
-    pub env: Vec<String>,
-    pub working_dir: Option<String>,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
-    pub hostname: Option<String>,
-    pub capture_output: bool,
-}
 
 /// Overrides that can be specified on the CLI to override image config.
 pub struct ImageOverrides {
@@ -174,10 +160,6 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 
     /// Accept the next output stream opened by the guest.
-    ///
-    /// The guest opens an output stream when starting a container with
-    /// `capture_output=true`. Returns an `IoSession` ready for reading
-    /// stdout/stderr events.
     pub async fn accept_output_stream(&mut self) -> anyhow::Result<(String, IoSession)> {
         let (container_id, stream) = self
             .session
@@ -198,99 +180,8 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 }
 
-/// Run a container using an image provider.
-pub async fn run(
-    vmm: &impl Vmm,
-    kernel_path: &Path,
-    rootfs_image_path: &Path,
-    provider: &impl ImageProvider,
-    image_ref: &str,
-    overrides: &ImageOverrides,
-) -> anyhow::Result<i32> {
-    let artifact = provider.prepare(image_ref).await.context("preparing image")?;
-
-    let config = if let Some(ref oci_config) = artifact.oci_config {
-        merge_config(oci_config, overrides)?
-    } else {
-        config_from_overrides(overrides)?
-    };
-
-    run_with_image(vmm, kernel_path, rootfs_image_path, &artifact.image_path, &config).await
-}
-
-/// Run a container from a pre-built ext4 image.
-async fn run_with_image(
-    vmm: &impl Vmm,
-    kernel_path: &Path,
-    rootfs_image_path: &Path,
-    container_image_path: &Path,
-    config: &ContainerConfig,
-) -> anyhow::Result<i32> {
-    let vm_config = VmConfig {
-        kernel_path: kernel_path.to_path_buf(),
-        rootfs_image_path: rootfs_image_path.to_path_buf(),
-        container_image_path: container_image_path.to_path_buf(),
-        vcpu_count: 1,
-        mem_size_mib: 128,
-        net: Some(NetConfig {
-            guest_ip: "172.16.0.2".to_string(),
-            netmask: "255.255.255.0".to_string(),
-            gateway: "172.16.0.1".to_string(),
-        }),
-        serial_console: true,
-    };
-
-    let mut instance = vmm.launch(&vm_config).await.context("launch VM")?;
-    log::info!("VM launched");
-
-    // Start the L2 fabric switch and gateway before vsock (guest boot takes seconds).
-    let _fabric = if let Some(tap) = instance.take_tap() {
-        let mut fabric = crate::fabric::Fabric::new();
-
-        let registry = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::<String, std::net::Ipv4Addr>::new()));
-        let (gateway, egress_tx, ingress_rx) =
-            crate::fabric::gateway::FabricGateway::new(registry)
-                .context("create fabric gateway")?;
-        fabric.set_gateway(egress_tx, ingress_rx);
-        tokio::spawn(gateway.run());
-
-        let tap_name = tap.name.clone();
-        fabric
-            .add_port(tap)
-            .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
-
-        log::info!("fabric: started L2 switch with gateway on {}", tap_name);
-        Some(fabric)
-    } else {
-        None
-    };
-
-    // Connect to guest and wait for ready.
-    let mut vm = ManagedVm::connect(instance).await?;
-
-    // Configure network if enabled.
-    if let Some(ref net_config) = vm_config.net {
-        vm.configure_network("eth0", net_config).await?;
-    }
-
-    // Add and start container.
-    let container_id = "default";
-    vm.add_container(container_id, "/dev/vdb", &["172.16.0.1".to_string()])
-        .await?;
-
-    vm.start_container(container_id, config).await?;
-
-    // Wait for container to exit.
-    let (_id, exit_code) = vm.wait_container_exit().await?;
-
-    // Shut down the guest.
-    vm.shutdown().await?;
-
-    Ok(exit_code)
-}
-
 /// Build a ContainerConfig from overrides only (no OCI image config).
-fn config_from_overrides(overrides: &ImageOverrides) -> anyhow::Result<ContainerConfig> {
+pub fn config_from_overrides(overrides: &ImageOverrides) -> anyhow::Result<ContainerConfig> {
     let entrypoint = overrides
         .entrypoint
         .clone()

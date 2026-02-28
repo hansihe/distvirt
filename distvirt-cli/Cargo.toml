@@ -12,6 +12,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 distvirt = { path = "../distvirt" }
 distvirt-compose = { path = "../distvirt-compose" }
+distvirt-worker = { path = "../distvirt-worker" }
+distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
 env_logger = "0.11"
 log = "0.4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }

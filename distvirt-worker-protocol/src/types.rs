@@ -1,8 +1,9 @@
 use std::net::Ipv4Addr;
 
-use crate::orchestrate::ContainerConfig;
+use serde::{Deserialize, Serialize};
 
 /// Network configuration for a namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub subnet: Ipv4Addr,
     pub gateway: Ipv4Addr,
@@ -10,6 +11,7 @@ pub struct NetworkConfig {
 }
 
 /// Network configuration for a single pod within a namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodNetworkConfig {
     pub ip: Ipv4Addr,
     pub mac: [u8; 6],
@@ -17,7 +19,21 @@ pub struct PodNetworkConfig {
     pub netmask: String,
 }
 
+/// Container execution configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerConfig {
+    pub entrypoint: String,
+    pub args: Vec<String>,
+    pub env: Vec<String>,
+    pub working_dir: Option<String>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub hostname: Option<String>,
+    pub capture_output: bool,
+}
+
 /// Specification for a container within a pod.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerSpec {
     pub container_id: String,
     pub image_ref: String,
@@ -25,19 +41,21 @@ pub struct ContainerSpec {
 }
 
 /// A service registry entry (name -> IP).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
     pub name: String,
     pub ip: Ipv4Addr,
 }
 
 /// Output stream identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputStream {
     Stdout,
     Stderr,
 }
 
 /// Commands sent from the orchestrator to the worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerCommand {
     CreateNamespace {
         namespace_id: String,
@@ -64,7 +82,7 @@ pub enum WorkerCommand {
 }
 
 /// Events emitted by the worker back to the orchestrator.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerEvent {
     NamespaceCreated {
         namespace_id: String,
@@ -83,13 +101,6 @@ pub enum WorkerEvent {
         pod_id: String,
         error: String,
     },
-    PodOutput {
-        namespace_id: String,
-        pod_id: String,
-        container_id: String,
-        stream: OutputStream,
-        data: Vec<u8>,
-    },
     PodLogStreamError {
         namespace_id: String,
         pod_id: String,
@@ -97,4 +108,12 @@ pub enum WorkerEvent {
         phase: String,
         error: String,
     },
+}
+
+/// Header sent at the start of each log yamux stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogStreamHeader {
+    pub namespace_id: String,
+    pub pod_id: String,
+    pub container_id: String,
 }

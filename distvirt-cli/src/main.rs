@@ -2,13 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tokio::sync::mpsc;
 
-use distvirt::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider;
-use distvirt::image_provider::rootfs_dir::RootfsDirProvider;
-use distvirt::orchestrate::ImageOverrides;
-use distvirt::protocol::WorkerEvent;
-use distvirt::worker::Worker;
+use distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider;
+use distvirt_worker::image_provider::rootfs_dir::RootfsDirProvider;
+use distvirt_worker::managed_vm::ImageOverrides;
+use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
 
 #[derive(Parser)]
 #[command(name = "distvirt", about = "Lightweight VM-based container runner")]
@@ -133,19 +131,14 @@ enum Commands {
 }
 
 /// Set up host NAT so the 172.16.0.0/24 subnet can reach the internet.
-///
-/// Enables ip_forward and adds an iptables MASQUERADE rule. This is
-/// intentionally simple and not cleaned up on exit — meant for local testing.
 fn setup_host_routing() -> anyhow::Result<()> {
     use std::process::Command;
 
     log::info!("setting up host NAT routing for 172.16.0.0/24");
 
-    // Enable IP forwarding.
     std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
         .context("enable ip_forward (are you root?)")?;
 
-    // Add iptables MASQUERADE rule (idempotent: check first).
     let check = Command::new("iptables")
         .args(["-t", "nat", "-C", "POSTROUTING", "-s", "172.16.0.0/24", "!", "-o", "tun+", "-j", "MASQUERADE"])
         .output()
@@ -169,6 +162,84 @@ fn setup_host_routing() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Run a single container using worker crate primitives directly (no protocol overhead).
+async fn run_single_container(
+    vmm: &impl distvirt_worker::vmm::Vmm,
+    kernel_path: &std::path::Path,
+    rootfs_image_path: &std::path::Path,
+    provider: &impl distvirt_worker::image_provider::ImageProvider,
+    image_ref: &str,
+    overrides: &ImageOverrides,
+) -> anyhow::Result<i32> {
+    use distvirt_worker::fabric::{self, FabricGateway};
+    use distvirt_worker::managed_vm::{config_from_overrides, merge_config, ManagedVm};
+    use distvirt_worker::vmm::{NetConfig, VmConfig, VmInstance};
+
+    let artifact = provider.prepare(image_ref).await.context("preparing image")?;
+
+    let config = if let Some(ref oci_config) = artifact.oci_config {
+        merge_config(oci_config, overrides)?
+    } else {
+        config_from_overrides(overrides)?
+    };
+
+    let vm_config = VmConfig {
+        kernel_path: kernel_path.to_path_buf(),
+        rootfs_image_path: rootfs_image_path.to_path_buf(),
+        container_image_path: artifact.image_path.clone(),
+        vcpu_count: 1,
+        mem_size_mib: 128,
+        net: Some(NetConfig {
+            guest_ip: "172.16.0.2".to_string(),
+            netmask: "255.255.255.0".to_string(),
+            gateway: "172.16.0.1".to_string(),
+        }),
+        serial_console: true,
+    };
+
+    let mut instance = vmm.launch(&vm_config).await.context("launch VM")?;
+    log::info!("VM launched");
+
+    let _fabric = if let Some(tap) = instance.take_tap() {
+        let mut fab = fabric::Fabric::new();
+
+        let registry = std::sync::Arc::new(std::sync::RwLock::new(
+            std::collections::HashMap::<String, std::net::Ipv4Addr>::new(),
+        ));
+        let (gateway, egress_tx, ingress_rx) =
+            FabricGateway::new(registry).context("create fabric gateway")?;
+        fab.set_gateway(egress_tx, ingress_rx);
+        tokio::spawn(gateway.run());
+
+        let tap_name = tap.name.clone();
+        fab.add_port(tap)
+            .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
+
+        log::info!("fabric: started L2 switch with gateway on {}", tap_name);
+        Some(fab)
+    } else {
+        None
+    };
+
+    let mut vm = ManagedVm::connect(instance).await?;
+
+    if let Some(ref net_config) = vm_config.net {
+        vm.configure_network("eth0", net_config).await?;
+    }
+
+    let container_id = "default";
+    vm.add_container(container_id, "/dev/vdb", &["172.16.0.1".to_string()])
+        .await?;
+
+    vm.start_container(container_id, &config).await?;
+
+    let (_id, exit_code) = vm.wait_container_exit().await?;
+
+    vm.shutdown().await?;
+
+    Ok(exit_code)
 }
 
 #[tokio::main]
@@ -197,31 +268,42 @@ async fn main() -> anyhow::Result<()> {
             let deployment = distvirt_compose::parse(&file)
                 .with_context(|| format!("parsing compose file '{}'", file.display()))?;
 
-            let vmm = distvirt::vmm::firecracker::Firecracker::new(firecracker);
+            let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker);
             let image_provider = ContainerdOverlayfsProvider {
                 socket: containerd_socket.to_str().unwrap().to_string(),
                 namespace,
             };
 
-            let (event_tx, mut event_rx) = mpsc::channel::<WorkerEvent>(256);
-            let mut worker = Worker::new(
-                kernel,
-                rootfs_image,
-                event_tx,
-                vmm,
-                image_provider,
-            );
+            // Create a duplex transport for local in-process communication.
+            let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
-            distvirt::orchestrate_compose::run_compose(
-                &deployment,
-                &mut worker,
-                &mut event_rx,
-            )
-            .await
-            .context("compose up")?;
+            // Spawn the worker on one half.
+            let worker_task = tokio::spawn(async move {
+                let conn = WorkerConnection::accept(worker_half).await?;
+                let worker = distvirt_worker::worker::Worker::new(
+                    kernel,
+                    rootfs_image,
+                    vmm,
+                    image_provider,
+                );
+                worker.run(conn).await
+            });
+
+            // Orchestrator on the other half.
+            let mut conn = OrchestratorConnection::connect(orch_half)
+                .await
+                .context("connect orchestrator")?;
+
+            let result = distvirt::orchestrate_compose::run_compose(&deployment, &mut conn).await;
+
+            // The worker task will end when the connection drops.
+            drop(conn);
+            let _ = worker_task.await;
+
+            result.context("compose up")?;
         }
         Commands::BuildImage { rootfs, output } => {
-            distvirt::image::build_ext4_image(&rootfs, &output)
+            distvirt_worker::image::build_ext4_image(&rootfs, &output)
                 .context("build ext4 image")?;
             log::info!("image written to {}", output.display());
         }
@@ -238,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
             hostname,
             firecracker,
         } => {
-            let vmm = distvirt::vmm::firecracker::Firecracker::new(firecracker);
+            let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker);
             let provider = RootfsDirProvider;
             let overrides = ImageOverrides {
                 entrypoint: Some(entrypoint),
@@ -249,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
                 gid,
                 hostname,
             };
-            let exit_code = distvirt::orchestrate::run(
+            let exit_code = run_single_container(
                 &vmm,
                 &kernel,
                 &rootfs_image,
@@ -283,13 +365,13 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let (uid, gid) = if let Some(ref u) = user {
-                distvirt::containerd::parse_user_numeric(u)
+                distvirt_worker::containerd::parse_user_numeric(u)
                     .context("parsing --user")?
             } else {
                 (None, None)
             };
 
-            let vmm = distvirt::vmm::firecracker::Firecracker::new(firecracker);
+            let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker);
             let provider = ContainerdOverlayfsProvider {
                 socket: containerd_socket.to_str().unwrap().to_string(),
                 namespace,
@@ -303,7 +385,7 @@ async fn main() -> anyhow::Result<()> {
                 gid,
                 hostname,
             };
-            let exit_code = distvirt::orchestrate::run(
+            let exit_code = run_single_container(
                 &vmm,
                 &kernel,
                 &rootfs_image,

@@ -1,17 +1,15 @@
 use std::net::Ipv4Addr;
 
 use anyhow::Context;
+use distvirt_worker_protocol::codec::recv_msg;
+use distvirt_worker_protocol::{
+    ContainerConfig, ContainerSpec, LogStreamHeader, NetworkConfig, OrchestratorConnection,
+    PodNetworkConfig, RegistryEntry, WorkerCommand, WorkerEvent,
+};
+use futures_lite::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 use crate::deployment::{Deployment, ServiceSpec};
-use crate::image_provider::ImageProvider;
-use crate::orchestrate::ContainerConfig;
-use crate::protocol::{
-    ContainerSpec, NetworkConfig, OutputStream, PodNetworkConfig, RegistryEntry, WorkerCommand,
-    WorkerEvent,
-};
-use crate::vmm::Vmm;
-use crate::worker::Worker;
 
 /// Build a [`ContainerConfig`] from a compose [`ServiceSpec`].
 fn build_container_config(spec: &ServiceSpec) -> ContainerConfig {
@@ -47,30 +45,81 @@ fn build_container_config(spec: &ServiceSpec) -> ContainerConfig {
     }
 }
 
-/// Run a compose deployment end-to-end using the worker protocol.
+/// A log line received from a container log stream.
+pub struct LogLine {
+    pub pod_id: String,
+    pub data: Vec<u8>,
+}
+
+/// Run a compose deployment end-to-end using the worker protocol over a connection.
 ///
 /// Creates a namespace, syncs the DNS registry, launches all pods in dependency
 /// order, streams output, waits for all pods to exit, and cleans up the namespace.
-pub async fn run_compose<V: Vmm, P: ImageProvider>(
+pub async fn run_compose(
     deployment: &Deployment,
-    worker: &mut Worker<V, P>,
-    event_rx: &mut mpsc::Receiver<WorkerEvent>,
+    conn: &mut OrchestratorConnection,
 ) -> anyhow::Result<()> {
     let plan = crate::deployment::plan(deployment).context("planning deployment")?;
     let namespace_id = deployment.name.clone();
 
+    // Take the log stream receiver and spawn a background log acceptor.
+    let mut log_rx = conn.take_log_stream_receiver();
+    let (log_line_tx, mut log_line_rx) = mpsc::channel::<LogLine>(256);
+
+    tokio::spawn(async move {
+        while let Some(mut stream) = log_rx.recv().await {
+            let header: Result<LogStreamHeader, _> = recv_msg(&mut stream).await;
+            match header {
+                Ok(header) => {
+                    let tx = log_line_tx.clone();
+                    let pod_id = header.pod_id.clone();
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 8192];
+                        loop {
+                            match stream.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let _ = tx
+                                        .send(LogLine {
+                                            pod_id: pod_id.clone(),
+                                            data: buf[..n].to_vec(),
+                                        })
+                                        .await;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::warn!("failed to read log stream header: {:#}", e);
+                }
+            }
+        }
+    });
+
     // 1. Create namespace.
-    worker
-        .handle_command(WorkerCommand::CreateNamespace {
-            namespace_id: namespace_id.clone(),
-            network: NetworkConfig {
-                subnet: Ipv4Addr::new(172, 16, 0, 0),
-                gateway: Ipv4Addr::new(172, 16, 0, 1),
-                prefix_len: 24,
-            },
-        })
-        .await
-        .context("create namespace")?;
+    conn.send_command(&WorkerCommand::CreateNamespace {
+        namespace_id: namespace_id.clone(),
+        network: NetworkConfig {
+            subnet: Ipv4Addr::new(172, 16, 0, 0),
+            gateway: Ipv4Addr::new(172, 16, 0, 1),
+            prefix_len: 24,
+        },
+    })
+    .await
+    .context("send create namespace")?;
+
+    // Wait for NamespaceCreated event.
+    let event = conn.recv_event().await.context("recv namespace created")?;
+    match event {
+        WorkerEvent::NamespaceCreated { .. } => {
+            log::info!("namespace '{}' created", namespace_id);
+        }
+        other => {
+            anyhow::bail!("expected NamespaceCreated, got {:?}", other);
+        }
+    }
 
     // 2. Registry sync.
     let registry_entries: Vec<RegistryEntry> = plan
@@ -82,13 +131,12 @@ pub async fn run_compose<V: Vmm, P: ImageProvider>(
         })
         .collect();
 
-    worker
-        .handle_command(WorkerCommand::RegistrySync {
-            namespace_id: namespace_id.clone(),
-            entries: registry_entries,
-        })
-        .await
-        .context("registry sync")?;
+    conn.send_command(&WorkerCommand::RegistrySync {
+        namespace_id: namespace_id.clone(),
+        entries: registry_entries,
+    })
+    .await
+    .context("send registry sync")?;
 
     // 3. Launch pods for each service in dependency order.
     let total_pods = plan.services.len();
@@ -105,101 +153,93 @@ pub async fn run_compose<V: Vmm, P: ImageProvider>(
             config: container_config,
         };
 
-        worker
-            .handle_command(WorkerCommand::LaunchPod {
-                namespace_id: namespace_id.clone(),
-                pod_id: planned.name.clone(),
-                network: PodNetworkConfig {
-                    ip: planned.ip,
-                    mac: planned.mac,
-                    gateway: Ipv4Addr::new(172, 16, 0, 1),
-                    netmask: "255.255.255.0".to_string(),
-                },
-                containers: vec![container_spec],
-            })
-            .await
-            .with_context(|| format!("launch pod '{}'", planned.name))?;
+        conn.send_command(&WorkerCommand::LaunchPod {
+            namespace_id: namespace_id.clone(),
+            pod_id: planned.name.clone(),
+            network: PodNetworkConfig {
+                ip: planned.ip,
+                mac: planned.mac,
+                gateway: Ipv4Addr::new(172, 16, 0, 1),
+                netmask: "255.255.255.0".to_string(),
+            },
+            containers: vec![container_spec],
+        })
+        .await
+        .with_context(|| format!("send launch pod '{}'", planned.name))?;
     }
 
-    // 4. Event loop: stream output and wait for pods to exit.
+    // 4. Event loop: receive events and log lines concurrently.
     let mut exited_count = 0;
 
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            WorkerEvent::NamespaceCreated { namespace_id } => {
-                log::info!("namespace '{}' created", namespace_id);
+    loop {
+        tokio::select! {
+            event_result = conn.recv_event() => {
+                let event = event_result.context("recv event")?;
+                match event {
+                    WorkerEvent::NamespaceCreated { namespace_id } => {
+                        log::info!("namespace '{}' created", namespace_id);
+                    }
+                    WorkerEvent::PodRunning {
+                        namespace_id: _,
+                        pod_id,
+                    } => {
+                        log::info!("pod '{}' is running", pod_id);
+                    }
+                    WorkerEvent::PodExited {
+                        namespace_id: _,
+                        pod_id,
+                        exit_code,
+                    } => {
+                        log::info!("pod '{}' exited with code {}", pod_id, exit_code);
+                        exited_count += 1;
+                        if exited_count >= total_pods {
+                            break;
+                        }
+                    }
+                    WorkerEvent::PodFailed {
+                        namespace_id: _,
+                        pod_id,
+                        error,
+                    } => {
+                        log::error!("pod '{}' failed: {}", pod_id, error);
+                        exited_count += 1;
+                        if exited_count >= total_pods {
+                            break;
+                        }
+                    }
+                    WorkerEvent::PodLogStreamError {
+                        namespace_id: _,
+                        pod_id,
+                        container_id: _,
+                        phase,
+                        error,
+                    } => {
+                        eprintln!("{} | log stream error ({}): {}", pod_id, phase, error);
+                    }
+                }
             }
-            WorkerEvent::PodRunning {
-                namespace_id: _,
-                pod_id,
-            } => {
-                log::info!("pod '{}' is running", pod_id);
-            }
-            WorkerEvent::PodOutput {
-                namespace_id: _,
-                pod_id,
-                container_id: _,
-                stream,
-                data,
-            } => {
-                let stream_name = match stream {
-                    OutputStream::Stdout => "stdout",
-                    OutputStream::Stderr => "stderr",
-                };
-                if let Ok(text) = std::str::from_utf8(&data) {
+            Some(log_line) = log_line_rx.recv() => {
+                if let Ok(text) = std::str::from_utf8(&log_line.data) {
                     for line in text.lines() {
-                        println!("{} | {}", pod_id, line);
+                        println!("{} | {}", log_line.pod_id, line);
                     }
                 } else {
                     log::debug!(
-                        "pod '{}' {}: {} bytes (binary)",
-                        pod_id,
-                        stream_name,
-                        data.len()
+                        "pod '{}': {} bytes (binary)",
+                        log_line.pod_id,
+                        log_line.data.len()
                     );
                 }
-            }
-            WorkerEvent::PodExited {
-                namespace_id: _,
-                pod_id,
-                exit_code,
-            } => {
-                log::info!("pod '{}' exited with code {}", pod_id, exit_code);
-                exited_count += 1;
-                if exited_count >= total_pods {
-                    break;
-                }
-            }
-            WorkerEvent::PodFailed {
-                namespace_id: _,
-                pod_id,
-                error,
-            } => {
-                log::error!("pod '{}' failed: {}", pod_id, error);
-                exited_count += 1;
-                if exited_count >= total_pods {
-                    break;
-                }
-            }
-            WorkerEvent::PodLogStreamError {
-                namespace_id: _,
-                pod_id,
-                container_id: _,
-                phase,
-                error,
-            } => {
-                eprintln!("{} | log stream error ({}): {}", pod_id, phase, error);
             }
         }
     }
 
     // 5. Clean up: destroy namespace.
-    worker
-        .handle_command(WorkerCommand::DestroyNamespace {
-            namespace_id: namespace_id.clone(),
-        })
-        .await
-        .context("destroy namespace")?;
+    conn.send_command(&WorkerCommand::DestroyNamespace {
+        namespace_id: namespace_id.clone(),
+    })
+    .await
+    .context("send destroy namespace")?;
 
     Ok(())
 }
