@@ -3,14 +3,14 @@ use anyhow::{bail, Context};
 use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 use distvirt_worker_protocol::ContainerConfig;
 
-use crate::containerd::{parse_user_numeric, ImageConfig};
+use crate::image_provider::containerd::{parse_user_numeric, ImageConfig};
 use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, VmInstance};
 use crate::task_handle::TaskHandle;
 use crate::vsock_client::GuestSession;
 
 /// Overrides that can be specified on the CLI to override image config.
-pub struct ImageOverrides {
+pub(crate) struct ImageOverrides {
     pub entrypoint: Option<String>,
     pub args: Vec<String>,
     pub env: Vec<String>,
@@ -21,7 +21,7 @@ pub struct ImageOverrides {
 }
 
 /// A launched VM with an established yamux session.
-pub struct ManagedVm<I> {
+pub(crate) struct ManagedVm<I> {
     instance: I,
     session: GuestSession,
 }
@@ -186,27 +186,8 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 }
 
-/// Build a ContainerConfig from overrides only (no OCI image config).
-pub fn config_from_overrides(overrides: &ImageOverrides) -> anyhow::Result<ContainerConfig> {
-    let entrypoint = overrides
-        .entrypoint
-        .clone()
-        .context("no entrypoint specified and image has no OCI config")?;
-
-    Ok(ContainerConfig {
-        entrypoint,
-        args: overrides.args.clone(),
-        env: overrides.env.clone(),
-        working_dir: overrides.working_dir.clone(),
-        uid: overrides.uid,
-        gid: overrides.gid,
-        hostname: overrides.hostname.clone(),
-        capture_output: false,
-    })
-}
-
 /// Merge image config with CLI overrides following OCI entrypoint/cmd resolution rules.
-pub fn merge_config(
+pub(crate) fn merge_config(
     image: &ImageConfig,
     overrides: &ImageOverrides,
 ) -> anyhow::Result<ContainerConfig> {

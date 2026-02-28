@@ -8,6 +8,7 @@ use tokio::net::UnixStream;
 
 use super::{VmConfig, VmInstance, Vmm};
 use crate::tap::TapDevice;
+use crate::task_handle::TaskHandle;
 
 /// Firecracker VMM implementation.
 pub struct Firecracker {
@@ -36,7 +37,7 @@ impl Vmm for Firecracker {
         let config_net = config.net.as_ref().map(|n| (n.guest_ip.clone(), n.netmask.clone(), n.gateway.clone()));
         let config_serial = config.serial_console;
 
-        tokio::task::spawn_blocking(move || {
+        let mut instance = tokio::task::spawn_blocking(move || {
             launch_sync(
                 &firecracker_bin,
                 &config_kernel,
@@ -49,7 +50,20 @@ impl Vmm for Firecracker {
             )
         })
         .await
-        .context("spawn_blocking launch")?
+        .context("spawn_blocking launch")??;
+
+        // Spawn serial console reader in async context so we can use TaskHandle.
+        if let Some(stdout) = instance.serial_stdout.take() {
+            instance._serial_task = Some(TaskHandle::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    log::debug!("[serial] {}", line);
+                }
+            }));
+        }
+
+        Ok(instance)
     }
 }
 
@@ -90,18 +104,13 @@ fn launch_sync(
     cmd.stderr(Stdio::null());
     let mut child = cmd.spawn().context("spawn firecracker")?;
 
-    // Forward serial console output (kernel boot logs via ttyS0) to log::debug.
-    if serial_console {
-        if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    log::debug!("[serial] {}", line);
-                }
-            });
-        }
-    }
+    // Take stdout for serial console — will be spawned as a TaskHandle
+    // in the async launch() method after spawn_blocking returns.
+    let serial_stdout = if serial_console {
+        child.stdout.take()
+    } else {
+        None
+    };
 
     // Wait for API socket to appear.
     wait_for_file(&api_socket, Duration::from_secs(5))
@@ -208,6 +217,8 @@ fn launch_sync(
         child,
         vsock_uds_path,
         tap,
+        serial_stdout,
+        _serial_task: None,
         _tmpdir: tmpdir,
     })
 }
@@ -216,7 +227,19 @@ pub struct FirecrackerInstance {
     child: tokio::process::Child,
     vsock_uds_path: PathBuf,
     tap: Option<TapDevice>,
+    serial_stdout: Option<tokio::process::ChildStdout>,
+    _serial_task: Option<TaskHandle<()>>,
     _tmpdir: tempfile::TempDir,
+}
+
+impl Drop for FirecrackerInstance {
+    fn drop(&mut self) {
+        // Safety net: if the instance is dropped without explicit cleanup
+        // (e.g., task abort, non-graceful stop), send SIGKILL to the process.
+        // start_kill() is non-async and safe to call in synchronous Drop.
+        // Field drop order ensures `child` is killed before `_tmpdir` is removed.
+        let _ = self.child.start_kill();
+    }
 }
 
 impl VmInstance for FirecrackerInstance {

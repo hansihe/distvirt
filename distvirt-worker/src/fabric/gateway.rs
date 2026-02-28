@@ -124,6 +124,9 @@ pub struct FabricGateway {
     upstream_servers: Vec<SocketAddr>,
     pending_dns: HashMap<u16, IpEndpoint>,
 
+    // Pod subnet gateway IP (for routing DNS queries from pods)
+    pod_gateway_ip: [u8; 4],
+
     // Timing
     boot_time: std::time::Instant,
 }
@@ -134,7 +137,7 @@ impl FabricGateway {
     /// Returns the gateway and channel endpoints for the fabric:
     /// - `egress_tx`: send frames destined for the gateway here
     /// - `ingress_rx`: receive frames from the gateway to inject into the fabric
-    pub fn new(registry: DnsRegistry) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
+    pub fn new(registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create TUN device for internet egress.
         let (tun_fd, tun_name) = create_tun()?;
         configure_tun_ip(&tun_name, GATEWAY_IP, [255, 255, 255, 0])?;
@@ -174,6 +177,12 @@ impl FabricGateway {
                 .push(IpCidr::new(
                     IpAddress::v4(GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3]),
                     24,
+                ))
+                .ok();
+            addrs
+                .push(IpCidr::new(
+                    IpAddress::v4(pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3]),
+                    pod_prefix_len,
                 ))
                 .ok();
         });
@@ -226,6 +235,7 @@ impl FabricGateway {
                 upstream_socket,
                 upstream_servers,
                 pending_dns: HashMap::new(),
+                pod_gateway_ip,
                 boot_time,
             },
             egress_tx,
@@ -362,7 +372,7 @@ impl FabricGateway {
                         let dst_ip: [u8; 4] = eth_frame[ETH_HEADER_LEN + 16..ETH_HEADER_LEN + 20]
                             .try_into()
                             .unwrap();
-                        dst_ip == GATEWAY_IP
+                        dst_ip == GATEWAY_IP || dst_ip == self.pod_gateway_ip
                     } else {
                         false
                     };

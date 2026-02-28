@@ -6,38 +6,60 @@ pub(crate) mod tun;
 
 pub use dns::DnsRegistry;
 pub use gateway::FabricGateway;
+pub use switch::GATEWAY_IP_STR;
 pub use port::{FramePort, Port, PortId};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-
 use crate::tap::TapDevice;
+use crate::task_handle::TaskHandle;
 use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, format_mac, is_broadcast, parse_ethernet_header};
 
 /// Shared port handle that can be used by any reader task to send frames.
 type SharedPort<P> = Arc<P>;
+
+/// RAII guard that removes a port from the fabric's port map on drop.
+///
+/// Created at the top of each port read loop. Guarantees cleanup whether the
+/// task exits normally, errors out, or is aborted.
+struct PortGuard<P: FramePort> {
+    port_id: PortId,
+    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
+}
+
+impl<P: FramePort> Drop for PortGuard<P> {
+    fn drop(&mut self) {
+        let mut ports = self.ports.lock().unwrap();
+        ports.remove(&self.port_id);
+        log::info!("fabric: port {} removed (guard dropped)", self.port_id);
+    }
+}
 
 /// The L2 fabric switch.
 ///
 /// Manages a set of ports (TAP devices) and switches Ethernet frames between
 /// them. Each port runs a tokio task that reads frames and performs MAC learning,
 /// ARP responding, and forwarding inline.
+///
+/// Port tasks are owned by the caller (returned as `TaskHandle`). Port map
+/// cleanup is automatic via `PortGuard`.
 pub struct Fabric<P: FramePort = Port> {
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
-    tasks: HashMap<PortId, JoinHandle<()>>,
     next_port_id: PortId,
     gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
+    _gateway_ingress_task: Option<TaskHandle<()>>,
 }
 
 impl Fabric<Port> {
     /// Add a TAP device as a port and start its forwarding task.
     ///
-    /// Returns the assigned port ID.
-    pub fn add_port(&mut self, tap: TapDevice) -> std::io::Result<PortId> {
+    /// Returns the assigned port ID and a `TaskHandle` that owns the port's
+    /// read loop task. The caller must keep the handle alive; dropping it
+    /// aborts the task and the `PortGuard` cleans up the port map entry.
+    pub fn add_port(&mut self, tap: TapDevice) -> std::io::Result<(PortId, TaskHandle<()>)> {
         let port_id = self.next_port_id;
         self.next_port_id += 1;
 
@@ -48,7 +70,7 @@ impl Fabric<Port> {
             ports.insert(port_id, Arc::clone(&port));
         }
 
-        let task = tokio::spawn(port_read_loop(
+        let task = TaskHandle::spawn(port_read_loop(
             port_id,
             Arc::clone(&port),
             Arc::clone(&self.ports),
@@ -56,10 +78,8 @@ impl Fabric<Port> {
             self.gateway_tx.clone(),
         ));
 
-        self.tasks.insert(port_id, task);
-
         log::info!("fabric: added port {}", port_id);
-        Ok(port_id)
+        Ok((port_id, task))
     }
 }
 
@@ -69,16 +89,17 @@ impl<P: FramePort> Fabric<P> {
         Fabric {
             ports: Arc::new(Mutex::new(HashMap::new())),
             mac_table: Arc::new(Mutex::new(MacTable::new())),
-            tasks: HashMap::new(),
             next_port_id: 0,
             gateway_tx: None,
+            _gateway_ingress_task: None,
         }
     }
 
     /// Add a pre-constructed port and start its forwarding task.
     ///
-    /// Returns the assigned port ID.
-    pub fn add_port_raw(&mut self, port: P) -> PortId {
+    /// Returns the assigned port ID and a `TaskHandle` that owns the port's
+    /// read loop task.
+    pub fn add_port_raw(&mut self, port: P) -> (PortId, TaskHandle<()>) {
         let port_id = self.next_port_id;
         self.next_port_id += 1;
 
@@ -89,7 +110,7 @@ impl<P: FramePort> Fabric<P> {
             ports.insert(port_id, Arc::clone(&port));
         }
 
-        let task = tokio::spawn(port_read_loop(
+        let task = TaskHandle::spawn(port_read_loop(
             port_id,
             Arc::clone(&port),
             Arc::clone(&self.ports),
@@ -97,20 +118,8 @@ impl<P: FramePort> Fabric<P> {
             self.gateway_tx.clone(),
         ));
 
-        self.tasks.insert(port_id, task);
-
         log::info!("fabric: added port {}", port_id);
-        port_id
-    }
-
-    /// Remove a port and cancel its forwarding task.
-    pub fn remove_port(&mut self, port_id: PortId) {
-        if let Some(task) = self.tasks.remove(&port_id) {
-            task.abort();
-        }
-        let mut ports = self.ports.lock().unwrap();
-        ports.remove(&port_id);
-        log::info!("fabric: removed port {}", port_id);
+        (port_id, task)
     }
 
     /// Connect an output gateway to the fabric.
@@ -128,17 +137,10 @@ impl<P: FramePort> Fabric<P> {
         let ports = Arc::clone(&self.ports);
         let mac_table = Arc::clone(&self.mac_table);
 
-        tokio::spawn(gateway_ingress_task(ingress_rx, ports, mac_table));
+        self._gateway_ingress_task =
+            Some(TaskHandle::spawn(gateway_ingress_task(ingress_rx, ports, mac_table)));
 
         log::info!("fabric: gateway connected");
-    }
-}
-
-impl<P: FramePort> Drop for Fabric<P> {
-    fn drop(&mut self) {
-        for (_, task) in self.tasks.drain() {
-            task.abort();
-        }
     }
 }
 
@@ -151,6 +153,12 @@ async fn port_read_loop<P: FramePort>(
     mac_table: Arc<Mutex<MacTable>>,
     gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
 ) {
+    // PortGuard removes this port from the map when this task exits for any reason.
+    let _guard = PortGuard {
+        port_id,
+        ports: Arc::clone(&ports),
+    };
+
     let mut buf = vec![0u8; VNET_HDR_SZ + 1514]; // vnet header + max Ethernet frame
 
     loop {
@@ -404,8 +412,8 @@ mod tests {
         let (port0, handle0) = make_test_port();
         let (port1, handle1) = make_test_port();
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         // Port 0 sends a frame with src=MAC_A, causing MAC_A to be learned on port 0.
         // Then port 1 sends a frame with dst=MAC_A, which should be delivered to port 0.
@@ -431,9 +439,9 @@ mod tests {
         let (port1, handle1) = make_test_port();
         let (port2, handle2) = make_test_port();
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
-        let _id2 = fabric.add_port_raw(port2);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
+        let (_id2, _task2) = fabric.add_port_raw(port2);
 
         // Port 0 sends a frame to unknown MAC_C.
         let frame = make_frame(MAC_C, MAC_A, 0x0800, &[0u8; 10]);
@@ -450,8 +458,8 @@ mod tests {
         let (port0, handle0) = make_test_port();
         let (port1, _handle1) = make_test_port();
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         // Port 0 sends a frame; it should never come back to port 0.
         let frame = make_frame(MAC_B, MAC_A, 0x0800, &[0u8; 10]);
@@ -472,8 +480,8 @@ mod tests {
         let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
         fabric.set_gateway(gw_tx, ingress_rx);
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         let frame = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
         handle0.inject_tx.send(frame).await.unwrap();
@@ -500,8 +508,8 @@ mod tests {
         let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
         fabric.set_gateway(gw_tx, ingress_rx);
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         let frame = make_frame(MULTICAST, MAC_A, 0x0800, &[0u8; 10]);
         handle0.inject_tx.send(frame).await.unwrap();
@@ -527,8 +535,8 @@ mod tests {
         let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
         fabric.set_gateway(gw_tx, ingress_rx);
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         let frame = make_frame(GATEWAY_MAC, MAC_A, 0x0800, &[0u8; 10]);
         handle0.inject_tx.send(frame).await.unwrap();
@@ -554,9 +562,9 @@ mod tests {
         let (port1, handle1) = make_test_port();
         let (port2, handle2) = make_test_port();
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
-        let _id2 = fabric.add_port_raw(port2);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
+        let (_id2, _task2) = fabric.add_port_raw(port2);
 
         // Port 0 sends a frame with src=MAC_A (learn MAC_A on port 0).
         let frame1 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
@@ -581,9 +589,9 @@ mod tests {
         let (port1, handle1) = make_test_port();
         let (port2, handle2) = make_test_port();
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
-        let _id2 = fabric.add_port_raw(port2);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
+        let (_id2, _task2) = fabric.add_port_raw(port2);
 
         // Learn MAC_A on port 0.
         let frame1 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
@@ -617,8 +625,8 @@ mod tests {
         let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
         fabric.set_gateway(gw_tx, ingress_rx);
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         // Learn MAC_A on port 0 by sending a frame from port 0.
         let frame_learn = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
@@ -643,8 +651,8 @@ mod tests {
         let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
         fabric.set_gateway(gw_tx, ingress_rx);
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         // Gateway sends to unknown MAC_C → should flood to all ports.
         let gw_frame = make_frame(MAC_C, GATEWAY_MAC, 0x0800, &[0u8; 10]);
@@ -664,8 +672,8 @@ mod tests {
         let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
         fabric.set_gateway(gw_tx, ingress_rx);
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         let gw_frame = make_frame(BROADCAST, GATEWAY_MAC, 0x0806, &[0u8; 10]);
         ingress_tx.send(gw_frame).await.unwrap();
@@ -682,8 +690,8 @@ mod tests {
         let (port0, handle0) = make_test_port();
         let (port1, handle1) = make_test_port();
 
-        let _id0 = fabric.add_port_raw(port0);
-        let _id1 = fabric.add_port_raw(port1);
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
 
         // Send a frame that is too short (< VNET_HDR_SZ + ETH_HEADER_LEN).
         let runt = vec![0u8; VNET_HDR_SZ + ETH_HEADER_LEN - 1];

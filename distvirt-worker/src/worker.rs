@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use distvirt_worker_protocol::{
-    ContainerSpec, LogStreamHeader, LogStreamOpener, PodNetworkConfig, RegistryEntry,
-    WorkerCommand, WorkerConnection, WorkerEvent,
+    ContainerSpec, LogStreamHeader, LogStreamOpener, NetworkConfig, PodNetworkConfig,
+    RegistryEntry, WorkerCommand, WorkerConnection, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -31,14 +31,12 @@ const STOP_POD_TIMEOUT: Duration = Duration::from_secs(15);
 /// INTENTIONALLY no From<anyhow::Error> — forces explicit construction.
 #[derive(Debug)]
 enum FatalError {
-    ConnectionLost(anyhow::Error),
     InternalInvariant(String),
 }
 
 impl fmt::Display for FatalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FatalError::ConnectionLost(e) => write!(f, "connection lost: {:#}", e),
             FatalError::InternalInvariant(msg) => {
                 write!(f, "internal invariant violated: {}", msg)
             }
@@ -53,6 +51,10 @@ struct PodState {
 }
 
 /// Per-namespace state: fabric, gateway, registry, pods, and cancellation token.
+///
+/// If we add more namespace-level tasks beyond the gateway (e.g. health checks,
+/// metrics collection), consider extracting a `NamespaceSupervisor` to formalize
+/// the one-for-all supervision pattern instead of growing this struct.
 struct NamespaceState {
     fabric: Arc<tokio::sync::Mutex<Fabric>>,
     _gateway_task: TaskHandle<()>,
@@ -72,6 +74,9 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     vmm: Arc<V>,
     image_provider: Arc<P>,
     /// Channel for background tasks to send events back to the main loop.
+    ///
+    /// The 256-element buffer provides intentional backpressure: if the main
+    /// loop falls behind, senders block rather than silently dropping events.
     bg_event_tx: mpsc::Sender<WorkerEvent>,
     bg_event_rx: mpsc::Receiver<WorkerEvent>,
     /// Root cancellation token for the entire worker.
@@ -125,6 +130,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     }
                 }
                 Some(event) = self.bg_event_rx.recv() => {
+                    // Clean up completed pods from namespace state.
+                    match &event {
+                        WorkerEvent::PodExited { namespace_id, pod_id, .. }
+                        | WorkerEvent::PodFailed { namespace_id, pod_id, .. } => {
+                            self.remove_finished_pod(namespace_id, pod_id);
+                        }
+                        _ => {}
+                    }
                     if let Err(e) = conn.send_event(&event).await {
                         log::error!("worker: failed to send event: {:#}", e);
                         break Err(e);
@@ -177,8 +190,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         match cmd {
             WorkerCommand::CreateNamespace {
                 namespace_id,
-                network: _network,
-            } => self.handle_create_namespace(namespace_id).await,
+                network,
+            } => self.handle_create_namespace(namespace_id, network).await,
             WorkerCommand::DestroyNamespace { namespace_id } => {
                 self.handle_destroy_namespace(&namespace_id).await
             }
@@ -210,27 +223,39 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
     async fn handle_create_namespace(
         &mut self,
         namespace_id: String,
+        network: NetworkConfig,
     ) -> Result<(), FatalError> {
         let mut fabric = Fabric::new();
 
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
 
-        let (gateway, egress_tx, ingress_rx) = FabricGateway::new(Arc::clone(&registry))
-            .map_err(|e| {
-                FatalError::InternalInvariant(format!("create fabric gateway: {:#}", e))
-            })?;
+        let pod_gateway_ip = network.gateway.octets();
+        let (gateway, egress_tx, ingress_rx) =
+            FabricGateway::new(Arc::clone(&registry), pod_gateway_ip, network.prefix_len)
+                .map_err(|e| {
+                    FatalError::InternalInvariant(format!("create fabric gateway: {:#}", e))
+                })?;
         fabric.set_gateway(egress_tx, ingress_rx);
 
         let ns_token = self.worker_token.child_token();
         let ns_cancel = ns_token.clone();
         let gateway_ns_id = namespace_id.clone();
 
+        let gateway_event_tx = self.bg_event_tx.clone();
         let gateway_task = TaskHandle::spawn(async move {
             gateway.run().await;
             log::error!(
                 "namespace '{}': gateway exited, cancelling all pods",
                 gateway_ns_id
             );
+            send_event(
+                &gateway_event_tx,
+                WorkerEvent::NamespaceFailed {
+                    namespace_id: gateway_ns_id.clone(),
+                    error: "gateway exited unexpectedly".to_string(),
+                },
+            )
+            .await;
             ns_cancel.cancel();
         });
 
@@ -250,10 +275,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         self.namespaces.insert(namespace_id.clone(), ns);
 
         // Send via background event channel — handlers never touch conn directly.
-        let _ = self
-            .bg_event_tx
-            .send(WorkerEvent::NamespaceCreated { namespace_id })
-            .await;
+        send_event(
+            &self.bg_event_tx,
+            WorkerEvent::NamespaceCreated { namespace_id },
+        )
+        .await;
         Ok(())
     }
 
@@ -367,6 +393,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         Ok(())
     }
 
+    /// Remove a finished pod from its namespace. The TaskHandle is dropped
+    /// (harmless since the supervisor already exited).
+    fn remove_finished_pod(&mut self, namespace_id: &str, pod_id: &str) {
+        if let Some(ns) = self.namespaces.get_mut(namespace_id) {
+            ns.pods.remove(pod_id);
+        }
+    }
+
     async fn handle_stop_pod(
         &mut self,
         namespace_id: &str,
@@ -420,6 +454,13 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
     }
 }
 
+/// Send an event to the worker main loop, or log and return if the worker is shutting down.
+async fn send_event(tx: &mpsc::Sender<WorkerEvent>, event: WorkerEvent) {
+    if tx.send(event).await.is_err() {
+        log::warn!("failed to send event, worker already shut down");
+    }
+}
+
 /// Top-level pod supervisor: launches the pod and monitors it.
 ///
 /// On launch failure, sends `PodFailed` and returns.
@@ -450,36 +491,46 @@ async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>(
         &pod_id,
         network,
         containers,
+        &cancel,
     )
     .await
     {
-        Ok((vm, yamux_driver, io_session)) => {
+        Ok((vm, yamux_driver, io_session, port_task)) => {
             // Emit PodRunning event.
-            if event_tx
-                .send(WorkerEvent::PodRunning {
+            send_event(
+                &event_tx,
+                WorkerEvent::PodRunning {
                     namespace_id: namespace_id.clone(),
                     pod_id: pod_id.clone(),
-                })
-                .await
-                .is_err()
-            {
-                log::warn!(
-                    "pod '{}': failed to send PodRunning, worker already shut down",
-                    pod_id
-                );
-                return;
-            }
-            pod_monitor(vm, yamux_driver, io_session, cancel, event_tx, namespace_id, pod_id).await;
+                },
+            )
+            .await;
+            pod_monitor(vm, yamux_driver, io_session, port_task, cancel, event_tx, namespace_id, pod_id).await;
         }
         Err(e) => {
-            log::error!("pod '{}': launch failed: {:#}", pod_id, e);
-            let _ = event_tx
-                .send(WorkerEvent::PodFailed {
-                    namespace_id,
-                    pod_id: pod_id.clone(),
-                    error: format!("{:#}", e),
-                })
+            if cancel.is_cancelled() {
+                log::info!("pod '{}': launch cancelled", pod_id);
+                send_event(
+                    &event_tx,
+                    WorkerEvent::PodExited {
+                        namespace_id,
+                        pod_id: pod_id.clone(),
+                        exit_code: -1,
+                    },
+                )
                 .await;
+            } else {
+                log::error!("pod '{}': launch failed: {:#}", pod_id, e);
+                send_event(
+                    &event_tx,
+                    WorkerEvent::PodFailed {
+                        namespace_id,
+                        pod_id: pod_id.clone(),
+                        error: format!("{:#}", e),
+                    },
+                )
+                .await;
+            }
         }
     }
 }
@@ -498,20 +549,26 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     pod_id: &str,
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<(
     ManagedVm<V::Instance>,
     TaskHandle<anyhow::Result<()>>,
     Option<(crate::io_session::IoSession, yamux::Stream)>,
+    Option<TaskHandle<()>>,
 )> {
     let container = containers
         .into_iter()
         .next()
         .context("pod must have at least one container")?;
 
-    let artifact = image_provider
-        .prepare(&container.image_ref)
-        .await
-        .context("preparing image")?;
+    let artifact = tokio::select! {
+        result = image_provider.prepare(&container.image_ref) => {
+            result.context("preparing image")?
+        }
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled during image prepare");
+        }
+    };
 
     let capture_output = container.config.capture_output;
     let config = if let Some(ref oci_config) = artifact.oci_config {
@@ -551,24 +608,41 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         serial_console: true,
     };
 
-    let mut instance = vmm.launch(&vm_config).await.context("launch VM")?;
+    let mut instance = tokio::select! {
+        result = vmm.launch(&vm_config) => {
+            result.context("launch VM")?
+        }
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled during VM launch");
+        }
+    };
     log::info!("worker: pod '{}' VM launched", pod_id);
 
-    if let Some(tap) = instance.take_tap() {
+    let port_task = if let Some(tap) = instance.take_tap() {
         let tap_name = tap.name.clone();
-        fabric
+        let (_port_id, task) = fabric
             .lock()
             .await
             .add_port(tap)
             .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
         log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
-    }
+        Some(task)
+    } else {
+        None
+    };
 
-    let (mut vm, yamux_driver) = ManagedVm::connect(instance).await?;
+    let (mut vm, yamux_driver) = tokio::select! {
+        result = ManagedVm::connect(instance) => { result? }
+        _ = cancel.cancelled() => {
+            // instance is moved into connect(); on cancel, connect() is dropped,
+            // which drops instance → FirecrackerInstance::drop sends SIGKILL.
+            anyhow::bail!("cancelled during VM connect");
+        }
+    };
 
     vm.configure_network("eth0", &net_config).await?;
 
-    let dns_servers = vec![network.gateway.to_string()];
+    let dns_servers = vec![crate::fabric::GATEWAY_IP_STR.to_string()];
 
     let container_id = &container.container_id;
     vm.add_container(container_id, "/dev/vdb", &dns_servers)
@@ -589,30 +663,34 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                     Ok(log_stream) => Some((session, log_stream)),
                     Err(e) => {
                         log::error!("pod '{}': failed to open log stream: {:#}", pod_id, e);
-                        let _ = event_tx
-                            .send(WorkerEvent::PodLogStreamError {
+                        send_event(
+                            event_tx,
+                            WorkerEvent::PodLogStreamError {
                                 namespace_id: namespace_id.to_string(),
                                 pod_id: pod_id.to_string(),
                                 container_id: container_id.to_string(),
                                 phase: "open_stream".to_string(),
                                 error: format!("{:#}", e),
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         None
                     }
                 }
             }
             Err(e) => {
                 log::error!("pod '{}': failed to accept output stream: {:#}", pod_id, e);
-                let _ = event_tx
-                    .send(WorkerEvent::PodLogStreamError {
+                send_event(
+                    event_tx,
+                    WorkerEvent::PodLogStreamError {
                         namespace_id: namespace_id.to_string(),
                         pod_id: pod_id.to_string(),
                         container_id: container_id.to_string(),
                         phase: "connect".to_string(),
                         error: format!("{:#}", e),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 None
             }
         }
@@ -620,7 +698,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         None
     };
 
-    Ok((vm, yamux_driver, io_session))
+    Ok((vm, yamux_driver, io_session, port_task))
 }
 
 /// Pod monitor: watches a running pod's sub-tasks and handles cleanup.
@@ -631,6 +709,7 @@ async fn pod_monitor<I: VmInstance>(
     mut vm: ManagedVm<I>,
     mut yamux_driver: TaskHandle<anyhow::Result<()>>,
     io_session: Option<(crate::io_session::IoSession, yamux::Stream)>,
+    port_task: Option<TaskHandle<()>>,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<WorkerEvent>,
     namespace_id: String,
@@ -657,6 +736,15 @@ async fn pod_monitor<I: VmInstance>(
             }
             let _ = log_stream.close().await;
         })
+    });
+
+    // Create a future that completes when the port task exits, or pends forever if there is none.
+    let mut port_task = port_task;
+    let mut port_task_fut = std::pin::pin!(async {
+        match port_task.as_mut() {
+            Some(task) => { let _ = task.await; }
+            None => std::future::pending::<()>().await,
+        }
     });
 
     let event = tokio::select! {
@@ -710,6 +798,17 @@ async fn pod_monitor<I: VmInstance>(
             }
         }
 
+        // Fatal: port read task died (TAP error, etc.).
+        _ = &mut port_task_fut => {
+            log::error!("pod '{}': port task exited, network dead — force killing VM", pod_id);
+            let _ = vm.force_kill().await;
+            WorkerEvent::PodFailed {
+                namespace_id: namespace_id.clone(),
+                pod_id: pod_id.clone(),
+                error: "port task exited unexpectedly".to_string(),
+            }
+        }
+
         // Cancellation: graceful shutdown requested.
         _ = cancel.cancelled() => {
             log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
@@ -737,7 +836,5 @@ async fn pod_monitor<I: VmInstance>(
     // _log_task is dropped here, automatically aborting via TaskHandle.
 
     // Send the event back to the main loop.
-    if event_tx.send(event).await.is_err() {
-        log::warn!("pod '{}': failed to send event, worker already shut down", pod_id);
-    }
+    send_event(&event_tx, event).await;
 }

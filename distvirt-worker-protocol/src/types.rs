@@ -102,6 +102,10 @@ pub enum WorkerEvent {
         pod_id: String,
         error: String,
     },
+    NamespaceFailed {
+        namespace_id: String,
+        error: String,
+    },
     ShuttingDown,
     PodLogStreamError {
         namespace_id: String,

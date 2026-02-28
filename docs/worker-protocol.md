@@ -8,7 +8,7 @@ This protocol is transport-agnostic. The same message types flow over:
 - **Unix domain socket** — local mode, CLI acting as orchestrator
 - **TCP/TLS** — distributed mode, remote workers connecting to a central orchestrator
 
-The target wire format is **Protobuf** over a bidirectional stream (gRPC or length-prefixed frames).
+The transport is a **yamux**-multiplexed bidirectional stream. The primary control stream carries length-prefixed JSON messages (commands and events). Additional yamux streams carry out-of-band data like container log output. The wire format may move to Protobuf in the future, but the message semantics are format-agnostic.
 
 ---
 
@@ -24,15 +24,22 @@ Workers connect to the orchestrator, not the other way around. This means:
 Worker                              Orchestrator
   |                                      |
   |──── Connect (TCP/UDS) ──────────────>|
-  |──── WorkerHello { ... } ───────────>|
-  |<─── WorkerAccepted { worker_id } ───|
+  |──── Establish yamux session ────────>|
   |                                      |
-  |        bidirectional stream          |
+  |   control stream (commands/events)   |
   |<──── commands ───────────────────────|
   |────── events ───────────────────────>|
   |                                      |
+  |   log streams (worker-initiated)     |
+  |────── LogStreamHeader ─────────────>|
+  |────── raw output bytes ────────────>|
+  |                                      |
   |     (disconnect = worker is gone)    |
 ```
+
+The orchestrator is the yamux Client (opens the control stream). The worker is the yamux Server (accepts the control stream, opens log streams back toward the orchestrator).
+
+**Worker registration** (future): For distributed mode, the first message on the control stream will be a `WorkerHello`/`WorkerAccepted` handshake to assign a stable `worker_id`. In local mode (single in-process worker), this is skipped.
 
 On disconnect, the orchestrator considers all pods on that worker lost. It may reschedule them to other workers depending on policy.
 
@@ -106,65 +113,46 @@ In local mode (single worker), the routing table is typically empty — all pods
 
 ## Messages: Orchestrator to Worker (Commands)
 
-### Worker Registration
-
-```protobuf
-message WorkerHello {
-  string version = 1;
-  WorkerResources resources = 2;
-}
-
-message WorkerResources {
-  uint32 cpu_cores = 1;
-  uint64 memory_bytes = 2;
-  uint64 disk_bytes = 3;
-}
-
-message WorkerAccepted {
-  string worker_id = 1;
-}
-```
-
 ### Namespace Lifecycle
 
-```protobuf
-message CreateNamespace {
-  string namespace_id = 1;
-  NetworkConfig network = 2;
+```
+CreateNamespace {
+  namespace_id: String,
+  network: NetworkConfig,
 }
 
-message NetworkConfig {
-  string subnet = 1;        // e.g. "172.16.0.0/24"
-  string gateway_ip = 2;    // e.g. "172.16.0.1"
-  bytes gateway_mac = 3;    // 6 bytes
+NetworkConfig {
+  subnet: Ipv4Addr,        // e.g. 172.16.0.0
+  prefix_len: u8,           // e.g. 24
+  gateway: Ipv4Addr,        // e.g. 172.16.0.1
 }
 
-message DestroyNamespace {
-  string namespace_id = 1;
+DestroyNamespace {
+  namespace_id: String,
 }
 ```
 
-`CreateNamespace` tells the worker to stand up a local fabric segment: create the L2 switch, create the smoltcp gateway at the specified IP/MAC, set up TUN egress. The worker is ready to accept pods on this namespace after acknowledging.
+`CreateNamespace` tells the worker to stand up a local fabric segment: create the L2 switch, create the smoltcp gateway at the specified IP, set up TUN egress. The gateway MAC is a fixed locally-administered address (`02:00:00:00:00:01`). The worker acknowledges with a `NamespaceCreated` event.
 
-`DestroyNamespace` tears down all pods in the namespace on this worker, then tears down the fabric segment.
+`DestroyNamespace` tears down all pods in the namespace on this worker (cancelling them with a graceful shutdown window), then tears down the fabric segment.
 
 ### DNS Registry Sync
 
-```protobuf
-message RegistrySync {
-  string namespace_id = 1;
-  repeated RegistryEntry entries = 2;
+```
+RegistrySync {
+  namespace_id: String,
+  entries: Vec<RegistryEntry>,
 }
 
-message RegistryUpdate {
-  string namespace_id = 1;
-  repeated RegistryEntry added = 2;
-  repeated string removed = 3;
+RegistryUpdate {
+  namespace_id: String,
+  added: Vec<RegistryEntry>,
+  removed: Vec<String>,
 }
 
-message RegistryEntry {
-  string name = 1;
-  string ip = 2;
+RegistryEntry {
+  name: String,
+  ip: Ipv4Addr,
 }
 ```
 
@@ -176,40 +164,33 @@ The gateway's DNS server queries this local registry. Names not found are forwar
 
 ### Fabric Routing
 
-```protobuf
-message FabricRouteSync {
-  string namespace_id = 1;
-  repeated FabricRouteEntry routes = 2;
+```
+FabricRouteSync {
+  namespace_id: String,
+  routes: Vec<FabricRouteEntry>,
 }
 
-message FabricRouteUpdate {
-  string namespace_id = 1;
-  repeated FabricRouteEntry added = 2;
-  repeated string removed_ips = 3;
+FabricRouteUpdate {
+  namespace_id: String,
+  added: Vec<FabricRouteEntry>,
+  removed_ips: Vec<String>,
 }
 
-message FabricRouteEntry {
-  string ip = 1;
-  bytes mac = 2;              // 6 bytes
-
-  oneof destination {
-    RemoteWorker remote = 3;
-    Placeholder placeholder = 4;
-  }
+FabricRouteEntry {
+  ip: Ipv4Addr,
+  mac: [u8; 6],
+  destination: RouteDestination,
 }
 
-message RemoteWorker {
-  string worker_id = 1;
+enum RouteDestination {
+  RemoteWorker { worker_id: String },
+  Placeholder { buffer_policy: BufferPolicy },
 }
 
-message Placeholder {
-  BufferPolicy buffer_policy = 1;
-}
-
-message BufferPolicy {
-  bool hold_tcp_syn = 1;     // hold TCP SYN + buffer connection (smoltcp gateway)
-  uint32 buffer_frames = 2;  // max frames to buffer (0 = drop immediately)
-  uint32 timeout_ms = 3;     // how long to buffer before giving up
+BufferPolicy {
+  hold_tcp_syn: bool,       // hold TCP SYN + buffer connection (smoltcp gateway)
+  buffer_frames: u32,       // max frames to buffer (0 = drop immediately)
+  timeout_ms: u32,          // how long to buffer before giving up
 }
 ```
 
@@ -221,83 +202,111 @@ Routes for pods that are local to this worker don't need entries — the fabric 
 
 ### Pod Lifecycle
 
-```protobuf
-message LaunchPod {
-  string namespace_id = 1;
-  string pod_id = 2;
-  PodNetworkConfig network = 3;
-  repeated ContainerSpec containers = 4;
+```
+LaunchPod {
+  namespace_id: String,
+  pod_id: String,
+  network: PodNetworkConfig,
+  containers: Vec<ContainerSpec>,
 }
 
-message PodNetworkConfig {
-  string ip = 1;
-  bytes mac = 2;             // 6 bytes
+PodNetworkConfig {
+  ip: Ipv4Addr,
+  mac: [u8; 6],
+  gateway: Ipv4Addr,         // gateway IP for the pod's network config
+  netmask: String,            // e.g. "255.255.255.0"
 }
 
-message ContainerSpec {
-  string container_id = 1;
-  string image = 2;          // image reference (e.g. "docker.io/library/nginx:latest")
-  repeated string entrypoint = 3;
-  repeated string args = 4;
-  map<string, string> env = 5;
-  string working_dir = 6;
-  string user = 7;           // "uid" or "uid:gid"
-  string hostname = 8;
-  bool capture_output = 9;
+ContainerSpec {
+  container_id: String,
+  image_ref: String,          // image reference (e.g. "docker.io/library/nginx:latest")
+  config: ContainerConfig,
 }
 
-message StopPod {
-  string namespace_id = 1;
-  string pod_id = 2;
-  bool graceful = 3;         // true = send shutdown, wait; false = kill immediately
+ContainerConfig {
+  entrypoint: String,         // main executable
+  args: Vec<String>,
+  env: Vec<String>,           // KEY=VALUE format (OCI convention)
+  working_dir: Option<String>,
+  uid: Option<u32>,
+  gid: Option<u32>,
+  hostname: Option<String>,
+  capture_output: bool,
 }
+
+StopPod {
+  namespace_id: String,
+  pod_id: String,
+  graceful: bool,             // true = send shutdown, wait; false = kill immediately
+}
+
+Shutdown {}
 ```
 
-`LaunchPod` tells the worker to:
-1. Prepare container images (pull if needed)
-2. Launch a Firecracker VM with the specified network config
-3. Attach the VM's TAP to the namespace's fabric
-4. Configure guest networking (IP, gateway, DNS)
-5. Add and start containers in order
-6. Report `PodRunning` when all containers are started
+`PodNetworkConfig` includes the full network configuration the pod needs to configure its guest interface. The orchestrator derives these from the namespace's `NetworkConfig` and the pod's assigned IP/MAC.
 
-`StopPod` tells the worker to shut down the pod. Graceful sends a shutdown command to the guest and waits; non-graceful kills the VM process.
+When a `ContainerSpec` references an OCI image, the worker parses the image's config (entrypoint, cmd, env, working_dir, user) and merges it with the `ContainerConfig` overrides. Explicit overrides take precedence; empty/None fields fall through to the image defaults.
+
+`LaunchPod` tells the worker to:
+1. Prepare container images (pull if needed, parse OCI config)
+2. Merge OCI image config with provided overrides
+3. Launch a Firecracker VM with the specified network config
+4. Attach the VM's TAP to the namespace's fabric
+5. Configure guest networking (IP, gateway, DNS pointing at fabric gateway)
+6. Add and start containers
+7. Report `PodRunning` when all containers are started
+
+`StopPod` tells the worker to shut down the pod. Graceful cancels the pod's token, triggering a graceful VM shutdown with a timeout before force-killing. Non-graceful aborts the pod supervisor immediately (VM process killed via Drop).
+
+`Shutdown` tells the worker to shut down entirely. The worker acknowledges with `ShuttingDown`, cancels all namespaces and pods, awaits cleanup, then exits.
 
 ---
 
 ## Messages: Worker to Orchestrator (Events)
 
-```protobuf
-message PodRunning {
-  string namespace_id = 1;
-  string pod_id = 2;
+### Control Stream Events
+
+```
+NamespaceCreated {
+  namespace_id: String,
 }
 
-message PodExited {
-  string namespace_id = 1;
-  string pod_id = 2;
-  int32 exit_code = 3;       // exit code of the "main" container
+NamespaceFailed {
+  namespace_id: String,
+  error: String,
 }
 
-message PodFailed {
-  string namespace_id = 1;
-  string pod_id = 2;
-  string error = 3;
+PodRunning {
+  namespace_id: String,
+  pod_id: String,
 }
 
-message PodOutput {
-  string namespace_id = 1;
-  string pod_id = 2;
-  string container_id = 3;
-  OutputStream stream = 4;
-  bytes data = 5;
+PodExited {
+  namespace_id: String,
+  pod_id: String,
+  exit_code: i32,
 }
 
-enum OutputStream {
-  STDOUT = 0;
-  STDERR = 1;
+PodFailed {
+  namespace_id: String,
+  pod_id: String,
+  error: String,
+}
+
+ShuttingDown {}
+
+PodLogStreamError {
+  namespace_id: String,
+  pod_id: String,
+  container_id: String,
+  phase: String,
+  error: String,
 }
 ```
+
+`NamespaceCreated` — the namespace's fabric, gateway, and DNS registry are up and ready for pods.
+
+`NamespaceFailed` — the namespace's gateway exited unexpectedly. All pods in the namespace are cancelled. The orchestrator should consider the namespace dead.
 
 `PodRunning` — the VM is booted, all containers are started, the pod is on the fabric.
 
@@ -305,15 +314,33 @@ enum OutputStream {
 
 `PodFailed` — the pod could not start (image pull failed, VM failed to boot, etc.). The worker has cleaned up any partial state.
 
-`PodOutput` — stdout/stderr from a container, if `capture_output` was set. The orchestrator decides what to do with it (stream to CLI, store, discard).
+`ShuttingDown` — acknowledges a `Shutdown` command. The worker is tearing down.
+
+`PodLogStreamError` — a non-fatal error occurred while setting up or streaming container logs. The pod continues running; only log delivery is affected.
+
+### Log Streams (Out-of-Band)
+
+Container output (stdout/stderr) is delivered over **separate yamux streams**, not as events on the control stream. This avoids head-of-line blocking — a pod producing heavy output doesn't block command/event processing.
+
+```
+LogStreamHeader {
+  namespace_id: String,
+  pod_id: String,
+  container_id: String,
+}
+```
+
+When a container has `capture_output: true`, the worker opens a new yamux stream toward the orchestrator, sends a `LogStreamHeader` as the first message, then writes raw output bytes. The orchestrator decides what to do with the data (stream to CLI, store, discard).
+
+The stream carries interleaved stdout/stderr as framed chunks from the guest's output session.
 
 ### Fabric Events
 
-```protobuf
-message FabricRouteMiss {
-  string namespace_id = 1;
-  string dst_ip = 2;
-  bytes dst_mac = 3;
+```
+FabricRouteMiss {
+  namespace_id: String,
+  dst_ip: Ipv4Addr,
+  dst_mac: [u8; 6],
 }
 ```
 
@@ -323,53 +350,41 @@ message FabricRouteMiss {
 
 ## Message Framing
 
-All messages are wrapped in a tagged union:
+All commands and events are tagged enums (Rust `enum`) serialized as length-prefixed JSON on the yamux control stream:
 
-```protobuf
-message WorkerCommand {
-  oneof command {
-    // Namespace lifecycle
-    CreateNamespace create_namespace = 1;
-    DestroyNamespace destroy_namespace = 2;
+```
+WorkerCommand = CreateNamespace { ... }
+             | DestroyNamespace { ... }
+             | RegistrySync { ... }
+             | RegistryUpdate { ... }
+             | FabricRouteSync { ... }
+             | FabricRouteUpdate { ... }
+             | LaunchPod { ... }
+             | StopPod { ... }
+             | Shutdown
 
-    // DNS registry
-    RegistrySync registry_sync = 3;
-    RegistryUpdate registry_update = 4;
-
-    // Fabric routing (includes both live routes and placeholders)
-    FabricRouteSync fabric_route_sync = 5;
-    FabricRouteUpdate fabric_route_update = 6;
-
-    // Pod lifecycle
-    LaunchPod launch_pod = 7;
-    StopPod stop_pod = 8;
-  }
-}
-
-message WorkerEvent {
-  oneof event {
-    // Pod lifecycle
-    PodRunning pod_running = 1;
-    PodExited pod_exited = 2;
-    PodFailed pod_failed = 3;
-    PodOutput pod_output = 4;
-
-    // Fabric
-    FabricRouteMiss fabric_route_miss = 5;
-  }
-}
+WorkerEvent = NamespaceCreated { ... }
+           | NamespaceFailed { ... }
+           | PodRunning { ... }
+           | PodExited { ... }
+           | PodFailed { ... }
+           | ShuttingDown
+           | PodLogStreamError { ... }
+           | FabricRouteMiss { ... }
 ```
 
-Over the wire: length-prefixed protobuf frames on a bidirectional stream.
+Over the wire: `[u32 LE length][JSON payload]` on the yamux control stream. Log streams use the same framing for the initial `LogStreamHeader`, then raw bytes.
 
-**gRPC consideration:** gRPC bidirectional streaming is attractive (ecosystem, codegen, TLS), but some gRPC client/server implementations periodically close and re-establish transport connections (e.g., `GOAWAY` frames, max connection age settings, load balancer idle timeouts). Since our protocol is stateful — the worker holds namespaces, running pods, fabric state — a transport disconnect must NOT be interpreted as "worker is gone, reschedule everything."
+### Transport
 
-Options:
-1. **Application-level session over gRPC** — the worker identifies itself with a stable `worker_id` on reconnect. The orchestrator matches it to existing state. The gRPC stream is just a transport; the session survives reconnects.
-2. **Raw framing over TCP/UDS** — simpler, no HTTP/2 dependency, full control over connection lifecycle. Disconnect genuinely means the worker is gone (or the network is). No ambiguity.
-3. **Hybrid** — use gRPC for the initial handshake and RPCs (health checks, resource reporting), but a raw TCP/UDS stream for the command/event channel.
+The protocol runs over **yamux** on any async bidirectional byte stream. This gives us:
+- Multiplexed streams (control + N log streams) over a single connection
+- Backpressure and flow control per stream
+- No HTTP/2 dependency
 
-For milestone 1 (local, in-process), this is moot — we use channels. The transport decision can be deferred, but the protocol messages are designed to be transport-agnostic either way.
+In local mode, the transport is a `tokio::io::duplex` (in-process byte pipe). In distributed mode (future), the transport is a TCP/TLS connection. The yamux session sits on top either way — same protocol, same code paths.
+
+Disconnect means the worker is gone. Since yamux owns the full connection lifecycle (no intermediate load balancer inserting GOAWAYs), there's no ambiguity about transport vs. session disconnects.
 
 ---
 
@@ -388,12 +403,12 @@ The orchestrator is the brain. It:
 ### Local Mode (compose up)
 
 In local mode, the CLI embeds a minimal orchestrator in-process:
-1. Starts listening on a Unix domain socket (or uses in-process channels)
-2. Starts an in-process worker that connects
+1. Creates a `tokio::io::duplex` pair and connects orchestrator/worker over it via yamux
+2. Starts an in-process worker on one end
 3. Parses compose file into a `Deployment`
 4. Plans execution (IP assignment, ordering)
 5. Sends `CreateNamespace`, `RegistrySync`, then `LaunchPod` for each service
-6. Streams `PodOutput` events to the terminal
+6. Accepts log streams from the worker and streams output to the terminal
 7. On Ctrl-C, sends `StopPod` for each pod, then `DestroyNamespace`
 
 The orchestrator logic is trivial in this mode, but the worker sees the exact same protocol it would in distributed mode.

@@ -1,8 +1,8 @@
 use anyhow::Context;
 use tempfile::NamedTempFile;
 
-use crate::containerd;
-use crate::image;
+use crate::image_provider::containerd;
+use crate::image_provider::image;
 use super::{ImageProvider, PreparedArtifact};
 
 /// Provides a container filesystem by pulling an OCI image via containerd,

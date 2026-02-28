@@ -1,3 +1,5 @@
+pub(crate) mod containerd;
+pub(crate) mod image;
 pub mod containerd_overlayfs;
 pub mod rootfs_dir;
 
@@ -5,7 +7,7 @@ use std::any::Any;
 use std::future::Future;
 use std::path::PathBuf;
 
-use crate::containerd::ImageConfig;
+use crate::image_provider::containerd::ImageConfig;
 
 /// A prepared container filesystem artifact ready for Firecracker.
 pub struct PreparedArtifact {

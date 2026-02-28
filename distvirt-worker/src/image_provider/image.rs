@@ -31,34 +31,43 @@ pub fn build_ext4_image(rootfs: &Path, output: &Path) -> anyhow::Result<()> {
     let image_size = (size_bytes as f64 * 1.2) as u64 + 10 * 1024 * 1024;
 
     // Create sparse file.
-    let status = Command::new("truncate")
+    let truncate_output = Command::new("truncate")
         .args(["-s", &image_size.to_string()])
         .arg(output)
-        .status()
+        .output()
         .context("running truncate")?;
-    if !status.success() {
-        bail!("truncate failed");
+    if !truncate_output.status.success() {
+        bail!(
+            "truncate failed: {}",
+            String::from_utf8_lossy(&truncate_output.stderr)
+        );
     }
 
     // Create ext4 filesystem populated with rootfs contents.
-    let status = Command::new("mkfs.ext4")
+    let mkfs_output = Command::new("mkfs.ext4")
         .args(["-d"])
         .arg(rootfs)
         .arg(output)
-        .status()
+        .output()
         .context("running mkfs.ext4")?;
-    if !status.success() {
-        bail!("mkfs.ext4 failed");
+    if !mkfs_output.status.success() {
+        bail!(
+            "mkfs.ext4 failed: {}",
+            String::from_utf8_lossy(&mkfs_output.stderr)
+        );
     }
 
     // Shrink to minimum size.
-    let status = Command::new("resize2fs")
+    let resize_output = Command::new("resize2fs")
         .arg("-M")
         .arg(output)
-        .status()
+        .output()
         .context("running resize2fs")?;
-    if !status.success() {
-        bail!("resize2fs failed");
+    if !resize_output.status.success() {
+        bail!(
+            "resize2fs failed: {}",
+            String::from_utf8_lossy(&resize_output.stderr)
+        );
     }
 
     Ok(())

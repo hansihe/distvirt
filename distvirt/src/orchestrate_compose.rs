@@ -1,5 +1,3 @@
-use std::net::Ipv4Addr;
-
 use anyhow::Context;
 use distvirt_worker_protocol::codec::recv_msg;
 use distvirt_worker_protocol::{
@@ -9,29 +7,47 @@ use distvirt_worker_protocol::{
 use futures_lite::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
-use crate::deployment::{Deployment, ServiceSpec};
+use crate::deployment::{
+    Deployment, ServiceSpec, DEFAULT_GATEWAY, DEFAULT_NETMASK, DEFAULT_PREFIX_LEN, DEFAULT_SUBNET,
+};
 
 /// Build a [`ContainerConfig`] from a compose [`ServiceSpec`].
+///
+/// Follows Docker semantics for entrypoint/command:
+/// - `entrypoint` alone: used as the full command line
+/// - `command` alone: used as the full command line (image entrypoint would
+///   normally prepend, but that's resolved at the worker/image level)
+/// - both: entrypoint is the executable, command supplies the arguments
 fn build_container_config(spec: &ServiceSpec) -> ContainerConfig {
+    let (entrypoint, args) = match (&spec.entrypoint, &spec.command) {
+        (Some(ep), Some(cmd)) => {
+            // Both specified: entrypoint[0] is the binary, rest of entrypoint + command are args.
+            let binary = ep.first().cloned().unwrap_or_default();
+            let mut args: Vec<String> = ep.get(1..).unwrap_or_default().to_vec();
+            args.extend(cmd.iter().cloned());
+            (binary, args)
+        }
+        (Some(ep), None) => {
+            // Only entrypoint: first element is binary, rest are args.
+            let binary = ep.first().cloned().unwrap_or_default();
+            let args = ep.get(1..).unwrap_or_default().to_vec();
+            (binary, args)
+        }
+        (None, Some(cmd)) => {
+            // Only command: first element is binary, rest are args.
+            let binary = cmd.first().cloned().unwrap_or_default();
+            let args = cmd.get(1..).unwrap_or_default().to_vec();
+            (binary, args)
+        }
+        (None, None) => {
+            // Neither specified: rely on image defaults (empty here).
+            (String::new(), Vec::new())
+        }
+    };
+
     ContainerConfig {
-        entrypoint: spec
-            .entrypoint
-            .as_ref()
-            .and_then(|ep| ep.first().cloned())
-            .unwrap_or_default(),
-        args: spec
-            .entrypoint
-            .as_ref()
-            .map(|ep| ep.get(1..).unwrap_or_default().to_vec())
-            .unwrap_or_default()
-            .into_iter()
-            .chain(
-                spec.command
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .collect(),
+        entrypoint,
+        args,
         env: spec
             .environment
             .iter()
@@ -102,9 +118,9 @@ pub async fn run_compose(
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: namespace_id.clone(),
         network: NetworkConfig {
-            subnet: Ipv4Addr::new(172, 16, 0, 0),
-            gateway: Ipv4Addr::new(172, 16, 0, 1),
-            prefix_len: 24,
+            subnet: DEFAULT_SUBNET,
+            gateway: DEFAULT_GATEWAY,
+            prefix_len: DEFAULT_PREFIX_LEN,
         },
     })
     .await
@@ -146,6 +162,14 @@ pub async fn run_compose(
             .get(&planned.name)
             .context("planned service not in deployment")?;
 
+        if !service_spec.ports.is_empty() {
+            log::warn!(
+                "service '{}': port mappings are not yet implemented, ignoring {} mapping(s)",
+                planned.name,
+                service_spec.ports.len()
+            );
+        }
+
         let container_config = build_container_config(service_spec);
         let container_spec = ContainerSpec {
             container_id: planned.name.clone(),
@@ -159,8 +183,8 @@ pub async fn run_compose(
             network: PodNetworkConfig {
                 ip: planned.ip,
                 mac: planned.mac,
-                gateway: Ipv4Addr::new(172, 16, 0, 1),
-                netmask: "255.255.255.0".to_string(),
+                gateway: DEFAULT_GATEWAY,
+                netmask: DEFAULT_NETMASK.to_string(),
             },
             containers: vec![container_spec],
         })
@@ -170,6 +194,8 @@ pub async fn run_compose(
 
     // 4. Event loop: receive events and log lines concurrently.
     let mut exited_count = 0;
+    let mut failed_pods: Vec<String> = Vec::new();
+    let mut namespace_error: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -190,7 +216,12 @@ pub async fn run_compose(
                         pod_id,
                         exit_code,
                     } => {
-                        log::info!("pod '{}' exited with code {}", pod_id, exit_code);
+                        if exit_code == 0 {
+                            log::info!("pod '{}' exited successfully", pod_id);
+                        } else {
+                            log::error!("pod '{}' exited with code {}", pod_id, exit_code);
+                            failed_pods.push(format!("{} (exit code {})", pod_id, exit_code));
+                        }
                         exited_count += 1;
                         if exited_count >= total_pods {
                             break;
@@ -202,10 +233,19 @@ pub async fn run_compose(
                         error,
                     } => {
                         log::error!("pod '{}' failed: {}", pod_id, error);
+                        failed_pods.push(format!("{} ({})", pod_id, error));
                         exited_count += 1;
                         if exited_count >= total_pods {
                             break;
                         }
+                    }
+                    WorkerEvent::NamespaceFailed {
+                        namespace_id: _,
+                        error,
+                    } => {
+                        log::error!("namespace '{}' failed: {}", namespace_id, error);
+                        namespace_error = Some(error);
+                        break;
                     }
                     WorkerEvent::ShuttingDown => {
                         log::info!("worker is shutting down");
@@ -244,6 +284,18 @@ pub async fn run_compose(
     })
     .await
     .context("send destroy namespace")?;
+
+    // 6. Report results.
+    if let Some(error) = namespace_error {
+        anyhow::bail!("namespace '{}' failed: {}", namespace_id, error);
+    }
+    if !failed_pods.is_empty() {
+        anyhow::bail!(
+            "{} pod(s) failed: {}",
+            failed_pods.len(),
+            failed_pods.join(", ")
+        );
+    }
 
     Ok(())
 }

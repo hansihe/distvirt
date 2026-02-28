@@ -5,6 +5,12 @@ use anyhow::bail;
 
 pub use distvirt_types::{Dependency, Deployment, PortMapping, PortProtocol, ServiceSpec};
 
+// Default network constants for single-worker namespaces.
+pub const DEFAULT_SUBNET: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 0);
+pub const DEFAULT_GATEWAY: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 1);
+pub const DEFAULT_PREFIX_LEN: u8 = 24;
+pub const DEFAULT_NETMASK: &str = "255.255.255.0";
+
 /// An execution plan with IP/MAC assignments for each service.
 pub struct ExecutionPlan {
     pub services: Vec<PlannedService>,
@@ -225,30 +231,3 @@ mod tests {
     }
 }
 
-/// Name-to-IP mapping, shared between DNS server, orchestrator, and workers.
-pub struct ServiceRegistry {
-    services: HashMap<String, Ipv4Addr>,
-}
-
-impl ServiceRegistry {
-    pub fn new() -> Self {
-        ServiceRegistry {
-            services: HashMap::new(),
-        }
-    }
-
-    /// Register a service name with an IP address.
-    pub fn register(&mut self, name: String, ip: Ipv4Addr) {
-        self.services.insert(name, ip);
-    }
-
-    /// Look up the IP address for a service name.
-    pub fn lookup(&self, name: &str) -> Option<Ipv4Addr> {
-        self.services.get(name).copied()
-    }
-
-    /// Iterate over all registered services.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, Ipv4Addr)> {
-        self.services.iter().map(|(k, v)| (k.as_str(), *v))
-    }
-}
