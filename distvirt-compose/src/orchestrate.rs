@@ -259,6 +259,9 @@ pub async fn run_compose(
                     } => {
                         eprintln!("{} | log stream error ({}): {}", pod_id, phase, error);
                     }
+                    WorkerEvent::FabricRouteMiss { namespace_id: _, dst_ip, dst_mac: _ } => {
+                        log::debug!("fabric route miss for {}", dst_ip);
+                    }
                 }
             }
             Some(log_line) = log_line_rx.recv() => {

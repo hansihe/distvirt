@@ -79,35 +79,64 @@ The smallest schedulable unit. A pod is a Firecracker VM with:
 
 For now, pods contain a single container. The protocol supports multiple from day one to avoid a redesign when sidecars, init containers, or suspend/resume arrive.
 
+### Service
+
+A service is a stable network identity with its own virtual IP and MAC on the namespace's fabric. Services are the recommended way for pods to communicate — DNS names resolve to service IPs, not pod IPs.
+
+The key separation: a **service IP** is the stable addressable identity; a **pod IP** is an ephemeral backend. The service entity on the fabric is the boundary for buffering, activation, readiness gating, and (future) protocol enforcement. This cleanly separates pod lifecycle (VM booted, network configured) from service readiness (application listening, health check passed).
+
+```
+Client pod → Service IP (virtual) → [buffer / activate / ready?] → Pod IP (real)
+```
+
+A service can be in one of these states:
+- **No backend** — the service IP exists on the fabric but no pod is assigned. Traffic is buffered per policy and a `ServiceActivation` event fires so the orchestrator can schedule a pod. This is the scale-to-zero state.
+- **Backend assigned, not ready** — a pod is assigned but hasn't passed readiness. Traffic is buffered, no activation event (orchestrator already knows).
+- **Ready** — traffic flows through to the backing pod.
+
+The orchestrator manages service lifecycle via `CreateService`, `UpdateServiceBackend`, `ServiceReady`, and `DestroyService` commands. Services are projected to all workers participating in a namespace (same as DNS entries).
+
 ### DNS Registry
 
 The orchestrator owns the authoritative name-to-IP mapping for each namespace. Workers hold a projected copy, kept in sync via full-state syncs and incremental deltas. The local fabric gateway uses this projection to answer DNS queries from pods.
 
-### Fabric Routing Table
+DNS entries typically map service names to **service IPs** (not pod IPs). The DNS registry is structurally unchanged — it's just `name → IP` — but the IPs now refer to service entities on the fabric rather than pods directly.
 
-Separate from DNS, the fabric needs to know how to forward packets across workers. When a pod on Worker A sends a frame to a pod on Worker B, Worker A's fabric segment needs to know "this MAC/IP lives on Worker B, send it through the tunnel to B."
+### Fabric Routing Table (Pod-to-Pod)
+
+Separate from services, the fabric routing table handles **direct pod-to-pod** forwarding. This preserves the flat L2 illusion — every pod has an IP, and any pod can reach any other pod by IP, even without going through a service.
 
 The orchestrator owns the authoritative routing table: a mapping of IP/MAC to a **destination** for each namespace. Workers hold a projected copy, kept in sync the same way as the DNS registry (full sync + deltas).
 
 Each route entry has one of two destination types:
 
 - **Remote worker** — the pod is live on another worker. The fabric forwards frames through the tunnel to that worker.
-- **Placeholder** — the pod is not currently running (suspended, scaled-to-zero, pending). The fabric applies a buffering policy and reports a route miss to the orchestrator.
+- **Placeholder** — the pod is not currently running (suspended, scaled-to-zero, pending). The fabric applies a basic buffering policy and reports a route miss to the orchestrator.
 
 This is a single unified table. When a suspended pod gets scheduled and boots on a worker, the orchestrator simply updates the entry from placeholder → remote worker (or it becomes local on the hosting worker and the entry is removed). No coordinating across separate tables.
 
 Pods that are local to this worker (have a TAP on the local fabric) don't need route entries — the fabric already knows about them.
 
-When the fabric receives a frame for a destination that has no local TAP and no route entry at all, it reports a **route miss** with no buffering (unknown destination). When it hits a placeholder entry, it applies the placeholder's buffer policy and also reports a route miss. The orchestrator can then schedule the pod, update routes, and the buffered frames get delivered.
+When the fabric receives a frame for a destination that has no local TAP, no service entity, and no route entry at all, it reports a **route miss** with no buffering (unknown destination). When it hits a placeholder entry, it applies the placeholder's buffer policy and also reports a route miss. The orchestrator can then schedule the pod, update routes, and the buffered frames get delivered.
 
-**Placeholder buffer policies** control what happens to traffic while the pod is activating:
-- **Hold TCP SYN** — the smoltcp gateway holds the TCP connection while the pod boots. From the sender's perspective, it's just a slow connection.
+**Pod placeholder buffer policies** are deliberately limited compared to service policies — they provide basic best-effort buffering only:
 - **Buffer frames** — queue up to N frames for up to M milliseconds, then drop.
 - **Drop** — discard immediately (still report the miss so the orchestrator can react).
 
-This is the foundation for transparent activation — the sending pod doesn't know or care that the target was suspended and is now booting.
+Rich activation features (readiness gating, protocol activators, TCP SYN hold) live on services, not on pod placeholders. The pod routing table is the "it just works" fallback for direct communication, not the primary traffic path.
 
 In local mode (single worker), the routing table is typically empty — all pods are local. But the protocol supports it from day one so multi-worker doesn't require a redesign.
+
+### Services vs. Pod Routes
+
+Traffic to a destination IP is resolved in this order:
+
+1. **Local TAP port** — the pod is on this worker, forward directly via MAC table.
+2. **Service entity** — the destination is a service IP. The service entity handles buffering, activation, and forwarding to the backing pod.
+3. **Route table** — the destination is a pod IP with a route entry (remote worker or placeholder). Basic forwarding or buffering.
+4. **Flood** — unknown destination, flood to all ports (standard L2 behavior).
+
+Services are the recommended path for inter-service communication. Pod routes preserve the flat network illusion for cases where pods connect directly by IP.
 
 ---
 
@@ -162,7 +191,52 @@ RegistryEntry {
 
 The gateway's DNS server queries this local registry. Names not found are forwarded to upstream DNS (for external resolution).
 
-### Fabric Routing
+### Service Lifecycle
+
+```
+CreateService {
+  namespace_id: String,
+  service_id: String,
+  ip: Ipv4Addr,
+  mac: [u8; 6],
+  policy: ServicePolicy,
+}
+
+ServicePolicy {
+  buffer_frames: u32,       // max frames to buffer (0 = drop immediately)
+  timeout_ms: u32,          // how long to buffer before giving up
+}
+
+UpdateServiceBackend {
+  namespace_id: String,
+  service_id: String,
+  backend: Option<ServiceBackend>,
+}
+
+ServiceBackend {
+  pod_ip: Ipv4Addr,
+}
+
+ServiceReady {
+  namespace_id: String,
+  service_id: String,
+}
+
+DestroyService {
+  namespace_id: String,
+  service_id: String,
+}
+```
+
+`CreateService` tells the worker to create a service entity on the namespace's fabric with a virtual IP/MAC. The service starts with no backend (traffic is buffered per policy, activation events fire). Services are projected to all workers participating in a namespace.
+
+`UpdateServiceBackend` assigns or removes the backing pod for a service. When a backend is assigned, traffic is still buffered until `ServiceReady` is received — the pod may not be listening yet. Setting `backend: None` returns the service to the no-backend state (scale-to-zero). The backing pod can be local (has a TAP on this worker's fabric) or remote (reached via the route table).
+
+`ServiceReady` tells the worker that the service's backing pod is ready to receive traffic. Buffered frames are flushed to the backing pod. The orchestrator decides when readiness is achieved (container started, health check passed, etc.) — this is orchestrator policy, not a worker concern.
+
+`DestroyService` removes the service entity from the fabric. Any buffered frames are dropped.
+
+### Fabric Routing (Pod-to-Pod)
 
 ```
 FabricRouteSync {
@@ -188,7 +262,6 @@ enum RouteDestination {
 }
 
 BufferPolicy {
-  hold_tcp_syn: bool,       // hold TCP SYN + buffer connection (smoltcp gateway)
   buffer_frames: u32,       // max frames to buffer (0 = drop immediately)
   timeout_ms: u32,          // how long to buffer before giving up
 }
@@ -196,9 +269,11 @@ BufferPolicy {
 
 `FabricRouteSync` is a full-state replacement of the routing table for a namespace on this worker. Sent when the worker joins a namespace.
 
-`FabricRouteUpdate` is an incremental delta. When a new pod launches on Worker B, the orchestrator sends a route update to Worker A so it knows how to forward frames. When a pod is suspended, the orchestrator updates the entry from `RemoteWorker` to `Placeholder` with an appropriate buffer policy.
+`FabricRouteUpdate` is an incremental delta. When a new pod launches on Worker B, the orchestrator sends a route update to Worker A so it knows how to forward frames. When a pod is suspended, the orchestrator updates the entry from `RemoteWorker` to `Placeholder` with a basic buffer policy.
 
 Routes for pods that are local to this worker don't need entries — the fabric already knows about them via the local TAP port.
+
+Note: `BufferPolicy` on pod routes is deliberately simpler than `ServicePolicy`. Rich activation features (readiness gating, protocol activators) live on services. Pod routes provide basic best-effort buffering only.
 
 ### Pod Lifecycle
 
@@ -337,6 +412,12 @@ The stream carries interleaved stdout/stderr as framed chunks from the guest's o
 ### Fabric Events
 
 ```
+ServiceActivation {
+  namespace_id: String,
+  service_id: String,
+  dst_ip: Ipv4Addr,
+}
+
 FabricRouteMiss {
   namespace_id: String,
   dst_ip: Ipv4Addr,
@@ -344,7 +425,9 @@ FabricRouteMiss {
 }
 ```
 
-`FabricRouteMiss` — the worker's fabric received a frame for a destination it can't deliver locally. This fires for both unknown destinations (no route entry at all) and placeholders (route entry exists but destination is a `Placeholder`). For placeholders, the fabric applies the buffer policy before reporting the miss. The orchestrator can respond by scheduling a suspended pod, updating the route entry from placeholder to remote worker, etc.
+`ServiceActivation` — traffic arrived at a service that has no backend (or whose backend isn't ready). The service entity buffers frames per its policy and emits this event so the orchestrator can schedule a pod, assign it as the backend, and eventually send `ServiceReady`. Debounced per service to avoid event floods.
+
+`FabricRouteMiss` — the worker's fabric received a frame for a **pod IP** (not a service IP) that it can't deliver locally. This fires for both unknown destinations (no route entry at all) and placeholders (route entry exists but destination is a `Placeholder`). For placeholders, the fabric applies the basic buffer policy before reporting the miss. The orchestrator can respond by scheduling a suspended pod, updating the route entry from placeholder to remote worker, etc. This is the pod-to-pod activation path — simpler and more limited than service activation.
 
 ---
 
@@ -357,6 +440,10 @@ WorkerCommand = CreateNamespace { ... }
              | DestroyNamespace { ... }
              | RegistrySync { ... }
              | RegistryUpdate { ... }
+             | CreateService { ... }
+             | UpdateServiceBackend { ... }
+             | ServiceReady { ... }
+             | DestroyService { ... }
              | FabricRouteSync { ... }
              | FabricRouteUpdate { ... }
              | LaunchPod { ... }
@@ -370,6 +457,7 @@ WorkerEvent = NamespaceCreated { ... }
            | PodFailed { ... }
            | ShuttingDown
            | PodLogStreamError { ... }
+           | ServiceActivation { ... }
            | FabricRouteMiss { ... }
 ```
 
@@ -406,10 +494,11 @@ In local mode, the CLI embeds a minimal orchestrator in-process:
 1. Creates a `tokio::io::duplex` pair and connects orchestrator/worker over it via yamux
 2. Starts an in-process worker on one end
 3. Parses compose file into a `Deployment`
-4. Plans execution (IP assignment, ordering)
-5. Sends `CreateNamespace`, `RegistrySync`, then `LaunchPod` for each service
-6. Accepts log streams from the worker and streams output to the terminal
-7. On Ctrl-C, sends `StopPod` for each pod, then `DestroyNamespace`
+4. Plans execution (IP assignment for pods and services, ordering)
+5. Sends `CreateNamespace`, `RegistrySync`, `CreateService` for each service, then `LaunchPod` for each pod
+6. As pods report `PodRunning`, sends `UpdateServiceBackend` + `ServiceReady` for their services
+7. Accepts log streams from the worker and streams output to the terminal
+8. On Ctrl-C, sends `StopPod` for each pod, `DestroyService` for each service, then `DestroyNamespace`
 
 The orchestrator logic is trivial in this mode, but the worker sees the exact same protocol it would in distributed mode.
 
@@ -470,4 +559,5 @@ These are out of scope but the protocol is designed to accommodate them:
 - **Health Checks**: `HealthCheck` in `ContainerSpec` — the worker runs health checks and reports `PodHealthy`/`PodUnhealthy` events.
 - **Exec**: `ExecInPod { pod_id, container_id, command }` — run a command in a running container.
 - **Tunnel Management**: `ConnectFabric { namespace, peer_worker, tunnel_config }` — orchestrator tells workers to establish tunnel ports between each other.
-- **Autoscaling / Scale-to-Zero**: orchestrator-level concerns that don't change the worker protocol — the orchestrator just sends LaunchPod/StopPod/SuspendPod/ResumePod as needed.
+- **Autoscaling / Scale-to-Zero**: orchestrator-level concerns built on the service model — the orchestrator reacts to `ServiceActivation` events by scheduling pods, and manages service backend assignment. No additional worker protocol changes needed.
+- **Protocol Activators**: `ServicePolicy` can be extended with protocol-aware activation (TCP SYN hold, HTTP/2 stream detection). These layer on top of the basic service buffering model — same commands, richer policy.

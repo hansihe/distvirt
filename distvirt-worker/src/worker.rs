@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::task_handle::TaskHandle;
 
-use crate::fabric::{DnsRegistry, Fabric, FabricGateway};
+use crate::fabric::{DnsRegistry, Fabric, FabricEvent, FabricGateway, RouteTable};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
 use crate::managed_vm::{ImageOverrides, ManagedVm, merge_config};
@@ -57,7 +57,9 @@ struct PodState {
 /// the one-for-all supervision pattern instead of growing this struct.
 struct NamespaceState {
     fabric: Arc<tokio::sync::Mutex<Fabric>>,
+    route_table: Arc<std::sync::Mutex<RouteTable>>,
     _gateway_task: TaskHandle<()>,
+    _event_bridge_task: TaskHandle<()>,
     registry: DnsRegistry,
     pods: HashMap<String, PodState>,
     token: CancellationToken,
@@ -213,6 +215,15 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 pod_id,
                 graceful,
             } => self.handle_stop_pod(&namespace_id, &pod_id, graceful).await,
+            WorkerCommand::FabricRouteSync {
+                namespace_id,
+                routes,
+            } => self.handle_fabric_route_sync(&namespace_id, routes),
+            WorkerCommand::FabricRouteUpdate {
+                namespace_id,
+                added,
+                removed_ips,
+            } => self.handle_fabric_route_update(&namespace_id, added, removed_ips),
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
                 unreachable!("Shutdown handled in run()")
@@ -228,6 +239,12 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let mut fabric = Fabric::new();
 
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
+
+        // Set up fabric event channel for route miss reporting.
+        let (fabric_event_tx, mut fabric_event_rx) = mpsc::channel::<FabricEvent>(64);
+        fabric.set_event_channel(fabric_event_tx);
+
+        let route_table = fabric.route_table();
 
         let pod_gateway_ip = network.gateway.octets();
         let (gateway, egress_tx, ingress_rx) =
@@ -259,6 +276,24 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             ns_cancel.cancel();
         });
 
+        // Bridge task: map FabricEvent::RouteMiss to WorkerEvent::FabricRouteMiss.
+        let bridge_event_tx = self.bg_event_tx.clone();
+        let bridge_ns_id = namespace_id.clone();
+        let event_bridge_task = TaskHandle::spawn(async move {
+            while let Some(event) = fabric_event_rx.recv().await {
+                match event {
+                    FabricEvent::RouteMiss { dst_ip, dst_mac } => {
+                        let _ = bridge_event_tx
+                            .try_send(WorkerEvent::FabricRouteMiss {
+                                namespace_id: bridge_ns_id.clone(),
+                                dst_ip,
+                                dst_mac,
+                            });
+                    }
+                }
+            }
+        });
+
         log::info!(
             "worker: created namespace '{}' with fabric + gateway",
             namespace_id
@@ -266,7 +301,9 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
         let ns = NamespaceState {
             fabric: Arc::new(tokio::sync::Mutex::new(fabric)),
+            route_table,
             _gateway_task: gateway_task,
+            _event_bridge_task: event_bridge_task,
             registry,
             pods: HashMap::new(),
             token: ns_token,
@@ -337,6 +374,49 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         }
 
         log::info!("worker: synced registry for namespace '{}'", namespace_id);
+        Ok(())
+    }
+
+    fn handle_fabric_route_sync(
+        &mut self,
+        namespace_id: &str,
+        routes: Vec<distvirt_worker_protocol::FabricRouteEntry>,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let mut rt = ns.route_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("route table lock poisoned: {}", e))
+        })?;
+        rt.sync(routes);
+
+        log::info!(
+            "worker: synced fabric routes for namespace '{}'",
+            namespace_id
+        );
+        Ok(())
+    }
+
+    fn handle_fabric_route_update(
+        &mut self,
+        namespace_id: &str,
+        added: Vec<distvirt_worker_protocol::FabricRouteEntry>,
+        removed_ips: Vec<std::net::Ipv4Addr>,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let mut rt = ns.route_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("route table lock poisoned: {}", e))
+        })?;
+        rt.update(added, removed_ips);
+
+        log::info!(
+            "worker: updated fabric routes for namespace '{}'",
+            namespace_id
+        );
         Ok(())
     }
 
@@ -623,7 +703,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         let (_port_id, task) = fabric
             .lock()
             .await
-            .add_port(tap)
+            .add_port_with_ip(tap, network.ip)
             .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
         log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
         Some(task)

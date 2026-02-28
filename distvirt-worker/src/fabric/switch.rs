@@ -64,6 +64,23 @@ pub fn parse_ethernet_header(frame: &[u8]) -> Option<([u8; 6], [u8; 6], u16)> {
     Some((dst, src, ethertype))
 }
 
+/// Extract the destination IPv4 address from an Ethernet frame (without vnet header).
+/// Returns `Some(ip)` if the frame is IPv4 (ethertype 0x0800) and long enough
+/// to contain the IP destination address (20 bytes of IP header minimum).
+pub fn extract_ipv4_dst(frame: &[u8]) -> Option<std::net::Ipv4Addr> {
+    // frame layout: [dst_mac(6)][src_mac(6)][ethertype(2)][ip_header...]
+    // IP dest address is at IP header offset 16..20 (absolute frame offset 30..34).
+    if frame.len() < ETH_HEADER_LEN + 20 {
+        return None;
+    }
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    if ethertype != 0x0800 {
+        return None;
+    }
+    let dst_ip = std::net::Ipv4Addr::new(frame[30], frame[31], frame[32], frame[33]);
+    Some(dst_ip)
+}
+
 /// Format a MAC address for logging.
 pub fn format_mac(bytes: &[u8; 6]) -> String {
     format!(
@@ -164,6 +181,43 @@ mod tests {
     #[test]
     fn parse_ethernet_header_empty() {
         assert!(parse_ethernet_header(&[]).is_none());
+    }
+
+    // --- format_mac tests ---
+
+    // --- extract_ipv4_dst tests ---
+
+    #[test]
+    fn extract_ipv4_dst_valid_ipv4_frame() {
+        // Build a minimal IPv4 frame: 14 byte eth header + 20 byte IP header.
+        let mut frame = [0u8; 34];
+        // ethertype = 0x0800 (IPv4)
+        frame[12] = 0x08;
+        frame[13] = 0x00;
+        // IP dest at offset 30..34 = 192.168.1.42
+        frame[30] = 192;
+        frame[31] = 168;
+        frame[32] = 1;
+        frame[33] = 42;
+        assert_eq!(
+            extract_ipv4_dst(&frame),
+            Some(std::net::Ipv4Addr::new(192, 168, 1, 42))
+        );
+    }
+
+    #[test]
+    fn extract_ipv4_dst_non_ipv4_ethertype() {
+        let mut frame = [0u8; 34];
+        // ethertype = 0x0806 (ARP)
+        frame[12] = 0x08;
+        frame[13] = 0x06;
+        assert_eq!(extract_ipv4_dst(&frame), None);
+    }
+
+    #[test]
+    fn extract_ipv4_dst_frame_too_short() {
+        let frame = [0u8; 33]; // needs at least 34
+        assert_eq!(extract_ipv4_dst(&frame), None);
     }
 
     // --- format_mac tests ---

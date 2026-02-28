@@ -1,6 +1,7 @@
 pub(crate) mod dns;
 pub(crate) mod gateway;
 pub(crate) mod port;
+pub(crate) mod route;
 pub(crate) mod switch;
 pub(crate) mod tun;
 
@@ -8,14 +9,24 @@ pub use dns::DnsRegistry;
 pub use gateway::FabricGateway;
 pub use switch::GATEWAY_IP_STR;
 pub use port::{FramePort, Port, PortId};
+pub use route::RouteTable;
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
-use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, format_mac, is_broadcast, parse_ethernet_header};
+use route::RouteAction;
+use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, extract_ipv4_dst, format_mac, is_broadcast, parse_ethernet_header};
+
+/// Fabric-internal event emitted when the route table is consulted.
+#[derive(Debug, Clone)]
+pub enum FabricEvent {
+    /// A frame hit a placeholder route or no route was found for a routed IP.
+    RouteMiss { dst_ip: Ipv4Addr, dst_mac: [u8; 6] },
+}
 
 /// Shared port handle that can be used by any reader task to send frames.
 type SharedPort<P> = Arc<P>;
@@ -48,8 +59,10 @@ impl<P: FramePort> Drop for PortGuard<P> {
 pub struct Fabric<P: FramePort = Port> {
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
+    route_table: Arc<Mutex<RouteTable>>,
     next_port_id: PortId,
     gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
+    event_tx: Option<mpsc::Sender<FabricEvent>>,
     _gateway_ingress_task: Option<TaskHandle<()>>,
 }
 
@@ -75,10 +88,62 @@ impl Fabric<Port> {
             Arc::clone(&port),
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
+            Arc::clone(&self.route_table),
             self.gateway_tx.clone(),
+            self.event_tx.clone(),
         ));
 
         log::info!("fabric: added port {}", port_id);
+        Ok((port_id, task))
+    }
+
+    /// Add a TAP device as a port, flush any buffered frames for `pod_ip`,
+    /// and start the forwarding task.
+    pub fn add_port_with_ip(
+        &mut self,
+        tap: TapDevice,
+        pod_ip: Ipv4Addr,
+    ) -> std::io::Result<(PortId, TaskHandle<()>)> {
+        let port_id = self.next_port_id;
+        self.next_port_id += 1;
+
+        let port = Arc::new(Port::new(tap)?);
+
+        {
+            let mut ports = self.ports.lock().unwrap();
+            ports.insert(port_id, Arc::clone(&port));
+        }
+
+        // Flush buffered frames for this IP and send them to the new port.
+        let buffered = {
+            let mut rt = self.route_table.lock().unwrap();
+            rt.flush_buffer(pod_ip)
+        };
+        if !buffered.is_empty() {
+            let flush_port = Arc::clone(&port);
+            let count = buffered.len();
+            tokio::spawn(async move {
+                for frame in buffered {
+                    if let Err(e) = flush_port.send_frame(&frame).await {
+                        log::warn!("fabric: flush buffered frame error: {}", e);
+                        break;
+                    }
+                }
+                log::info!("fabric: flushed {} buffered frames to port {}", count, port_id);
+            });
+        }
+
+        let task = TaskHandle::spawn(port_read_loop(
+            port_id,
+            Arc::clone(&port),
+            Arc::clone(&self.ports),
+            Arc::clone(&self.mac_table),
+            Arc::clone(&self.route_table),
+            self.gateway_tx.clone(),
+            self.event_tx.clone(),
+        ));
+
+        log::info!("fabric: added port {} with ip {}", port_id, pod_ip);
         Ok((port_id, task))
     }
 }
@@ -89,8 +154,10 @@ impl<P: FramePort> Fabric<P> {
         Fabric {
             ports: Arc::new(Mutex::new(HashMap::new())),
             mac_table: Arc::new(Mutex::new(MacTable::new())),
+            route_table: Arc::new(Mutex::new(RouteTable::new())),
             next_port_id: 0,
             gateway_tx: None,
+            event_tx: None,
             _gateway_ingress_task: None,
         }
     }
@@ -115,10 +182,57 @@ impl<P: FramePort> Fabric<P> {
             Arc::clone(&port),
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
+            Arc::clone(&self.route_table),
             self.gateway_tx.clone(),
+            self.event_tx.clone(),
         ));
 
         log::info!("fabric: added port {}", port_id);
+        (port_id, task)
+    }
+
+    /// Add a pre-constructed port with an associated IP, flush buffered frames,
+    /// and start the forwarding task.
+    pub fn add_port_raw_with_ip(&mut self, port: P, pod_ip: Ipv4Addr) -> (PortId, TaskHandle<()>) {
+        let port_id = self.next_port_id;
+        self.next_port_id += 1;
+
+        let port = Arc::new(port);
+
+        {
+            let mut ports = self.ports.lock().unwrap();
+            ports.insert(port_id, Arc::clone(&port));
+        }
+
+        let buffered = {
+            let mut rt = self.route_table.lock().unwrap();
+            rt.flush_buffer(pod_ip)
+        };
+        if !buffered.is_empty() {
+            let flush_port = Arc::clone(&port);
+            let count = buffered.len();
+            tokio::spawn(async move {
+                for frame in buffered {
+                    if let Err(e) = flush_port.send_frame(&frame).await {
+                        log::warn!("fabric: flush buffered frame error: {}", e);
+                        break;
+                    }
+                }
+                log::info!("fabric: flushed {} buffered frames to port {}", count, port_id);
+            });
+        }
+
+        let task = TaskHandle::spawn(port_read_loop(
+            port_id,
+            Arc::clone(&port),
+            Arc::clone(&self.ports),
+            Arc::clone(&self.mac_table),
+            Arc::clone(&self.route_table),
+            self.gateway_tx.clone(),
+            self.event_tx.clone(),
+        ));
+
+        log::info!("fabric: added port {} with ip {}", port_id, pod_ip);
         (port_id, task)
     }
 
@@ -136,11 +250,28 @@ impl<P: FramePort> Fabric<P> {
 
         let ports = Arc::clone(&self.ports);
         let mac_table = Arc::clone(&self.mac_table);
+        let route_table = Arc::clone(&self.route_table);
+        let event_tx = self.event_tx.clone();
 
-        self._gateway_ingress_task =
-            Some(TaskHandle::spawn(gateway_ingress_task(ingress_rx, ports, mac_table)));
+        self._gateway_ingress_task = Some(TaskHandle::spawn(gateway_ingress_task(
+            ingress_rx,
+            ports,
+            mac_table,
+            route_table,
+            event_tx,
+        )));
 
         log::info!("fabric: gateway connected");
+    }
+
+    /// Set the event channel for fabric events (route misses, etc.).
+    pub fn set_event_channel(&mut self, tx: mpsc::Sender<FabricEvent>) {
+        self.event_tx = Some(tx);
+    }
+
+    /// Get a reference to the route table.
+    pub fn route_table(&self) -> Arc<Mutex<RouteTable>> {
+        Arc::clone(&self.route_table)
     }
 }
 
@@ -151,7 +282,9 @@ async fn port_read_loop<P: FramePort>(
     port: SharedPort<P>,
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
+    route_table: Arc<Mutex<RouteTable>>,
     gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
+    event_tx: Option<mpsc::Sender<FabricEvent>>,
 ) {
     // PortGuard removes this port from the map when this task exits for any reason.
     let _guard = PortGuard {
@@ -238,8 +371,10 @@ async fn port_read_loop<P: FramePort>(
                     }
                 }
             } else {
-                // Unknown unicast: flood to all other ports.
-                flood_frame(frame, port_id, &ports).await;
+                // Unknown unicast: consult route table for IPv4 frames.
+                handle_unknown_unicast(
+                    frame, dst_mac, port_id, &ports, &route_table, &event_tx,
+                ).await;
             }
         }
     }
@@ -251,6 +386,8 @@ async fn gateway_ingress_task<P: FramePort>(
     mut ingress_rx: mpsc::Receiver<Vec<u8>>,
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
+    route_table: Arc<Mutex<RouteTable>>,
+    event_tx: Option<mpsc::Sender<FabricEvent>>,
 ) {
     while let Some(frame) = ingress_rx.recv().await {
         if frame.len() < VNET_HDR_SZ {
@@ -282,13 +419,66 @@ async fn gateway_ingress_task<P: FramePort>(
                     }
                 }
             } else {
-                // Unknown unicast: flood.
-                flood_frame(&frame, PortId::MAX, &ports).await;
+                // Unknown unicast: consult route table for IPv4 frames.
+                handle_unknown_unicast(
+                    &frame, dst_mac, PortId::MAX, &ports, &route_table, &event_tx,
+                ).await;
             }
         }
     }
 
     log::info!("fabric: gateway ingress task ended");
+}
+
+/// Handle unknown unicast: consult the route table for IPv4 frames,
+/// otherwise flood as before.
+async fn handle_unknown_unicast<P: FramePort>(
+    frame: &[u8],
+    dst_mac: [u8; 6],
+    src_port_id: PortId,
+    ports: &Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
+    route_table: &Arc<Mutex<RouteTable>>,
+    event_tx: &Option<mpsc::Sender<FabricEvent>>,
+) {
+    // Try to extract IPv4 destination from the frame (skip vnet header).
+    let eth_frame = &frame[VNET_HDR_SZ..];
+    if let Some(dst_ip) = extract_ipv4_dst(eth_frame) {
+        let (action, should_miss) = {
+            let mut rt = route_table.lock().unwrap();
+            rt.lookup_and_buffer(dst_ip, frame)
+        };
+
+        match action {
+            RouteAction::Buffered => {
+                log::trace!("fabric: frame to {} buffered", dst_ip);
+            }
+            RouteAction::Drop => {
+                log::trace!("fabric: frame to {} dropped by route policy", dst_ip);
+            }
+            RouteAction::RemoteWorker { worker_id } => {
+                log::debug!(
+                    "fabric: frame to {} destined for remote worker {} (stub: dropping)",
+                    dst_ip, worker_id
+                );
+            }
+            RouteAction::NoRoute => {
+                // No route entry — flood as before.
+                flood_frame(frame, src_port_id, ports).await;
+            }
+        }
+
+        if should_miss {
+            if let Some(tx) = event_tx {
+                let _ = tx.try_send(FabricEvent::RouteMiss {
+                    dst_ip,
+                    dst_mac,
+                });
+            }
+        }
+    } else {
+        // Non-IPv4 unknown unicast: flood as before.
+        flood_frame(frame, src_port_id, ports).await;
+    }
 }
 
 /// Send a frame to all ports except the source port.
@@ -707,5 +897,203 @@ mod tests {
         let frame = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
         // Should not panic.
         flood_frame::<TestPort>(&frame, 0, &ports).await;
+    }
+
+    // --- Route-aware forwarding tests ---
+
+    /// Build a valid IPv4 test frame with specific dst IP.
+    /// Layout: [vnet_hdr(10)][eth_hdr(14)][ip_hdr(20)]
+    fn make_ipv4_frame(dst_mac: [u8; 6], src_mac: [u8; 6], dst_ip: Ipv4Addr) -> Vec<u8> {
+        let mut frame = vec![0u8; VNET_HDR_SZ]; // zeroed vnet header
+        // Ethernet header
+        frame.extend_from_slice(&dst_mac);
+        frame.extend_from_slice(&src_mac);
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        // Minimal IP header (20 bytes)
+        let mut ip_hdr = [0u8; 20];
+        ip_hdr[0] = 0x45; // version=4, IHL=5
+        // src IP at offset 12..16
+        ip_hdr[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        // dst IP at offset 16..20
+        let dst_octets = dst_ip.octets();
+        ip_hdr[16..20].copy_from_slice(&dst_octets);
+        frame.extend_from_slice(&ip_hdr);
+        frame
+    }
+
+    /// Helper: try to receive a FabricEvent with timeout.
+    async fn try_recv_event(rx: &mut tokio_mpsc::Receiver<FabricEvent>) -> Option<FabricEvent> {
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    #[tokio::test]
+    async fn placeholder_route_buffers_instead_of_flooding() {
+        use distvirt_worker_protocol::{
+            BufferPolicy, FabricRouteEntry, RouteDestination,
+        };
+
+        let mut fabric: Fabric<TestPort> = Fabric::new();
+        let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
+        fabric.set_event_channel(event_tx);
+
+        let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
+
+        // Add a placeholder route for pod_ip.
+        {
+            let rt_arc = fabric.route_table();
+            let mut rt = rt_arc.lock().unwrap();
+            rt.sync(vec![FabricRouteEntry {
+                ip: pod_ip,
+                mac: MAC_C,
+                destination: RouteDestination::Placeholder {
+                    buffer_policy: BufferPolicy {
+                        hold_tcp_syn: false,
+                        buffer_frames: 10,
+                        timeout_ms: 5000,
+                    },
+                },
+            }]);
+        }
+
+        let (port0, handle0) = make_test_port();
+        let (port1, handle1) = make_test_port();
+
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
+
+        // Port 0 sends an IPv4 frame to the placeholder IP with unknown dst MAC.
+        let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+        handle0.inject_tx.send(frame).await.unwrap();
+
+        // Port 1 should NOT receive the frame (it was buffered, not flooded).
+        assert_no_frame(&handle1).await;
+
+        // A route miss event should have been emitted.
+        let event = try_recv_event(&mut event_rx).await;
+        assert!(matches!(event, Some(FabricEvent::RouteMiss { dst_ip: ip, .. }) if ip == pod_ip));
+    }
+
+    #[tokio::test]
+    async fn no_route_still_floods() {
+        let mut fabric: Fabric<TestPort> = Fabric::new();
+
+        let (port0, handle0) = make_test_port();
+        let (port1, handle1) = make_test_port();
+        let (port2, handle2) = make_test_port();
+
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+        let (_id1, _task1) = fabric.add_port_raw(port1);
+        let (_id2, _task2) = fabric.add_port_raw(port2);
+
+        // Port 0 sends IPv4 frame to unknown MAC with no route entry.
+        let pod_ip = Ipv4Addr::new(172, 16, 0, 99);
+        let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+        handle0.inject_tx.send(frame).await.unwrap();
+
+        // Both other ports should receive the flooded frame.
+        assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
+        assert!(try_recv(&handle2).await.is_some(), "port 2 should receive flooded frame");
+    }
+
+    #[tokio::test]
+    async fn buffered_frames_flushed_to_new_port() {
+        use distvirt_worker_protocol::{
+            BufferPolicy, FabricRouteEntry, RouteDestination,
+        };
+
+        let mut fabric: Fabric<TestPort> = Fabric::new();
+
+        let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
+
+        // Add a placeholder route.
+        {
+            let rt_arc = fabric.route_table();
+            let mut rt = rt_arc.lock().unwrap();
+            rt.sync(vec![FabricRouteEntry {
+                ip: pod_ip,
+                mac: MAC_C,
+                destination: RouteDestination::Placeholder {
+                    buffer_policy: BufferPolicy {
+                        hold_tcp_syn: false,
+                        buffer_frames: 10,
+                        timeout_ms: 5000,
+                    },
+                },
+            }]);
+        }
+
+        let (port0, handle0) = make_test_port();
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+
+        // Send 3 frames to the placeholder IP.
+        for _ in 0..3 {
+            let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+            handle0.inject_tx.send(frame).await.unwrap();
+        }
+
+        // Let the port read loop process the frames.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Now add a new port "for" that IP — buffered frames should be flushed to it.
+        let (port_new, handle_new) = make_test_port();
+        let (_id_new, _task_new) = fabric.add_port_raw_with_ip(port_new, pod_ip);
+
+        // The new port should receive the 3 buffered frames.
+        for i in 0..3 {
+            let frame = try_recv(&handle_new).await;
+            assert!(frame.is_some(), "new port should receive buffered frame {}", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn route_miss_debounced_on_rapid_frames() {
+        use distvirt_worker_protocol::{
+            BufferPolicy, FabricRouteEntry, RouteDestination,
+        };
+
+        let mut fabric: Fabric<TestPort> = Fabric::new();
+        let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
+        fabric.set_event_channel(event_tx);
+
+        let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
+
+        {
+            let rt_arc = fabric.route_table();
+            let mut rt = rt_arc.lock().unwrap();
+            rt.sync(vec![FabricRouteEntry {
+                ip: pod_ip,
+                mac: MAC_C,
+                destination: RouteDestination::Placeholder {
+                    buffer_policy: BufferPolicy {
+                        hold_tcp_syn: false,
+                        buffer_frames: 100,
+                        timeout_ms: 5000,
+                    },
+                },
+            }]);
+        }
+
+        let (port0, handle0) = make_test_port();
+        let (_id0, _task0) = fabric.add_port_raw(port0);
+
+        // Send multiple frames rapidly.
+        for _ in 0..5 {
+            let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+            handle0.inject_tx.send(frame).await.unwrap();
+        }
+
+        // Wait for processing.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Should get exactly one miss event (debounced).
+        let event1 = try_recv_event(&mut event_rx).await;
+        assert!(event1.is_some(), "should get one route miss event");
+
+        // No second event within debounce window.
+        let event2 = try_recv_event(&mut event_rx).await;
+        assert!(event2.is_none(), "second miss should be debounced");
     }
 }

@@ -47,6 +47,34 @@ pub struct RegistryEntry {
     pub ip: Ipv4Addr,
 }
 
+/// Buffer policy for placeholder routes (scale-to-zero / suspended pods).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BufferPolicy {
+    /// Hold TCP SYN connections at the gateway level (no-op for now, stored for future use).
+    pub hold_tcp_syn: bool,
+    /// Maximum number of frames to buffer (0 = drop immediately).
+    pub buffer_frames: u32,
+    /// How long to buffer before giving up, in milliseconds.
+    pub timeout_ms: u32,
+}
+
+/// Where a fabric route entry points.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RouteDestination {
+    /// The pod is live on another worker.
+    RemoteWorker { worker_id: String },
+    /// The pod is not currently running (suspended, scaled-to-zero).
+    Placeholder { buffer_policy: BufferPolicy },
+}
+
+/// A single entry in the fabric routing table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FabricRouteEntry {
+    pub ip: Ipv4Addr,
+    pub mac: [u8; 6],
+    pub destination: RouteDestination,
+}
+
 /// Output stream identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputStream {
@@ -78,6 +106,15 @@ pub enum WorkerCommand {
         namespace_id: String,
         pod_id: String,
         graceful: bool,
+    },
+    FabricRouteSync {
+        namespace_id: String,
+        routes: Vec<FabricRouteEntry>,
+    },
+    FabricRouteUpdate {
+        namespace_id: String,
+        added: Vec<FabricRouteEntry>,
+        removed_ips: Vec<Ipv4Addr>,
     },
     Shutdown,
 }
@@ -113,6 +150,11 @@ pub enum WorkerEvent {
         container_id: String,
         phase: String,
         error: String,
+    },
+    FabricRouteMiss {
+        namespace_id: String,
+        dst_ip: Ipv4Addr,
+        dst_mac: [u8; 6],
     },
 }
 
