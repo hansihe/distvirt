@@ -223,7 +223,7 @@ async fn run_single_container(
         None
     };
 
-    let mut vm = ManagedVm::connect(instance).await?;
+    let (mut vm, _yamux_driver) = ManagedVm::connect(instance).await?;
 
     if let Some(ref net_config) = vm_config.net {
         vm.configure_network("eth0", net_config).await?;

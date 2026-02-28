@@ -28,10 +28,9 @@ pub struct VmConfig {
 }
 
 /// A VMM implementation that can launch VMs.
-#[allow(async_fn_in_trait)]
 pub trait Vmm: Send + Sync {
     type Instance: VmInstance;
-    async fn launch(&self, config: &VmConfig) -> anyhow::Result<Self::Instance>;
+    fn launch(&self, config: &VmConfig) -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
 }
 
 /// A running VM instance.

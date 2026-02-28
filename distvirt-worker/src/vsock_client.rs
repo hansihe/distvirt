@@ -5,6 +5,8 @@ use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
+use crate::task_handle::TaskHandle;
+
 use distvirt_guest_protocol::StreamHeader;
 
 type YamuxStream = yamux::Stream;
@@ -24,7 +26,7 @@ impl GuestSession {
     /// Opens the control stream, sends `StreamHeader::Control`, and spawns
     /// a background task that drives the yamux connection and collects
     /// incoming streams from the guest.
-    pub async fn new(socket: tokio::net::UnixStream) -> anyhow::Result<Self> {
+    pub async fn new(socket: tokio::net::UnixStream) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>)> {
         // Convert tokio socket to futures-io compatible.
         let compat_socket = socket.compat();
 
@@ -79,21 +81,21 @@ impl GuestSession {
             let _ = incoming_tx.send(stream);
         }
 
-        tokio::spawn(async move {
+        let yamux_driver = TaskHandle::spawn(async move {
             loop {
                 match poll_fn(|cx| conn.poll_next_inbound(cx)).await {
                     Some(Ok(stream)) => {
                         if incoming_tx.send(stream).is_err() {
-                            break; // receiver dropped
+                            return Ok(()); // receiver dropped
                         }
                     }
                     Some(Err(e)) => {
                         log::error!("yamux connection error: {}", e);
-                        break;
+                        return Err(anyhow::anyhow!("yamux connection error: {}", e));
                     }
                     None => {
                         log::info!("yamux connection closed by guest");
-                        break;
+                        return Ok(());
                     }
                 }
             }
@@ -114,10 +116,10 @@ impl GuestSession {
             .context("write header payload")?;
         control.flush().await.context("flush header")?;
 
-        Ok(GuestSession {
+        Ok((GuestSession {
             control,
             incoming_rx,
-        })
+        }, yamux_driver))
     }
 
     /// Send a length-prefixed JSON message on the control stream.

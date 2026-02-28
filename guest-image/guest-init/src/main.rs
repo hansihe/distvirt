@@ -480,9 +480,12 @@ fn main() {
         log::error!("fatal: {:#}", e);
     }
 
-    log::info!("powering off");
+    log::info!("shutting down");
     unsafe { libc::sync(); }
-    unsafe { libc::reboot(libc::RB_POWER_OFF); }
+    // Use reboot (not power-off): Firecracker doesn't support ACPI power-off,
+    // so RB_POWER_OFF halts the vCPU but leaves the process running.
+    // RB_AUTOBOOT triggers a triple fault which causes KVM/Firecracker to exit.
+    unsafe { libc::reboot(libc::RB_AUTOBOOT); }
     loop {
         unsafe { libc::pause(); }
     }

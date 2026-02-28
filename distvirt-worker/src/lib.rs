@@ -8,4 +8,5 @@ pub mod managed_vm;
 pub mod tap;
 pub mod vmm;
 pub mod vsock_client;
+pub mod task_handle;
 pub mod worker;

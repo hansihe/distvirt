@@ -79,6 +79,7 @@ pub enum WorkerCommand {
         pod_id: String,
         graceful: bool,
     },
+    Shutdown,
 }
 
 /// Events emitted by the worker back to the orchestrator.
@@ -101,6 +102,7 @@ pub enum WorkerEvent {
         pod_id: String,
         error: String,
     },
+    ShuttingDown,
     PodLogStreamError {
         namespace_id: String,
         pod_id: String,

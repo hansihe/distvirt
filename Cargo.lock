@@ -562,6 +562,7 @@ dependencies = [
  "containerd-client",
  "distvirt-guest-protocol",
  "distvirt-worker-protocol",
+ "env_logger",
  "futures-lite",
  "libc",
  "log",

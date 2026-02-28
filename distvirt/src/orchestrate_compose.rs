@@ -207,6 +207,10 @@ pub async fn run_compose(
                             break;
                         }
                     }
+                    WorkerEvent::ShuttingDown => {
+                        log::info!("worker is shutting down");
+                        break;
+                    }
                     WorkerEvent::PodLogStreamError {
                         namespace_id: _,
                         pod_id,

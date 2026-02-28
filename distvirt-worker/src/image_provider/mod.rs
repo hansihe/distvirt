@@ -2,6 +2,7 @@ pub mod containerd_overlayfs;
 pub mod rootfs_dir;
 
 use std::any::Any;
+use std::future::Future;
 use std::path::PathBuf;
 
 use crate::containerd::ImageConfig;
@@ -34,7 +35,6 @@ impl PreparedArtifact {
 ///
 /// Implementations interpret `image_ref` according to their backend
 /// (e.g. a directory path, an OCI image reference, etc).
-#[allow(async_fn_in_trait)]
 pub trait ImageProvider: Send + Sync {
-    async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact>;
+    fn prepare(&self, image_ref: &str) -> impl Future<Output = anyhow::Result<PreparedArtifact>> + Send;
 }

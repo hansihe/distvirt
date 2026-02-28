@@ -6,6 +6,7 @@ use distvirt_worker_protocol::ContainerConfig;
 use crate::containerd::{parse_user_numeric, ImageConfig};
 use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, VmInstance};
+use crate::task_handle::TaskHandle;
 use crate::vsock_client::GuestSession;
 
 /// Overrides that can be specified on the CLI to override image config.
@@ -30,14 +31,14 @@ impl<I: VmInstance> ManagedVm<I> {
     ///
     /// Connects to the guest over vsock, establishes a yamux session,
     /// and waits for the Ready message.
-    pub async fn connect(instance: I) -> anyhow::Result<Self> {
+    pub async fn connect(instance: I) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>)> {
         log::info!("connecting vsock");
         let stream = instance
             .connect_vsock(VSOCK_CONTROL_PORT)
             .await
             .context("connect vsock")?;
 
-        let mut session = GuestSession::new(stream)
+        let (mut session, yamux_driver) = GuestSession::new(stream)
             .await
             .context("establish yamux session")?;
 
@@ -47,7 +48,7 @@ impl<I: VmInstance> ManagedVm<I> {
             other => bail!("expected Ready, got {:?}", other),
         }
 
-        Ok(ManagedVm { instance, session })
+        Ok((ManagedVm { instance, session }, yamux_driver))
     }
 
     /// Configure the guest's network interface.
@@ -170,13 +171,18 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 
     /// Shut down the guest and wait for the VM to exit.
-    pub async fn shutdown(mut self) -> anyhow::Result<()> {
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
         self.session
             .send(&HostMessage::Shutdown)
             .await
             .context("send Shutdown")?;
         self.instance.wait().await.context("wait for VM")?;
         Ok(())
+    }
+
+    /// Forcibly kill the VM process.
+    pub async fn force_kill(&mut self) -> anyhow::Result<()> {
+        self.instance.kill().await.context("kill VM")
     }
 }
 
