@@ -1,4 +1,5 @@
 pub(crate) mod dns;
+mod forwarding;
 pub(crate) mod gateway;
 pub(crate) mod port;
 pub(crate) mod route;
@@ -20,9 +21,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
-use route::RouteAction;
-use service::ServiceAction;
-use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, extract_ipv4_dst, format_mac, is_broadcast, parse_ethernet_header};
+use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogLevel};
+use forwarding::{port_read_loop, gateway_ingress_task};
+use switch::{MacTable, VNET_HDR_SZ, format_mac};
 
 /// Fabric-internal event emitted when the route table or service table is consulted.
 #[derive(Debug, Clone)]
@@ -31,27 +32,16 @@ pub enum FabricEvent {
     RouteMiss { dst_ip: Ipv4Addr, dst_mac: [u8; 6] },
     /// A frame hit a service IP that has no ready backend.
     ServiceActivation { service_id: String, dst_ip: Ipv4Addr },
+    /// An activator signaled a backend need level change.
+    ServiceBackendNeed {
+        service_id: String,
+        dst_ip: Ipv4Addr,
+        need: distvirt_worker_protocol::BackendNeed,
+    },
 }
 
 /// Shared port handle that can be used by any reader task to send frames.
 type SharedPort<P> = Arc<P>;
-
-/// RAII guard that removes a port from the fabric's port map on drop.
-///
-/// Created at the top of each port read loop. Guarantees cleanup whether the
-/// task exits normally, errors out, or is aborted.
-struct PortGuard<P: FramePort> {
-    port_id: PortId,
-    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-}
-
-impl<P: FramePort> Drop for PortGuard<P> {
-    fn drop(&mut self) {
-        let mut ports = self.ports.lock().unwrap();
-        ports.remove(&self.port_id);
-        log::info!("fabric: port {} removed (guard dropped)", self.port_id);
-    }
-}
 
 /// The L2 fabric switch.
 ///
@@ -292,6 +282,103 @@ impl<P: FramePort> Fabric<P> {
         Arc::clone(&self.service_table)
     }
 
+    /// Send raw Ethernet frames (no vnet header) out to the port that owns
+    /// the given destination MAC. Prepends a zeroed vnet header before sending.
+    pub fn send_l4_frames(&self, frames: Vec<Vec<u8>>) {
+        if frames.is_empty() {
+            return;
+        }
+        let mac_table = self.mac_table.lock().unwrap();
+        let ports = self.ports.lock().unwrap();
+
+        // Group frames by destination port for efficiency.
+        for eth_frame in frames {
+            if eth_frame.len() < 6 {
+                continue;
+            }
+            let dst_mac: [u8; 6] = eth_frame[0..6].try_into().unwrap();
+            if let Some(port_id) = mac_table.lookup(&dst_mac) {
+                if let Some(port) = ports.get(&port_id) {
+                    let port = Arc::clone(port);
+                    let mut frame = vec![0u8; VNET_HDR_SZ];
+                    frame.extend_from_slice(&eth_frame);
+                    tokio::spawn(async move {
+                        if let Err(e) = port.send_frame(&frame).await {
+                            log::warn!("fabric: send_l4_frame error: {}", e);
+                        }
+                    });
+                }
+            } else {
+                log::debug!(
+                    "fabric: send_l4_frame: dst MAC {} not in mac_table",
+                    format_mac(&dst_mac)
+                );
+            }
+        }
+    }
+
+    /// Execute activator actions from mark_ready (replay packets, log, backend need).
+    pub fn execute_service_actions(
+        &self,
+        actions: &[Action],
+        service_id: &str,
+        event_tx: &Option<mpsc::Sender<FabricEvent>>,
+    ) {
+        let service_table = self.service_table.lock().unwrap();
+        let mac_table_inner = &*self.mac_table;
+        let ports_inner = &*self.ports;
+        for action in actions {
+            match action {
+                Action::ReplayPacket(raw_frame) => {
+                    if let Some(pod_mac) = service_table.get_backend_mac_by_id(service_id) {
+                        let mt = mac_table_inner.lock().unwrap();
+                        if let Some(port_id) = mt.lookup(&pod_mac) {
+                            let ports = ports_inner.lock().unwrap();
+                            if let Some(port) = ports.get(&port_id) {
+                                let port = Arc::clone(port);
+                                let mut rewritten = raw_frame.clone();
+                                if rewritten.len() >= VNET_HDR_SZ + 6 {
+                                    rewritten[VNET_HDR_SZ..VNET_HDR_SZ + 6]
+                                        .copy_from_slice(&pod_mac);
+                                }
+                                tokio::spawn(async move {
+                                    if let Err(e) = port.send_frame(&rewritten).await {
+                                        log::warn!("fabric: replay send error: {}", e);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                Action::SetBackendNeed(need) => {
+                    let proto_need = match need {
+                        ActivatorBackendNeed::None => distvirt_worker_protocol::BackendNeed::None,
+                        ActivatorBackendNeed::Traffic => distvirt_worker_protocol::BackendNeed::Traffic,
+                        ActivatorBackendNeed::Active => distvirt_worker_protocol::BackendNeed::Active,
+                    };
+                    if let Some(tx) = event_tx {
+                        let _ = tx.try_send(FabricEvent::ServiceBackendNeed {
+                            service_id: service_id.to_string(),
+                            dst_ip: std::net::Ipv4Addr::UNSPECIFIED,
+                            need: proto_need,
+                        });
+                    }
+                }
+                Action::Log(log_action) => {
+                    let msg = format!("activator[{}]: {}", service_id, log_action.message);
+                    match log_action.level {
+                        LogLevel::Trace => log::trace!("{}", msg),
+                        LogLevel::Debug => log::debug!("{}", msg),
+                        LogLevel::Info => log::info!("{}", msg),
+                        LogLevel::Warn => log::warn!("{}", msg),
+                        LogLevel::Error => log::error!("{}", msg),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Flush buffered service frames to the backend port.
     ///
     /// Looks up the backend MAC in the mac_table to find the port,
@@ -341,961 +428,5 @@ impl<P: FramePort> Fabric<P> {
     }
 }
 
-/// Per-port read loop: reads frames, learns MACs, responds to gateway ARP,
-/// and forwards/floods frames to other ports.
-async fn port_read_loop<P: FramePort>(
-    port_id: PortId,
-    port: SharedPort<P>,
-    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-    mac_table: Arc<Mutex<MacTable>>,
-    route_table: Arc<Mutex<RouteTable>>,
-    service_table: Arc<Mutex<ServiceTable>>,
-    gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
-    event_tx: Option<mpsc::Sender<FabricEvent>>,
-) {
-    // PortGuard removes this port from the map when this task exits for any reason.
-    let _guard = PortGuard {
-        port_id,
-        ports: Arc::clone(&ports),
-    };
-
-    let mut buf = vec![0u8; VNET_HDR_SZ + 1514]; // vnet header + max Ethernet frame
-
-    loop {
-        let n = match port.recv_frame(&mut buf).await {
-            Ok(0) => {
-                log::info!("fabric: port {} EOF", port_id);
-                break;
-            }
-            Ok(n) => n,
-            Err(e) => {
-                log::warn!("fabric: port {} recv error: {}", port_id, e);
-                break;
-            }
-        };
-
-        if n < VNET_HDR_SZ {
-            continue; // too short to contain vnet header
-        }
-
-        let frame = &buf[..n];
-
-        let (dst_mac, src_mac, ethertype) = match parse_ethernet_header(&frame[VNET_HDR_SZ..]) {
-            Some(h) => h,
-            None => continue, // runt frame
-        };
-
-        log::trace!(
-            "fabric: port {} frame {} -> {} ethertype=0x{:04x} len={}",
-            port_id,
-            format_mac(&src_mac),
-            format_mac(&dst_mac),
-            ethertype,
-            n,
-        );
-
-        // Learn source MAC.
-        {
-            let mut table = mac_table.lock().unwrap();
-            table.learn(src_mac, port_id);
-        }
-
-        // Forward or flood.
-        if is_broadcast(&dst_mac) || dst_mac[0] & 0x01 != 0 {
-            // Broadcast/multicast: flood to all other ports and also to gateway.
-            flood_frame(frame, port_id, &ports).await;
-            if let Some(ref gw_tx) = gateway_tx {
-                let _ = gw_tx.try_send(frame.to_vec());
-            }
-            // Check if this is an ARP request for a service IP and reply.
-            try_service_arp_reply(frame, &service_table, &port).await;
-        } else if dst_mac == GATEWAY_MAC {
-            // Gateway-destined frame: send to gateway via channel.
-            if let Some(ref gw_tx) = gateway_tx {
-                let _ = gw_tx.try_send(frame.to_vec());
-            }
-            continue;
-        } else {
-            // Unicast lookup.
-            let dst_port_id = {
-                let table = mac_table.lock().unwrap();
-                table.lookup(&dst_mac)
-            };
-
-            if let Some(dst_id) = dst_port_id {
-                if dst_id != port_id {
-                    let dst_port = {
-                        let ports = ports.lock().unwrap();
-                        ports.get(&dst_id).cloned()
-                    };
-                    if let Some(dst_port) = dst_port {
-                        if let Err(e) = dst_port.send_frame(frame).await {
-                            log::warn!(
-                                "fabric: send port {} -> {} error: {}",
-                                port_id,
-                                dst_id,
-                                e
-                            );
-                        }
-                    }
-                }
-            } else {
-                // Unknown unicast: consult service table, then route table.
-                handle_unknown_unicast(
-                    frame, dst_mac, port_id, &ports, &mac_table, &route_table,
-                    &service_table, &event_tx,
-                ).await;
-            }
-        }
-    }
-}
-
-/// Task that reads frames from the gateway ingress channel and forwards them
-/// into the fabric via MAC lookup or flooding.
-async fn gateway_ingress_task<P: FramePort>(
-    mut ingress_rx: mpsc::Receiver<Vec<u8>>,
-    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-    mac_table: Arc<Mutex<MacTable>>,
-    route_table: Arc<Mutex<RouteTable>>,
-    service_table: Arc<Mutex<ServiceTable>>,
-    event_tx: Option<mpsc::Sender<FabricEvent>>,
-) {
-    while let Some(frame) = ingress_rx.recv().await {
-        if frame.len() < VNET_HDR_SZ {
-            continue;
-        }
-        let (dst_mac, _src_mac, _ethertype) = match parse_ethernet_header(&frame[VNET_HDR_SZ..]) {
-            Some(h) => h,
-            None => continue,
-        };
-
-        if is_broadcast(&dst_mac) || dst_mac[0] & 0x01 != 0 {
-            // Broadcast/multicast: flood to all ports.
-            // Use PortId::MAX as the "source" so no port is excluded.
-            flood_frame(&frame, PortId::MAX, &ports).await;
-        } else {
-            let dst_port_id = {
-                let table = mac_table.lock().unwrap();
-                table.lookup(&dst_mac)
-            };
-
-            if let Some(dst_id) = dst_port_id {
-                let dst_port = {
-                    let ports = ports.lock().unwrap();
-                    ports.get(&dst_id).cloned()
-                };
-                if let Some(dst_port) = dst_port {
-                    if let Err(e) = dst_port.send_frame(&frame).await {
-                        log::warn!("fabric: gateway ingress send to port {} error: {}", dst_id, e);
-                    }
-                }
-            } else {
-                // Unknown unicast: consult service table, then route table.
-                handle_unknown_unicast(
-                    &frame, dst_mac, PortId::MAX, &ports, &mac_table, &route_table,
-                    &service_table, &event_tx,
-                ).await;
-            }
-        }
-    }
-
-    log::info!("fabric: gateway ingress task ended");
-}
-
-/// Handle unknown unicast: consult service table first, then route table for IPv4 frames,
-/// otherwise flood as before.
-async fn handle_unknown_unicast<P: FramePort>(
-    frame: &[u8],
-    dst_mac: [u8; 6],
-    src_port_id: PortId,
-    ports: &Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-    mac_table: &Arc<Mutex<MacTable>>,
-    route_table: &Arc<Mutex<RouteTable>>,
-    service_table: &Arc<Mutex<ServiceTable>>,
-    event_tx: &Option<mpsc::Sender<FabricEvent>>,
-) {
-    // Try to extract IPv4 destination from the frame (skip vnet header).
-    let eth_frame = &frame[VNET_HDR_SZ..];
-    if let Some(dst_ip) = extract_ipv4_dst(eth_frame) {
-        // 1. Check service table first.
-        let svc_result = {
-            let mut st = service_table.lock().unwrap();
-            st.lookup_and_buffer(dst_ip, frame)
-        };
-
-        if let Some((svc_action, should_activate)) = svc_result {
-            // Get service_id for activation event (re-lock briefly).
-            let service_id = if should_activate {
-                let st = service_table.lock().unwrap();
-                st.get_service_id(&dst_ip).map(String::from)
-            } else {
-                None
-            };
-
-            match svc_action {
-                ServiceAction::Forward { pod_ip: _, pod_mac } => {
-                    // Find port for backend MAC, rewrite dst MAC, send.
-                    let dst_port = {
-                        let mt = mac_table.lock().unwrap();
-                        if let Some(port_id) = mt.lookup(&pod_mac) {
-                            let p = ports.lock().unwrap();
-                            p.get(&port_id).cloned()
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(dst_port) = dst_port {
-                        let mut rewritten = frame.to_vec();
-                        if rewritten.len() >= VNET_HDR_SZ + 6 {
-                            rewritten[VNET_HDR_SZ..VNET_HDR_SZ + 6].copy_from_slice(&pod_mac);
-                        }
-                        if let Err(e) = dst_port.send_frame(&rewritten).await {
-                            log::warn!("fabric: service forward error: {}", e);
-                        }
-                    } else {
-                        log::debug!(
-                            "fabric: service forward to {} but backend MAC not in mac_table",
-                            format_mac(&pod_mac)
-                        );
-                    }
-                }
-                ServiceAction::Buffered => {
-                    log::trace!("fabric: frame to service {} buffered", dst_ip);
-                }
-                ServiceAction::Drop => {
-                    log::trace!("fabric: frame to service {} dropped", dst_ip);
-                }
-            }
-
-            if let Some(service_id) = service_id {
-                if let Some(tx) = event_tx {
-                    let _ = tx.try_send(FabricEvent::ServiceActivation {
-                        service_id,
-                        dst_ip,
-                    });
-                }
-            }
-
-            return;
-        }
-
-        // 2. Fall through to route table.
-        let (action, should_miss) = {
-            let mut rt = route_table.lock().unwrap();
-            rt.lookup_and_buffer(dst_ip, frame)
-        };
-
-        match action {
-            RouteAction::Buffered => {
-                log::trace!("fabric: frame to {} buffered", dst_ip);
-            }
-            RouteAction::Drop => {
-                log::trace!("fabric: frame to {} dropped by route policy", dst_ip);
-            }
-            RouteAction::RemoteWorker { worker_id } => {
-                log::debug!(
-                    "fabric: frame to {} destined for remote worker {} (stub: dropping)",
-                    dst_ip, worker_id
-                );
-            }
-            RouteAction::NoRoute => {
-                // No route entry — flood as before.
-                flood_frame(frame, src_port_id, ports).await;
-            }
-        }
-
-        if should_miss {
-            if let Some(tx) = event_tx {
-                let _ = tx.try_send(FabricEvent::RouteMiss {
-                    dst_ip,
-                    dst_mac,
-                });
-            }
-        }
-    } else {
-        // Non-IPv4 unknown unicast: flood as before.
-        flood_frame(frame, src_port_id, ports).await;
-    }
-}
-
-/// Check if a broadcast frame is an ARP request for a service IP. If so,
-/// construct and send an ARP reply back to the source port.
-async fn try_service_arp_reply<P: FramePort>(
-    frame: &[u8],
-    service_table: &Arc<Mutex<ServiceTable>>,
-    src_port: &SharedPort<P>,
-) {
-    let eth_frame = &frame[VNET_HDR_SZ..];
-    // Minimum ARP frame: 14 (eth header) + 28 (ARP for IPv4) = 42.
-    if eth_frame.len() < 42 {
-        return;
-    }
-    let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
-    if ethertype != 0x0806 {
-        return;
-    }
-    // ARP operation at offset 20-21 (relative to eth_frame start at 14+6=20).
-    let arp = &eth_frame[14..];
-    let op = u16::from_be_bytes([arp[6], arp[7]]);
-    if op != 1 {
-        return; // Not a request.
-    }
-    // Target protocol address at ARP offset 24..28.
-    let target_ip = Ipv4Addr::new(arp[24], arp[25], arp[26], arp[27]);
-
-    let service_mac = {
-        let st = service_table.lock().unwrap();
-        st.get_mac(&target_ip)
-    };
-
-    let service_mac = match service_mac {
-        Some(mac) => mac,
-        None => return,
-    };
-
-    // Build ARP reply.
-    let sender_mac: [u8; 6] = eth_frame[6..12].try_into().unwrap();
-    let sender_ip: [u8; 4] = arp[14..18].try_into().unwrap();
-
-    let mut reply = vec![0u8; VNET_HDR_SZ]; // vnet header (zeroed)
-    // Ethernet header: dst=sender_mac, src=service_mac, ethertype=0x0806.
-    reply.extend_from_slice(&sender_mac);
-    reply.extend_from_slice(&service_mac);
-    reply.extend_from_slice(&0x0806u16.to_be_bytes());
-    // ARP payload.
-    let mut arp_reply = [0u8; 28];
-    arp_reply[0..2].copy_from_slice(&[0x00, 0x01]); // hardware type: Ethernet
-    arp_reply[2..4].copy_from_slice(&[0x08, 0x00]); // protocol type: IPv4
-    arp_reply[4] = 6; // hardware size
-    arp_reply[5] = 4; // protocol size
-    arp_reply[6..8].copy_from_slice(&[0x00, 0x02]); // operation: reply
-    arp_reply[8..14].copy_from_slice(&service_mac); // sender hardware address
-    arp_reply[14..18].copy_from_slice(&target_ip.octets()); // sender protocol address
-    arp_reply[18..24].copy_from_slice(&sender_mac); // target hardware address
-    arp_reply[24..28].copy_from_slice(&sender_ip); // target protocol address
-    reply.extend_from_slice(&arp_reply);
-
-    if let Err(e) = src_port.send_frame(&reply).await {
-        log::warn!("fabric: service ARP reply send error: {}", e);
-    } else {
-        log::debug!(
-            "fabric: sent ARP reply for service IP {} (MAC {})",
-            target_ip,
-            format_mac(&service_mac)
-        );
-    }
-}
-
-/// Send a frame to all ports except the source port.
-async fn flood_frame<P: FramePort>(
-    frame: &[u8],
-    src_port_id: PortId,
-    ports: &Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-) {
-    let targets: Vec<(PortId, SharedPort<P>)> = {
-        let ports = ports.lock().unwrap();
-        let mut result = Vec::new();
-        for (id, port) in ports.iter() {
-            if *id != src_port_id {
-                result.push((*id, Arc::clone(port)));
-            }
-        }
-        result
-    };
-
-    for (id, port) in targets {
-        if let Err(e) = port.send_frame(frame).await {
-            log::warn!("fabric: flood to port {} error: {}", id, e);
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use switch::ETH_HEADER_LEN;
-    use tokio::sync::mpsc as tokio_mpsc;
-
-    /// Channel-backed test double for FramePort.
-    struct TestPort {
-        /// Test injects frames here; recv_frame reads from this.
-        rx: tokio::sync::Mutex<tokio_mpsc::Receiver<Vec<u8>>>,
-        /// send_frame writes here; test reads captured frames from tx_out.
-        tx: tokio_mpsc::Sender<Vec<u8>>,
-    }
-
-    struct TestPortHandle {
-        /// Send frames into the port (simulates wire ingress).
-        inject_tx: tokio_mpsc::Sender<Vec<u8>>,
-        /// Receive frames that the fabric sent to this port.
-        capture_rx: tokio::sync::Mutex<tokio_mpsc::Receiver<Vec<u8>>>,
-    }
-
-    fn make_test_port() -> (TestPort, TestPortHandle) {
-        let (inject_tx, inject_rx) = tokio_mpsc::channel(64);
-        let (capture_tx, capture_rx) = tokio_mpsc::channel(64);
-        (
-            TestPort {
-                rx: tokio::sync::Mutex::new(inject_rx),
-                tx: capture_tx,
-            },
-            TestPortHandle {
-                inject_tx,
-                capture_rx: tokio::sync::Mutex::new(capture_rx),
-            },
-        )
-    }
-
-    impl FramePort for TestPort {
-        async fn recv_frame(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let mut rx = self.rx.lock().await;
-            match rx.recv().await {
-                Some(data) => {
-                    let len = data.len().min(buf.len());
-                    buf[..len].copy_from_slice(&data[..len]);
-                    Ok(len)
-                }
-                None => Ok(0), // EOF
-            }
-        }
-
-        async fn send_frame(&self, buf: &[u8]) -> std::io::Result<usize> {
-            self.tx
-                .send(buf.to_vec())
-                .await
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "channel closed"))?;
-            Ok(buf.len())
-        }
-    }
-
-    /// Build a valid test frame: [vnet_hdr (10 bytes)][eth_hdr (14 bytes)][payload...]
-    fn make_frame(dst_mac: [u8; 6], src_mac: [u8; 6], ethertype: u16, payload: &[u8]) -> Vec<u8> {
-        let mut frame = vec![0u8; VNET_HDR_SZ]; // zeroed vnet header
-        frame.extend_from_slice(&dst_mac);
-        frame.extend_from_slice(&src_mac);
-        frame.extend_from_slice(&ethertype.to_be_bytes());
-        frame.extend_from_slice(payload);
-        frame
-    }
-
-    /// Helper: try to receive a frame with a timeout. Returns None if no frame arrives.
-    async fn try_recv(handle: &TestPortHandle) -> Option<Vec<u8>> {
-        let mut rx = handle.capture_rx.lock().await;
-        tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .ok()
-            .flatten()
-    }
-
-    /// Helper: assert no frame arrives within timeout.
-    async fn assert_no_frame(handle: &TestPortHandle) {
-        assert!(try_recv(handle).await.is_none(), "expected no frame but got one");
-    }
-
-    // Some test MAC addresses
-    const MAC_A: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
-    const MAC_B: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0b];
-    const MAC_C: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0c];
-    const BROADCAST: [u8; 6] = [0xff; 6];
-    const MULTICAST: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01];
-
-    // --- Unicast forwarding tests ---
-
-    #[tokio::test]
-    async fn known_dst_delivers_to_correct_port() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        // Port 0 sends a frame with src=MAC_A, causing MAC_A to be learned on port 0.
-        // Then port 1 sends a frame with dst=MAC_A, which should be delivered to port 0.
-        let frame_learn = make_frame(MAC_B, MAC_A, 0x0800, &[0u8; 10]);
-        handle0.inject_tx.send(frame_learn).await.unwrap();
-
-        // Wait for learning to happen; the frame floods since MAC_B is unknown.
-        let _ = try_recv(&handle1).await;
-
-        // Now port 1 sends to MAC_A (known on port 0).
-        let frame_to_a = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
-        handle1.inject_tx.send(frame_to_a).await.unwrap();
-
-        // Port 0 should receive the frame.
-        let received = try_recv(&handle0).await;
-        assert!(received.is_some(), "port 0 should receive frame destined to MAC_A");
-    }
-
-    #[tokio::test]
-    async fn unknown_dst_floods_to_all_other_ports() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-        let (port2, handle2) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-        let (_id2, _task2) = fabric.add_port_raw(port2);
-
-        // Port 0 sends a frame to unknown MAC_C.
-        let frame = make_frame(MAC_C, MAC_A, 0x0800, &[0u8; 10]);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        // Both port 1 and port 2 should receive the flooded frame.
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
-        assert!(try_recv(&handle2).await.is_some(), "port 2 should receive flooded frame");
-    }
-
-    #[tokio::test]
-    async fn no_loopback_to_source_port() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, _handle1) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        // Port 0 sends a frame; it should never come back to port 0.
-        let frame = make_frame(MAC_B, MAC_A, 0x0800, &[0u8; 10]);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        assert_no_frame(&handle0).await;
-    }
-
-    // --- Broadcast/multicast tests ---
-
-    #[tokio::test]
-    async fn broadcast_floods_to_all_other_ports_and_gateway() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
-        let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-        fabric.set_gateway(gw_tx, ingress_rx);
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        let frame = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        // Port 1 should receive the flooded frame.
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should get broadcast");
-
-        // Gateway should also receive it.
-        let gw_frame = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            gw_rx.recv(),
-        )
-        .await;
-        assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get broadcast");
-    }
-
-    #[tokio::test]
-    async fn multicast_floods_to_all_other_ports_and_gateway() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
-        let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-        fabric.set_gateway(gw_tx, ingress_rx);
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        let frame = make_frame(MULTICAST, MAC_A, 0x0800, &[0u8; 10]);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should get multicast");
-        let gw_frame = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            gw_rx.recv(),
-        )
-        .await;
-        assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get multicast");
-    }
-
-    // --- Gateway routing tests ---
-
-    #[tokio::test]
-    async fn gateway_mac_dst_sent_to_gateway_only() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
-        let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-        fabric.set_gateway(gw_tx, ingress_rx);
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        let frame = make_frame(GATEWAY_MAC, MAC_A, 0x0800, &[0u8; 10]);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        // Gateway should receive it.
-        let gw_frame = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            gw_rx.recv(),
-        )
-        .await;
-        assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get frame");
-
-        // Port 1 should NOT receive it.
-        assert_no_frame(&handle1).await;
-    }
-
-    // --- MAC learning tests ---
-
-    #[tokio::test]
-    async fn mac_learning_and_forwarding() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-        let (port2, handle2) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-        let (_id2, _task2) = fabric.add_port_raw(port2);
-
-        // Port 0 sends a frame with src=MAC_A (learn MAC_A on port 0).
-        let frame1 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-        handle0.inject_tx.send(frame1).await.unwrap();
-
-        // Drain the broadcast flood.
-        let _ = try_recv(&handle1).await;
-        let _ = try_recv(&handle2).await;
-
-        // Port 1 sends a frame with dst=MAC_A → should go to port 0 only.
-        let frame2 = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
-        handle1.inject_tx.send(frame2).await.unwrap();
-
-        assert!(try_recv(&handle0).await.is_some(), "port 0 should receive frame to MAC_A");
-        assert_no_frame(&handle2).await;
-    }
-
-    #[tokio::test]
-    async fn mac_migration() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-        let (port2, handle2) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-        let (_id2, _task2) = fabric.add_port_raw(port2);
-
-        // Learn MAC_A on port 0.
-        let frame1 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-        handle0.inject_tx.send(frame1).await.unwrap();
-        let _ = try_recv(&handle1).await;
-        let _ = try_recv(&handle2).await;
-
-        // Migrate MAC_A to port 1.
-        let frame2 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-        handle1.inject_tx.send(frame2).await.unwrap();
-        let _ = try_recv(&handle0).await;
-        let _ = try_recv(&handle2).await;
-
-        // Port 2 sends to MAC_A → should now go to port 1.
-        let frame3 = make_frame(MAC_A, MAC_C, 0x0800, &[0u8; 10]);
-        handle2.inject_tx.send(frame3).await.unwrap();
-
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should receive frame after migration");
-        assert_no_frame(&handle0).await;
-    }
-
-    // --- Gateway ingress tests ---
-
-    #[tokio::test]
-    async fn gateway_ingress_known_unicast() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (gw_tx, _gw_rx) = tokio_mpsc::channel(64);
-        let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-        fabric.set_gateway(gw_tx, ingress_rx);
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        // Learn MAC_A on port 0 by sending a frame from port 0.
-        let frame_learn = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-        handle0.inject_tx.send(frame_learn).await.unwrap();
-        let _ = try_recv(&handle1).await;
-
-        // Gateway sends a frame to MAC_A → should go to port 0 only.
-        let gw_frame = make_frame(MAC_A, GATEWAY_MAC, 0x0800, &[0u8; 10]);
-        ingress_tx.send(gw_frame).await.unwrap();
-
-        assert!(try_recv(&handle0).await.is_some(), "port 0 should receive gateway ingress");
-        assert_no_frame(&handle1).await;
-    }
-
-    #[tokio::test]
-    async fn gateway_ingress_unknown_unicast_floods() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (gw_tx, _gw_rx) = tokio_mpsc::channel(64);
-        let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-        fabric.set_gateway(gw_tx, ingress_rx);
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        // Gateway sends to unknown MAC_C → should flood to all ports.
-        let gw_frame = make_frame(MAC_C, GATEWAY_MAC, 0x0800, &[0u8; 10]);
-        ingress_tx.send(gw_frame).await.unwrap();
-
-        assert!(try_recv(&handle0).await.is_some(), "port 0 should receive flooded frame");
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
-    }
-
-    #[tokio::test]
-    async fn gateway_ingress_broadcast_floods_to_all() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (gw_tx, _gw_rx) = tokio_mpsc::channel(64);
-        let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-        fabric.set_gateway(gw_tx, ingress_rx);
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        let gw_frame = make_frame(BROADCAST, GATEWAY_MAC, 0x0806, &[0u8; 10]);
-        ingress_tx.send(gw_frame).await.unwrap();
-
-        assert!(try_recv(&handle0).await.is_some(), "port 0 should receive broadcast");
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should receive broadcast");
-    }
-
-    // --- Edge case tests ---
-
-    #[tokio::test]
-    async fn runt_frame_dropped() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        // Send a frame that is too short (< VNET_HDR_SZ + ETH_HEADER_LEN).
-        let runt = vec![0u8; VNET_HDR_SZ + ETH_HEADER_LEN - 1];
-        handle0.inject_tx.send(runt).await.unwrap();
-
-        assert_no_frame(&handle1).await;
-    }
-
-    #[tokio::test]
-    async fn flood_frame_with_empty_ports_no_panic() {
-        let ports: Arc<Mutex<HashMap<PortId, SharedPort<TestPort>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let frame = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
-        // Should not panic.
-        flood_frame::<TestPort>(&frame, 0, &ports).await;
-    }
-
-    // --- Route-aware forwarding tests ---
-
-    /// Build a valid IPv4 test frame with specific dst IP.
-    /// Layout: [vnet_hdr(10)][eth_hdr(14)][ip_hdr(20)]
-    fn make_ipv4_frame(dst_mac: [u8; 6], src_mac: [u8; 6], dst_ip: Ipv4Addr) -> Vec<u8> {
-        let mut frame = vec![0u8; VNET_HDR_SZ]; // zeroed vnet header
-        // Ethernet header
-        frame.extend_from_slice(&dst_mac);
-        frame.extend_from_slice(&src_mac);
-        frame.extend_from_slice(&0x0800u16.to_be_bytes());
-        // Minimal IP header (20 bytes)
-        let mut ip_hdr = [0u8; 20];
-        ip_hdr[0] = 0x45; // version=4, IHL=5
-        // src IP at offset 12..16
-        ip_hdr[12..16].copy_from_slice(&[10, 0, 0, 1]);
-        // dst IP at offset 16..20
-        let dst_octets = dst_ip.octets();
-        ip_hdr[16..20].copy_from_slice(&dst_octets);
-        frame.extend_from_slice(&ip_hdr);
-        frame
-    }
-
-    /// Helper: try to receive a FabricEvent with timeout.
-    async fn try_recv_event(rx: &mut tokio_mpsc::Receiver<FabricEvent>) -> Option<FabricEvent> {
-        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
-            .await
-            .ok()
-            .flatten()
-    }
-
-    #[tokio::test]
-    async fn placeholder_route_buffers_instead_of_flooding() {
-        use distvirt_worker_protocol::{
-            BufferPolicy, FabricRouteEntry, RouteDestination,
-        };
-
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
-        fabric.set_event_channel(event_tx);
-
-        let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
-
-        // Add a placeholder route for pod_ip.
-        {
-            let rt_arc = fabric.route_table();
-            let mut rt = rt_arc.lock().unwrap();
-            rt.sync(vec![FabricRouteEntry {
-                ip: pod_ip,
-                mac: MAC_C,
-                destination: RouteDestination::Placeholder {
-                    buffer_policy: BufferPolicy {
-                        buffer_frames: 10,
-                        timeout_ms: 5000,
-                    },
-                },
-            }]);
-        }
-
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-
-        // Port 0 sends an IPv4 frame to the placeholder IP with unknown dst MAC.
-        let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        // Port 1 should NOT receive the frame (it was buffered, not flooded).
-        assert_no_frame(&handle1).await;
-
-        // A route miss event should have been emitted.
-        let event = try_recv_event(&mut event_rx).await;
-        assert!(matches!(event, Some(FabricEvent::RouteMiss { dst_ip: ip, .. }) if ip == pod_ip));
-    }
-
-    #[tokio::test]
-    async fn no_route_still_floods() {
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-
-        let (port0, handle0) = make_test_port();
-        let (port1, handle1) = make_test_port();
-        let (port2, handle2) = make_test_port();
-
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-        let (_id1, _task1) = fabric.add_port_raw(port1);
-        let (_id2, _task2) = fabric.add_port_raw(port2);
-
-        // Port 0 sends IPv4 frame to unknown MAC with no route entry.
-        let pod_ip = Ipv4Addr::new(172, 16, 0, 99);
-        let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
-        handle0.inject_tx.send(frame).await.unwrap();
-
-        // Both other ports should receive the flooded frame.
-        assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
-        assert!(try_recv(&handle2).await.is_some(), "port 2 should receive flooded frame");
-    }
-
-    #[tokio::test]
-    async fn buffered_frames_flushed_to_new_port() {
-        use distvirt_worker_protocol::{
-            BufferPolicy, FabricRouteEntry, RouteDestination,
-        };
-
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-
-        let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
-
-        // Add a placeholder route.
-        {
-            let rt_arc = fabric.route_table();
-            let mut rt = rt_arc.lock().unwrap();
-            rt.sync(vec![FabricRouteEntry {
-                ip: pod_ip,
-                mac: MAC_C,
-                destination: RouteDestination::Placeholder {
-                    buffer_policy: BufferPolicy {
-                        buffer_frames: 10,
-                        timeout_ms: 5000,
-                    },
-                },
-            }]);
-        }
-
-        let (port0, handle0) = make_test_port();
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-
-        // Send 3 frames to the placeholder IP.
-        for _ in 0..3 {
-            let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
-            handle0.inject_tx.send(frame).await.unwrap();
-        }
-
-        // Let the port read loop process the frames.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Now add a new port "for" that IP — buffered frames should be flushed to it.
-        let (port_new, handle_new) = make_test_port();
-        let (_id_new, _task_new) = fabric.add_port_raw_with_ip(port_new, pod_ip);
-
-        // The new port should receive the 3 buffered frames.
-        for i in 0..3 {
-            let frame = try_recv(&handle_new).await;
-            assert!(frame.is_some(), "new port should receive buffered frame {}", i);
-        }
-    }
-
-    #[tokio::test]
-    async fn route_miss_debounced_on_rapid_frames() {
-        use distvirt_worker_protocol::{
-            BufferPolicy, FabricRouteEntry, RouteDestination,
-        };
-
-        let mut fabric: Fabric<TestPort> = Fabric::new();
-        let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
-        fabric.set_event_channel(event_tx);
-
-        let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
-
-        {
-            let rt_arc = fabric.route_table();
-            let mut rt = rt_arc.lock().unwrap();
-            rt.sync(vec![FabricRouteEntry {
-                ip: pod_ip,
-                mac: MAC_C,
-                destination: RouteDestination::Placeholder {
-                    buffer_policy: BufferPolicy {
-                        buffer_frames: 100,
-                        timeout_ms: 5000,
-                    },
-                },
-            }]);
-        }
-
-        let (port0, handle0) = make_test_port();
-        let (_id0, _task0) = fabric.add_port_raw(port0);
-
-        // Send multiple frames rapidly.
-        for _ in 0..5 {
-            let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
-            handle0.inject_tx.send(frame).await.unwrap();
-        }
-
-        // Wait for processing.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Should get exactly one miss event (debounced).
-        let event1 = try_recv_event(&mut event_rx).await;
-        assert!(event1.is_some(), "should get one route miss event");
-
-        // No second event within debounce window.
-        let event2 = try_recv_event(&mut event_rx).await;
-        assert!(event2.is_none(), "second miss should be debounced");
-    }
-}
+mod tests;

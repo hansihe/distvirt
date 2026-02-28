@@ -56,7 +56,7 @@ async fn setup() -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHan
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let worker = distvirt_worker::worker::Worker::new(kernel, rootfs, vmm, image_provider);
+        let worker = distvirt_worker::worker::Worker::new(kernel, rootfs, vmm, image_provider, None);
         worker.run(conn).await
     });
 

@@ -5,9 +5,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
+use distvirt_activator::{ActivatorInstance, ActivatorRuntime, StreamManager, StreamManagerConfig};
 use distvirt_worker_protocol::{
-    ContainerSpec, LogStreamHeader, LogStreamOpener, NetworkConfig, PodNetworkConfig,
-    RegistryEntry, WorkerCommand, WorkerConnection, WorkerEvent,
+    ActivatorConfig, ContainerSpec, LogStreamHeader, LogStreamOpener, NetworkConfig,
+    PodNetworkConfig, RegistryEntry, WorkerCommand, WorkerConnection, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -84,6 +85,8 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     bg_event_rx: mpsc::Receiver<WorkerEvent>,
     /// Root cancellation token for the entire worker.
     worker_token: CancellationToken,
+    /// Activator WASM runtime (None if no component directory or loading failed).
+    activator_runtime: Option<ActivatorRuntime>,
 }
 
 impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
@@ -92,8 +95,18 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         rootfs_image_path: PathBuf,
         vmm: V,
         image_provider: P,
+        component_dir: Option<PathBuf>,
     ) -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel(256);
+        let activator_runtime = component_dir.and_then(|dir| {
+            match ActivatorRuntime::new(&dir) {
+                Ok(rt) => Some(rt),
+                Err(e) => {
+                    log::warn!("activator runtime init failed: {:#}, activators disabled", e);
+                    None
+                }
+            }
+        });
         Worker {
             kernel_path,
             rootfs_image_path,
@@ -103,6 +116,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             bg_event_tx,
             bg_event_rx,
             worker_token: CancellationToken::new(),
+            activator_runtime,
         }
     }
 
@@ -320,6 +334,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                                 dst_ip,
                             });
                     }
+                    FabricEvent::ServiceBackendNeed { service_id, dst_ip: _, need } => {
+                        let _ = bridge_event_tx
+                            .try_send(WorkerEvent::ServiceBackendNeed {
+                                namespace_id: bridge_ns_id.clone(),
+                                service_id,
+                                need,
+                            });
+                    }
                 }
             }
         });
@@ -463,10 +485,53 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
+        let activator = if policy.activator.is_some() {
+            if let Some(ref runtime) = self.activator_runtime {
+                let component_name = match &policy.activator {
+                    Some(ActivatorConfig::Tcp { .. }) => "tcp",
+                    Some(ActivatorConfig::Http2 { .. }) => "http2",
+                    None => unreachable!(),
+                };
+                match runtime.get_component(component_name) {
+                    Some(component) => {
+                        match ActivatorInstance::new(runtime.engine(), component) {
+                            Ok(instance) => Some(instance),
+                            Err(e) => {
+                                log::error!("failed to instantiate activator: {:#}", e);
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("activator component '{}' not found", component_name);
+                        None
+                    }
+                }
+            } else {
+                log::warn!("activator requested but runtime not available");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Create StreamManager for L4 mode (Http2 activator).
+        let stream_manager = match &policy.activator {
+            Some(ActivatorConfig::Http2 { .. }) => {
+                Some(StreamManager::new(StreamManagerConfig {
+                    service_ip: ip,
+                    service_mac: mac,
+                    listen_ports: vec![80],
+                    ..StreamManagerConfig::default()
+                }))
+            }
+            _ => None,
+        };
+
         let mut st = ns.service_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        st.create(service_id.clone(), ip, mac, policy);
+        st.create(service_id.clone(), ip, mac, policy, activator, stream_manager);
 
         log::info!(
             "worker: created service '{}' with ip {} in namespace '{}'",
@@ -514,10 +579,21 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             st.mark_ready(service_id)
         };
 
-        if let Some((frames, backend_mac)) = flush_data {
-            if !frames.is_empty() {
-                let fabric = ns.fabric.lock().await;
-                fabric.flush_service_frames(frames, backend_mac);
+        if let Some(result) = flush_data {
+            use crate::fabric::service::{MarkReadyResult, ServiceAction};
+            let fabric = ns.fabric.lock().await;
+            match result {
+                MarkReadyResult::Passthrough { frames, backend_mac, actions } => {
+                    if !frames.is_empty() {
+                        fabric.flush_service_frames(frames, backend_mac);
+                    }
+                    fabric.execute_service_actions(&actions, service_id, &None);
+                }
+                MarkReadyResult::L4(ServiceAction::L4Result { actions, frames, .. }) => {
+                    fabric.send_l4_frames(frames);
+                    fabric.execute_service_actions(&actions, service_id, &None);
+                }
+                _ => {}
             }
         }
 

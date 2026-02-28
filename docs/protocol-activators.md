@@ -430,25 +430,28 @@ This is a natural extension of the batched action model — just another action 
 
 ### Phase 1: Activator framework + TCP activator
 
-1. Add wasmtime dependency to the worker.
-2. Define the WIT interface (types, events, actions, `process-events` entry point).
-3. Implement L3 packet parsing layer using etherparse.
-4. Implement the WASM loading and instantiation infrastructure in the fabric.
-5. Integrate the activator call path into `ServiceEntity` — event batching, `process-events` dispatch, action execution.
-6. Build the TCP activator as a WASM component (Rust guest code).
-7. Wire up `ActivatorConfig` through `ServicePolicy` and `CreateService`.
+1. ~~Add wasmtime dependency to the worker.~~ **Done.**
+2. ~~Define the WIT interface (types, events, actions, `process-events` entry point).~~ **Done** — `distvirt-activator/wit/activator.wit`.
+3. ~~Implement L3 packet parsing layer using etherparse.~~ **Done** — `distvirt-activator/src/packet_parse.rs` (10 tests passing).
+4. ~~Implement the WASM loading and instantiation infrastructure in the fabric.~~ **Done** — `ActivatorRuntime` (component directory scanner) and `ActivatorInstance` (fuel-limited WASM execution) in `distvirt-activator/src/`.
+5. ~~Integrate the activator call path into `ServiceEntity` — event batching, `process-events` dispatch, action execution.~~ **Done** — `ServiceEntity` holds optional `ActivatorInstance` + `FlowTracker`, `lookup_and_buffer` has activator branch, `handle_unknown_unicast` executes `ReplayPacket`/`SetBackendNeed`/`Log` actions, `BackendAvailable` events pushed on state changes.
+6. ~~Build the TCP activator as a WASM component (Rust guest code).~~ **Done** — `activators/tcp/` (cargo-component crate targeting wasm32-wasip1). SYN-based flow tracking, RST dropping, frame buffering + replay, 1024-flow cap. Also built `activators/test-echo/` (deterministic test fixture exercising all event/action variants) and `activators/spin/` (fuel exhaustion test). 26 integration tests in `distvirt-activator/tests/wasm_integration.rs`. Build via `./activators/build.sh`.
+7. ~~Wire up `ActivatorConfig` through `ServicePolicy` and `CreateService`.~~ **Done** — `Worker` holds `ActivatorRuntime`, `handle_create_service` instantiates the right component based on `ActivatorConfig`, `ServiceBackendNeed` events bridged to orchestrator via `WorkerEvent`.
 
 The TCP activator is simple enough to validate the entire framework end-to-end: WIT interface design, WASM call overhead, batched event/action flow, L3 parsing, signaling, replay.
 
+~~**Remaining for Phase 1**~~: ~~L4 stream actions are stubbed with a warning log. The `mark_ready` activator action handling in the worker is minimal (actions returned but not yet executed during flush).~~ **Done** — `mark_ready` now executes `ReplayPacket` actions via `execute_service_actions()` and handles L4 results via `send_l4_frames()`.
+
 ### Phase 2: H2 activator
 
-1. Implement L4 stream management layer using smoltcp — TCP connection handling, byte stream delivery to activators.
-2. Implement upstream connection support — `upstream-connect` action handling, connection lifecycle.
-3. Implement backpressure — pause/resume actions, TCP window integration.
-4. Build H2 activator component with H2 frame parsing and connection maintenance.
-5. Per-stream activation on HEADERS frames.
-6. Connection proxying with N:M multiplexing between client and backend connections.
-7. Test against real H2 clients (curl, browsers, gRPC clients).
+1. ~~Implement L4 stream management layer using smoltcp — TCP connection handling, byte stream delivery to activators.~~ **Done** — `StreamManager` in `distvirt-activator/src/stream_manager.rs`. smoltcp-backed TCP stack with `FabricDevice` (queue-based phy), listening socket pool, downstream/upstream stream tracking, pause/resume support. 8 unit tests passing. ARP resolution handled via normal frame flow.
+2. ~~Implement upstream connection support — `upstream-connect` action handling, connection lifecycle.~~ **Done** — `StreamManager.execute_action(UpstreamConnect)` creates TCP sockets connecting to the backend IP/port, `UpstreamConnectResult`/`UpstreamData`/`UpstreamClose` events generated from socket state changes.
+3. ~~Implement backpressure — pause/resume actions, TCP window integration.~~ **Done** — `PauseDownstream`/`ResumeDownstream`/`PauseUpstream`/`ResumeUpstream` actions toggle per-stream `paused` flag, suppressing `StreamData`/`UpstreamData` events while paused. smoltcp applies TCP window pressure naturally when data isn't consumed.
+4. ~~Integrate L4 into service/fabric/worker.~~ **Done** — `ServiceEntity` holds optional `StreamManager`, `lookup_and_buffer` has L4 branch (strips vnet header, feeds to StreamManager, runs bounded activator event loop separating L4/non-L4 actions), `ServiceAction::L4Result` handled in `handle_unknown_unicast` (frame sending via MAC lookup + non-L4 action dispatch), `handle_create_service` creates `StreamManager` for `Http2` config, `handle_service_ready` handles both `Passthrough` and `L4` results.
+5. Build H2 activator component with H2 frame parsing and connection maintenance.
+6. Per-stream activation on HEADERS frames.
+7. Connection proxying with N:M multiplexing between client and backend connections.
+8. Test against real H2 clients (curl, browsers, gRPC clients).
 
 ### Phase 3: Ecosystem
 

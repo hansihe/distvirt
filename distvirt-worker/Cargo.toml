@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 containerd-client = "0.8"
 distvirt-guest-protocol = { path = "../distvirt-guest-protocol" }
+distvirt-activator = { path = "../distvirt-activator" }
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
 libc = "0.2"
 log = "0.4"
@@ -14,7 +15,7 @@ oci-spec = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-udp", "alloc", "log"] }
+smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-udp", "socket-tcp", "alloc", "log"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util", "time", "process", "sync"] }
 tonic = "0.12"
 yamux = "0.13.9"
@@ -23,4 +24,5 @@ futures-lite = "2.6.1"
 
 [dev-dependencies]
 env_logger = "0.11"
+etherparse = "0.16"
 futures-lite = "2.6.1"

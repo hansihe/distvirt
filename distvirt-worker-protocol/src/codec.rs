@@ -1,3 +1,9 @@
+//! Length-prefixed postcard codec for the control stream.
+//!
+//! All messages on the yamux control stream are framed as
+//! `[u32 LE length][postcard payload]`. Log streams use the same framing
+//! for the initial [`LogStreamHeader`](crate::LogStreamHeader), then raw bytes.
+
 use anyhow::{bail, Context};
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};

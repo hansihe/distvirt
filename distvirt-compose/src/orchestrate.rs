@@ -163,6 +163,7 @@ pub async fn run_compose(
             policy: ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
+                activator: None,
             },
         })
         .await
@@ -307,6 +308,9 @@ pub async fn run_compose(
                     }
                     WorkerEvent::ServiceActivation { namespace_id: _, service_id, dst_ip } => {
                         log::debug!("service activation for '{}' ({})", service_id, dst_ip);
+                    }
+                    WorkerEvent::ServiceBackendNeed { namespace_id: _, service_id, need } => {
+                        log::debug!("service backend need for '{}': {:?}", service_id, need);
                     }
                 }
             }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["distvirt-worker", "distvirt-worker-protocol", "distvirt-guest-protocol", "distvirt-cli", "distvirt-compose", "guest-image/guest-init"]
+members = ["distvirt-worker", "distvirt-worker-protocol", "distvirt-guest-protocol", "distvirt-cli", "distvirt-compose", "distvirt-activator", "guest-image/guest-init"]
+exclude = ["activators/test-echo", "activators/tcp", "activators/spin"]
 
 [profile.guest]
 inherits = "release"

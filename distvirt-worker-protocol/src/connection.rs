@@ -1,3 +1,33 @@
+//! Yamux-based connections for the orchestrator and worker sides of the protocol.
+//!
+//! Both sides share the same yamux session over an arbitrary async byte stream
+//! (`tokio::io::duplex` for local mode, TCP/TLS for distributed mode). The
+//! orchestrator is the yamux Client, the worker is the yamux Server.
+//!
+//! # Example: In-Process Connection (Local Mode)
+//!
+//! ```rust,no_run
+//! use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let (orch_transport, worker_transport) = tokio::io::duplex(64 * 1024);
+//!
+//! let (mut orch, mut worker) = tokio::try_join!(
+//!     OrchestratorConnection::connect(orch_transport),
+//!     WorkerConnection::accept(worker_transport),
+//! )?;
+//!
+//! // Orchestrator sends commands, worker receives them:
+//! // orch.send_command(&cmd).await?;
+//! // let cmd = worker.recv_command().await?;
+//!
+//! // Worker sends events, orchestrator receives them:
+//! // worker.send_event(&event).await?;
+//! // let event = orch.recv_event().await?;
+//! # Ok(())
+//! # }
+//! ```
+
 use std::future::poll_fn;
 
 use anyhow::Context;

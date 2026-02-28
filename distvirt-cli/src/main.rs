@@ -185,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
                     rootfs_image,
                     vmm,
                     image_provider,
+                    None,
                 );
                 worker.run(conn).await
             });
@@ -244,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
                     rootfs_image,
                     vmm,
                     image_provider,
+                    None,
                 );
                 worker.run(conn).await
             });

@@ -2,10 +2,14 @@ use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
+use distvirt_activator::{ActivatorInstance, FlowTracker, StreamManager, StreamManagerOutput, is_l4_action, parse_frame_to_packet_info};
+use distvirt_activator::types::{Action, Event};
 use distvirt_worker_protocol::ServicePolicy;
 
+use super::switch::VNET_HDR_SZ;
+
 /// What the fabric should do with a frame that matched a service IP.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ServiceAction {
     /// Forward to the ready backend pod.
     Forward { pod_ip: Ipv4Addr, pod_mac: [u8; 6] },
@@ -13,6 +17,18 @@ pub enum ServiceAction {
     Buffered,
     /// Frame was dropped (buffer full or timed out).
     Drop,
+    /// Activator processed the frame and returned actions for the fabric to execute.
+    ActivatorActions {
+        actions: Vec<Action>,
+        service_id: String,
+    },
+    /// L4 stream manager processed the frame and produced outgoing frames + non-L4 actions.
+    L4Result {
+        actions: Vec<Action>,
+        frames: Vec<Vec<u8>>,
+        service_id: String,
+        poll_delay: Option<Duration>,
+    },
 }
 
 /// A fabric-level service entity with its own virtual IP/MAC,
@@ -27,6 +43,71 @@ struct ServiceEntity {
     ready: bool,
     buffer: VecDeque<Vec<u8>>,
     buffer_start: Option<Instant>,
+    activator: Option<ActivatorInstance>,
+    flow_tracker: Option<FlowTracker>,
+    stream_manager: Option<StreamManager>,
+}
+
+/// Result of marking a service as ready.
+pub enum MarkReadyResult {
+    /// L3 passthrough mode: buffered frames + backend MAC + activator actions.
+    Passthrough {
+        frames: Vec<Vec<u8>>,
+        backend_mac: [u8; 6],
+        actions: Vec<Action>,
+    },
+    /// L4 stream mode: outgoing frames + non-L4 actions via ServiceAction::L4Result.
+    L4(ServiceAction),
+}
+
+/// Run L4 event cycle on a service entity: feed eth_frame to StreamManager,
+/// run activator event loop, collect outgoing frames and non-L4 actions.
+fn run_l4_cycle(entity: &mut ServiceEntity, eth_frame: &[u8]) -> ServiceAction {
+    let sm = entity.stream_manager.as_mut().unwrap();
+    let sm_output = sm.receive_frame(eth_frame);
+    process_l4_output(entity, sm_output)
+}
+
+/// Process StreamManagerOutput through the activator event loop (bounded to 4 rounds).
+fn process_l4_output(entity: &mut ServiceEntity, mut sm_output: StreamManagerOutput) -> ServiceAction {
+    let sm = entity.stream_manager.as_mut().unwrap();
+    let mut all_non_l4_actions = Vec::new();
+
+    if let Some(ref mut activator) = entity.activator {
+        for _ in 0..4 {
+            if sm_output.events.is_empty() {
+                break;
+            }
+            for event in sm_output.events.drain(..) {
+                activator.push_event(event);
+            }
+            let actions = match activator.process_events() {
+                Ok(a) => a,
+                Err(e) => {
+                    log::error!("activator error for service '{}': {:#}", entity.service_id, e);
+                    break;
+                }
+            };
+            let mut new_events = Vec::new();
+            for action in &actions {
+                if is_l4_action(action) {
+                    let out = sm.execute_action(action);
+                    new_events.extend(out.events);
+                    sm_output.frames.extend(out.frames);
+                }
+            }
+            all_non_l4_actions.extend(actions.into_iter().filter(|a| !is_l4_action(a)));
+            sm_output.events = new_events;
+        }
+    }
+
+    let poll_delay = sm.poll_delay();
+    ServiceAction::L4Result {
+        actions: all_non_l4_actions,
+        frames: sm_output.frames,
+        service_id: entity.service_id.clone(),
+        poll_delay,
+    }
 }
 
 /// Table of service entities indexed by IP for fast frame-path lookup.
@@ -48,7 +129,20 @@ impl ServiceTable {
     }
 
     /// Register a new service entity.
-    pub fn create(&mut self, service_id: String, ip: Ipv4Addr, mac: [u8; 6], policy: ServicePolicy) {
+    pub fn create(
+        &mut self,
+        service_id: String,
+        ip: Ipv4Addr,
+        mac: [u8; 6],
+        policy: ServicePolicy,
+        activator: Option<ActivatorInstance>,
+        stream_manager: Option<StreamManager>,
+    ) {
+        let flow_tracker = if activator.is_some() && stream_manager.is_none() {
+            Some(FlowTracker::new())
+        } else {
+            None
+        };
         let entity = ServiceEntity {
             service_id: service_id.clone(),
             ip,
@@ -59,6 +153,9 @@ impl ServiceTable {
             ready: false,
             buffer: VecDeque::new(),
             buffer_start: None,
+            activator,
+            flow_tracker,
+            stream_manager,
         };
         self.by_ip.insert(ip, entity);
         self.id_to_ip.insert(service_id, ip);
@@ -82,6 +179,7 @@ impl ServiceTable {
             None => return,
         };
         if let Some(entity) = self.by_ip.get_mut(&ip) {
+            let has_backend = backend.is_some();
             match backend {
                 Some((pod_ip, pod_mac)) => {
                     entity.backend_ip = Some(pod_ip);
@@ -95,12 +193,21 @@ impl ServiceTable {
             entity.ready = false;
             entity.buffer.clear();
             entity.buffer_start = None;
+            if let Some(ref mut sm) = entity.stream_manager {
+                sm.update_backend(
+                    entity.backend_ip,
+                    entity.backend_mac,
+                );
+            }
+            if let Some(ref mut activator) = entity.activator {
+                activator.push_event(Event::BackendAvailable(has_backend));
+            }
         }
     }
 
-    /// Mark a service as ready. Returns the buffered frames and backend MAC
-    /// so the caller can flush them to the backend port.
-    pub fn mark_ready(&mut self, service_id: &str) -> Option<(Vec<Vec<u8>>, [u8; 6])> {
+    /// Mark a service as ready. Returns buffered frames / activator actions
+    /// (L3 passthrough mode) or an L4Result (L4 stream mode).
+    pub fn mark_ready(&mut self, service_id: &str) -> Option<MarkReadyResult> {
         let ip = match self.id_to_ip.get(service_id) {
             Some(ip) => *ip,
             None => return None,
@@ -111,9 +218,35 @@ impl ServiceTable {
         }
         entity.ready = true;
         let backend_mac = entity.backend_mac.unwrap();
+
+        // L4 path: push BackendAvailable event through the stream manager cycle.
+        if entity.stream_manager.is_some() {
+            if let Some(ref mut activator) = entity.activator {
+                activator.push_event(Event::BackendAvailable(true));
+            }
+            let sm = entity.stream_manager.as_mut().unwrap();
+            let sm_output = sm.handle_timeout();
+            let svc_action = process_l4_output(entity, sm_output);
+            return Some(MarkReadyResult::L4(svc_action));
+        }
+
         let frames: Vec<Vec<u8>> = entity.buffer.drain(..).collect();
         entity.buffer_start = None;
-        Some((frames, backend_mac))
+
+        let actions = if let Some(ref mut activator) = entity.activator {
+            activator.push_event(Event::BackendAvailable(true));
+            match activator.process_events() {
+                Ok(actions) => actions,
+                Err(e) => {
+                    log::error!("activator error for service '{}': {:#}", entity.service_id, e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        Some(MarkReadyResult::Passthrough { frames, backend_mac, actions })
     }
 
     /// Check if a destination IP belongs to a service. If so, buffer or forward
@@ -129,6 +262,32 @@ impl ServiceTable {
         if entity.ready {
             if let (Some(pod_ip), Some(pod_mac)) = (entity.backend_ip, entity.backend_mac) {
                 return Some((ServiceAction::Forward { pod_ip, pod_mac }, false));
+            }
+        }
+
+        // L4 stream manager path: feed raw frame, run activator event loop.
+        if entity.stream_manager.is_some() {
+            let eth_frame = &frame[VNET_HDR_SZ..];
+            let result = run_l4_cycle(entity, eth_frame);
+            return Some((result, false));
+        }
+
+        // L3 activator path: parse frame, push event, process.
+        if let Some(ref mut activator) = entity.activator {
+            let eth_frame = &frame[VNET_HDR_SZ..];
+            let flow_tracker = entity.flow_tracker.as_mut().unwrap();
+            if let Some(packet_info) = parse_frame_to_packet_info(eth_frame, frame, flow_tracker) {
+                activator.push_event(Event::Packet(packet_info));
+            }
+            match activator.process_events() {
+                Ok(actions) => {
+                    let service_id = entity.service_id.clone();
+                    return Some((ServiceAction::ActivatorActions { actions, service_id }, false));
+                }
+                Err(e) => {
+                    log::error!("activator error for service '{}': {:#}", entity.service_id, e);
+                    // Fall through to passthrough buffering on error
+                }
             }
         }
 
@@ -174,6 +333,13 @@ impl ServiceTable {
         Some((ServiceAction::Buffered, should_activate))
     }
 
+    /// Look up the backend MAC for a service by its ID.
+    pub fn get_backend_mac_by_id(&self, service_id: &str) -> Option<[u8; 6]> {
+        let ip = self.id_to_ip.get(service_id)?;
+        let entity = self.by_ip.get(ip)?;
+        entity.backend_mac
+    }
+
     /// Look up the service MAC for a given IP (used for ARP replies).
     pub fn get_mac(&self, ip: &Ipv4Addr) -> Option<[u8; 6]> {
         self.by_ip.get(ip).map(|e| e.mac)
@@ -183,6 +349,7 @@ impl ServiceTable {
     pub fn get_service_id(&self, ip: &Ipv4Addr) -> Option<&str> {
         self.by_ip.get(ip).map(|e| e.service_id.as_str())
     }
+
 }
 
 #[cfg(test)]
@@ -199,6 +366,7 @@ mod tests {
         ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 30000,
+            activator: None,
         }
     }
 
@@ -211,7 +379,7 @@ mod tests {
     #[test]
     fn buffers_when_not_ready() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
 
         let result = table.lookup_and_buffer(SVC_IP, FRAME);
         assert!(matches!(result, Some((ServiceAction::Buffered, true))));
@@ -220,7 +388,7 @@ mod tests {
     #[test]
     fn forwards_when_ready() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
         table.mark_ready("svc1");
 
@@ -235,7 +403,7 @@ mod tests {
     #[test]
     fn mark_ready_returns_buffered_frames() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
 
         // Buffer some frames.
@@ -244,15 +412,19 @@ mod tests {
         }
 
         let result = table.mark_ready("svc1");
-        let (frames, mac) = result.unwrap();
-        assert_eq!(frames.len(), 3);
-        assert_eq!(mac, POD_MAC);
+        match result.unwrap() {
+            MarkReadyResult::Passthrough { frames, backend_mac, .. } => {
+                assert_eq!(frames.len(), 3);
+                assert_eq!(backend_mac, POD_MAC);
+            }
+            _ => panic!("expected Passthrough result"),
+        }
     }
 
     #[test]
     fn update_backend_clears_ready_and_buffer() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
         table.mark_ready("svc1");
 
@@ -266,7 +438,7 @@ mod tests {
     #[test]
     fn destroy_removes_service() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
         assert!(table.destroy("svc1"));
         assert!(table.lookup_and_buffer(SVC_IP, FRAME).is_none());
     }
@@ -274,7 +446,7 @@ mod tests {
     #[test]
     fn activation_debounced() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
 
         let (_, activate1) = table.lookup_and_buffer(SVC_IP, FRAME).unwrap();
         assert!(activate1);
@@ -293,7 +465,10 @@ mod tests {
             ServicePolicy {
                 buffer_frames: 2,
                 timeout_ms: 30000,
+                activator: None,
             },
+            None,
+            None,
         );
 
         table.lookup_and_buffer(SVC_IP, FRAME);
@@ -305,7 +480,102 @@ mod tests {
     #[test]
     fn get_mac_returns_service_mac() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy());
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
         assert_eq!(table.get_mac(&SVC_IP), Some(SVC_MAC));
+    }
+
+    /// Try to load the TCP activator. Returns None if WASM components aren't built.
+    fn try_load_tcp_activator() -> Option<(distvirt_activator::ActivatorRuntime, distvirt_activator::ActivatorInstance)> {
+        let component_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../activators/target/components");
+        let runtime = distvirt_activator::ActivatorRuntime::new(&component_dir).ok()?;
+        let component = runtime.get_component("tcp")?;
+        let instance = distvirt_activator::ActivatorInstance::new(runtime.engine(), component).ok()?;
+        Some((runtime, instance))
+    }
+
+    /// Build a valid TCP SYN frame with vnet header using etherparse.
+    fn make_tcp_frame_for_service(
+        dst_mac: [u8; 6],
+        src_mac: [u8; 6],
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        use etherparse::PacketBuilder;
+
+        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
+            .ipv4(src_ip, dst_ip, 64)
+            .tcp(src_port, dst_port, 1000, 65535);
+
+        let mut eth_frame = Vec::new();
+        builder.write(&mut eth_frame, &[]).unwrap();
+
+        // Set SYN flag: eth(14) + ip(20) + tcp flags at byte 13
+        let tcp_start = 14 + 20;
+        eth_frame[tcp_start + 13] = 0x02; // SYN
+
+        let mut frame = vec![0u8; VNET_HDR_SZ];
+        frame.extend_from_slice(&eth_frame);
+        frame
+    }
+
+    #[test]
+    fn activator_mark_ready_returns_replay_actions() {
+        let Some((_runtime, instance)) = try_load_tcp_activator() else {
+            eprintln!("SKIP: TCP activator WASM not built");
+            return;
+        };
+
+        let mut table = ServiceTable::new();
+        table.create(
+            "svc1".into(),
+            SVC_IP,
+            SVC_MAC,
+            ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
+                    ports: None,
+                    tcp_only: false,
+                    max_flows: 1024,
+                }),
+            },
+            Some(instance),
+            None,
+        );
+
+        // Feed a TCP SYN frame via lookup_and_buffer.
+        let syn_frame = make_tcp_frame_for_service(
+            SVC_MAC,
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a],
+            [10, 0, 0, 1],
+            SVC_IP.octets(),
+            12345,
+            80,
+        );
+        let result = table.lookup_and_buffer(SVC_IP, &syn_frame);
+        assert!(
+            matches!(result, Some((ServiceAction::ActivatorActions { .. }, _))),
+            "SYN should trigger activator actions"
+        );
+
+        // Set backend and mark ready.
+        table.update_backend("svc1", Some((POD_IP, POD_MAC)));
+        let ready_result = table.mark_ready("svc1");
+        assert!(ready_result.is_some(), "mark_ready should return Some");
+
+        match ready_result.unwrap() {
+            MarkReadyResult::Passthrough { backend_mac, actions, .. } => {
+                assert_eq!(backend_mac, POD_MAC);
+                let replay_count = actions
+                    .iter()
+                    .filter(|a| matches!(a, Action::ReplayPacket(_)))
+                    .count();
+                assert!(replay_count > 0, "mark_ready should return ReplayPacket actions for buffered SYN");
+            }
+            _ => panic!("expected Passthrough result"),
+        }
     }
 }
