@@ -197,25 +197,9 @@ Client pod → Service IP (virtual) → [buffer / activate / ready?] → Pod IP 
 
 ### Protocol Activators
 
-Protocol activators live on service entities and provide protocol-aware activation and traffic management. They are configured per-service based on the declared application protocols. This is additive — basic frame buffering works first, protocol awareness layers on top.
+Protocol-aware activation and traffic management for service entities, implemented as WASM components loaded at runtime. TCP-level activation (SYN detection, flow tracking) and HTTP/2 stream-level activation (per-request activation on multiplexed connections) are the primary targets.
 
-#### TCP-Level Activation
-
-- SYN detection on the service IP triggers activation events
-- Frames buffered at the service entity during pod boot
-- Flushed to backing pod once readiness gate passes
-- Non-TCP traffic to a TCP-only service can be dropped
-
-#### HTTP/2 Activation
-
-A single H2 connection multiplexes many requests. Activating on TCP means waking the VM for every new connection. Per-stream activation means the VM only wakes when an actual request arrives.
-
-Requirements:
-1. Track TCP state and reassemble the stream at the service entity
-2. Parse H2 frame headers (9 bytes each) — only needs HEADERS frame detection
-3. Maintain the H2 connection to the client (respond to SETTINGS, PING, WINDOW_UPDATE)
-4. On new stream (HEADERS frame): emit activation event, buffer the frame
-5. Once pod is ready: replay buffered frames or splice the connection through
+See **[Protocol Activators](protocol-activators.md)** for the full design.
 
 ### Multi-Worker Tunneling
 
