@@ -17,35 +17,59 @@ pub struct ExecutionPlan {
 }
 
 /// A service with assigned IP and MAC addresses.
+///
+/// Each service gets two IPs: a service IP (virtual, used for DNS/traffic)
+/// and a pod IP (assigned to the actual VM/pod). This separation enables
+/// readiness gating via fabric-level service entities.
 pub struct PlannedService {
     pub name: String,
-    pub ip: Ipv4Addr,
-    pub mac: [u8; 6],
+    /// Virtual service IP (used for DNS resolution and service entity).
+    pub service_ip: Ipv4Addr,
+    /// Virtual service MAC.
+    pub service_mac: [u8; 6],
+    /// Pod IP (assigned to the actual VM network interface).
+    pub pod_ip: Ipv4Addr,
+    /// Pod MAC.
+    pub pod_mac: [u8; 6],
 }
 
 /// Produce an execution plan from a deployment.
 ///
-/// Assigns IPs from 172.16.0.2 upward (gateway is .1) and derives
-/// deterministic MAC addresses. Services are ordered by dependency
-/// (best-effort topological sort; cycles produce a warning, not an error).
+/// Assigns IPs from 172.16.0.2 upward (gateway is .1). Each service gets
+/// two IPs: service IPs first (.2 to .N+1), then pod IPs (.N+2 to .2N+1).
+/// Services are ordered by dependency (best-effort topological sort).
 pub fn plan(deployment: &Deployment) -> anyhow::Result<ExecutionPlan> {
-    if deployment.services.len() > 253 {
+    if deployment.services.len() > 126 {
         bail!(
-            "too many services ({}, max 253)",
+            "too many services ({}, max 126)",
             deployment.services.len()
         );
     }
 
     let ordered = topo_sort(deployment);
+    let n = ordered.len();
 
     let services = ordered
         .into_iter()
         .enumerate()
         .map(|(i, name)| {
-            let last_octet = (i + 2) as u8; // .2, .3, .4, ...
-            let ip = Ipv4Addr::new(172, 16, 0, last_octet);
-            let mac = [0x06, 0x00, 0xAC, 0x10, 0x00, last_octet];
-            PlannedService { name, ip, mac }
+            // Service IPs: .2, .3, .4, ... .N+1
+            let svc_octet = (i + 2) as u8;
+            let service_ip = Ipv4Addr::new(172, 16, 0, svc_octet);
+            let service_mac = [0x06, 0x00, 0xAC, 0x10, 0x00, svc_octet];
+
+            // Pod IPs: .N+2, .N+3, ... .2N+1
+            let pod_octet = (n + i + 2) as u8;
+            let pod_ip = Ipv4Addr::new(172, 16, 0, pod_octet);
+            let pod_mac = [0x06, 0x00, 0xAC, 0x10, 0x00, pod_octet];
+
+            PlannedService {
+                name,
+                service_ip,
+                service_mac,
+                pod_ip,
+                pod_mac,
+            }
         })
         .collect();
 
@@ -159,8 +183,10 @@ mod tests {
         let p = plan(&d).unwrap();
         assert_eq!(p.services.len(), 1);
         assert_eq!(p.services[0].name, "web");
-        assert_eq!(p.services[0].ip, Ipv4Addr::new(172, 16, 0, 2));
-        assert_eq!(p.services[0].mac, [0x06, 0x00, 0xAC, 0x10, 0x00, 0x02]);
+        assert_eq!(p.services[0].service_ip, Ipv4Addr::new(172, 16, 0, 2));
+        assert_eq!(p.services[0].service_mac, [0x06, 0x00, 0xAC, 0x10, 0x00, 0x02]);
+        assert_eq!(p.services[0].pod_ip, Ipv4Addr::new(172, 16, 0, 3));
+        assert_eq!(p.services[0].pod_mac, [0x06, 0x00, 0xAC, 0x10, 0x00, 0x03]);
     }
 
     #[test]
@@ -168,13 +194,17 @@ mod tests {
         let d = make_deployment(vec![("charlie", vec![]), ("alpha", vec![]), ("bravo", vec![])]);
         let p = plan(&d).unwrap();
         assert_eq!(p.services.len(), 3);
-        // Alphabetical order for independent services
+        // Alphabetical order for independent services.
+        // Service IPs: .2, .3, .4; Pod IPs: .5, .6, .7
         assert_eq!(p.services[0].name, "alpha");
-        assert_eq!(p.services[0].ip, Ipv4Addr::new(172, 16, 0, 2));
+        assert_eq!(p.services[0].service_ip, Ipv4Addr::new(172, 16, 0, 2));
+        assert_eq!(p.services[0].pod_ip, Ipv4Addr::new(172, 16, 0, 5));
         assert_eq!(p.services[1].name, "bravo");
-        assert_eq!(p.services[1].ip, Ipv4Addr::new(172, 16, 0, 3));
+        assert_eq!(p.services[1].service_ip, Ipv4Addr::new(172, 16, 0, 3));
+        assert_eq!(p.services[1].pod_ip, Ipv4Addr::new(172, 16, 0, 6));
         assert_eq!(p.services[2].name, "charlie");
-        assert_eq!(p.services[2].ip, Ipv4Addr::new(172, 16, 0, 4));
+        assert_eq!(p.services[2].service_ip, Ipv4Addr::new(172, 16, 0, 4));
+        assert_eq!(p.services[2].pod_ip, Ipv4Addr::new(172, 16, 0, 7));
     }
 
     #[test]
@@ -216,7 +246,7 @@ mod tests {
     fn plan_too_many_services() {
         let services: Vec<(&str, Vec<&str>)> = Vec::new();
         let mut d = make_deployment(services);
-        for i in 0..254 {
+        for i in 0..127 {
             d.services
                 .insert(format!("svc{i:03}"), make_service(vec![]));
         }

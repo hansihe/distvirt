@@ -50,12 +50,28 @@ pub struct RegistryEntry {
 /// Buffer policy for placeholder routes (scale-to-zero / suspended pods).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferPolicy {
-    /// Hold TCP SYN connections at the gateway level (no-op for now, stored for future use).
-    pub hold_tcp_syn: bool,
     /// Maximum number of frames to buffer (0 = drop immediately).
     pub buffer_frames: u32,
     /// How long to buffer before giving up, in milliseconds.
     pub timeout_ms: u32,
+}
+
+/// Policy for a fabric-level service entity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePolicy {
+    /// Maximum number of frames to buffer while waiting for readiness.
+    pub buffer_frames: u32,
+    /// How long to buffer before giving up, in milliseconds.
+    pub timeout_ms: u32,
+}
+
+/// Backend target for a service entity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceBackend {
+    /// The backing pod's IP address.
+    pub pod_ip: Ipv4Addr,
+    /// The backing pod's MAC address (needed to find the port).
+    pub pod_mac: [u8; 6],
 }
 
 /// Where a fabric route entry points.
@@ -116,6 +132,26 @@ pub enum WorkerCommand {
         added: Vec<FabricRouteEntry>,
         removed_ips: Vec<Ipv4Addr>,
     },
+    CreateService {
+        namespace_id: String,
+        service_id: String,
+        ip: Ipv4Addr,
+        mac: [u8; 6],
+        policy: ServicePolicy,
+    },
+    UpdateServiceBackend {
+        namespace_id: String,
+        service_id: String,
+        backend: Option<ServiceBackend>,
+    },
+    ServiceReady {
+        namespace_id: String,
+        service_id: String,
+    },
+    DestroyService {
+        namespace_id: String,
+        service_id: String,
+    },
     Shutdown,
 }
 
@@ -155,6 +191,11 @@ pub enum WorkerEvent {
         namespace_id: String,
         dst_ip: Ipv4Addr,
         dst_mac: [u8; 6],
+    },
+    ServiceActivation {
+        namespace_id: String,
+        service_id: String,
+        dst_ip: Ipv4Addr,
     },
 }
 

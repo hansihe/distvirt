@@ -2,9 +2,9 @@
 
 ## Current State
 
-**Phases 1, 2, and 3 (route table + frame buffering) are implemented.** The fabric is a per-namespace userspace L2 switch with a smoltcp-based IP gateway providing ARP, DNS service discovery, and internet egress via TUN+NAT. Each worker creates one fabric instance per namespace. Pod TAP devices are added as ports on the switch. The fabric includes a route table for destinations that aren't local — frames to placeholder destinations are buffered per policy, and route miss events propagate to the orchestrator for scale-to-zero activation.
+**Phases 1, 2, 3 (route table + frame buffering), and 4 (service entities) are implemented.** The fabric is a per-namespace userspace L2 switch with a smoltcp-based IP gateway providing ARP, DNS service discovery, and internet egress via TUN+NAT. Each worker creates one fabric instance per namespace. Pod TAP devices are added as ports on the switch. The fabric includes a route table for destinations that aren't local — frames to placeholder destinations are buffered per policy, and route miss events propagate to the orchestrator for scale-to-zero activation. Fabric-level service entities provide readiness gating: traffic to service IPs is buffered until the orchestrator signals readiness, at which point frames are flushed to the backing pod.
 
-**Known limitation**: Buffered frames are currently flushed as soon as the pod's TAP port is added to the fabric, before the guest has configured its network or the application has started listening. This needs a readiness gate — see Service Network Entities below.
+**Note**: Direct pod-to-pod route table buffering (via `add_port_with_ip`) still flushes immediately when the TAP port is added, without readiness gating. Service entities are the recommended path for inter-service communication where readiness gating matters.
 
 ---
 
@@ -52,24 +52,47 @@ Key methods:
 - `lookup_and_buffer(dst_ip, frame) -> (RouteAction, bool)` — returns action + whether miss event should fire (respecting debounce). Handles buffer limits and timeout expiry.
 - `flush_buffer(ip) -> Vec<Vec<u8>>` — drains buffered frames (called when pod activates)
 
+### `service.rs` — Service entities + service table
+
+`ServiceEntity`: holds service_id, virtual IP/MAC, `ServicePolicy` (buffer_frames, timeout_ms), optional backend (pod IP/MAC), readiness state, and a `VecDeque<Vec<u8>>` frame buffer with timeout tracking.
+
+`ServiceTable`: `HashMap<Ipv4Addr, ServiceEntity>` for fast frame-path lookup, plus `HashMap<String, Ipv4Addr>` for command dispatch by service_id. Per-IP activation debounce (default 1s window) prevents activation event floods.
+
+`ServiceAction` enum: `Forward { pod_ip, pod_mac }` (service is ready, forward to backend), `Buffered` (frame accepted into buffer), `Drop` (buffer full or timed out).
+
+Key methods:
+- `create(service_id, ip, mac, policy)` — register a new service entity
+- `destroy(service_id)` — remove a service entity
+- `update_backend(service_id, backend)` — assign or remove backing pod; clears readiness and resets buffer
+- `mark_ready(service_id) -> Option<(Vec<Vec<u8>>, [u8; 6])>` — mark ready, returns buffered frames + backend MAC for flushing
+- `lookup_and_buffer(dst_ip, frame) -> Option<(ServiceAction, bool)>` — `None` if not a service IP; `bool` is `should_activate` (debounced)
+- `get_mac(ip)` — returns service MAC for ARP replies
+
 ### `mod.rs` — `Fabric` struct + port read loops
 
-Owns ports (`Arc<Mutex<HashMap<PortId, SharedPort>>>`), MAC table (`Arc<Mutex<MacTable>>`), and route table (`Arc<Mutex<RouteTable>>`). Each port spawns its own tokio task for frame reading and forwarding. Shared state locks held only briefly for lookups. Lock ordering: mac_table always acquired before route_table.
+Owns ports (`Arc<Mutex<HashMap<PortId, SharedPort>>>`), MAC table (`Arc<Mutex<MacTable>>`), route table (`Arc<Mutex<RouteTable>>`), and service table (`Arc<Mutex<ServiceTable>>`). Each port spawns its own tokio task for frame reading and forwarding. Shared state locks held only briefly for lookups. Lock ordering: never hold service_table while acquiring mac_table; release service_table first, then lock mac_table for forwarding.
 
-`FabricEvent::RouteMiss { dst_ip, dst_mac }` — fabric-internal event emitted when frames hit placeholder routes. Forwarded to worker via an optional `mpsc::Sender<FabricEvent>` set with `set_event_channel(tx)`. Uses `try_send` — misses are hints, silent drop under backpressure is acceptable.
+`FabricEvent` enum:
+- `RouteMiss { dst_ip, dst_mac }` — frame hit a placeholder route or unknown pod IP
+- `ServiceActivation { service_id, dst_ip }` — frame hit a service with no ready backend
+
+Both forwarded to worker via an optional `mpsc::Sender<FabricEvent>` set with `set_event_channel(tx)`. Uses `try_send` — these are hints, silent drop under backpressure is acceptable.
 
 Frame forwarding logic:
 - **Gateway MAC destination**: send only to gateway channel
-- **Broadcast/multicast**: flood to all ports + gateway
+- **Broadcast/multicast**: flood to all ports + gateway. Additionally, ARP requests for service IPs receive a synthetic ARP reply (`try_service_arp_reply`), making service IPs ARP-resolvable.
 - **Known unicast**: MAC lookup → direct forward to port
+- **Unknown unicast (IPv4, service IP)**: consult service table → forward (rewrite dst MAC to backend pod MAC) / buffer / drop. Emit `ServiceActivation` if no ready backend (debounced).
 - **Unknown unicast (IPv4 with route entry)**: consult route table → buffer/drop/remote-stub per policy
 - **Unknown unicast (IPv4, no route entry)**: flood to all other ports (preserves existing behavior)
 - **Unknown unicast (non-IPv4)**: flood to all other ports
 - **No loopback**: never sends frame back to source port
 
-Port lifecycle: `add_port(TapDevice) -> (PortId, TaskHandle)`, `add_port_with_ip(TapDevice, Ipv4Addr)` — the latter currently flushes buffered frames immediately to the new port via a spawned async task (this will move to service entities once implemented). `PortGuard` provides RAII cleanup — automatically removes port from map when the port task exits or panics.
+`flush_service_frames(frames, backend_mac)` — looks up backend MAC in mac_table to find port, rewrites dst MAC in each frame, sends via spawned async task.
 
-Gateway connection: `set_gateway(egress_tx, ingress_rx)` — bidirectional channel pair. Separate ingress task reads frames from gateway and injects them back into the switch for forwarding. Both port read loops and gateway ingress task are route-aware.
+Port lifecycle: `add_port(TapDevice) -> (PortId, TaskHandle)`, `add_port_with_ip(TapDevice, Ipv4Addr)` — the latter flushes route-table-buffered frames immediately to the new port via a spawned async task. For service-backed traffic, flushing is gated on `ServiceReady` instead. `PortGuard` provides RAII cleanup — automatically removes port from map when the port task exits or panics.
+
+Gateway connection: `set_gateway(egress_tx, ingress_rx)` — bidirectional channel pair. Separate ingress task reads frames from gateway and injects them back into the switch for forwarding. Both port read loops and gateway ingress task are service-table-aware and route-aware.
 
 All frames include 10-byte vhost VNET header before the Ethernet frame.
 
@@ -117,12 +140,18 @@ Opens `/dev/net/tun` with `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`, enables `TUN_F_C
 **Namespace creation** (`worker.rs:handle_create_namespace`):
 1. Create `Fabric` instance
 2. Create fabric event channel, call `fabric.set_event_channel(tx)`
-3. Get `route_table` reference from fabric
+3. Get `route_table` and `service_table` references from fabric
 4. Create `DnsRegistry` (shared `Arc<RwLock<HashMap>>`)
 5. Spawn `FabricGateway` as background tokio task
 6. Connect fabric ↔ gateway via channel pair
-7. Spawn event bridge task: maps `FabricEvent::RouteMiss` → `WorkerEvent::FabricRouteMiss` and forwards to `bg_event_tx`
-8. Store in `NamespaceState` (includes `route_table` and `_event_bridge_task`)
+7. Spawn event bridge task: maps `FabricEvent::RouteMiss` → `WorkerEvent::FabricRouteMiss` and `FabricEvent::ServiceActivation` → `WorkerEvent::ServiceActivation`, forwards to `bg_event_tx`
+8. Store in `NamespaceState` (includes `route_table`, `service_table`, and `_event_bridge_task`)
+
+**Service management** (`worker.rs`):
+- `handle_create_service` — locks service table, calls `create(service_id, ip, mac, policy)`
+- `handle_update_service_backend` — locks service table, calls `update_backend(service_id, backend)`
+- `handle_service_ready` — locks service table, calls `mark_ready(service_id)` to get buffered frames + backend MAC; if frames, calls `fabric.flush_service_frames(frames, backend_mac)` to deliver them
+- `handle_destroy_service` — locks service table, calls `destroy(service_id)`
 
 **Route management** (`worker.rs`):
 - `handle_fabric_route_sync` — locks route table, calls `sync(routes)` for full replacement
@@ -131,14 +160,14 @@ Opens `/dev/net/tun` with `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`, enables `TUN_F_C
 **Pod launch** (`worker.rs:pod_launch`):
 1. VM launches with TAP device (virtio-net, vhost-net backend)
 2. `take_tap()` transfers TAP ownership from VM to fabric
-3. `fabric.add_port_with_ip(tap, network.ip)` — flushes any buffered frames for this IP, then starts port forwarding task
+3. `fabric.add_port_with_ip(tap, network.ip)` — flushes any route-table-buffered frames for this IP, then starts port forwarding task
 4. Guest configures interface via `ConfigureNetwork` command (IP/netmask/gateway)
 
 **Pod shutdown**: Port task cleaned up automatically via RAII when supervisor exits.
 
 ---
 
-## Service Entities (Next)
+## Service Entities
 
 Services are first-class network entities on the fabric with their own virtual IP and MAC, separate from backing pod IPs. A service entity is the boundary at which application-level traffic management happens — buffering, activation, and readiness gating all live here rather than on the pod directly. See `docs/worker-protocol.md` for the full protocol design.
 
@@ -147,8 +176,8 @@ Client pod → Service IP (virtual) → [buffer / activate / ready?] → Pod IP 
 ```
 
 **Why this separation matters**:
-- **Clean lifecycle boundary**: Pod lifecycle (VM booted, network configured) is distinct from service readiness (application listening, health check passed). The current model conflates them.
-- **Readiness gating**: Buffered frames are only flushed to the backing pod once the orchestrator sends `ServiceReady`. This replaces the current behavior where flush happens immediately at port-add time.
+- **Clean lifecycle boundary**: Pod lifecycle (VM booted, network configured) is distinct from service readiness (application listening, health check passed).
+- **Readiness gating**: Buffered frames are only flushed to the backing pod once the orchestrator sends `ServiceReady`, not immediately at port-add time.
 - **Flexibility**: Multiple services can back the same pod. Scale-to-zero is "no backing pod assigned to service IP" rather than "pod doesn't exist."
 - **Protocol activators (future)**: Protocol-aware logic (TCP SYN detection, HTTP/2 stream parsing) runs on the service entity where the expected protocols are declared.
 
@@ -156,15 +185,11 @@ Client pod → Service IP (virtual) → [buffer / activate / ready?] → Pod IP 
 
 **Coexistence with pod routes**: Pods remain directly addressable by IP. The existing route table with placeholder entries provides basic best-effort buffering for direct pod-to-pod traffic. Services get the rich activation path; pod routes preserve the flat L2 network illusion. Traffic resolution order: local TAP → service entity → route table → flood.
 
-**How this relates to existing code**: The route table and frame buffering from Phase 3 are the foundation. Service entities are a new construct alongside the route table (not a replacement). The `FabricEvent::RouteMiss` mechanism splits into two: `ServiceActivation` for service IPs, `FabricRouteMiss` for pod IPs. The existing `add_port_with_ip` flush-on-add behavior will be replaced by service-driven readiness gating for service-backed pods.
+**ARP resolution**: Service IPs are ARP-resolvable. When a broadcast ARP request targets a service IP, the fabric constructs an ARP reply with the service's virtual MAC and sends it back to the requesting port. This allows guest network stacks to resolve service IPs without any special configuration.
 
-### What Needs to Change
+**IP allocation in compose mode**: Each service gets two IPs from the namespace subnet — a service IP (virtual, used for DNS and the service entity) and a pod IP (assigned to the VM network interface). Service IPs are allocated first (.2 to .N+1), pod IPs after (.N+2 to .2N+1). This limits compose deployments to 126 services per namespace (using the default /24 subnet).
 
-- **New `service.rs` module**: Service entity struct holding IP/MAC, policy, backend binding, readiness state, and frame buffer. Keyed by service ID, stored in fabric.
-- **Frame forwarding in `mod.rs`**: Before consulting the route table for unknown unicast, check if the destination IP matches a service entity. If so, delegate to the service entity (buffer/activate/forward).
-- **New `FabricEvent::ServiceActivation`**: Emitted when traffic hits a service with no ready backend. Mapped to `WorkerEvent::ServiceActivation` by the event bridge.
-- **Worker command handlers**: `handle_create_service`, `handle_update_service_backend`, `handle_service_ready`, `handle_destroy_service` in `worker.rs`.
-- **Orchestrator changes**: Compose orchestrator creates services, assigns backends, signals readiness.
+**Compose orchestration flow**: On `CreateNamespace`, the orchestrator sends `CreateService` for each planned service. DNS entries map names to service IPs. On `PodRunning`, the orchestrator sends `UpdateServiceBackend` (with pod IP/MAC) followed by `ServiceReady` to flush buffered frames and enable traffic flow.
 
 ---
 

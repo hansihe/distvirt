@@ -215,6 +215,7 @@ UpdateServiceBackend {
 
 ServiceBackend {
   pod_ip: Ipv4Addr,
+  pod_mac: [u8; 6],
 }
 
 ServiceReady {

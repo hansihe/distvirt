@@ -167,7 +167,6 @@ mod tests {
             mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
-                    hold_tcp_syn: false,
                     buffer_frames,
                     timeout_ms,
                 },

@@ -2,6 +2,7 @@ pub(crate) mod dns;
 pub(crate) mod gateway;
 pub(crate) mod port;
 pub(crate) mod route;
+pub(crate) mod service;
 pub(crate) mod switch;
 pub(crate) mod tun;
 
@@ -10,6 +11,7 @@ pub use gateway::FabricGateway;
 pub use switch::GATEWAY_IP_STR;
 pub use port::{FramePort, Port, PortId};
 pub use route::RouteTable;
+pub use service::ServiceTable;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -19,13 +21,16 @@ use tokio::sync::mpsc;
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
 use route::RouteAction;
+use service::ServiceAction;
 use switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, extract_ipv4_dst, format_mac, is_broadcast, parse_ethernet_header};
 
-/// Fabric-internal event emitted when the route table is consulted.
+/// Fabric-internal event emitted when the route table or service table is consulted.
 #[derive(Debug, Clone)]
 pub enum FabricEvent {
     /// A frame hit a placeholder route or no route was found for a routed IP.
     RouteMiss { dst_ip: Ipv4Addr, dst_mac: [u8; 6] },
+    /// A frame hit a service IP that has no ready backend.
+    ServiceActivation { service_id: String, dst_ip: Ipv4Addr },
 }
 
 /// Shared port handle that can be used by any reader task to send frames.
@@ -60,6 +65,7 @@ pub struct Fabric<P: FramePort = Port> {
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
     route_table: Arc<Mutex<RouteTable>>,
+    service_table: Arc<Mutex<ServiceTable>>,
     next_port_id: PortId,
     gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
     event_tx: Option<mpsc::Sender<FabricEvent>>,
@@ -89,6 +95,7 @@ impl Fabric<Port> {
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
             Arc::clone(&self.route_table),
+            Arc::clone(&self.service_table),
             self.gateway_tx.clone(),
             self.event_tx.clone(),
         ));
@@ -139,6 +146,7 @@ impl Fabric<Port> {
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
             Arc::clone(&self.route_table),
+            Arc::clone(&self.service_table),
             self.gateway_tx.clone(),
             self.event_tx.clone(),
         ));
@@ -155,6 +163,7 @@ impl<P: FramePort> Fabric<P> {
             ports: Arc::new(Mutex::new(HashMap::new())),
             mac_table: Arc::new(Mutex::new(MacTable::new())),
             route_table: Arc::new(Mutex::new(RouteTable::new())),
+            service_table: Arc::new(Mutex::new(ServiceTable::new())),
             next_port_id: 0,
             gateway_tx: None,
             event_tx: None,
@@ -183,6 +192,7 @@ impl<P: FramePort> Fabric<P> {
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
             Arc::clone(&self.route_table),
+            Arc::clone(&self.service_table),
             self.gateway_tx.clone(),
             self.event_tx.clone(),
         ));
@@ -228,6 +238,7 @@ impl<P: FramePort> Fabric<P> {
             Arc::clone(&self.ports),
             Arc::clone(&self.mac_table),
             Arc::clone(&self.route_table),
+            Arc::clone(&self.service_table),
             self.gateway_tx.clone(),
             self.event_tx.clone(),
         ));
@@ -251,6 +262,7 @@ impl<P: FramePort> Fabric<P> {
         let ports = Arc::clone(&self.ports);
         let mac_table = Arc::clone(&self.mac_table);
         let route_table = Arc::clone(&self.route_table);
+        let service_table = Arc::clone(&self.service_table);
         let event_tx = self.event_tx.clone();
 
         self._gateway_ingress_task = Some(TaskHandle::spawn(gateway_ingress_task(
@@ -258,6 +270,7 @@ impl<P: FramePort> Fabric<P> {
             ports,
             mac_table,
             route_table,
+            service_table,
             event_tx,
         )));
 
@@ -273,6 +286,59 @@ impl<P: FramePort> Fabric<P> {
     pub fn route_table(&self) -> Arc<Mutex<RouteTable>> {
         Arc::clone(&self.route_table)
     }
+
+    /// Get a reference to the service table.
+    pub fn service_table(&self) -> Arc<Mutex<ServiceTable>> {
+        Arc::clone(&self.service_table)
+    }
+
+    /// Flush buffered service frames to the backend port.
+    ///
+    /// Looks up the backend MAC in the mac_table to find the port,
+    /// rewrites the destination MAC in each frame, and sends them.
+    pub fn flush_service_frames(&self, frames: Vec<Vec<u8>>, backend_mac: [u8; 6]) {
+        let dst_port = {
+            let mac_table = self.mac_table.lock().unwrap();
+            let port_id = match mac_table.lookup(&backend_mac) {
+                Some(id) => id,
+                None => {
+                    log::warn!(
+                        "fabric: flush_service_frames: backend MAC {} not in mac_table, dropping {} frames",
+                        format_mac(&backend_mac),
+                        frames.len()
+                    );
+                    return;
+                }
+            };
+            let ports = self.ports.lock().unwrap();
+            match ports.get(&port_id) {
+                Some(p) => Arc::clone(p),
+                None => {
+                    log::warn!(
+                        "fabric: flush_service_frames: port {} gone, dropping {} frames",
+                        port_id,
+                        frames.len()
+                    );
+                    return;
+                }
+            }
+        };
+
+        let count = frames.len();
+        tokio::spawn(async move {
+            for mut frame in frames {
+                // Rewrite dst MAC in the frame (after vnet header).
+                if frame.len() >= VNET_HDR_SZ + 6 {
+                    frame[VNET_HDR_SZ..VNET_HDR_SZ + 6].copy_from_slice(&backend_mac);
+                }
+                if let Err(e) = dst_port.send_frame(&frame).await {
+                    log::warn!("fabric: flush_service_frames send error: {}", e);
+                    break;
+                }
+            }
+            log::info!("fabric: flushed {} service frames to backend", count);
+        });
+    }
 }
 
 /// Per-port read loop: reads frames, learns MACs, responds to gateway ARP,
@@ -283,6 +349,7 @@ async fn port_read_loop<P: FramePort>(
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
     route_table: Arc<Mutex<RouteTable>>,
+    service_table: Arc<Mutex<ServiceTable>>,
     gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
     event_tx: Option<mpsc::Sender<FabricEvent>>,
 ) {
@@ -340,6 +407,8 @@ async fn port_read_loop<P: FramePort>(
             if let Some(ref gw_tx) = gateway_tx {
                 let _ = gw_tx.try_send(frame.to_vec());
             }
+            // Check if this is an ARP request for a service IP and reply.
+            try_service_arp_reply(frame, &service_table, &port).await;
         } else if dst_mac == GATEWAY_MAC {
             // Gateway-destined frame: send to gateway via channel.
             if let Some(ref gw_tx) = gateway_tx {
@@ -371,9 +440,10 @@ async fn port_read_loop<P: FramePort>(
                     }
                 }
             } else {
-                // Unknown unicast: consult route table for IPv4 frames.
+                // Unknown unicast: consult service table, then route table.
                 handle_unknown_unicast(
-                    frame, dst_mac, port_id, &ports, &route_table, &event_tx,
+                    frame, dst_mac, port_id, &ports, &mac_table, &route_table,
+                    &service_table, &event_tx,
                 ).await;
             }
         }
@@ -387,6 +457,7 @@ async fn gateway_ingress_task<P: FramePort>(
     ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
     mac_table: Arc<Mutex<MacTable>>,
     route_table: Arc<Mutex<RouteTable>>,
+    service_table: Arc<Mutex<ServiceTable>>,
     event_tx: Option<mpsc::Sender<FabricEvent>>,
 ) {
     while let Some(frame) = ingress_rx.recv().await {
@@ -419,9 +490,10 @@ async fn gateway_ingress_task<P: FramePort>(
                     }
                 }
             } else {
-                // Unknown unicast: consult route table for IPv4 frames.
+                // Unknown unicast: consult service table, then route table.
                 handle_unknown_unicast(
-                    &frame, dst_mac, PortId::MAX, &ports, &route_table, &event_tx,
+                    &frame, dst_mac, PortId::MAX, &ports, &mac_table, &route_table,
+                    &service_table, &event_tx,
                 ).await;
             }
         }
@@ -430,19 +502,84 @@ async fn gateway_ingress_task<P: FramePort>(
     log::info!("fabric: gateway ingress task ended");
 }
 
-/// Handle unknown unicast: consult the route table for IPv4 frames,
+/// Handle unknown unicast: consult service table first, then route table for IPv4 frames,
 /// otherwise flood as before.
 async fn handle_unknown_unicast<P: FramePort>(
     frame: &[u8],
     dst_mac: [u8; 6],
     src_port_id: PortId,
     ports: &Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
+    mac_table: &Arc<Mutex<MacTable>>,
     route_table: &Arc<Mutex<RouteTable>>,
+    service_table: &Arc<Mutex<ServiceTable>>,
     event_tx: &Option<mpsc::Sender<FabricEvent>>,
 ) {
     // Try to extract IPv4 destination from the frame (skip vnet header).
     let eth_frame = &frame[VNET_HDR_SZ..];
     if let Some(dst_ip) = extract_ipv4_dst(eth_frame) {
+        // 1. Check service table first.
+        let svc_result = {
+            let mut st = service_table.lock().unwrap();
+            st.lookup_and_buffer(dst_ip, frame)
+        };
+
+        if let Some((svc_action, should_activate)) = svc_result {
+            // Get service_id for activation event (re-lock briefly).
+            let service_id = if should_activate {
+                let st = service_table.lock().unwrap();
+                st.get_service_id(&dst_ip).map(String::from)
+            } else {
+                None
+            };
+
+            match svc_action {
+                ServiceAction::Forward { pod_ip: _, pod_mac } => {
+                    // Find port for backend MAC, rewrite dst MAC, send.
+                    let dst_port = {
+                        let mt = mac_table.lock().unwrap();
+                        if let Some(port_id) = mt.lookup(&pod_mac) {
+                            let p = ports.lock().unwrap();
+                            p.get(&port_id).cloned()
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(dst_port) = dst_port {
+                        let mut rewritten = frame.to_vec();
+                        if rewritten.len() >= VNET_HDR_SZ + 6 {
+                            rewritten[VNET_HDR_SZ..VNET_HDR_SZ + 6].copy_from_slice(&pod_mac);
+                        }
+                        if let Err(e) = dst_port.send_frame(&rewritten).await {
+                            log::warn!("fabric: service forward error: {}", e);
+                        }
+                    } else {
+                        log::debug!(
+                            "fabric: service forward to {} but backend MAC not in mac_table",
+                            format_mac(&pod_mac)
+                        );
+                    }
+                }
+                ServiceAction::Buffered => {
+                    log::trace!("fabric: frame to service {} buffered", dst_ip);
+                }
+                ServiceAction::Drop => {
+                    log::trace!("fabric: frame to service {} dropped", dst_ip);
+                }
+            }
+
+            if let Some(service_id) = service_id {
+                if let Some(tx) = event_tx {
+                    let _ = tx.try_send(FabricEvent::ServiceActivation {
+                        service_id,
+                        dst_ip,
+                    });
+                }
+            }
+
+            return;
+        }
+
+        // 2. Fall through to route table.
         let (action, should_miss) = {
             let mut rt = route_table.lock().unwrap();
             rt.lookup_and_buffer(dst_ip, frame)
@@ -478,6 +615,74 @@ async fn handle_unknown_unicast<P: FramePort>(
     } else {
         // Non-IPv4 unknown unicast: flood as before.
         flood_frame(frame, src_port_id, ports).await;
+    }
+}
+
+/// Check if a broadcast frame is an ARP request for a service IP. If so,
+/// construct and send an ARP reply back to the source port.
+async fn try_service_arp_reply<P: FramePort>(
+    frame: &[u8],
+    service_table: &Arc<Mutex<ServiceTable>>,
+    src_port: &SharedPort<P>,
+) {
+    let eth_frame = &frame[VNET_HDR_SZ..];
+    // Minimum ARP frame: 14 (eth header) + 28 (ARP for IPv4) = 42.
+    if eth_frame.len() < 42 {
+        return;
+    }
+    let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+    if ethertype != 0x0806 {
+        return;
+    }
+    // ARP operation at offset 20-21 (relative to eth_frame start at 14+6=20).
+    let arp = &eth_frame[14..];
+    let op = u16::from_be_bytes([arp[6], arp[7]]);
+    if op != 1 {
+        return; // Not a request.
+    }
+    // Target protocol address at ARP offset 24..28.
+    let target_ip = Ipv4Addr::new(arp[24], arp[25], arp[26], arp[27]);
+
+    let service_mac = {
+        let st = service_table.lock().unwrap();
+        st.get_mac(&target_ip)
+    };
+
+    let service_mac = match service_mac {
+        Some(mac) => mac,
+        None => return,
+    };
+
+    // Build ARP reply.
+    let sender_mac: [u8; 6] = eth_frame[6..12].try_into().unwrap();
+    let sender_ip: [u8; 4] = arp[14..18].try_into().unwrap();
+
+    let mut reply = vec![0u8; VNET_HDR_SZ]; // vnet header (zeroed)
+    // Ethernet header: dst=sender_mac, src=service_mac, ethertype=0x0806.
+    reply.extend_from_slice(&sender_mac);
+    reply.extend_from_slice(&service_mac);
+    reply.extend_from_slice(&0x0806u16.to_be_bytes());
+    // ARP payload.
+    let mut arp_reply = [0u8; 28];
+    arp_reply[0..2].copy_from_slice(&[0x00, 0x01]); // hardware type: Ethernet
+    arp_reply[2..4].copy_from_slice(&[0x08, 0x00]); // protocol type: IPv4
+    arp_reply[4] = 6; // hardware size
+    arp_reply[5] = 4; // protocol size
+    arp_reply[6..8].copy_from_slice(&[0x00, 0x02]); // operation: reply
+    arp_reply[8..14].copy_from_slice(&service_mac); // sender hardware address
+    arp_reply[14..18].copy_from_slice(&target_ip.octets()); // sender protocol address
+    arp_reply[18..24].copy_from_slice(&sender_mac); // target hardware address
+    arp_reply[24..28].copy_from_slice(&sender_ip); // target protocol address
+    reply.extend_from_slice(&arp_reply);
+
+    if let Err(e) = src_port.send_frame(&reply).await {
+        log::warn!("fabric: service ARP reply send error: {}", e);
+    } else {
+        log::debug!(
+            "fabric: sent ARP reply for service IP {} (MAC {})",
+            target_ip,
+            format_mac(&service_mac)
+        );
     }
 }
 
@@ -950,7 +1155,6 @@ mod tests {
                 mac: MAC_C,
                 destination: RouteDestination::Placeholder {
                     buffer_policy: BufferPolicy {
-                        hold_tcp_syn: false,
                         buffer_frames: 10,
                         timeout_ms: 5000,
                     },
@@ -1017,7 +1221,6 @@ mod tests {
                 mac: MAC_C,
                 destination: RouteDestination::Placeholder {
                     buffer_policy: BufferPolicy {
-                        hold_tcp_syn: false,
                         buffer_frames: 10,
                         timeout_ms: 5000,
                     },
@@ -1068,7 +1271,6 @@ mod tests {
                 mac: MAC_C,
                 destination: RouteDestination::Placeholder {
                     buffer_policy: BufferPolicy {
-                        hold_tcp_syn: false,
                         buffer_frames: 100,
                         timeout_ms: 5000,
                     },

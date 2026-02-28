@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::task_handle::TaskHandle;
 
-use crate::fabric::{DnsRegistry, Fabric, FabricEvent, FabricGateway, RouteTable};
+use crate::fabric::{DnsRegistry, Fabric, FabricEvent, FabricGateway, RouteTable, ServiceTable};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
 use crate::managed_vm::{ImageOverrides, ManagedVm, merge_config};
@@ -58,6 +58,7 @@ struct PodState {
 struct NamespaceState {
     fabric: Arc<tokio::sync::Mutex<Fabric>>,
     route_table: Arc<std::sync::Mutex<RouteTable>>,
+    service_table: Arc<std::sync::Mutex<ServiceTable>>,
     _gateway_task: TaskHandle<()>,
     _event_bridge_task: TaskHandle<()>,
     registry: DnsRegistry,
@@ -224,6 +225,26 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 added,
                 removed_ips,
             } => self.handle_fabric_route_update(&namespace_id, added, removed_ips),
+            WorkerCommand::CreateService {
+                namespace_id,
+                service_id,
+                ip,
+                mac,
+                policy,
+            } => self.handle_create_service(&namespace_id, service_id, ip, mac, policy),
+            WorkerCommand::UpdateServiceBackend {
+                namespace_id,
+                service_id,
+                backend,
+            } => self.handle_update_service_backend(&namespace_id, &service_id, backend),
+            WorkerCommand::ServiceReady {
+                namespace_id,
+                service_id,
+            } => self.handle_service_ready(&namespace_id, &service_id).await,
+            WorkerCommand::DestroyService {
+                namespace_id,
+                service_id,
+            } => self.handle_destroy_service(&namespace_id, &service_id),
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
                 unreachable!("Shutdown handled in run()")
@@ -245,6 +266,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         fabric.set_event_channel(fabric_event_tx);
 
         let route_table = fabric.route_table();
+        let service_table = fabric.service_table();
 
         let pod_gateway_ip = network.gateway.octets();
         let (gateway, egress_tx, ingress_rx) =
@@ -276,7 +298,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             ns_cancel.cancel();
         });
 
-        // Bridge task: map FabricEvent::RouteMiss to WorkerEvent::FabricRouteMiss.
+        // Bridge task: map FabricEvents to WorkerEvents.
         let bridge_event_tx = self.bg_event_tx.clone();
         let bridge_ns_id = namespace_id.clone();
         let event_bridge_task = TaskHandle::spawn(async move {
@@ -288,6 +310,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                                 namespace_id: bridge_ns_id.clone(),
                                 dst_ip,
                                 dst_mac,
+                            });
+                    }
+                    FabricEvent::ServiceActivation { service_id, dst_ip } => {
+                        let _ = bridge_event_tx
+                            .try_send(WorkerEvent::ServiceActivation {
+                                namespace_id: bridge_ns_id.clone(),
+                                service_id,
+                                dst_ip,
                             });
                     }
                 }
@@ -302,6 +332,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let ns = NamespaceState {
             fabric: Arc::new(tokio::sync::Mutex::new(fabric)),
             route_table,
+            service_table,
             _gateway_task: gateway_task,
             _event_bridge_task: event_bridge_task,
             registry,
@@ -416,6 +447,104 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         log::info!(
             "worker: updated fabric routes for namespace '{}'",
             namespace_id
+        );
+        Ok(())
+    }
+
+    fn handle_create_service(
+        &mut self,
+        namespace_id: &str,
+        service_id: String,
+        ip: std::net::Ipv4Addr,
+        mac: [u8; 6],
+        policy: distvirt_worker_protocol::ServicePolicy,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let mut st = ns.service_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
+        })?;
+        st.create(service_id.clone(), ip, mac, policy);
+
+        log::info!(
+            "worker: created service '{}' with ip {} in namespace '{}'",
+            service_id, ip, namespace_id
+        );
+        Ok(())
+    }
+
+    fn handle_update_service_backend(
+        &mut self,
+        namespace_id: &str,
+        service_id: &str,
+        backend: Option<distvirt_worker_protocol::ServiceBackend>,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let mut st = ns.service_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
+        })?;
+        let backend_tuple = backend.map(|b| (b.pod_ip, b.pod_mac));
+        st.update_backend(service_id, backend_tuple);
+
+        log::info!(
+            "worker: updated service backend '{}' in namespace '{}'",
+            service_id, namespace_id
+        );
+        Ok(())
+    }
+
+    async fn handle_service_ready(
+        &mut self,
+        namespace_id: &str,
+        service_id: &str,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let flush_data = {
+            let mut st = ns.service_table.lock().map_err(|e| {
+                FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
+            })?;
+            st.mark_ready(service_id)
+        };
+
+        if let Some((frames, backend_mac)) = flush_data {
+            if !frames.is_empty() {
+                let fabric = ns.fabric.lock().await;
+                fabric.flush_service_frames(frames, backend_mac);
+            }
+        }
+
+        log::info!(
+            "worker: service '{}' marked ready in namespace '{}'",
+            service_id, namespace_id
+        );
+        Ok(())
+    }
+
+    fn handle_destroy_service(
+        &mut self,
+        namespace_id: &str,
+        service_id: &str,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let mut st = ns.service_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
+        })?;
+        st.destroy(service_id);
+
+        log::info!(
+            "worker: destroyed service '{}' in namespace '{}'",
+            service_id, namespace_id
         );
         Ok(())
     }

@@ -2,7 +2,7 @@ use anyhow::Context;
 use distvirt_worker_protocol::codec::recv_msg;
 use distvirt_worker_protocol::{
     ContainerConfig, ContainerSpec, LogStreamHeader, NetworkConfig, OrchestratorConnection,
-    PodNetworkConfig, RegistryEntry, WorkerCommand, WorkerEvent,
+    PodNetworkConfig, RegistryEntry, ServiceBackend, ServicePolicy, WorkerCommand, WorkerEvent,
 };
 use futures_lite::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -136,13 +136,13 @@ pub async fn run_compose(
         }
     }
 
-    // 2. Registry sync.
+    // 2. Registry sync — DNS names resolve to service IPs.
     let registry_entries: Vec<RegistryEntry> = plan
         .services
         .iter()
         .map(|s| RegistryEntry {
             name: s.name.clone(),
-            ip: s.ip,
+            ip: s.service_ip,
         })
         .collect();
 
@@ -152,6 +152,22 @@ pub async fn run_compose(
     })
     .await
     .context("send registry sync")?;
+
+    // 2b. Create fabric-level service entities for each planned service.
+    for planned in &plan.services {
+        conn.send_command(&WorkerCommand::CreateService {
+            namespace_id: namespace_id.clone(),
+            service_id: planned.name.clone(),
+            ip: planned.service_ip,
+            mac: planned.service_mac,
+            policy: ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+            },
+        })
+        .await
+        .with_context(|| format!("send create service '{}'", planned.name))?;
+    }
 
     // 3. Launch pods for each service in dependency order.
     let total_pods = plan.services.len();
@@ -180,8 +196,8 @@ pub async fn run_compose(
             namespace_id: namespace_id.clone(),
             pod_id: planned.name.clone(),
             network: PodNetworkConfig {
-                ip: planned.ip,
-                mac: planned.mac,
+                ip: planned.pod_ip,
+                mac: planned.pod_mac,
                 gateway: DEFAULT_GATEWAY,
                 netmask: DEFAULT_NETMASK.to_string(),
             },
@@ -190,6 +206,13 @@ pub async fn run_compose(
         .await
         .with_context(|| format!("send launch pod '{}'", planned.name))?;
     }
+
+    // Build a lookup from pod_id to planned service for service readiness on PodRunning.
+    let planned_by_name: std::collections::HashMap<&str, &crate::deployment::PlannedService> = plan
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s))
+        .collect();
 
     // 4. Event loop: receive events and log lines concurrently.
     let mut exited_count = 0;
@@ -209,6 +232,26 @@ pub async fn run_compose(
                         pod_id,
                     } => {
                         log::info!("pod '{}' is running", pod_id);
+                        // Wire up the service backend and mark ready.
+                        if let Some(planned) = planned_by_name.get(pod_id.as_str()) {
+                            conn.send_command(&WorkerCommand::UpdateServiceBackend {
+                                namespace_id: namespace_id.clone(),
+                                service_id: pod_id.clone(),
+                                backend: Some(ServiceBackend {
+                                    pod_ip: planned.pod_ip,
+                                    pod_mac: planned.pod_mac,
+                                }),
+                            })
+                            .await
+                            .with_context(|| format!("send update service backend '{}'", pod_id))?;
+
+                            conn.send_command(&WorkerCommand::ServiceReady {
+                                namespace_id: namespace_id.clone(),
+                                service_id: pod_id.clone(),
+                            })
+                            .await
+                            .with_context(|| format!("send service ready '{}'", pod_id))?;
+                        }
                     }
                     WorkerEvent::PodExited {
                         namespace_id: _,
@@ -261,6 +304,9 @@ pub async fn run_compose(
                     }
                     WorkerEvent::FabricRouteMiss { namespace_id: _, dst_ip, dst_mac: _ } => {
                         log::debug!("fabric route miss for {}", dst_ip);
+                    }
+                    WorkerEvent::ServiceActivation { namespace_id: _, service_id, dst_ip } => {
+                        log::debug!("service activation for '{}' ({})", service_id, dst_ip);
                     }
                 }
             }

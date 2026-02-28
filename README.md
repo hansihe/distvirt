@@ -84,6 +84,6 @@ distvirt compose-up -f compose.yaml
 
 ## Status
 
-Local single-worker mode works end-to-end: `compose-up` parses a compose file, plans execution, launches VMs with networking and DNS service discovery, and streams output.
+Local single-worker mode works end-to-end: `compose-up` parses a compose file, plans execution, launches VMs with networking and DNS service discovery, and streams output. Fabric-level service entities provide readiness gating — traffic to service IPs is buffered until the backing pod is ready, then flushed.
 
 Not yet implemented: distributed multi-worker mode, suspend/resume, scale-to-zero activation, protocol inspectors, port forwarding, health checks, exec.
