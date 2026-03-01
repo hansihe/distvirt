@@ -122,16 +122,48 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
             pod_info.service_id
         );
     }
+
+    // Services in Launching/Active must reference pods in the pods map.
+    for (sid, svc) in &ns.services {
+        match svc {
+            ServiceState::Launching {
+                pod_id, worker_id, ..
+            } => {
+                assert!(
+                    ns.pods.contains_key(pod_id),
+                    "Service {:?} in Launching references unknown pod {:?}",
+                    sid,
+                    pod_id
+                );
+                assert!(
+                    ns.workers.contains_key(worker_id),
+                    "Service {:?} in Launching references unknown worker {:?}",
+                    sid,
+                    worker_id
+                );
+            }
+            ServiceState::Active {
+                pod_id, worker_id, ..
+            } => {
+                assert!(
+                    ns.pods.contains_key(pod_id),
+                    "Service {:?} in Active references unknown pod {:?}",
+                    sid,
+                    pod_id
+                );
+                assert!(
+                    ns.workers.contains_key(worker_id),
+                    "Service {:?} in Active references unknown worker {:?}",
+                    sid,
+                    worker_id
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 fn check_orchestrator_invariants(orch: &Orchestrator, output: &OrchestratorOutput) {
-    // No events sent to unknown clients.
-    for (cid, _) in &output.client_events {
-        // Allow events to clients not in the set — they may have just disconnected.
-        // But commands to workers must target known workers.
-        let _ = cid;
-    }
-
     // No worker commands sent to unknown workers.
     for (wid, _) in &output.worker_commands {
         assert!(
@@ -147,7 +179,7 @@ fn check_orchestrator_invariants(orch: &Orchestrator, output: &OrchestratorOutpu
 proptest! {
     #[test]
     fn namespace_invariants_hold(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
-        let mut ns = NamespaceStateMachine::new(test_spec());
+        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), test_spec());
         for input in inputs {
             let output = ns.step(input);
             check_namespace_invariants(&ns, &output);

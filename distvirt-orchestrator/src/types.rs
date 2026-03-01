@@ -5,24 +5,24 @@ use serde::{Deserialize, Serialize};
 
 // --- ID Newtypes ---
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NamespaceId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct WorkerId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ServiceId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PodId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClientId(pub u64);
 
 // --- Timer Keys ---
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TimerKey {
     IdleTimeout { service_id: ServiceId },
     LaunchTimeout { service_id: ServiceId, pod_id: PodId },
@@ -135,7 +135,7 @@ pub enum WorkerCommand {
     ServiceReady { namespace_id: NamespaceId, service_id: ServiceId },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkerEvent {
     NamespaceCreated,
     ServiceCreated { service_id: ServiceId },
@@ -148,14 +148,14 @@ pub enum WorkerEvent {
 
 // --- Domain Enums ---
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BackendNeed {
     None,
     Traffic,
     Active,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NamespaceStatus {
     Creating,
     Active,
@@ -163,7 +163,7 @@ pub enum NamespaceStatus {
     Destroying,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServiceState {
     Pending,
     Idle,
@@ -182,13 +182,13 @@ pub enum ServiceState {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServiceHosting {
     Normal,
     Spliced { original_worker_id: WorkerId },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FabricStatus {
     Creating,
     Active,
@@ -197,13 +197,13 @@ pub enum FabricStatus {
 
 // --- State Structs ---
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceWorkerState {
     pub fabric_status: FabricStatus,
     pub pods: HashSet<PodId>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PodInfo {
     pub service_id: ServiceId,
     pub worker_id: WorkerId,
@@ -235,18 +235,18 @@ pub struct CapacityRequest {
 
 // --- Spec Types ---
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSpec {
     pub services: HashMap<ServiceId, ServiceSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceSpec {
     pub image: String,
     pub activation: Option<ActivationSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActivationSpec {
     pub idle_timeout: Duration,
 }

@@ -8,3 +8,4 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1"
+stateright = "0.31"

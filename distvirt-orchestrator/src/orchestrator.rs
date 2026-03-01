@@ -9,6 +9,12 @@ pub struct Orchestrator {
     pub clients: HashSet<ClientId>,
 }
 
+impl Default for Orchestrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Orchestrator {
     pub fn new() -> Self {
         Orchestrator {
@@ -68,8 +74,14 @@ impl Orchestrator {
                     ));
                     return;
                 }
-                let ns = NamespaceStateMachine::new(spec);
-                self.namespaces.insert(namespace_id, ns);
+                let ns = NamespaceStateMachine::new(namespace_id.clone(), spec);
+                self.namespaces.insert(namespace_id.clone(), ns);
+
+                // Assign a connected worker if available.
+                if let Some(worker_id) = self.pick_worker_for_namespace() {
+                    self.assign_worker_to_namespace(&namespace_id, &worker_id, out);
+                }
+
                 out.client_events.push((client_id, ClientEvent::Ok));
             }
             ClientCommand::DeleteNamespace { namespace_id } => {
@@ -164,14 +176,33 @@ impl Orchestrator {
         capabilities: WorkerCapabilities,
         out: &mut OrchestratorOutput,
     ) {
+        // If this worker was already connected, clean up old assignments first.
+        if self.workers.contains_key(&worker_id) {
+            self.handle_worker_disconnected(worker_id.clone(), out);
+        }
+
         self.workers.insert(
-            worker_id,
+            worker_id.clone(),
             WorkerState {
                 capabilities,
                 status: WorkerStatus::Connected,
                 namespaces: HashSet::new(),
             },
         );
+
+        // Assign this worker to any namespace in Creating state with no workers.
+        let workerless: Vec<NamespaceId> = self
+            .namespaces
+            .iter()
+            .filter(|(_, ns)| {
+                ns.status == NamespaceStatus::Creating && ns.workers.is_empty()
+            })
+            .map(|(ns_id, _)| ns_id.clone())
+            .collect();
+
+        for ns_id in workerless {
+            self.assign_worker_to_namespace(&ns_id, &worker_id, out);
+        }
 
         // Notify all namespaces that new capacity is available.
         let ns_ids: Vec<_> = self.namespaces.keys().cloned().collect();
@@ -209,6 +240,12 @@ impl Orchestrator {
     ) {
         if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
             let ns_out = ns.step(input);
+
+            // Merge namespace output into top-level output.
+            out.worker_commands.extend(ns_out.worker_commands.iter().cloned());
+            out.timers_set.extend(ns_out.timers_set.iter().cloned());
+            out.timers_cancel.extend(ns_out.timers_cancel.iter().cloned());
+
             if ns_out != NamespaceOutput::default() {
                 out.namespace_outputs.push((namespace_id, ns_out));
             }
@@ -218,11 +255,44 @@ impl Orchestrator {
                 out.client_events.push((
                     client_id,
                     ClientEvent::Error {
-                        message: format!("namespace not found"),
+                        message: "namespace not found".to_string(),
                     },
                 ));
             }
         }
+    }
+
+    fn pick_worker_for_namespace(&self) -> Option<WorkerId> {
+        self.workers
+            .iter()
+            .find(|(_, ws)| ws.status == WorkerStatus::Connected)
+            .map(|(wid, _)| wid.clone())
+    }
+
+    fn assign_worker_to_namespace(
+        &mut self,
+        namespace_id: &NamespaceId,
+        worker_id: &WorkerId,
+        out: &mut OrchestratorOutput,
+    ) {
+        if let Some(ns) = self.namespaces.get_mut(namespace_id) {
+            ns.workers.insert(
+                worker_id.clone(),
+                NamespaceWorkerState {
+                    fabric_status: FabricStatus::Creating,
+                    pods: HashSet::new(),
+                },
+            );
+        }
+        if let Some(ws) = self.workers.get_mut(worker_id) {
+            ws.namespaces.insert(namespace_id.clone());
+        }
+        out.worker_commands.push((
+            worker_id.clone(),
+            WorkerCommand::CreateNamespace {
+                namespace_id: namespace_id.clone(),
+            },
+        ));
     }
 }
 
