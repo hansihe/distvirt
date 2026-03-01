@@ -106,7 +106,11 @@ pub enum NamespaceInput {
     Splice { client_id: ClientId, service_id: ServiceId, worker_id: WorkerId },
     Unsplice { client_id: ClientId, service_id: ServiceId },
     StreamLogs { client_id: ClientId, service_id: Option<ServiceId> },
-    CapacityAvailable,
+    LaunchPod {
+        service_id: ServiceId,
+        worker_id: WorkerId,
+        pod_id: PodId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -115,7 +119,8 @@ pub struct NamespaceOutput {
     pub client_events: Vec<(ClientId, ClientEvent)>,
     pub timers_set: Vec<(TimerKey, Duration)>,
     pub timers_cancel: Vec<TimerKey>,
-    pub capacity_requests: Vec<CapacityRequest>,
+    pub pod_requests: Vec<PodRequest>,
+    pub destroyed: bool,
 }
 
 // --- Worker Protocol (Orchestrator-Domain) ---
@@ -144,6 +149,7 @@ pub enum WorkerEvent {
     PodRunning { pod_id: PodId },
     PodExited { pod_id: PodId },
     PodFailed { pod_id: PodId, reason: String },
+    NamespaceDestroyed,
 }
 
 // --- Domain Enums ---
@@ -228,9 +234,8 @@ pub struct WorkerCapabilities {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CapacityRequest {
+pub struct PodRequest {
     pub service_id: ServiceId,
-    pub memory_mb: u64,
 }
 
 // --- Spec Types ---

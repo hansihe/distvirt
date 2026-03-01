@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use distvirt_orchestrator::namespace::NamespaceStateMachine;
 use distvirt_orchestrator::orchestrator::Orchestrator;
@@ -55,6 +56,7 @@ fn arb_backend_need() -> impl Strategy<Value = BackendNeed> {
 fn arb_worker_event() -> impl Strategy<Value = WorkerEvent> {
     prop_oneof![
         Just(WorkerEvent::NamespaceCreated),
+        Just(WorkerEvent::NamespaceDestroyed),
         arb_service_id().prop_map(|sid| WorkerEvent::ServiceCreated { service_id: sid }),
         arb_service_id().prop_map(|sid| WorkerEvent::ServiceActivation { service_id: sid }),
         (arb_service_id(), arb_backend_need()).prop_map(|(sid, need)| {
@@ -72,6 +74,14 @@ fn arb_worker_event() -> impl Strategy<Value = WorkerEvent> {
     ]
 }
 
+fn arb_namespace_spec() -> impl Strategy<Value = NamespaceSpec> {
+    prop_oneof![
+        Just(single_service_spec()),
+        Just(multi_service_spec()),
+        Just(activation_only_spec()),
+    ]
+}
+
 fn arb_namespace_input() -> impl Strategy<Value = NamespaceInput> {
     prop_oneof![
         (arb_worker_id(), arb_worker_event()).prop_map(|(wid, event)| {
@@ -84,17 +94,64 @@ fn arb_namespace_input() -> impl Strategy<Value = NamespaceInput> {
         arb_timer_key().prop_map(|tk| NamespaceInput::TimerFired { timer_key: tk }),
         arb_client_id().prop_map(|cid| NamespaceInput::Delete { client_id: cid }),
         arb_client_id().prop_map(|cid| NamespaceInput::GetStatus { client_id: cid }),
-        Just(NamespaceInput::CapacityAvailable),
+        (arb_client_id(), arb_namespace_spec()).prop_map(|(cid, spec)| {
+            NamespaceInput::UpdateSpec {
+                client_id: cid,
+                spec,
+            }
+        }),
+        (arb_service_id(), arb_worker_id(), arb_pod_id()).prop_map(|(sid, wid, pid)| {
+            NamespaceInput::LaunchPod {
+                service_id: sid,
+                worker_id: wid,
+                pod_id: pid,
+            }
+        }),
     ]
 }
 
-fn test_spec() -> NamespaceSpec {
+fn single_service_spec() -> NamespaceSpec {
     let mut services = HashMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
             image: "test-image:latest".into(),
             activation: None,
+        },
+    );
+    NamespaceSpec { services }
+}
+
+fn multi_service_spec() -> NamespaceSpec {
+    let mut services = HashMap::new();
+    services.insert(
+        ServiceId("svc1".into()),
+        ServiceSpec {
+            image: "test-image:latest".into(),
+            activation: None,
+        },
+    );
+    services.insert(
+        ServiceId("svc2".into()),
+        ServiceSpec {
+            image: "test-image:latest".into(),
+            activation: Some(ActivationSpec {
+                idle_timeout: Duration::from_secs(30),
+            }),
+        },
+    );
+    NamespaceSpec { services }
+}
+
+fn activation_only_spec() -> NamespaceSpec {
+    let mut services = HashMap::new();
+    services.insert(
+        ServiceId("svc1".into()),
+        ServiceSpec {
+            image: "test-image:latest".into(),
+            activation: Some(ActivationSpec {
+                idle_timeout: Duration::from_secs(30),
+            }),
         },
     );
     NamespaceSpec { services }
@@ -161,6 +218,21 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
             _ => {}
         }
     }
+
+    // Services in Destroying namespace never have new pods launched.
+    if ns.status == NamespaceStatus::Destroying {
+        assert!(
+            output.pod_requests.is_empty(),
+            "Destroying namespace emitted pod requests"
+        );
+        // No LaunchPod commands should be emitted
+        for (_, cmd) in &output.worker_commands {
+            assert!(
+                !matches!(cmd, WorkerCommand::LaunchPod { .. }),
+                "Destroying namespace emitted LaunchPod command"
+            );
+        }
+    }
 }
 
 fn check_orchestrator_invariants(orch: &Orchestrator, output: &OrchestratorOutput) {
@@ -179,7 +251,16 @@ fn check_orchestrator_invariants(orch: &Orchestrator, output: &OrchestratorOutpu
 proptest! {
     #[test]
     fn namespace_invariants_hold(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
-        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), test_spec());
+        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), single_service_spec());
+        for input in inputs {
+            let output = ns.step(input);
+            check_namespace_invariants(&ns, &output);
+        }
+    }
+
+    #[test]
+    fn namespace_invariants_hold_multi_service(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
+        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), multi_service_spec());
         for input in inputs {
             let output = ns.step(input);
             check_namespace_invariants(&ns, &output);
@@ -198,7 +279,7 @@ proptest! {
         for _ in 0..num_steps {
             // Simple PRNG for deterministic test.
             rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let choice = (rng_state >> 32) % 6;
+            let choice = (rng_state >> 32) % 7;
 
             let input = match choice {
                 0 => OrchestratorInput::ClientConnected {
@@ -221,15 +302,25 @@ proptest! {
                     client_id: ClientId(rng_state % 3),
                     command: ClientCommand::CreateNamespace {
                         namespace_id: NamespaceId(format!("ns-{}", rng_state % 5)),
-                        spec: test_spec(),
+                        spec: single_service_spec(),
                     },
                 },
-                _ => OrchestratorInput::ClientCommand {
+                5 => OrchestratorInput::ClientCommand {
                     client_id: ClientId(rng_state % 3),
                     command: ClientCommand::DeleteNamespace {
                         namespace_id: NamespaceId(format!("ns-{}", rng_state % 5)),
                     },
                 },
+                _ => {
+                    // NamespaceDestroyed event routed to a namespace.
+                    OrchestratorInput::NamespaceInput {
+                        namespace_id: NamespaceId(format!("ns-{}", rng_state % 5)),
+                        input: NamespaceInput::WorkerEvent {
+                            worker_id: WorkerId(format!("w-{}", rng_state % 3)),
+                            event: WorkerEvent::NamespaceDestroyed,
+                        },
+                    }
+                }
             };
 
             let output = orch.step(input);

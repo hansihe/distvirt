@@ -65,6 +65,60 @@ fn active_namespace(spec: NamespaceSpec) -> NamespaceStateMachine {
     ns
 }
 
+/// Simulate outer-layer scheduling: step the namespace, then for any pod_requests
+/// emitted, pick the first active worker and inject LaunchPod.
+/// Returns combined output.
+fn step_with_scheduling(
+    ns: &mut NamespaceStateMachine,
+    input: NamespaceInput,
+    pod_counter: &mut u64,
+) -> NamespaceOutput {
+    let mut out = ns.step(input);
+    let requests = std::mem::take(&mut out.pod_requests);
+    for req in requests {
+        // Pick first active worker.
+        let wid = ns
+            .workers
+            .iter()
+            .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+            .map(|(wid, _)| wid.clone());
+        if let Some(wid) = wid {
+            let pod_id = PodId(format!("pod-{}", *pod_counter));
+            *pod_counter += 1;
+            let launch_out = ns.step(NamespaceInput::LaunchPod {
+                service_id: req.service_id,
+                worker_id: wid,
+                pod_id,
+            });
+            out.worker_commands.extend(launch_out.worker_commands);
+            out.timers_set.extend(launch_out.timers_set);
+            out.timers_cancel.extend(launch_out.timers_cancel);
+        }
+    }
+    out
+}
+
+/// Trigger reconcile on an active namespace by stepping with a no-op GetStatus,
+/// which doesn't reconcile. Instead, directly call reconcile via a UpdateSpec with same spec.
+/// Actually, we just need to trigger reconciliation. The simplest way now is to use
+/// NamespaceCreated from a Creating worker, or use step_with_scheduling on a synthetic event.
+/// For tests that had `CapacityAvailable`, we replicate by calling reconcile_all_services
+/// indirectly via UpdateSpec with the same spec (which calls reconcile at the end).
+fn reconcile_active_namespace(
+    ns: &mut NamespaceStateMachine,
+    pod_counter: &mut u64,
+) -> NamespaceOutput {
+    // UpdateSpec with the same spec triggers reconcile on Active namespaces.
+    step_with_scheduling(
+        ns,
+        NamespaceInput::UpdateSpec {
+            client_id: client_id(99),
+            spec: ns.spec.clone(),
+        },
+        pod_counter,
+    )
+}
+
 // --- Orchestrator Tests ---
 
 #[test]
@@ -414,6 +468,133 @@ fn test_namespace_get_status() {
     }));
 }
 
+// --- ListNamespaces Tests ---
+
+#[test]
+fn test_list_namespaces_returns_all() {
+    let mut orch = Orchestrator::new();
+
+    // Create two namespaces.
+    orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::CreateNamespace {
+            namespace_id: ns_id("ns1"),
+            spec: test_spec(),
+        },
+    });
+    orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::CreateNamespace {
+            namespace_id: ns_id("ns2"),
+            spec: test_spec_with_activation(),
+        },
+    });
+
+    let out = orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::ListNamespaces,
+    });
+
+    let list = out
+        .client_events
+        .iter()
+        .find_map(|(_, ev)| match ev {
+            ClientEvent::NamespaceList { namespaces } => Some(namespaces),
+            _ => None,
+        })
+        .expect("should have NamespaceList event");
+
+    assert_eq!(list.len(), 2);
+    let ids: std::collections::HashSet<_> = list.iter().map(|r| &r.namespace_id).collect();
+    assert!(ids.contains(&ns_id("ns1")));
+    assert!(ids.contains(&ns_id("ns2")));
+}
+
+#[test]
+fn test_list_namespaces_empty() {
+    let mut orch = Orchestrator::new();
+    let out = orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::ListNamespaces,
+    });
+
+    let list = out
+        .client_events
+        .iter()
+        .find_map(|(_, ev)| match ev {
+            ClientEvent::NamespaceList { namespaces } => Some(namespaces),
+            _ => None,
+        })
+        .expect("should have NamespaceList event");
+
+    assert!(list.is_empty());
+}
+
+// --- UpdateSpec Service Removal Tests ---
+
+#[test]
+fn test_update_spec_removes_service() {
+    let mut ns = active_namespace(test_spec());
+    let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
+
+    // Reconcile to get the service launched.
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    let pod_id = match &ns.services[&svc_id] {
+        ServiceState::Launching { pod_id, .. } => pod_id.clone(),
+        _ => panic!("expected Launching"),
+    };
+    ns.step(NamespaceInput::WorkerEvent {
+        worker_id: worker_id(1),
+        event: WorkerEvent::PodRunning { pod_id: pod_id.clone() },
+    });
+    assert!(matches!(ns.services[&svc_id], ServiceState::Active { .. }));
+
+    // Update spec with no services — svc1 should be removed.
+    let empty_spec = NamespaceSpec {
+        services: HashMap::new(),
+    };
+    let out = ns.step(NamespaceInput::UpdateSpec {
+        client_id: client_id(1),
+        spec: empty_spec,
+    });
+
+    assert!(ns.services.is_empty());
+    assert!(ns.pods.is_empty());
+    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
+        cmd,
+        WorkerCommand::StopPod { .. }
+    )));
+}
+
+#[test]
+fn test_update_spec_removes_launching_service() {
+    let mut ns = active_namespace(test_spec());
+    let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
+
+    // Reconcile to get the service launching.
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    assert!(matches!(ns.services[&svc_id], ServiceState::Launching { .. }));
+
+    // Update spec with no services — should stop the launching pod and cancel the launch timer.
+    let empty_spec = NamespaceSpec {
+        services: HashMap::new(),
+    };
+    let out = ns.step(NamespaceInput::UpdateSpec {
+        client_id: client_id(1),
+        spec: empty_spec,
+    });
+
+    assert!(ns.services.is_empty());
+    assert!(ns.pods.is_empty());
+    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
+        cmd,
+        WorkerCommand::StopPod { .. }
+    )));
+    assert!(!out.timers_cancel.is_empty());
+}
+
 // --- Lifecycle Tests ---
 
 #[test]
@@ -426,11 +607,16 @@ fn test_namespace_created_activates_namespace() {
             pods: std::collections::HashSet::new(),
         },
     );
+    let mut pod_counter = 0u64;
 
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::NamespaceCreated,
-    });
+    let out = step_with_scheduling(
+        &mut ns,
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceCreated,
+        },
+        &mut pod_counter,
+    );
 
     assert_eq!(ns.status, NamespaceStatus::Active);
     assert_eq!(
@@ -438,7 +624,7 @@ fn test_namespace_created_activates_namespace() {
         FabricStatus::Active
     );
 
-    // Always-on service should have been launched (CreateService + LaunchPod).
+    // Always-on service should have been launched (CreateService + LaunchPod via scheduling).
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
         WorkerCommand::CreateService { .. }
@@ -453,22 +639,27 @@ fn test_namespace_created_activates_namespace() {
 fn test_activation_service_lifecycle() {
     let mut ns = active_namespace(test_spec_with_activation());
     let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
 
     // Reconcile: activation service goes Pending → Idle with CreateService on workers.
-    let out = ns.step(NamespaceInput::CapacityAvailable);
+    let out = reconcile_active_namespace(&mut ns, &mut pod_counter);
     assert_eq!(ns.services[&svc_id], ServiceState::Idle);
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
         WorkerCommand::CreateService { .. }
     )));
 
-    // ServiceActivation → should launch pod.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceActivation {
-            service_id: svc_id.clone(),
+    // ServiceActivation → should request pod scheduling then launch.
+    let out = step_with_scheduling(
+        &mut ns,
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceActivation {
+                service_id: svc_id.clone(),
+            },
         },
-    });
+        &mut pod_counter,
+    );
     assert!(matches!(
         ns.services[&svc_id],
         ServiceState::Launching { .. }
@@ -533,9 +724,10 @@ fn test_activation_service_lifecycle() {
 fn test_always_on_service_lifecycle() {
     let mut ns = active_namespace(test_spec());
     let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
 
-    // Reconcile: always-on service goes Pending → Launching.
-    let _out = ns.step(NamespaceInput::CapacityAvailable);
+    // Reconcile: always-on service goes Pending → WaitingForCapacity → Launching.
+    let _out = reconcile_active_namespace(&mut ns, &mut pod_counter);
     assert!(matches!(
         ns.services[&svc_id],
         ServiceState::Launching { .. }
@@ -558,13 +750,17 @@ fn test_always_on_service_lifecycle() {
         ServiceState::Active { .. }
     ));
 
-    // PodExited → should re-launch (always-on).
-    let _out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodExited {
-            pod_id: pod_id.clone(),
+    // PodExited → should re-launch (always-on) via pod request.
+    let _out = step_with_scheduling(
+        &mut ns,
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodExited {
+                pod_id: pod_id.clone(),
+            },
         },
-    });
+        &mut pod_counter,
+    );
     assert!(matches!(
         ns.services[&svc_id],
         ServiceState::Launching { .. }
@@ -575,15 +771,20 @@ fn test_always_on_service_lifecycle() {
 fn test_worker_loss_during_active_service() {
     let mut ns = active_namespace(test_spec_with_activation());
     let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
 
     // Get to Active state.
-    ns.step(NamespaceInput::CapacityAvailable);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceActivation {
-            service_id: svc_id.clone(),
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    step_with_scheduling(
+        &mut ns,
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceActivation {
+                service_id: svc_id.clone(),
+            },
         },
-    });
+        &mut pod_counter,
+    );
     let pod_id = match &ns.services[&svc_id] {
         ServiceState::Launching { pod_id, .. } => pod_id.clone(),
         _ => panic!("expected Launching"),
@@ -611,15 +812,20 @@ fn test_worker_loss_during_active_service() {
 fn test_launch_timeout() {
     let mut ns = active_namespace(test_spec_with_activation());
     let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
 
     // Get to Launching state.
-    ns.step(NamespaceInput::CapacityAvailable);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceActivation {
-            service_id: svc_id.clone(),
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    step_with_scheduling(
+        &mut ns,
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceActivation {
+                service_id: svc_id.clone(),
+            },
         },
-    });
+        &mut pod_counter,
+    );
     let (pod_id, launch_timeout) = match &ns.services[&svc_id] {
         ServiceState::Launching {
             pod_id,
@@ -645,9 +851,10 @@ fn test_launch_timeout() {
 fn test_delete_stops_pods_and_destroys() {
     let mut ns = active_namespace(test_spec());
     let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
 
     // Get to Active with a running pod.
-    ns.step(NamespaceInput::CapacityAvailable);
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
     let pod_id = match &ns.services[&svc_id] {
         ServiceState::Launching { pod_id, .. } => pod_id.clone(),
         _ => panic!("expected Launching"),
@@ -676,15 +883,20 @@ fn test_delete_stops_pods_and_destroys() {
 fn test_idle_timer_cancelled_on_traffic() {
     let mut ns = active_namespace(test_spec_with_activation());
     let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
 
     // Get to Active.
-    ns.step(NamespaceInput::CapacityAvailable);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceActivation {
-            service_id: svc_id.clone(),
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    step_with_scheduling(
+        &mut ns,
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceActivation {
+                service_id: svc_id.clone(),
+            },
         },
-    });
+        &mut pod_counter,
+    );
     let pod_id = match &ns.services[&svc_id] {
         ServiceState::Launching { pod_id, .. } => pod_id.clone(),
         _ => panic!("expected Launching"),
@@ -713,4 +925,290 @@ fn test_idle_timer_cancelled_on_traffic() {
         },
     });
     assert!(!out.timers_cancel.is_empty());
+}
+
+// --- Destroy Lifecycle Tests ---
+
+#[test]
+fn test_destroying_namespace_ignores_activation() {
+    let mut ns = active_namespace(test_spec_with_activation());
+    let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
+
+    // Reconcile to get service to Idle.
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    assert_eq!(ns.services[&svc_id], ServiceState::Idle);
+
+    // Delete namespace.
+    ns.step(NamespaceInput::Delete {
+        client_id: client_id(1),
+    });
+    assert_eq!(ns.status, NamespaceStatus::Destroying);
+
+    // Activation event should be ignored.
+    let out = ns.step(NamespaceInput::WorkerEvent {
+        worker_id: worker_id(1),
+        event: WorkerEvent::ServiceActivation {
+            service_id: svc_id.clone(),
+        },
+    });
+    // Service should still be Idle, no pod requests.
+    assert_eq!(ns.services[&svc_id], ServiceState::Idle);
+    assert!(out.pod_requests.is_empty());
+    assert!(out.worker_commands.is_empty());
+}
+
+#[test]
+fn test_namespace_destroyed_triggers_cleanup() {
+    let mut ns = active_namespace(test_spec());
+    let svc_id = ServiceId("svc1".into());
+    let mut pod_counter = 0u64;
+
+    // Get service to Active.
+    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    let pod_id = match &ns.services[&svc_id] {
+        ServiceState::Launching { pod_id, .. } => pod_id.clone(),
+        _ => panic!("expected Launching"),
+    };
+    ns.step(NamespaceInput::WorkerEvent {
+        worker_id: worker_id(1),
+        event: WorkerEvent::PodRunning {
+            pod_id: pod_id.clone(),
+        },
+    });
+    assert!(matches!(ns.services[&svc_id], ServiceState::Active { .. }));
+
+    // Delete namespace.
+    ns.step(NamespaceInput::Delete {
+        client_id: client_id(1),
+    });
+    assert_eq!(ns.status, NamespaceStatus::Destroying);
+
+    // NamespaceDestroyed from the worker — should clean up and signal destroyed.
+    let out = ns.step(NamespaceInput::WorkerEvent {
+        worker_id: worker_id(1),
+        event: WorkerEvent::NamespaceDestroyed,
+    });
+    assert!(out.destroyed);
+    assert!(ns.workers.is_empty());
+    assert!(ns.pods.is_empty());
+}
+
+#[test]
+fn test_namespace_destroyed_removal_from_orchestrator() {
+    let mut orch = Orchestrator::new();
+
+    // Connect worker, create namespace, activate it.
+    orch.step(OrchestratorInput::WorkerConnected {
+        worker_id: worker_id(1),
+        capabilities: worker_caps(),
+    });
+    orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::CreateNamespace {
+            namespace_id: ns_id("ns1"),
+            spec: test_spec(),
+        },
+    });
+
+    // NamespaceCreated — namespace becomes Active.
+    orch.step(OrchestratorInput::NamespaceInput {
+        namespace_id: ns_id("ns1"),
+        input: NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceCreated,
+        },
+    });
+    assert_eq!(
+        orch.namespaces.get(&ns_id("ns1")).unwrap().status,
+        NamespaceStatus::Active
+    );
+
+    // Delete namespace.
+    orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::DeleteNamespace {
+            namespace_id: ns_id("ns1"),
+        },
+    });
+    assert_eq!(
+        orch.namespaces.get(&ns_id("ns1")).unwrap().status,
+        NamespaceStatus::Destroying
+    );
+
+    // NamespaceDestroyed — namespace should be removed from orchestrator.
+    orch.step(OrchestratorInput::NamespaceInput {
+        namespace_id: ns_id("ns1"),
+        input: NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceDestroyed,
+        },
+    });
+    assert!(!orch.namespaces.contains_key(&ns_id("ns1")));
+    // Worker should no longer reference the namespace.
+    assert!(!orch.workers[&worker_id(1)]
+        .namespaces
+        .contains(&ns_id("ns1")));
+}
+
+// --- Outer Layer Scheduling Tests ---
+
+#[test]
+fn test_outer_layer_scheduling_picks_worker() {
+    let mut ns = active_namespace(test_spec());
+    let svc_id = ServiceId("svc1".into());
+
+    // Reconcile — service should go to WaitingForCapacity with a PodRequest.
+    let out = ns.step(NamespaceInput::UpdateSpec {
+        client_id: client_id(99),
+        spec: ns.spec.clone(),
+    });
+    assert_eq!(ns.services[&svc_id], ServiceState::WaitingForCapacity);
+    assert_eq!(out.pod_requests.len(), 1);
+    assert_eq!(out.pod_requests[0].service_id, svc_id);
+
+    // Inject LaunchPod (simulating outer layer).
+    let pod_id = PodId("pod-0".into());
+    let out = ns.step(NamespaceInput::LaunchPod {
+        service_id: svc_id.clone(),
+        worker_id: worker_id(1),
+        pod_id: pod_id.clone(),
+    });
+    assert!(matches!(
+        ns.services[&svc_id],
+        ServiceState::Launching { .. }
+    ));
+    assert!(out
+        .worker_commands
+        .iter()
+        .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. })));
+}
+
+#[test]
+fn test_waiting_for_capacity_no_workers() {
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let svc_id = ServiceId("svc1".into());
+
+    // Make namespace Active with no workers.
+    ns.status = NamespaceStatus::Active;
+
+    // Reconcile — service should emit PodRequest but stay WaitingForCapacity.
+    let out = ns.step(NamespaceInput::UpdateSpec {
+        client_id: client_id(99),
+        spec: ns.spec.clone(),
+    });
+    assert_eq!(ns.services[&svc_id], ServiceState::WaitingForCapacity);
+    assert_eq!(out.pod_requests.len(), 1);
+
+    // Add a worker and inject LaunchPod.
+    ns.workers.insert(
+        worker_id(1),
+        NamespaceWorkerState {
+            fabric_status: FabricStatus::Active,
+            pods: std::collections::HashSet::new(),
+        },
+    );
+    let pod_id = PodId("pod-0".into());
+    let out = ns.step(NamespaceInput::LaunchPod {
+        service_id: svc_id.clone(),
+        worker_id: worker_id(1),
+        pod_id: pod_id.clone(),
+    });
+    assert!(matches!(
+        ns.services[&svc_id],
+        ServiceState::Launching { .. }
+    ));
+    assert!(out.worker_commands.iter().any(|(wid, cmd)| {
+        *wid == worker_id(1) && matches!(cmd, WorkerCommand::LaunchPod { .. })
+    }));
+}
+
+#[test]
+fn test_full_activation_lifecycle_through_orchestrator() {
+    let mut orch = Orchestrator::new();
+
+    // Connect worker.
+    orch.step(OrchestratorInput::WorkerConnected {
+        worker_id: worker_id(1),
+        capabilities: worker_caps(),
+    });
+
+    // Create namespace with activation service.
+    orch.step(OrchestratorInput::ClientCommand {
+        client_id: client_id(1),
+        command: ClientCommand::CreateNamespace {
+            namespace_id: ns_id("ns1"),
+            spec: test_spec_with_activation(),
+        },
+    });
+
+    // NamespaceCreated — namespace becomes Active, activation service goes Pending→Idle.
+    let out = orch.step(OrchestratorInput::NamespaceInput {
+        namespace_id: ns_id("ns1"),
+        input: NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceCreated,
+        },
+    });
+    let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
+    assert_eq!(ns.status, NamespaceStatus::Active);
+    let svc_id = ServiceId("svc1".into());
+    assert_eq!(ns.services[&svc_id], ServiceState::Idle);
+    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
+        cmd,
+        WorkerCommand::CreateService { .. }
+    )));
+
+    // Activation event — outer layer should schedule pod.
+    let out = orch.step(OrchestratorInput::NamespaceInput {
+        namespace_id: ns_id("ns1"),
+        input: NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceActivation {
+                service_id: svc_id.clone(),
+            },
+        },
+    });
+    let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
+    assert!(matches!(
+        ns.services[&svc_id],
+        ServiceState::Launching { .. }
+    ));
+    assert!(out
+        .worker_commands
+        .iter()
+        .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. })));
+
+    // Get pod_id from Launching state.
+    let pod_id = match &ns.services[&svc_id] {
+        ServiceState::Launching { pod_id, .. } => pod_id.clone(),
+        _ => panic!("expected Launching"),
+    };
+
+    // PodRunning — Active.
+    let out = orch.step(OrchestratorInput::NamespaceInput {
+        namespace_id: ns_id("ns1"),
+        input: NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning {
+                pod_id: pod_id.clone(),
+            },
+        },
+    });
+    let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
+    assert!(matches!(
+        ns.services[&svc_id],
+        ServiceState::Active { .. }
+    ));
+    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
+        cmd,
+        WorkerCommand::UpdateServiceBackend {
+            backend: Some(_),
+            ..
+        }
+    )));
+    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
+        cmd,
+        WorkerCommand::ServiceReady { .. }
+    )));
 }

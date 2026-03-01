@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::time::{Duration, Instant};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -110,7 +111,7 @@ pub struct FabricGateway {
     // TUN for internet egress
     tun: AsyncFd<OwnedFd>,
     tun_name: String,
-    ip_mac_table: HashMap<[u8; 4], [u8; 6]>,
+    ip_mac_table: HashMap<[u8; 4], ([u8; 6], Instant)>,
 
     // Channels to/from fabric switch
     egress_rx: mpsc::Receiver<Vec<u8>>,
@@ -122,13 +123,17 @@ pub struct FabricGateway {
     // DNS upstream forwarding
     upstream_socket: TokioUdpSocket,
     upstream_servers: Vec<SocketAddr>,
-    pending_dns: HashMap<u16, IpEndpoint>,
+    pending_dns: HashMap<u16, (IpEndpoint, Instant)>,
 
     // Pod subnet gateway IP (for routing DNS queries from pods)
     pod_gateway_ip: [u8; 4],
 
+    // Eviction timeouts
+    dns_timeout: Duration,
+    ip_mac_timeout: Duration,
+
     // Timing
-    boot_time: std::time::Instant,
+    boot_time: Instant,
 }
 
 impl FabricGateway {
@@ -168,7 +173,7 @@ impl FabricGateway {
         let async_fd = AsyncFd::new(tun_fd)?;
 
         // Create smoltcp interface with gateway MAC and IP.
-        let boot_time = std::time::Instant::now();
+        let boot_time = Instant::now();
         let mut device = ChannelDevice::new();
         let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(GATEWAY_MAC)));
         let mut iface = Interface::new(config, &mut device, SmolInstant::from_millis(0));
@@ -235,6 +240,8 @@ impl FabricGateway {
                 upstream_socket,
                 upstream_servers,
                 pending_dns: HashMap::new(),
+                dns_timeout: Duration::from_secs(10),
+                ip_mac_timeout: Duration::from_secs(300),
                 pod_gateway_ip,
                 boot_time,
             },
@@ -294,7 +301,7 @@ impl FabricGateway {
             }
 
             // Fall back to upstream.
-            self.pending_dns.insert(query_id, endpoint);
+            self.pending_dns.insert(query_id, (endpoint, Instant::now()));
 
             if let Some(upstream) = self.upstream_servers.first() {
                 if let Err(e) = self.upstream_socket.send_to(&query, upstream).await {
@@ -312,7 +319,7 @@ impl FabricGateway {
         }
 
         let query_id = u16::from_be_bytes([response[0], response[1]]);
-        if let Some(endpoint) = self.pending_dns.remove(&query_id) {
+        if let Some((endpoint, _)) = self.pending_dns.remove(&query_id) {
             log::info!("gateway: DNS response id={} -> {}", query_id, endpoint);
             let sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
             if let Err(e) = sock.send_slice(response, endpoint) {
@@ -327,10 +334,45 @@ impl FabricGateway {
         }
     }
 
+    /// Sweep stale entries from pending_dns and ip_mac_table.
+    fn sweep_stale_entries(&mut self) {
+        let now = Instant::now();
+
+        // Sweep stale DNS entries.
+        let before = self.pending_dns.len();
+        self.pending_dns.retain(|id, (_, inserted)| {
+            if now.duration_since(*inserted) > self.dns_timeout {
+                log::warn!("gateway: DNS query id={} timed out, removing", id);
+                false
+            } else {
+                true
+            }
+        });
+        let expired = before - self.pending_dns.len();
+        if expired > 0 {
+            log::info!("gateway: swept {} stale DNS entries", expired);
+        }
+
+        // Sweep stale ip_mac entries.
+        let before = self.ip_mac_table.len();
+        self.ip_mac_table.retain(|_ip, (_, inserted)| {
+            now.duration_since(*inserted) <= self.ip_mac_timeout
+        });
+        let expired = before - self.ip_mac_table.len();
+        if expired > 0 {
+            log::info!(
+                "gateway: swept {} stale ip_mac entries ({} remaining)",
+                expired,
+                self.ip_mac_table.len()
+            );
+        }
+    }
+
     /// Run the gateway main loop.
     pub async fn run(mut self) {
         let mut tun_buf = vec![0u8; 65536];
         let mut dns_buf = vec![0u8; 4096];
+        let mut sweep_interval = tokio::time::interval(Duration::from_secs(5));
 
         loop {
             let ts = self.smoltcp_now();
@@ -389,7 +431,7 @@ impl FabricGateway {
                         let src_mac: [u8; 6] = eth_frame[6..12].try_into().unwrap();
                         let ip_packet = &eth_frame[ETH_HEADER_LEN..];
                         let src_ip: [u8; 4] = ip_packet[12..16].try_into().unwrap();
-                        self.ip_mac_table.insert(src_ip, src_mac);
+                        self.ip_mac_table.insert(src_ip, (src_mac, Instant::now()));
 
                         // Copy vnet header and adjust csum_start for TUN (IP-level,
                         // no ethernet header), then write [vnet_hdr][ip_packet] to TUN.
@@ -427,7 +469,7 @@ impl FabricGateway {
 
                     let dst_ip: [u8; 4] = ip_packet[16..20].try_into().unwrap();
                     let dst_mac = match self.ip_mac_table.get(&dst_ip) {
-                        Some(mac) => *mac,
+                        Some((mac, _)) => *mac,
                         None => {
                             log::debug!(
                                 "gateway: ingress no MAC for {}.{}.{}.{}, dropping",
@@ -470,6 +512,11 @@ impl FabricGateway {
                 // smoltcp timer (ARP cache, retransmissions)
                 _ = tokio::time::sleep_until(poll_deadline) => {
                     self.poll_and_drain();
+                }
+
+                // Periodic sweep of stale entries
+                _ = sweep_interval.tick() => {
+                    self.sweep_stale_entries();
                 }
             }
         }
@@ -617,6 +664,45 @@ mod tests {
             servers[0],
             SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9)), 53)
         );
+    }
+
+    #[test]
+    fn pending_dns_timeout_removes_stale_entries() {
+        // Simulate the retain logic used in sweep_stale_entries.
+        let mut pending: HashMap<u16, (IpEndpoint, Instant)> = HashMap::new();
+        let old = Instant::now() - Duration::from_secs(15);
+        let recent = Instant::now();
+
+        pending.insert(1, (IpEndpoint { addr: IpAddress::v4(0, 0, 0, 0), port: 0 }, old));
+        pending.insert(2, (IpEndpoint { addr: IpAddress::v4(0, 0, 0, 0), port: 0 }, recent));
+
+        let timeout = Duration::from_secs(10);
+        let now = Instant::now();
+        pending.retain(|_id, (_, inserted)| {
+            now.duration_since(*inserted) <= timeout
+        });
+
+        assert!(pending.get(&1).is_none(), "old entry should be removed");
+        assert!(pending.get(&2).is_some(), "recent entry should remain");
+    }
+
+    #[test]
+    fn ip_mac_table_timeout_removes_stale_entries() {
+        let mut table: HashMap<[u8; 4], ([u8; 6], Instant)> = HashMap::new();
+        let old = Instant::now() - Duration::from_secs(600);
+        let recent = Instant::now();
+
+        table.insert([10, 0, 0, 1], ([0x02; 6], old));
+        table.insert([10, 0, 0, 2], ([0x03; 6], recent));
+
+        let timeout = Duration::from_secs(300);
+        let now = Instant::now();
+        table.retain(|_ip, (_, inserted)| {
+            now.duration_since(*inserted) <= timeout
+        });
+
+        assert!(table.get(&[10, 0, 0, 1]).is_none(), "old entry should be removed");
+        assert!(table.get(&[10, 0, 0, 2]).is_some(), "recent entry should remain");
     }
 
     #[test]

@@ -90,29 +90,8 @@ impl Fabric<Port> {
     /// read loop task. The caller must keep the handle alive; dropping it
     /// aborts the task and the `PortGuard` cleans up the port map entry.
     pub fn add_port(&mut self, tap: TapDevice) -> std::io::Result<(PortId, TaskHandle<()>)> {
-        let port_id = self.next_port_id;
-        self.next_port_id += 1;
-
-        let port = Arc::new(Port::new(tap)?);
-
-        {
-            let mut ports = self.ports.lock().unwrap();
-            ports.insert(port_id, Arc::clone(&port));
-        }
-
-        let task = TaskHandle::spawn(port_read_loop(
-            port_id,
-            Arc::clone(&port),
-            Arc::clone(&self.ports),
-            Arc::clone(&self.mac_table),
-            Arc::clone(&self.route_table),
-            Arc::clone(&self.service_table),
-            self.gateway_tx.clone(),
-            self.event_tx.clone(),
-        ));
-
-        log::info!("fabric: added port {}", port_id);
-        Ok((port_id, task))
+        let port = Port::new(tap)?;
+        Ok(self.add_port_inner(port, None))
     }
 
     /// Add a TAP device as a port, flush any buffered frames for `pod_ip`,
@@ -122,48 +101,8 @@ impl Fabric<Port> {
         tap: TapDevice,
         pod_ip: Ipv4Addr,
     ) -> std::io::Result<(PortId, TaskHandle<()>)> {
-        let port_id = self.next_port_id;
-        self.next_port_id += 1;
-
-        let port = Arc::new(Port::new(tap)?);
-
-        {
-            let mut ports = self.ports.lock().unwrap();
-            ports.insert(port_id, Arc::clone(&port));
-        }
-
-        // Flush buffered frames for this IP and send them to the new port.
-        let buffered = {
-            let mut rt = self.route_table.lock().unwrap();
-            rt.flush_buffer(pod_ip)
-        };
-        if !buffered.is_empty() {
-            let flush_port = Arc::clone(&port);
-            let count = buffered.len();
-            tokio::spawn(async move {
-                for frame in buffered {
-                    if let Err(e) = flush_port.send_frame(&frame).await {
-                        log::warn!("fabric: flush buffered frame error: {}", e);
-                        break;
-                    }
-                }
-                log::info!("fabric: flushed {} buffered frames to port {}", count, port_id);
-            });
-        }
-
-        let task = TaskHandle::spawn(port_read_loop(
-            port_id,
-            Arc::clone(&port),
-            Arc::clone(&self.ports),
-            Arc::clone(&self.mac_table),
-            Arc::clone(&self.route_table),
-            Arc::clone(&self.service_table),
-            self.gateway_tx.clone(),
-            self.event_tx.clone(),
-        ));
-
-        log::info!("fabric: added port {} with ip {}", port_id, pod_ip);
-        Ok((port_id, task))
+        let port = Port::new(tap)?;
+        Ok(self.add_port_inner(port, Some(pod_ip)))
     }
 }
 
@@ -187,34 +126,17 @@ impl<P: FramePort> Fabric<P> {
     /// Returns the assigned port ID and a `TaskHandle` that owns the port's
     /// read loop task.
     pub fn add_port_raw(&mut self, port: P) -> (PortId, TaskHandle<()>) {
-        let port_id = self.next_port_id;
-        self.next_port_id += 1;
-
-        let port = Arc::new(port);
-
-        {
-            let mut ports = self.ports.lock().unwrap();
-            ports.insert(port_id, Arc::clone(&port));
-        }
-
-        let task = TaskHandle::spawn(port_read_loop(
-            port_id,
-            Arc::clone(&port),
-            Arc::clone(&self.ports),
-            Arc::clone(&self.mac_table),
-            Arc::clone(&self.route_table),
-            Arc::clone(&self.service_table),
-            self.gateway_tx.clone(),
-            self.event_tx.clone(),
-        ));
-
-        log::info!("fabric: added port {}", port_id);
-        (port_id, task)
+        self.add_port_inner(port, None)
     }
 
     /// Add a pre-constructed port with an associated IP, flush buffered frames,
     /// and start the forwarding task.
     pub fn add_port_raw_with_ip(&mut self, port: P, pod_ip: Ipv4Addr) -> (PortId, TaskHandle<()>) {
+        self.add_port_inner(port, Some(pod_ip))
+    }
+
+    /// Shared implementation for all add_port variants.
+    fn add_port_inner(&mut self, port: P, pod_ip: Option<Ipv4Addr>) -> (PortId, TaskHandle<()>) {
         let port_id = self.next_port_id;
         self.next_port_id += 1;
 
@@ -225,22 +147,25 @@ impl<P: FramePort> Fabric<P> {
             ports.insert(port_id, Arc::clone(&port));
         }
 
-        let buffered = {
-            let mut rt = self.route_table.lock().unwrap();
-            rt.flush_buffer(pod_ip)
-        };
-        if !buffered.is_empty() {
-            let flush_port = Arc::clone(&port);
-            let count = buffered.len();
-            tokio::spawn(async move {
-                for frame in buffered {
-                    if let Err(e) = flush_port.send_frame(&frame).await {
-                        log::warn!("fabric: flush buffered frame error: {}", e);
-                        break;
+        // Flush buffered frames if an IP was provided.
+        if let Some(pod_ip) = pod_ip {
+            let buffered = {
+                let mut rt = self.route_table.lock().unwrap();
+                rt.flush_buffer(pod_ip)
+            };
+            if !buffered.is_empty() {
+                let flush_port = Arc::clone(&port);
+                let count = buffered.len();
+                tokio::spawn(async move {
+                    for frame in buffered {
+                        if let Err(e) = flush_port.send_frame(&frame).await {
+                            log::warn!("fabric: flush buffered frame error: {}", e);
+                            break;
+                        }
                     }
-                }
-                log::info!("fabric: flushed {} buffered frames to port {}", count, port_id);
-            });
+                    log::info!("fabric: flushed {} buffered frames to port {}", count, port_id);
+                });
+            }
         }
 
         let task = TaskHandle::spawn(port_read_loop(
@@ -254,7 +179,11 @@ impl<P: FramePort> Fabric<P> {
             self.event_tx.clone(),
         ));
 
-        log::info!("fabric: added port {} with ip {}", port_id, pod_ip);
+        match pod_ip {
+            Some(ip) => log::info!("fabric: added port {} with ip {}", port_id, ip),
+            None => log::info!("fabric: added port {}", port_id),
+        }
+
         (port_id, task)
     }
 
@@ -279,11 +208,24 @@ impl<P: FramePort> Fabric<P> {
         self._gateway_ingress_task = Some(TaskHandle::spawn(gateway_ingress_task(
             ingress_rx,
             ports,
-            mac_table,
+            mac_table.clone(),
             route_table,
             service_table,
             event_tx,
         )));
+
+        // Spawn periodic MAC table GC task.
+        {
+            let mac_table = mac_table;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let mut table = mac_table.lock().unwrap();
+                    table.gc(std::time::Duration::from_secs(300));
+                }
+            });
+        }
 
         log::info!("fabric: gateway connected");
     }
@@ -309,18 +251,22 @@ impl<P: FramePort> Fabric<P> {
         if frames.is_empty() {
             return;
         }
-        let mac_table = self.mac_table.lock().unwrap();
-        let ports = self.ports.lock().unwrap();
 
-        // Group frames by destination port for efficiency.
         for eth_frame in frames {
             if eth_frame.len() < 6 {
                 continue;
             }
             let dst_mac: [u8; 6] = eth_frame[0..6].try_into().unwrap();
-            if let Some(port_id) = mac_table.lookup(&dst_mac) {
-                if let Some(port) = ports.get(&port_id) {
-                    let port = Arc::clone(port);
+            let port_id = {
+                let mt = self.mac_table.lock().unwrap();
+                mt.lookup(&dst_mac)
+            };
+            if let Some(port_id) = port_id {
+                let port = {
+                    let p = self.ports.lock().unwrap();
+                    p.get(&port_id).cloned()
+                };
+                if let Some(port) = port {
                     let mut frame = vec![0u8; VNET_HDR_SZ];
                     frame.extend_from_slice(&eth_frame);
                     tokio::spawn(async move {
@@ -338,55 +284,25 @@ impl<P: FramePort> Fabric<P> {
         }
     }
 
-    /// Execute activator actions from mark_ready (replay packets, log, backend need).
-    pub fn execute_service_actions(
+    /// Dispatch activator actions from mark_ready (replay packets, log, backend need).
+    ///
+    /// Looks up the service IP from the service table, then delegates to
+    /// `forwarding::dispatch_action` for each action.
+    pub async fn dispatch_actions(
         &self,
         actions: &[Action],
         service_id: &str,
     ) {
-        let service_table = self.service_table.lock().unwrap();
-        let dst_ip = service_table.get_ip_by_id(service_id)
-            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-        let mac_table_inner = &*self.mac_table;
-        let ports_inner = &*self.ports;
+        let dst_ip = {
+            let st = self.service_table.lock().unwrap();
+            st.get_ip_by_id(service_id)
+                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
+        };
         for action in actions {
-            match action {
-                Action::ReplayPacket(raw_frame) => {
-                    if let Some(pod_mac) = service_table.get_backend_mac_by_id(service_id) {
-                        let mt = mac_table_inner.lock().unwrap();
-                        if let Some(port_id) = mt.lookup(&pod_mac) {
-                            let ports = ports_inner.lock().unwrap();
-                            if let Some(port) = ports.get(&port_id) {
-                                let port = Arc::clone(port);
-                                let mut rewritten = raw_frame.clone();
-                                if rewritten.len() >= VNET_HDR_SZ + 6 {
-                                    rewritten[VNET_HDR_SZ..VNET_HDR_SZ + 6]
-                                        .copy_from_slice(&pod_mac);
-                                }
-                                tokio::spawn(async move {
-                                    if let Err(e) = port.send_frame(&rewritten).await {
-                                        log::warn!("fabric: replay send error: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-                Action::SetBackendNeed(need) => {
-                    let proto_need = convert_backend_need(need);
-                    if let Some(ref tx) = self.event_tx {
-                        let _ = tx.try_send(FabricEvent::ServiceBackendNeed {
-                            service_id: service_id.to_string(),
-                            dst_ip,
-                            need: proto_need,
-                        });
-                    }
-                }
-                Action::Log(log_action) => {
-                    handle_log_action(service_id, log_action);
-                }
-                _ => {}
-            }
+            forwarding::dispatch_action(
+                action, service_id, dst_ip,
+                &self.service_table, &self.mac_table, &self.ports, &self.event_tx,
+            ).await;
         }
     }
 
@@ -395,9 +311,9 @@ impl<P: FramePort> Fabric<P> {
     /// Looks up the backend MAC in the mac_table to find the port,
     /// rewrites the destination MAC in each frame, and sends them.
     pub fn flush_service_frames(&self, frames: Vec<Vec<u8>>, backend_mac: [u8; 6]) {
-        let dst_port = {
+        let port_id = {
             let mac_table = self.mac_table.lock().unwrap();
-            let port_id = match mac_table.lookup(&backend_mac) {
+            match mac_table.lookup(&backend_mac) {
                 Some(id) => id,
                 None => {
                     log::warn!(
@@ -407,7 +323,9 @@ impl<P: FramePort> Fabric<P> {
                     );
                     return;
                 }
-            };
+            }
+        };
+        let dst_port = {
             let ports = self.ports.lock().unwrap();
             match ports.get(&port_id) {
                 Some(p) => Arc::clone(p),

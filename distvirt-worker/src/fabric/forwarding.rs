@@ -208,15 +208,14 @@ pub(super) async fn dispatch_action<P: FramePort>(
                 st.get_backend_mac_by_id(service_id)
             };
             if let Some(pod_mac) = backend_mac {
-                let dst_port = {
+                let port_id = {
                     let mt = mac_table.lock().unwrap();
-                    if let Some(port_id) = mt.lookup(&pod_mac) {
-                        let p = ports.lock().unwrap();
-                        p.get(&port_id).cloned()
-                    } else {
-                        None
-                    }
+                    mt.lookup(&pod_mac)
                 };
+                let dst_port = port_id.and_then(|pid| {
+                    let p = ports.lock().unwrap();
+                    p.get(&pid).cloned()
+                });
                 if let Some(dst_port) = dst_port {
                     let mut rewritten = raw_frame.clone();
                     if rewritten.len() >= VNET_HDR_SZ + 6 {
@@ -232,11 +231,13 @@ pub(super) async fn dispatch_action<P: FramePort>(
         Action::SetBackendNeed(need) => {
             let proto_need = convert_backend_need(need);
             if let Some(tx) = event_tx {
-                let _ = tx.try_send(FabricEvent::ServiceBackendNeed {
+                if let Err(e) = tx.send(FabricEvent::ServiceBackendNeed {
                     service_id: service_id.to_string(),
                     dst_ip,
                     need: proto_need,
-                });
+                }).await {
+                    log::warn!("fabric: failed to send ServiceBackendNeed for {}: {}", service_id, e);
+                }
             }
         }
         Action::Log(log_action) => {
@@ -260,16 +261,21 @@ fn send_l4_frames<P: FramePort>(
     if frames.is_empty() {
         return;
     }
-    let mac_table_ref = mac_table.lock().unwrap();
-    let ports_ref = ports.lock().unwrap();
     for eth_frame in frames {
         if eth_frame.len() < 6 {
             continue;
         }
         let frame_dst_mac: [u8; 6] = eth_frame[0..6].try_into().unwrap();
-        if let Some(port_id) = mac_table_ref.lookup(&frame_dst_mac) {
-            if let Some(port) = ports_ref.get(&port_id) {
-                let port = Arc::clone(port);
+        let port_id = {
+            let mt = mac_table.lock().unwrap();
+            mt.lookup(&frame_dst_mac)
+        };
+        if let Some(port_id) = port_id {
+            let port = {
+                let p = ports.lock().unwrap();
+                p.get(&port_id).cloned()
+            };
+            if let Some(port) = port {
                 let mut vnet_frame = vec![0u8; VNET_HDR_SZ];
                 vnet_frame.extend_from_slice(eth_frame);
                 tokio::spawn(async move {

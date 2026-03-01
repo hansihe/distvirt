@@ -10,7 +10,6 @@ pub struct NamespaceStateMachine {
     pub services: HashMap<ServiceId, ServiceState>,
     pub pods: HashMap<PodId, PodInfo>,
     pub workers: HashMap<WorkerId, NamespaceWorkerState>,
-    pub next_pod_id: u64,
 }
 
 impl NamespaceStateMachine {
@@ -28,21 +27,7 @@ impl NamespaceStateMachine {
             services,
             pods: HashMap::new(),
             workers: HashMap::new(),
-            next_pod_id: 0,
         }
-    }
-
-    fn gen_pod_id(&mut self) -> PodId {
-        let id = self.next_pod_id;
-        self.next_pod_id += 1;
-        PodId(format!("pod-{}", id))
-    }
-
-    fn select_worker_for_pod(&self) -> Option<WorkerId> {
-        self.workers
-            .iter()
-            .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
-            .map(|(wid, _)| wid.clone())
     }
 
     fn has_activation(&self, service_id: &ServiceId) -> bool {
@@ -112,8 +97,12 @@ impl NamespaceStateMachine {
             } => {
                 self.handle_stream_logs(client_id, service_id, &mut out);
             }
-            NamespaceInput::CapacityAvailable => {
-                self.handle_capacity_available(&mut out);
+            NamespaceInput::LaunchPod {
+                service_id,
+                worker_id,
+                pod_id,
+            } => {
+                self.handle_launch_pod(&service_id, &worker_id, &pod_id, &mut out);
             }
         }
 
@@ -133,6 +122,55 @@ impl NamespaceStateMachine {
         }
 
         match event {
+            WorkerEvent::NamespaceDestroyed => {
+                // Clean up pods on this worker.
+                let lost_pods: Vec<PodId> = self
+                    .pods
+                    .iter()
+                    .filter(|(_, info)| info.worker_id == *worker_id)
+                    .map(|(pid, _)| pid.clone())
+                    .collect();
+                for pod_id in &lost_pods {
+                    let pod_info = self.pods.remove(pod_id);
+                    if let Some(pod_info) = pod_info {
+                        // Reset services referencing this pod.
+                        let service = self.services.get(&pod_info.service_id).cloned();
+                        match service {
+                            Some(ServiceState::Launching {
+                                pod_id: ref pid,
+                                ref launch_timeout,
+                                ..
+                            }) if pid == pod_id => {
+                                out.timers_cancel.push(launch_timeout.clone());
+                                self.services
+                                    .insert(pod_info.service_id, ServiceState::Pending);
+                            }
+                            Some(ServiceState::Active {
+                                pod_id: ref pid,
+                                ref idle_timer,
+                                ..
+                            }) if pid == pod_id => {
+                                if let Some(tk) = idle_timer {
+                                    out.timers_cancel.push(tk.clone());
+                                }
+                                self.services
+                                    .insert(pod_info.service_id, ServiceState::Pending);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                self.workers.remove(worker_id);
+                if self.workers.is_empty() && self.status == NamespaceStatus::Destroying {
+                    out.destroyed = true;
+                }
+                return;
+            }
+            _ if self.status == NamespaceStatus::Destroying => {
+                // In Destroying state, ignore all worker events except NamespaceDestroyed.
+                return;
+            }
             WorkerEvent::NamespaceCreated => {
                 if let Some(ws) = self.workers.get_mut(worker_id)
                     && ws.fabric_status == FabricStatus::Creating
@@ -309,6 +347,9 @@ impl NamespaceStateMachine {
     }
 
     fn reconcile_all_services(&mut self, out: &mut NamespaceOutput) {
+        if self.status == NamespaceStatus::Destroying {
+            return;
+        }
         let service_ids: Vec<ServiceId> = self.spec.services.keys().cloned().collect();
         for svc_id in service_ids {
             self.reconcile_service(&svc_id, out);
@@ -349,31 +390,50 @@ impl NamespaceStateMachine {
     }
 
     fn try_launch_pod(&mut self, svc_id: &ServiceId, out: &mut NamespaceOutput) {
-        let worker_id = match self.select_worker_for_pod() {
-            Some(wid) => wid,
-            None => {
-                self.services
-                    .insert(svc_id.clone(), ServiceState::WaitingForCapacity);
-                out.capacity_requests.push(CapacityRequest {
-                    service_id: svc_id.clone(),
-                    memory_mb: 128,
-                });
-                return;
-            }
-        };
+        self.services
+            .insert(svc_id.clone(), ServiceState::WaitingForCapacity);
+        out.pod_requests.push(PodRequest {
+            service_id: svc_id.clone(),
+        });
+    }
 
-        let pod_id = self.gen_pod_id();
+    fn handle_launch_pod(
+        &mut self,
+        service_id: &ServiceId,
+        worker_id: &WorkerId,
+        pod_id: &PodId,
+        out: &mut NamespaceOutput,
+    ) {
+        // Only act if service is waiting for capacity.
+        if !matches!(
+            self.services.get(service_id),
+            Some(ServiceState::WaitingForCapacity)
+        ) {
+            return;
+        }
+
+        // Worker must be in our map and active.
+        if !matches!(
+            self.workers.get(worker_id),
+            Some(ws) if ws.fabric_status == FabricStatus::Active
+        ) {
+            return;
+        }
+
         let ns_id = self.namespace_id.clone();
-        let spec = self.spec.services.get(svc_id).cloned().unwrap();
+        let spec = match self.spec.services.get(service_id) {
+            Some(s) => s.clone(),
+            None => return,
+        };
 
         self.pods.insert(
             pod_id.clone(),
             PodInfo {
-                service_id: svc_id.clone(),
+                service_id: service_id.clone(),
                 worker_id: worker_id.clone(),
             },
         );
-        if let Some(ws) = self.workers.get_mut(&worker_id) {
+        if let Some(ws) = self.workers.get_mut(worker_id) {
             ws.pods.insert(pod_id.clone());
         }
 
@@ -381,7 +441,7 @@ impl NamespaceStateMachine {
             worker_id.clone(),
             WorkerCommand::CreateService {
                 namespace_id: ns_id.clone(),
-                service_id: svc_id.clone(),
+                service_id: service_id.clone(),
                 spec,
             },
         ));
@@ -390,22 +450,22 @@ impl NamespaceStateMachine {
             WorkerCommand::LaunchPod {
                 namespace_id: ns_id.clone(),
                 pod_id: pod_id.clone(),
-                service_id: svc_id.clone(),
+                service_id: service_id.clone(),
             },
         ));
 
         let launch_timeout = TimerKey::LaunchTimeout {
-            service_id: svc_id.clone(),
+            service_id: service_id.clone(),
             pod_id: pod_id.clone(),
         };
         out.timers_set
             .push((launch_timeout.clone(), Duration::from_secs(60)));
 
         self.services.insert(
-            svc_id.clone(),
+            service_id.clone(),
             ServiceState::Launching {
-                pod_id,
-                worker_id,
+                pod_id: pod_id.clone(),
+                worker_id: worker_id.clone(),
                 launch_timeout,
             },
         );
@@ -463,7 +523,11 @@ impl NamespaceStateMachine {
 
         self.workers.remove(worker_id);
 
-        if self.workers.is_empty() && self.status == NamespaceStatus::Active {
+        if self.status == NamespaceStatus::Destroying {
+            if self.workers.is_empty() {
+                out.destroyed = true;
+            }
+        } else if self.workers.is_empty() && self.status == NamespaceStatus::Active {
             self.status = NamespaceStatus::Creating;
         } else if self.status == NamespaceStatus::Active {
             self.reconcile_all_services(out);
@@ -555,9 +619,79 @@ impl NamespaceStateMachine {
         spec: NamespaceSpec,
         out: &mut NamespaceOutput,
     ) {
+        // Add new services.
         for svc_id in spec.services.keys() {
             if !self.services.contains_key(svc_id) {
                 self.services.insert(svc_id.clone(), ServiceState::Pending);
+            }
+        }
+
+        // Remove services no longer in spec.
+        let removed: Vec<ServiceId> = self
+            .services
+            .keys()
+            .filter(|svc_id| !spec.services.contains_key(svc_id))
+            .cloned()
+            .collect();
+
+        for svc_id in removed {
+            let svc_state = self.services.remove(&svc_id);
+            if let Some(svc_state) = svc_state {
+                match svc_state {
+                    ServiceState::Launching {
+                        pod_id,
+                        worker_id,
+                        launch_timeout,
+                    } => {
+                        out.timers_cancel.push(launch_timeout);
+                        let ns_id = self.namespace_id.clone();
+                        out.worker_commands.push((
+                            worker_id.clone(),
+                            WorkerCommand::StopPod {
+                                namespace_id: ns_id,
+                                pod_id: pod_id.clone(),
+                            },
+                        ));
+                        if let Some(ws) = self.workers.get_mut(&worker_id) {
+                            ws.pods.remove(&pod_id);
+                        }
+                        self.pods.remove(&pod_id);
+                    }
+                    ServiceState::Active {
+                        pod_id,
+                        worker_id,
+                        idle_timer,
+                        ..
+                    } => {
+                        if let Some(timer_key) = idle_timer {
+                            out.timers_cancel.push(timer_key);
+                        }
+                        let ns_id = self.namespace_id.clone();
+                        out.worker_commands.push((
+                            worker_id.clone(),
+                            WorkerCommand::StopPod {
+                                namespace_id: ns_id.clone(),
+                                pod_id: pod_id.clone(),
+                            },
+                        ));
+                        for wid in self.active_worker_ids() {
+                            out.worker_commands.push((
+                                wid,
+                                WorkerCommand::UpdateServiceBackend {
+                                    namespace_id: ns_id.clone(),
+                                    service_id: svc_id.clone(),
+                                    backend: None,
+                                },
+                            ));
+                        }
+                        if let Some(ws) = self.workers.get_mut(&worker_id) {
+                            ws.pods.remove(&pod_id);
+                        }
+                        self.pods.remove(&pod_id);
+                    }
+                    // Pending, Idle, WaitingForCapacity — no pods/timers to clean up.
+                    _ => {}
+                }
             }
         }
 
@@ -709,9 +843,4 @@ impl NamespaceStateMachine {
         out.client_events.push((client_id, ClientEvent::Ok));
     }
 
-    fn handle_capacity_available(&mut self, out: &mut NamespaceOutput) {
-        if self.status == NamespaceStatus::Active {
-            self.reconcile_all_services(out);
-        }
-    }
 }

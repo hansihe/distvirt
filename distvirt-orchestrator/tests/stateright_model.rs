@@ -13,6 +13,7 @@ struct NamespaceModel {
     initial_spec: NamespaceSpec,
     worker_count: usize,
     enable_worker_failure: bool,
+    enable_delete: bool,
     max_steps: usize,
 }
 
@@ -28,7 +29,6 @@ struct NamespaceSnapshot {
     services: BTreeMap<ServiceId, ServiceState>,
     pods: BTreeMap<PodId, PodInfo>,
     workers: BTreeMap<WorkerId, WorkerSnapshot>,
-    next_pod_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -78,7 +78,6 @@ impl NamespaceSnapshot {
                     )
                 })
                 .collect(),
-            next_pod_id: sm.next_pod_id,
         }
     }
 
@@ -117,7 +116,6 @@ impl NamespaceSnapshot {
                     )
                 })
                 .collect(),
-            next_pod_id: self.next_pod_id,
         }
     }
 }
@@ -128,6 +126,7 @@ impl NamespaceSnapshot {
 struct ModelState {
     namespace: NamespaceSnapshot,
     pending_timers: BTreeSet<TimerKey>,
+    next_pod_id: u64,
     step_count: usize,
 }
 
@@ -145,7 +144,7 @@ enum ModelAction {
     WorkerLost {
         worker_id: WorkerId,
     },
-    CapacityAvailable,
+    Delete,
 }
 
 // --- Helper: generate worker IDs ---
@@ -180,6 +179,7 @@ impl Model for NamespaceModel {
         vec![ModelState {
             namespace: snapshot,
             pending_timers: BTreeSet::new(),
+            next_pod_id: 0,
             step_count: 0,
         }]
     }
@@ -269,7 +269,8 @@ impl Model for NamespaceModel {
                         }
                     }
                     ServiceState::WaitingForCapacity => {
-                        // Nothing from workers directly; CapacityAvailable handled below.
+                        // Outer layer can inject LaunchPod — handled in next_state
+                        // by processing pod_requests from output.
                     }
                 }
             }
@@ -285,6 +286,16 @@ impl Model for NamespaceModel {
             }
         }
 
+        // NamespaceDestroyed event from any worker (in Destroying namespace).
+        if ns.status == NamespaceStatus::Destroying {
+            for (wid, _) in &ns.workers {
+                actions.push(ModelAction::WorkerEvent {
+                    worker_id: wid.clone(),
+                    event: WorkerEvent::NamespaceDestroyed,
+                });
+            }
+        }
+
         // Worker can disconnect (if enabled).
         if self.enable_worker_failure {
             for (wid, _) in &ns.workers {
@@ -294,12 +305,18 @@ impl Model for NamespaceModel {
             }
         }
 
-        // CapacityAvailable can always arrive.
-        actions.push(ModelAction::CapacityAvailable);
+        // Delete action (if enabled and not already destroying/destroyed).
+        if self.enable_delete
+            && ns.status != NamespaceStatus::Destroying
+            && !ns.workers.is_empty()
+        {
+            actions.push(ModelAction::Delete);
+        }
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut sm = state.namespace.to_state_machine();
+        let mut next_pod_id = state.next_pod_id;
 
         let input = match action {
             ModelAction::WorkerEvent { worker_id, event } => {
@@ -307,7 +324,9 @@ impl Model for NamespaceModel {
             }
             ModelAction::TimerFired { timer_key } => NamespaceInput::TimerFired { timer_key },
             ModelAction::WorkerLost { worker_id } => NamespaceInput::WorkerLost { worker_id },
-            ModelAction::CapacityAvailable => NamespaceInput::CapacityAvailable,
+            ModelAction::Delete => NamespaceInput::Delete {
+                client_id: ClientId(0),
+            },
         };
 
         let output = sm.step(input);
@@ -321,9 +340,38 @@ impl Model for NamespaceModel {
             pending_timers.remove(timer_key);
         }
 
+        // Process pod_requests: simulate outer-layer scheduling.
+        // Pick first active worker for each request.
+        for req in &output.pod_requests {
+            let active_worker = sm
+                .workers
+                .iter()
+                .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+                .map(|(wid, _)| wid.clone());
+
+            if let Some(wid) = active_worker {
+                let pod_id = PodId(format!("pod-{}", next_pod_id));
+                next_pod_id += 1;
+
+                let launch_out = sm.step(NamespaceInput::LaunchPod {
+                    service_id: req.service_id.clone(),
+                    worker_id: wid,
+                    pod_id,
+                });
+
+                for (timer_key, _duration) in &launch_out.timers_set {
+                    pending_timers.insert(timer_key.clone());
+                }
+                for timer_key in &launch_out.timers_cancel {
+                    pending_timers.remove(timer_key);
+                }
+            }
+        }
+
         Some(ModelState {
             namespace: NamespaceSnapshot::from_state_machine(&sm),
             pending_timers,
+            next_pod_id,
             step_count: state.step_count + 1,
         })
     }
@@ -333,18 +381,14 @@ impl Model for NamespaceModel {
     }
 
     fn properties(&self) -> Vec<Property<Self>> {
-        vec![
+        let mut props = vec![
             // Safety: No commands sent to workers not in namespace's worker map.
             Property::<Self>::always("no commands to unknown workers", |_model, state| {
                 let ns = &state.namespace;
                 for (_sid, svc) in &ns.services {
                     match svc {
-                        ServiceState::Launching { worker_id, .. } => {
-                            if !ns.workers.contains_key(worker_id) {
-                                return false;
-                            }
-                        }
-                        ServiceState::Active { worker_id, .. } => {
+                        ServiceState::Launching { worker_id, .. }
+                        | ServiceState::Active { worker_id, .. } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
                             }
@@ -359,12 +403,8 @@ impl Model for NamespaceModel {
                 let ns = &state.namespace;
                 for (_sid, svc) in &ns.services {
                     match svc {
-                        ServiceState::Launching { pod_id, .. } => {
-                            if !ns.pods.contains_key(pod_id) {
-                                return false;
-                            }
-                        }
-                        ServiceState::Active { pod_id, .. } => {
+                        ServiceState::Launching { pod_id, .. }
+                        | ServiceState::Active { pod_id, .. } => {
                             if !ns.pods.contains_key(pod_id) {
                                 return false;
                             }
@@ -418,15 +458,26 @@ impl Model for NamespaceModel {
             }),
             // Reachability: Can reach Idle after Active (idle timeout scale-down).
             Property::<Self>::sometimes("can reach idle after active", |_model, state| {
-                // Check if any service is Idle and a pod was previously used (next_pod_id > 0).
-                state.namespace.next_pod_id > 0
+                state.next_pod_id > 0
                     && state
                         .namespace
                         .services
                         .values()
                         .any(|s| matches!(s, ServiceState::Idle))
             }),
-        ]
+        ];
+
+        if self.enable_delete {
+            props.push(Property::<Self>::sometimes(
+                "can reach destroyed",
+                |_model, state| {
+                    state.namespace.status == NamespaceStatus::Destroying
+                        && state.namespace.workers.is_empty()
+                },
+            ));
+        }
+
+        props
     }
 }
 
@@ -475,6 +526,7 @@ fn check_single_service_activation() {
         initial_spec: single_service_spec(),
         worker_count: 1,
         enable_worker_failure: false,
+        enable_delete: false,
         max_steps: 15,
     }
     .checker()
@@ -494,6 +546,7 @@ fn check_two_services() {
         initial_spec: two_service_spec(),
         worker_count: 1,
         enable_worker_failure: false,
+        enable_delete: false,
         max_steps: 10,
     }
     .checker()
@@ -508,12 +561,12 @@ fn check_two_services() {
 }
 
 #[test]
-#[ignore] // run with: cargo test --release -- --ignored
 fn check_activation_with_worker_failure() {
     let result = NamespaceModel {
         initial_spec: single_service_spec(),
         worker_count: 2,
         enable_worker_failure: true,
+        enable_delete: false,
         max_steps: 20,
     }
     .checker()
@@ -528,13 +581,13 @@ fn check_activation_with_worker_failure() {
 }
 
 #[test]
-#[ignore] // run with: cargo test --release -- --ignored
 fn check_two_workers_two_services() {
     let result = NamespaceModel {
         initial_spec: two_service_spec(),
         worker_count: 2,
         enable_worker_failure: true,
-        max_steps: 15,
+        enable_delete: false,
+        max_steps: 8,
     }
     .checker()
     .spawn_dfs()
@@ -543,6 +596,46 @@ fn check_two_workers_two_services() {
     result.assert_properties();
     println!(
         "Two workers, two services: {} unique states explored",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn check_delete_lifecycle() {
+    let result = NamespaceModel {
+        initial_spec: single_service_spec(),
+        worker_count: 1,
+        enable_worker_failure: false,
+        enable_delete: true,
+        max_steps: 15,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Delete lifecycle: {} unique states explored",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn check_delete_with_worker_failure() {
+    let result = NamespaceModel {
+        initial_spec: two_service_spec(),
+        worker_count: 2,
+        enable_worker_failure: true,
+        enable_delete: true,
+        max_steps: 7,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Delete with worker failure: {} unique states explored",
         result.unique_state_count()
     );
 }

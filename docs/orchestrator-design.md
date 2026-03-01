@@ -44,17 +44,51 @@ enum OrchestratorInput {
 
 Most inputs are routed directly to a namespace. `WorkerDisconnected` fans out a `WorkerLost` event to every namespace that had pods on that worker. `CreateNamespace` instantiates a new state machine. `CloneNamespace` reads the spec from the source and creates a new state machine with a modified copy. `ListNamespaces` reads across all state machines.
 
-### Per-Namespace State Machine
+### Per-Namespace State Machine — Three-Layer Split
+
+The namespace state machine is split into three layers to keep each piece small and independently testable:
+
+1. **NamespaceStateMachine** (thin coordinator): fabric management, namespace lifecycle, event routing between sub-state-machines.
+2. **WorkloadStateMachine**: pod lifecycle (scheduling, launching, running). Driven by demand signals from services.
+3. **ServiceStateMachine**: activation, idle timeout, backend routing. Driven by activation events and workload readiness.
+
+Multiple services can share a single workload. The coordinator maintains the mapping and forwards signals between them.
+
+This split reduces the model-checking state space from O(states^N) (monolithic, all services interleaved) to O(states × N) (each sub-SM checked independently).
 
 ```rust
 struct NamespaceStateMachine {
     spec: NamespaceSpec,
     status: NamespaceStatus,
     workers: HashMap<WorkerId, NamespaceWorkerState>,
-    services: HashMap<ServiceId, ServiceState>,
-    pods: HashMap<PodId, PodInfo>,
+
+    /// Maps each service to its workload. Multiple services can share
+    /// a workload (e.g. sidecar pattern, or services with identical pods).
+    service_workload: HashMap<ServiceId, WorkloadId>,
+    workloads: HashMap<WorkloadId, WorkloadStateMachine>,
+    services: HashMap<ServiceId, ServiceStateMachine>,
 }
 
+/// Workload sub-state-machine. Manages the pod lifecycle for one workload.
+struct WorkloadStateMachine {
+    state: WorkloadState,
+    spec: WorkloadSpec,
+    /// Number of services currently requesting this workload be running.
+    demand_count: u32,
+}
+
+/// Service sub-state-machine. Manages activation, idle timeout, and
+/// backend routing for one service.
+struct ServiceStateMachine {
+    state: ServiceState,
+    spec: ServiceSpec,
+    workload_id: WorkloadId,
+}
+```
+
+The coordinator dispatches external inputs and routes internal signals between sub-SMs:
+
+```rust
 /// Inputs to a single namespace state machine.
 /// No namespace_id fields — the state machine knows which namespace it is.
 enum NamespaceInput {
@@ -65,10 +99,10 @@ enum NamespaceInput {
     UpdateSpec { client_id: ClientId, spec: NamespaceSpec },
     Delete { client_id: ClientId },
     GetStatus { client_id: ClientId },
-    Splice { client_id: ClientId, service_id: ServiceId, worker_id: WorkerId },
-    Unsplice { client_id: ClientId, service_id: ServiceId },
+    Splice { client_id: ClientId, workload_id: WorkloadId, worker_id: WorkerId },
+    Unsplice { client_id: ClientId, workload_id: WorkloadId },
     StreamLogs { client_id: ClientId, service_id: Option<ServiceId> },
-    /// A new worker is available. Re-reconcile services that may be
+    /// A new worker is available. Re-reconcile workloads that may be
     /// waiting for capacity.
     CapacityAvailable,
 }
@@ -84,13 +118,94 @@ struct NamespaceOutput {
 }
 
 struct CapacityRequest {
-    service_id: ServiceId,
+    workload_id: WorkloadId,
     memory_mb: u64,
 }
+```
 
+#### Sub-SM Input/Output Types
+
+The coordinator communicates with sub-SMs via typed internal signals:
+
+```rust
+/// Inputs to the workload sub-state-machine.
+enum WorkloadInput {
+    /// A service needs this workload running.
+    DemandUp,
+    /// A service no longer needs this workload running.
+    DemandDown,
+    /// Worker capacity became available (retry scheduling).
+    CapacityAvailable,
+    /// Worker reports pod status change.
+    WorkerEvent { worker_id: WorkerId, event: WorkerEvent },
+    /// Worker hosting this workload's pod disconnected.
+    WorkerLost { worker_id: WorkerId },
+    /// Timer fired (launch timeout).
+    TimerFired { timer_key: TimerKey },
+}
+
+/// Outputs from the workload sub-state-machine.
+enum WorkloadOutput {
+    /// The workload's pod is now running and reachable.
+    BecameReady { pod_id: PodId, worker_id: WorkerId },
+    /// The workload's pod is no longer available.
+    BecameUnready,
+    /// Need worker capacity — forward to outer layer.
+    NeedCapacity { memory_mb: u64 },
+    /// Worker commands to emit.
+    WorkerCommand { worker_id: WorkerId, command: WorkerCommand },
+    /// Timer management.
+    SetTimer { key: TimerKey, duration: Duration },
+    CancelTimer { key: TimerKey },
+}
+
+/// Inputs to the service sub-state-machine.
+enum ServiceInput {
+    /// The service's workload became ready (pod running).
+    WorkloadReady { pod_id: PodId, worker_id: WorkerId },
+    /// The service's workload became unready (pod lost).
+    WorkloadUnready,
+    /// Activation event from worker (first traffic hit).
+    ServiceActivation,
+    /// Ongoing backend need signal from worker.
+    ServiceBackendNeed { need: BackendNeed },
+    /// Timer fired (idle timeout).
+    TimerFired { timer_key: TimerKey },
+}
+
+/// Outputs from the service sub-state-machine.
+enum ServiceOutput {
+    /// This service needs its workload running.
+    DemandUp,
+    /// This service no longer needs its workload running.
+    DemandDown,
+    /// Worker commands to emit (UpdateServiceBackend, ServiceReady).
+    WorkerCommand { worker_id: WorkerId, command: WorkerCommand },
+    /// Timer management.
+    SetTimer { key: TimerKey, duration: Duration },
+    CancelTimer { key: TimerKey },
+}
+```
+
+The coordinator's `step` function is thin routing logic:
+
+```rust
 impl NamespaceStateMachine {
     /// Pure state transition. No I/O, no async, no side effects.
-    pub fn step(&mut self, input: NamespaceInput) -> NamespaceOutput { ... }
+    pub fn step(&mut self, input: NamespaceInput) -> NamespaceOutput {
+        let mut out = NamespaceOutput::default();
+
+        // 1. Route input to the appropriate sub-SM(s).
+        // 2. Collect sub-SM outputs.
+        // 3. Forward internal signals (e.g. ServiceOutput::DemandUp
+        //    becomes WorkloadInput::DemandUp).
+        // 4. Forward WorkloadOutput::BecameReady to all services
+        //    mapped to that workload.
+        // 5. Collect worker commands, timer ops, capacity requests
+        //    into NamespaceOutput.
+
+        out
+    }
 }
 ```
 

@@ -7,6 +7,7 @@ pub struct Orchestrator {
     pub namespaces: HashMap<NamespaceId, NamespaceStateMachine>,
     pub workers: HashMap<WorkerId, WorkerState>,
     pub clients: HashSet<ClientId>,
+    pub next_pod_id: u64,
 }
 
 impl Default for Orchestrator {
@@ -21,6 +22,7 @@ impl Orchestrator {
             namespaces: HashMap::new(),
             workers: HashMap::new(),
             clients: HashSet::new(),
+            next_pod_id: 0,
         }
     }
 
@@ -106,12 +108,79 @@ impl Orchestrator {
                 );
             }
             ClientCommand::ListNamespaces => {
-                // TODO: build list from all namespace state machines
+                let namespaces = self
+                    .namespaces
+                    .iter()
+                    .map(|(ns_id, ns)| {
+                        let mut services = HashMap::new();
+                        for (svc_id, svc_state) in &ns.services {
+                            let (state_str, pod_id, worker_id, backend_need) = match svc_state {
+                                ServiceState::Pending => {
+                                    ("pending".to_string(), None, None, None)
+                                }
+                                ServiceState::Idle => ("idle".to_string(), None, None, None),
+                                ServiceState::WaitingForCapacity => {
+                                    ("waiting_for_capacity".to_string(), None, None, None)
+                                }
+                                ServiceState::Launching {
+                                    pod_id, worker_id, ..
+                                } => (
+                                    "launching".to_string(),
+                                    Some(pod_id.clone()),
+                                    Some(worker_id.clone()),
+                                    None,
+                                ),
+                                ServiceState::Active {
+                                    pod_id,
+                                    worker_id,
+                                    backend_need,
+                                    ..
+                                } => (
+                                    "active".to_string(),
+                                    Some(pod_id.clone()),
+                                    Some(worker_id.clone()),
+                                    Some(backend_need.clone()),
+                                ),
+                            };
+
+                            let activation_enabled = ns
+                                .spec
+                                .services
+                                .get(svc_id)
+                                .and_then(|s| s.activation.as_ref())
+                                .is_some();
+                            let spliced = matches!(
+                                svc_state,
+                                ServiceState::Active {
+                                    hosting: ServiceHosting::Spliced { .. },
+                                    ..
+                                }
+                            );
+
+                            services.insert(
+                                svc_id.clone(),
+                                ServiceStatusReport {
+                                    state: state_str,
+                                    pod_id,
+                                    worker_id,
+                                    backend_need,
+                                    activation_enabled,
+                                    spliced,
+                                },
+                            );
+                        }
+
+                        NamespaceStatusReport {
+                            namespace_id: ns_id.clone(),
+                            status: ns.status.clone(),
+                            services,
+                        }
+                    })
+                    .collect();
+
                 out.client_events.push((
                     client_id,
-                    ClientEvent::NamespaceList {
-                        namespaces: Vec::new(),
-                    },
+                    ClientEvent::NamespaceList { namespaces },
                 ));
             }
             ClientCommand::Splice {
@@ -204,11 +273,8 @@ impl Orchestrator {
             self.assign_worker_to_namespace(&ns_id, &worker_id, out);
         }
 
-        // Notify all namespaces that new capacity is available.
-        let ns_ids: Vec<_> = self.namespaces.keys().cloned().collect();
-        for ns_id in ns_ids {
-            self.route_namespace_input(ns_id, NamespaceInput::CapacityAvailable, out);
-        }
+        // Check all namespaces for services waiting for capacity and schedule them.
+        self.schedule_waiting_pods(out);
     }
 
     fn handle_worker_disconnected(
@@ -240,15 +306,7 @@ impl Orchestrator {
     ) {
         if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
             let ns_out = ns.step(input);
-
-            // Merge namespace output into top-level output.
-            out.worker_commands.extend(ns_out.worker_commands.iter().cloned());
-            out.timers_set.extend(ns_out.timers_set.iter().cloned());
-            out.timers_cancel.extend(ns_out.timers_cancel.iter().cloned());
-
-            if ns_out != NamespaceOutput::default() {
-                out.namespace_outputs.push((namespace_id, ns_out));
-            }
+            self.process_namespace_output(namespace_id, ns_out, out);
         } else {
             // If the input carries a client_id, send an error back.
             if let Some(client_id) = extract_client_id(&input) {
@@ -260,6 +318,113 @@ impl Orchestrator {
                 ));
             }
         }
+    }
+
+    fn process_namespace_output(
+        &mut self,
+        namespace_id: NamespaceId,
+        ns_out: NamespaceOutput,
+        out: &mut OrchestratorOutput,
+    ) {
+        // Merge namespace output into top-level output.
+        out.worker_commands
+            .extend(ns_out.worker_commands.iter().cloned());
+        out.timers_set.extend(ns_out.timers_set.iter().cloned());
+        out.timers_cancel
+            .extend(ns_out.timers_cancel.iter().cloned());
+
+        let destroyed = ns_out.destroyed;
+        let pod_requests = ns_out.pod_requests.clone();
+
+        if ns_out != NamespaceOutput::default() {
+            out.namespace_outputs
+                .push((namespace_id.clone(), ns_out));
+        }
+
+        // Process pod scheduling requests from the namespace.
+        for req in pod_requests {
+            if let Some(worker_id) = self.select_worker_for_pod(&namespace_id) {
+                let pod_id = self.gen_pod_id();
+                if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                    let launch_out = ns.step(NamespaceInput::LaunchPod {
+                        service_id: req.service_id,
+                        worker_id,
+                        pod_id,
+                    });
+                    // Recursively process outputs from LaunchPod (it won't emit more pod_requests).
+                    out.worker_commands
+                        .extend(launch_out.worker_commands.iter().cloned());
+                    out.timers_set
+                        .extend(launch_out.timers_set.iter().cloned());
+                    out.timers_cancel
+                        .extend(launch_out.timers_cancel.iter().cloned());
+                    if launch_out != NamespaceOutput::default() {
+                        out.namespace_outputs
+                            .push((namespace_id.clone(), launch_out));
+                    }
+                }
+            }
+            // If no worker available, service stays in WaitingForCapacity.
+        }
+
+        // If namespace is fully destroyed, remove it and clean up worker references.
+        if destroyed {
+            self.namespaces.remove(&namespace_id);
+            for ws in self.workers.values_mut() {
+                ws.namespaces.remove(&namespace_id);
+            }
+        }
+    }
+
+    fn schedule_waiting_pods(&mut self, out: &mut OrchestratorOutput) {
+        // Collect (namespace_id, service_id) pairs for services waiting for capacity.
+        let waiting: Vec<(NamespaceId, ServiceId)> = self
+            .namespaces
+            .iter()
+            .flat_map(|(ns_id, ns)| {
+                ns.services
+                    .iter()
+                    .filter(|(_, state)| matches!(state, ServiceState::WaitingForCapacity))
+                    .map(move |(svc_id, _)| (ns_id.clone(), svc_id.clone()))
+            })
+            .collect();
+
+        for (ns_id, svc_id) in waiting {
+            if let Some(worker_id) = self.select_worker_for_pod(&ns_id) {
+                let pod_id = self.gen_pod_id();
+                if let Some(ns) = self.namespaces.get_mut(&ns_id) {
+                    let launch_out = ns.step(NamespaceInput::LaunchPod {
+                        service_id: svc_id,
+                        worker_id,
+                        pod_id,
+                    });
+                    out.worker_commands
+                        .extend(launch_out.worker_commands.iter().cloned());
+                    out.timers_set
+                        .extend(launch_out.timers_set.iter().cloned());
+                    out.timers_cancel
+                        .extend(launch_out.timers_cancel.iter().cloned());
+                    if launch_out != NamespaceOutput::default() {
+                        out.namespace_outputs
+                            .push((ns_id.clone(), launch_out));
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_pod_id(&mut self) -> PodId {
+        let id = self.next_pod_id;
+        self.next_pod_id += 1;
+        PodId(format!("pod-{}", id))
+    }
+
+    fn select_worker_for_pod(&self, namespace_id: &NamespaceId) -> Option<WorkerId> {
+        let ns = self.namespaces.get(namespace_id)?;
+        ns.workers
+            .iter()
+            .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+            .map(|(wid, _)| wid.clone())
     }
 
     fn pick_worker_for_namespace(&self) -> Option<WorkerId> {

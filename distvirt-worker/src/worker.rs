@@ -319,28 +319,37 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             while let Some(event) = fabric_event_rx.recv().await {
                 match event {
                     FabricEvent::RouteMiss { dst_ip, dst_mac } => {
-                        let _ = bridge_event_tx
+                        if let Err(e) = bridge_event_tx
                             .try_send(WorkerEvent::FabricRouteMiss {
                                 namespace_id: bridge_ns_id.clone(),
                                 dst_ip,
                                 dst_mac,
-                            });
+                            })
+                        {
+                            log::warn!("worker: dropped FabricRouteMiss event: {}", e);
+                        }
                     }
                     FabricEvent::ServiceActivation { service_id, dst_ip } => {
-                        let _ = bridge_event_tx
+                        if let Err(e) = bridge_event_tx
                             .try_send(WorkerEvent::ServiceActivation {
                                 namespace_id: bridge_ns_id.clone(),
                                 service_id,
                                 dst_ip,
-                            });
+                            })
+                        {
+                            log::warn!("worker: dropped ServiceActivation event: {}", e);
+                        }
                     }
                     FabricEvent::ServiceBackendNeed { service_id, dst_ip: _, need } => {
-                        let _ = bridge_event_tx
-                            .try_send(WorkerEvent::ServiceBackendNeed {
+                        if let Err(e) = bridge_event_tx
+                            .send(WorkerEvent::ServiceBackendNeed {
                                 namespace_id: bridge_ns_id.clone(),
                                 service_id,
                                 need,
-                            });
+                            }).await
+                        {
+                            log::warn!("worker: failed to send ServiceBackendNeed event: {}", e);
+                        }
                     }
                 }
             }
@@ -587,11 +596,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     if !frames.is_empty() {
                         fabric.flush_service_frames(frames, backend_mac);
                     }
-                    fabric.execute_service_actions(&actions, service_id);
+                    fabric.dispatch_actions(&actions, service_id).await;
                 }
                 MarkReadyResult::L4(ServiceAction::L4Result { actions, frames, .. }) => {
                     fabric.send_l4_frames(frames);
-                    fabric.execute_service_actions(&actions, service_id);
+                    fabric.dispatch_actions(&actions, service_id).await;
                 }
                 _ => {}
             }

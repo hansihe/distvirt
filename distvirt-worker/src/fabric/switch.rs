@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use super::port::PortId;
 
@@ -19,7 +20,7 @@ pub const VNET_HDR_SZ: usize = 10;
 
 /// MAC address learning table mapping MAC addresses to port IDs.
 pub struct MacTable {
-    table: HashMap<[u8; 6], PortId>,
+    table: HashMap<[u8; 6], (PortId, Instant)>,
 }
 
 impl MacTable {
@@ -32,13 +33,26 @@ impl MacTable {
     /// Learn (insert or update) a source MAC to port mapping.
     pub fn learn(&mut self, mac: [u8; 6], port_id: PortId) {
         if !is_broadcast(&mac) && !is_multicast(&mac) {
-            self.table.insert(mac, port_id);
+            self.table.insert(mac, (port_id, Instant::now()));
         }
     }
 
     /// Look up which port a destination MAC is associated with.
     pub fn lookup(&self, mac: &[u8; 6]) -> Option<PortId> {
-        self.table.get(mac).copied()
+        self.table.get(mac).map(|(port_id, _)| *port_id)
+    }
+
+    /// Remove entries older than `max_age`.
+    pub fn gc(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        let before = self.table.len();
+        self.table.retain(|_mac, (_, seen)| {
+            now.duration_since(*seen) <= max_age
+        });
+        let expired = before - self.table.len();
+        if expired > 0 {
+            log::info!("mac_table: gc removed {} stale entries ({} remaining)", expired, self.table.len());
+        }
     }
 }
 
@@ -133,6 +147,25 @@ mod tests {
         let mac = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01];
         table.learn(mac, 2);
         assert_eq!(table.lookup(&mac), None);
+    }
+
+    #[test]
+    fn mac_table_gc_removes_stale_entries() {
+        let mut table = MacTable::new();
+        let mac_a = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
+        let mac_b = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0b];
+        table.learn(mac_a, 1);
+        table.learn(mac_b, 2);
+
+        // Both should be present with a generous max_age.
+        table.gc(Duration::from_secs(300));
+        assert_eq!(table.lookup(&mac_a), Some(1));
+        assert_eq!(table.lookup(&mac_b), Some(2));
+
+        // With zero max_age, all entries should be removed.
+        table.gc(Duration::from_secs(0));
+        assert_eq!(table.lookup(&mac_a), None);
+        assert_eq!(table.lookup(&mac_b), None);
     }
 
     #[test]
