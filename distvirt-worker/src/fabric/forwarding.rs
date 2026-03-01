@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
-use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogLevel};
+use distvirt_activator::types::Action;
 use super::route::RouteAction;
 use super::service::ServiceAction;
 use super::switch::{GATEWAY_MAC, MacTable, VNET_HDR_SZ, extract_ipv4_dst, format_mac, is_broadcast, parse_ethernet_header};
 use super::port::{FramePort, PortId};
-use super::{FabricEvent, SharedPort};
+use super::{FabricEvent, SharedPort, convert_backend_need, handle_log_action};
 
 /// RAII guard that removes a port from the fabric's port map on drop.
 ///
@@ -229,11 +230,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
             }
         }
         Action::SetBackendNeed(need) => {
-            let proto_need = match need {
-                ActivatorBackendNeed::None => distvirt_worker_protocol::BackendNeed::None,
-                ActivatorBackendNeed::Traffic => distvirt_worker_protocol::BackendNeed::Traffic,
-                ActivatorBackendNeed::Active => distvirt_worker_protocol::BackendNeed::Active,
-            };
+            let proto_need = convert_backend_need(need);
             if let Some(tx) = event_tx {
                 let _ = tx.try_send(FabricEvent::ServiceBackendNeed {
                     service_id: service_id.to_string(),
@@ -243,14 +240,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
             }
         }
         Action::Log(log_action) => {
-            let msg = format!("activator[{}]: {}", service_id, log_action.message);
-            match log_action.level {
-                LogLevel::Trace => log::trace!("{}", msg),
-                LogLevel::Debug => log::debug!("{}", msg),
-                LogLevel::Info => log::info!("{}", msg),
-                LogLevel::Warn => log::warn!("{}", msg),
-                LogLevel::Error => log::error!("{}", msg),
-            }
+            handle_log_action(service_id, log_action);
         }
         Action::PacketDecision { .. } => {
             // Decision already handled by activator internally.
@@ -259,6 +249,79 @@ pub(super) async fn dispatch_action<P: FramePort>(
             log::debug!("fabric: unhandled activator action in forwarding path");
         }
     }
+}
+
+/// Send L4 outgoing Ethernet frames (no vnet header) to the appropriate ports.
+fn send_l4_frames<P: FramePort>(
+    frames: &[Vec<u8>],
+    mac_table: &Arc<Mutex<MacTable>>,
+    ports: &Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
+) {
+    if frames.is_empty() {
+        return;
+    }
+    let mac_table_ref = mac_table.lock().unwrap();
+    let ports_ref = ports.lock().unwrap();
+    for eth_frame in frames {
+        if eth_frame.len() < 6 {
+            continue;
+        }
+        let frame_dst_mac: [u8; 6] = eth_frame[0..6].try_into().unwrap();
+        if let Some(port_id) = mac_table_ref.lookup(&frame_dst_mac) {
+            if let Some(port) = ports_ref.get(&port_id) {
+                let port = Arc::clone(port);
+                let mut vnet_frame = vec![0u8; VNET_HDR_SZ];
+                vnet_frame.extend_from_slice(eth_frame);
+                tokio::spawn(async move {
+                    if let Err(e) = port.send_frame(&vnet_frame).await {
+                        log::warn!("fabric: L4 frame send error: {}", e);
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Schedule a smoltcp poll timer for a service IP.
+///
+/// Spawns a tokio task that sleeps for `delay`, then calls
+/// `handle_timeout_for_ip` on the service table to drive TCP state machine
+/// timers (retransmissions, TIME_WAIT cleanup, FIN/FIN-ACK, etc.).
+fn schedule_poll_timer<P: FramePort>(
+    delay: Duration,
+    ip: Ipv4Addr,
+    service_table: Arc<Mutex<super::ServiceTable>>,
+    mac_table: Arc<Mutex<MacTable>>,
+    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
+    event_tx: Option<mpsc::Sender<FabricEvent>>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+
+        let result = {
+            let mut st = service_table.lock().unwrap();
+            st.handle_timeout_for_ip(ip)
+        };
+
+        if let Some(ServiceAction::L4Result { actions, frames, service_id, poll_delay }) = result {
+            send_l4_frames(&frames, &mac_table, &ports);
+
+            for action in &actions {
+                dispatch_action(
+                    action, &service_id, ip,
+                    &service_table, &mac_table, &ports, &event_tx,
+                ).await;
+            }
+
+            // Reschedule if smoltcp still needs polling.
+            if let Some(next_delay) = poll_delay {
+                schedule_poll_timer(
+                    next_delay, ip,
+                    service_table, mac_table, ports, event_tx,
+                );
+            }
+        }
+    });
 }
 
 /// Handle unknown unicast: consult service table first, then route table for IPv4 frames,
@@ -332,36 +395,25 @@ async fn handle_unknown_unicast<P: FramePort>(
                         ).await;
                     }
                 }
-                ServiceAction::L4Result { actions, frames, service_id, .. } => {
+                ServiceAction::L4Result { actions, frames, service_id, poll_delay } => {
                     // Send outgoing L4 frames.
-                    if !frames.is_empty() {
-                        let mac_table_ref = mac_table.lock().unwrap();
-                        let ports_ref = ports.lock().unwrap();
-                        for eth_frame in frames {
-                            if eth_frame.len() < 6 {
-                                continue;
-                            }
-                            let frame_dst_mac: [u8; 6] = eth_frame[0..6].try_into().unwrap();
-                            if let Some(port_id) = mac_table_ref.lookup(&frame_dst_mac) {
-                                if let Some(port) = ports_ref.get(&port_id) {
-                                    let port = Arc::clone(port);
-                                    let mut vnet_frame = vec![0u8; VNET_HDR_SZ];
-                                    vnet_frame.extend_from_slice(&eth_frame);
-                                    tokio::spawn(async move {
-                                        if let Err(e) = port.send_frame(&vnet_frame).await {
-                                            log::warn!("fabric: L4 frame send error: {}", e);
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    send_l4_frames(&frames, mac_table, ports);
                     // Handle non-L4 actions (SetBackendNeed, Log, etc.)
                     for action in actions {
                         dispatch_action(
                             &action, &service_id, dst_ip,
                             service_table, mac_table, ports, event_tx,
                         ).await;
+                    }
+                    // Schedule smoltcp timer if needed.
+                    if let Some(delay) = poll_delay {
+                        schedule_poll_timer(
+                            delay, dst_ip,
+                            Arc::clone(service_table),
+                            Arc::clone(mac_table),
+                            Arc::clone(ports),
+                            event_tx.clone(),
+                        );
                     }
                 }
             }

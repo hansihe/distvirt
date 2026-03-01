@@ -351,6 +351,31 @@ fn instance_fuel_exhaustion() {
     assert!(result.is_err(), "expected fuel exhaustion error");
 }
 
+// --- Fuel accumulation regression test ---
+
+#[test]
+fn instance_fuel_does_not_accumulate() {
+    let runtime = require_components();
+    let component = runtime.get_component("tcp").unwrap();
+    let mut inst = ActivatorInstance::new(runtime.engine(), component).unwrap();
+
+    // Call process_events 100 times with trivial events to let fuel "accumulate"
+    // if the bug is present.
+    for _ in 0..100 {
+        inst.push_event(Event::Tick);
+        inst.process_events().unwrap();
+    }
+
+    // Now load a spin component and verify it still traps — fuel didn't secretly grow.
+    let spin_component = runtime
+        .get_component("spin")
+        .expect("spin component not found");
+    let mut spin_inst = ActivatorInstance::new(runtime.engine(), spin_component).unwrap();
+    spin_inst.push_event(Event::Tick);
+    let result = spin_inst.process_events();
+    assert!(result.is_err(), "spin should still trap after idle calls on another instance");
+}
+
 // --- TCP activator tests ---
 
 #[test]

@@ -3,7 +3,7 @@
 //!
 //! The fabric feeds frames in, gets events and outgoing frames back.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -129,8 +129,8 @@ struct StreamState {
     opened_notified: bool,
     closed_notified: bool,
     paused: bool,
-    /// For upstream connections, the destination port.
-    _upstream_port: Option<u16>,
+    /// For upstream connections, the local ephemeral port used.
+    upstream_local_port: Option<u16>,
 }
 
 /// Output from StreamManager operations.
@@ -174,6 +174,10 @@ pub struct StreamManager {
     backend_ip: Option<Ipv4Addr>,
     /// Backend MAC for upstream connections.
     backend_mac: Option<[u8; 6]>,
+    /// Allocated upstream local ports to avoid collisions.
+    upstream_ports: HashSet<u16>,
+    /// Counter for upstream port allocation.
+    next_upstream_port: u16,
 }
 
 impl StreamManager {
@@ -226,7 +230,26 @@ impl StreamManager {
             base_instant,
             backend_ip: None,
             backend_mac: None,
+            upstream_ports: HashSet::new(),
+            next_upstream_port: 49152,
         }
+    }
+
+    /// Allocate a unique ephemeral port for upstream connections.
+    fn alloc_upstream_port(&mut self) -> u16 {
+        let range_start = 49152u16;
+        let range_size = 16384u16;
+        for _ in 0..range_size {
+            let port = self.next_upstream_port;
+            self.next_upstream_port = range_start + (self.next_upstream_port - range_start + 1) % range_size;
+            if !self.upstream_ports.contains(&port) {
+                self.upstream_ports.insert(port);
+                return port;
+            }
+        }
+        // All ports exhausted — fallback (should not happen in practice).
+        log::error!("stream_manager: all ephemeral ports exhausted");
+        self.next_upstream_port
     }
 
     fn smoltcp_now(&self) -> SmolInstant {
@@ -300,7 +323,7 @@ impl StreamManager {
                     opened_notified: true,
                     closed_notified: false,
                     paused: false,
-                    _upstream_port: None,
+                    upstream_local_port: None,
                 },
             );
             self.handle_to_stream.insert(handle, stream_id);
@@ -411,6 +434,10 @@ impl StreamManager {
             if let Some(state) = self.streams.remove(&stream_id) {
                 self.handle_to_stream.remove(&state.socket_handle);
                 self.sockets.remove(state.socket_handle);
+                // Release upstream local port for reuse.
+                if let Some(port) = state.upstream_local_port {
+                    self.upstream_ports.remove(&port);
+                }
             }
         }
 
@@ -441,7 +468,15 @@ impl StreamManager {
                 if let Some(state) = self.streams.get(stream) {
                     let socket = self.sockets.get_mut::<tcp::Socket>(state.socket_handle);
                     if socket.can_send() {
-                        let _ = socket.send_slice(data);
+                        match socket.send_slice(data) {
+                            Ok(sent) if sent < data.len() => {
+                                log::warn!("stream_manager: downstream partial write: {}/{}", sent, data.len());
+                            }
+                            Err(e) => {
+                                log::warn!("stream_manager: downstream send error: {:?}", e);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -471,6 +506,7 @@ impl StreamManager {
                     let handle = self.sockets.add(socket);
 
                     let stream_id = self.alloc_stream_id();
+                    let local_port = self.alloc_upstream_port();
                     self.streams.insert(
                         stream_id,
                         StreamState {
@@ -479,7 +515,7 @@ impl StreamManager {
                             opened_notified: false,
                             closed_notified: false,
                             paused: false,
-                            _upstream_port: Some(*port),
+                            upstream_local_port: Some(local_port),
                         },
                     );
                     self.handle_to_stream.insert(handle, stream_id);
@@ -494,7 +530,6 @@ impl StreamManager {
                         *port,
                     );
                     let socket = self.sockets.get_mut::<tcp::Socket>(handle);
-                    let local_port = 49152 + (stream_id as u16 % 16384);
                     let local = IpEndpoint::new(
                         IpAddress::v4(
                             self.config.service_ip.octets()[0],
@@ -516,7 +551,15 @@ impl StreamManager {
                     if state.direction == StreamDirection::Upstream {
                         let socket = self.sockets.get_mut::<tcp::Socket>(state.socket_handle);
                         if socket.can_send() {
-                            let _ = socket.send_slice(data);
+                            match socket.send_slice(data) {
+                                Ok(sent) if sent < data.len() => {
+                                    log::warn!("stream_manager: upstream partial write: {}/{}", sent, data.len());
+                                }
+                                Err(e) => {
+                                    log::warn!("stream_manager: upstream send error: {:?}", e);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -571,10 +614,45 @@ impl StreamManager {
     }
 
     /// Update the backend target for upstream connections.
+    ///
+    /// If both IP and MAC are provided, injects a synthetic ARP reply so
+    /// smoltcp learns the backend's MAC address in its neighbor cache.
     pub fn update_backend(&mut self, ip: Option<Ipv4Addr>, mac: Option<[u8; 6]>) {
         self.backend_ip = ip;
         self.backend_mac = mac;
+        if let (Some(ip), Some(mac)) = (ip, mac) {
+            let arp_reply = build_arp_reply(&self.config, ip, mac);
+            self.device.rx_queue.push_back(arp_reply);
+            let now = self.smoltcp_now();
+            // Process the ARP reply so smoltcp learns the neighbor; discard output.
+            self.poll_and_drain(now);
+        }
     }
+}
+
+/// Build a synthetic ARP reply frame so smoltcp learns the backend's MAC.
+///
+/// The reply looks like it came from the backend (sender = backend IP/MAC)
+/// targeted at the service (target = service IP/MAC).
+fn build_arp_reply(config: &StreamManagerConfig, backend_ip: Ipv4Addr, backend_mac: [u8; 6]) -> Vec<u8> {
+    let mut frame = vec![0u8; 42];
+    // Ethernet header: dst = service MAC, src = backend MAC, ethertype = ARP
+    frame[0..6].copy_from_slice(&config.service_mac);
+    frame[6..12].copy_from_slice(&backend_mac);
+    frame[12..14].copy_from_slice(&[0x08, 0x06]);
+    // ARP header
+    frame[14..16].copy_from_slice(&[0x00, 0x01]); // HTYPE: Ethernet
+    frame[16..18].copy_from_slice(&[0x08, 0x00]); // PTYPE: IPv4
+    frame[18] = 6; // HLEN
+    frame[19] = 4; // PLEN
+    frame[20..22].copy_from_slice(&[0x00, 0x02]); // Opcode: reply
+    // Sender = backend
+    frame[22..28].copy_from_slice(&backend_mac);
+    frame[28..32].copy_from_slice(&backend_ip.octets());
+    // Target = service
+    frame[32..38].copy_from_slice(&config.service_mac);
+    frame[38..42].copy_from_slice(&config.service_ip.octets());
+    frame
 }
 
 /// Helper to check if an action is an L4 stream action (handled by StreamManager).
@@ -961,6 +1039,114 @@ mod tests {
 
         let _output = sm.execute_action(&Action::ResumeDownstream(stream_id));
         let _timeout_out = sm.handle_timeout();
+    }
+
+    #[test]
+    fn test_partial_write_handled_gracefully() {
+        let config = StreamManagerConfig {
+            service_ip: SVC_IP,
+            service_mac: SVC_MAC,
+            listen_ports: vec![80],
+            tcp_buffer_size: 64, // Small buffer to trigger partial write
+            listen_pool_size: 2,
+        };
+        let mut sm = StreamManager::new(config);
+        let (stream_id, _) = do_handshake(&mut sm);
+
+        // Try to send 256 bytes into a 64-byte buffer — should not panic.
+        let big_data = vec![0xAA; 256];
+        let output = sm.execute_action(&Action::DownstreamSend {
+            stream: stream_id,
+            data: big_data,
+        });
+
+        // Should produce some TCP frames (partial write handled).
+        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
+        assert!(!tcp_frames.is_empty(), "partial write should still produce frames");
+    }
+
+    #[test]
+    fn test_upstream_connect_sends_syn_not_arp() {
+        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let mut sm = StreamManager::new(config);
+
+        let backend_ip = Ipv4Addr::new(10, 0, 0, 200);
+        let backend_mac: [u8; 6] = [0x02, 0x00, 0x0a, 0x00, 0x00, 0xc8];
+
+        // Seed the neighbor cache.
+        sm.update_backend(Some(backend_ip), Some(backend_mac));
+
+        // Now issue an upstream connect.
+        let output = sm.execute_action(&Action::UpstreamConnect { port: 8080 });
+
+        // Should produce a TCP SYN frame, not an ARP request.
+        assert!(!output.frames.is_empty(), "UpstreamConnect should produce frames");
+        let has_arp = output.frames.iter().any(|f| is_arp_request(f));
+        assert!(!has_arp, "should not produce ARP request after update_backend seeded neighbor cache");
+        let has_tcp = output.frames.iter().any(|f| is_tcp_frame(f));
+        assert!(has_tcp, "should produce TCP SYN frame");
+    }
+
+    #[test]
+    fn test_upstream_ports_unique() {
+        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let mut sm = StreamManager::new(config);
+
+        let backend_ip = Ipv4Addr::new(10, 0, 0, 200);
+        let backend_mac: [u8; 6] = [0x02, 0x00, 0x0a, 0x00, 0x00, 0xc8];
+        sm.update_backend(Some(backend_ip), Some(backend_mac));
+
+        let mut src_ports = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let output = sm.execute_action(&Action::UpstreamConnect { port: 8080 });
+            for frame in &output.frames {
+                if is_tcp_frame(frame) {
+                    let ts = tcp_start(frame);
+                    let src_port = u16::from_be_bytes([frame[ts], frame[ts + 1]]);
+                    src_ports.insert(src_port);
+                }
+            }
+        }
+        // All source ports should be unique.
+        assert_eq!(src_ports.len(), 100, "all 100 upstream connections should have unique source ports");
+    }
+
+    #[test]
+    fn test_poll_delay_and_handle_timeout_drives_fin_ack() {
+        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let mut sm = StreamManager::new(config);
+        let (stream_id, server_seq) = do_handshake(&mut sm);
+
+        // Client sends FIN.
+        let fin = make_tcp_fin(
+            CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC,
+            12345, 80, 1001, server_seq + 1,
+        );
+        let output = feed_frame(&mut sm, &fin, CLIENT_MAC);
+
+        // Should get StreamClose event.
+        let has_close = output.events.iter().any(|e| matches!(e, Event::StreamClose(s) if *s == stream_id));
+        assert!(has_close, "FIN should produce StreamClose");
+
+        // After processing FIN, smoltcp should want a timer (for TIME_WAIT or retransmit).
+        // Calling handle_timeout should produce frames (ACK for the FIN at minimum).
+        let timeout_output = sm.handle_timeout();
+        let total_frames = output.frames.len() + timeout_output.frames.len();
+        assert!(total_frames > 0, "FIN processing should produce at least one outgoing frame (ACK)");
+    }
+
+    #[test]
+    fn test_poll_delay_returns_some_after_close() {
+        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let mut sm = StreamManager::new(config);
+        let (_stream_id, server_seq) = do_handshake(&mut sm);
+
+        // Close from server side.
+        sm.execute_action(&Action::DownstreamClose(_stream_id));
+
+        // poll_delay should be Some after initiating close (FIN sent, waiting for ACK).
+        let delay = sm.poll_delay();
+        assert!(delay.is_some(), "poll_delay should be Some after initiating close, got None");
     }
 
     #[test]

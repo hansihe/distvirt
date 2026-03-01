@@ -587,11 +587,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     if !frames.is_empty() {
                         fabric.flush_service_frames(frames, backend_mac);
                     }
-                    fabric.execute_service_actions(&actions, service_id, &None);
+                    fabric.execute_service_actions(&actions, service_id);
                 }
                 MarkReadyResult::L4(ServiceAction::L4Result { actions, frames, .. }) => {
                     fabric.send_l4_frames(frames);
-                    fabric.execute_service_actions(&actions, service_id, &None);
+                    fabric.execute_service_actions(&actions, service_id);
                 }
                 _ => {}
             }

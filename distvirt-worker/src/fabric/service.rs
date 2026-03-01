@@ -49,6 +49,7 @@ struct ServiceEntity {
 }
 
 /// Result of marking a service as ready.
+#[derive(Debug)]
 pub enum MarkReadyResult {
     /// L3 passthrough mode: buffered frames + backend MAC + activator actions.
     Passthrough {
@@ -75,11 +76,11 @@ fn process_l4_output(entity: &mut ServiceEntity, mut sm_output: StreamManagerOut
 
     if let Some(ref mut activator) = entity.activator {
         for _ in 0..4 {
-            if sm_output.events.is_empty() {
-                break;
-            }
             for event in sm_output.events.drain(..) {
                 activator.push_event(event);
+            }
+            if !activator.has_pending_events() {
+                break;
             }
             let actions = match activator.process_events() {
                 Ok(a) => a,
@@ -98,6 +99,16 @@ fn process_l4_output(entity: &mut ServiceEntity, mut sm_output: StreamManagerOut
             }
             all_non_l4_actions.extend(actions.into_iter().filter(|a| !is_l4_action(a)));
             sm_output.events = new_events;
+        }
+
+        // Warn if the event loop didn't fully converge within 4 rounds.
+        if !sm_output.events.is_empty() || activator.has_pending_events() {
+            log::warn!(
+                "service '{}': L4 event loop hit 4-round cap with {} pending SM events and {} pending activator events",
+                entity.service_id,
+                sm_output.events.len(),
+                if activator.has_pending_events() { "some" } else { "no" },
+            );
         }
     }
 
@@ -350,6 +361,21 @@ impl ServiceTable {
         self.by_ip.get(ip).map(|e| e.service_id.as_str())
     }
 
+    /// Look up the service IP for a given service ID.
+    pub fn get_ip_by_id(&self, service_id: &str) -> Option<Ipv4Addr> {
+        self.id_to_ip.get(service_id).copied()
+    }
+
+    /// Handle a smoltcp timeout for a service IP.
+    ///
+    /// Calls `handle_timeout()` on the StreamManager, runs the activator loop,
+    /// and returns the resulting `ServiceAction` (if the service has an L4 path).
+    pub fn handle_timeout_for_ip(&mut self, ip: Ipv4Addr) -> Option<ServiceAction> {
+        let entity = self.by_ip.get_mut(&ip)?;
+        let sm = entity.stream_manager.as_mut()?;
+        let sm_output = sm.handle_timeout();
+        Some(process_l4_output(entity, sm_output))
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +545,120 @@ mod tests {
         let mut frame = vec![0u8; VNET_HDR_SZ];
         frame.extend_from_slice(&eth_frame);
         frame
+    }
+
+    #[test]
+    fn l4_mark_ready_processes_backend_available() {
+        let Some((_runtime, instance)) = try_load_tcp_activator() else {
+            eprintln!("SKIP: TCP activator WASM not built");
+            return;
+        };
+
+        let sm = distvirt_activator::StreamManager::new(
+            distvirt_activator::StreamManagerConfig {
+                service_ip: SVC_IP,
+                service_mac: SVC_MAC,
+                listen_ports: vec![80],
+                tcp_buffer_size: 4096,
+                listen_pool_size: 2,
+            },
+        );
+
+        let mut table = ServiceTable::new();
+        table.create(
+            "svc1".into(),
+            SVC_IP,
+            SVC_MAC,
+            ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
+                    ports: None,
+                    tcp_only: false,
+                    max_flows: 1024,
+                }),
+            },
+            Some(instance),
+            Some(sm),
+        );
+
+        // Feed a TCP SYN to the L4 path (after vnet header).
+        let syn_frame = make_tcp_frame_for_service(
+            SVC_MAC,
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a],
+            [10, 0, 0, 1],
+            SVC_IP.octets(),
+            12345,
+            80,
+        );
+        let result = table.lookup_and_buffer(SVC_IP, &syn_frame);
+        assert!(
+            matches!(result, Some((ServiceAction::L4Result { .. }, _))),
+            "SYN should trigger L4Result"
+        );
+
+        // Set backend and mark ready.
+        table.update_backend("svc1", Some((POD_IP, POD_MAC)));
+        let ready_result = table.mark_ready("svc1");
+        assert!(ready_result.is_some(), "mark_ready should return Some");
+
+        match ready_result.unwrap() {
+            MarkReadyResult::L4(ServiceAction::L4Result { actions, .. }) => {
+                // The tcp activator should have processed BackendAvailable(true)
+                // and emitted SetBackendNeed and/or other actions.
+                // At minimum, there should be some actions from the activator.
+                let has_set_backend_need = actions
+                    .iter()
+                    .any(|a| matches!(a, Action::SetBackendNeed(_)));
+                assert!(
+                    has_set_backend_need,
+                    "mark_ready L4 path should produce SetBackendNeed from BackendAvailable event, got: {:?}",
+                    actions
+                );
+            }
+            other => panic!("expected L4 result, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn handle_timeout_for_ip_returns_l4_result() {
+        let sm = distvirt_activator::StreamManager::new(
+            distvirt_activator::StreamManagerConfig {
+                service_ip: SVC_IP,
+                service_mac: SVC_MAC,
+                listen_ports: vec![80],
+                tcp_buffer_size: 4096,
+                listen_pool_size: 2,
+            },
+        );
+
+        let mut table = ServiceTable::new();
+        table.create(
+            "svc1".into(),
+            SVC_IP,
+            SVC_MAC,
+            default_policy(),
+            None,
+            Some(sm),
+        );
+
+        // handle_timeout_for_ip on a service with a StreamManager should return Some(L4Result).
+        let result = table.handle_timeout_for_ip(SVC_IP);
+        assert!(result.is_some(), "handle_timeout_for_ip should return Some for L4 service");
+        assert!(
+            matches!(result.unwrap(), ServiceAction::L4Result { .. }),
+            "should return L4Result"
+        );
+    }
+
+    #[test]
+    fn handle_timeout_for_ip_returns_none_for_l3() {
+        let mut table = ServiceTable::new();
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+
+        // L3 service (no StreamManager) should return None.
+        let result = table.handle_timeout_for_ip(SVC_IP);
+        assert!(result.is_none(), "handle_timeout_for_ip should return None for L3 service");
     }
 
     #[test]

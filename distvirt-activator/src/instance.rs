@@ -73,9 +73,8 @@ impl ActivatorInstance {
             return Ok(Vec::new());
         }
 
-        // Reset fuel for this call.
-        let remaining = self.store.get_fuel().unwrap_or(0);
-        self.store.set_fuel(remaining + FUEL_PER_CALL)?;
+        // Reset fuel for this call (not additive — prevents accumulation).
+        self.store.set_fuel(FUEL_PER_CALL)?;
 
         let events: Vec<Event> = self.pending_events.drain(..).collect();
         let wit_events: Vec<bindings::Event> = events.iter().map(event_to_wit).collect();

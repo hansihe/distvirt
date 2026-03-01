@@ -21,9 +21,30 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
-use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogLevel};
+use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
 use forwarding::{port_read_loop, gateway_ingress_task};
 use switch::{MacTable, VNET_HDR_SZ, format_mac};
+
+/// Convert activator BackendNeed to protocol BackendNeed.
+pub(crate) fn convert_backend_need(need: &ActivatorBackendNeed) -> distvirt_worker_protocol::BackendNeed {
+    match need {
+        ActivatorBackendNeed::None => distvirt_worker_protocol::BackendNeed::None,
+        ActivatorBackendNeed::Traffic => distvirt_worker_protocol::BackendNeed::Traffic,
+        ActivatorBackendNeed::Active => distvirt_worker_protocol::BackendNeed::Active,
+    }
+}
+
+/// Log an activator log action with appropriate level.
+pub(crate) fn handle_log_action(service_id: &str, log_action: &LogAction) {
+    let msg = format!("activator[{}]: {}", service_id, log_action.message);
+    match log_action.level {
+        LogLevel::Trace => log::trace!("{}", msg),
+        LogLevel::Debug => log::debug!("{}", msg),
+        LogLevel::Info => log::info!("{}", msg),
+        LogLevel::Warn => log::warn!("{}", msg),
+        LogLevel::Error => log::error!("{}", msg),
+    }
+}
 
 /// Fabric-internal event emitted when the route table or service table is consulted.
 #[derive(Debug, Clone)]
@@ -322,9 +343,10 @@ impl<P: FramePort> Fabric<P> {
         &self,
         actions: &[Action],
         service_id: &str,
-        event_tx: &Option<mpsc::Sender<FabricEvent>>,
     ) {
         let service_table = self.service_table.lock().unwrap();
+        let dst_ip = service_table.get_ip_by_id(service_id)
+            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
         let mac_table_inner = &*self.mac_table;
         let ports_inner = &*self.ports;
         for action in actions {
@@ -351,28 +373,17 @@ impl<P: FramePort> Fabric<P> {
                     }
                 }
                 Action::SetBackendNeed(need) => {
-                    let proto_need = match need {
-                        ActivatorBackendNeed::None => distvirt_worker_protocol::BackendNeed::None,
-                        ActivatorBackendNeed::Traffic => distvirt_worker_protocol::BackendNeed::Traffic,
-                        ActivatorBackendNeed::Active => distvirt_worker_protocol::BackendNeed::Active,
-                    };
-                    if let Some(tx) = event_tx {
+                    let proto_need = convert_backend_need(need);
+                    if let Some(ref tx) = self.event_tx {
                         let _ = tx.try_send(FabricEvent::ServiceBackendNeed {
                             service_id: service_id.to_string(),
-                            dst_ip: std::net::Ipv4Addr::UNSPECIFIED,
+                            dst_ip,
                             need: proto_need,
                         });
                     }
                 }
                 Action::Log(log_action) => {
-                    let msg = format!("activator[{}]: {}", service_id, log_action.message);
-                    match log_action.level {
-                        LogLevel::Trace => log::trace!("{}", msg),
-                        LogLevel::Debug => log::debug!("{}", msg),
-                        LogLevel::Info => log::info!("{}", msg),
-                        LogLevel::Warn => log::warn!("{}", msg),
-                        LogLevel::Error => log::error!("{}", msg),
-                    }
+                    handle_log_action(service_id, log_action);
                 }
                 _ => {}
             }
