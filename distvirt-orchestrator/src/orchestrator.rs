@@ -113,58 +113,65 @@ impl Orchestrator {
                     .iter()
                     .map(|(ns_id, ns)| {
                         let mut services = HashMap::new();
-                        for (svc_id, svc_state) in &ns.services {
-                            let (state_str, pod_id, worker_id, backend_need) = match svc_state {
-                                ServiceState::Pending => {
-                                    ("pending".to_string(), None, None, None)
+                        for (svc_id, svc) in &ns.services {
+                            let wl_id = &svc.workload_id;
+                            let wl = ns.workloads.get(wl_id);
+
+                            let (wl_state_str, pod_id, worker_id) = match wl.map(|w| &w.state) {
+                                Some(WorkloadState::Dormant) | None => {
+                                    ("dormant".to_string(), None, None)
                                 }
-                                ServiceState::Idle => ("idle".to_string(), None, None, None),
-                                ServiceState::WaitingForCapacity => {
-                                    ("waiting_for_capacity".to_string(), None, None, None)
+                                Some(WorkloadState::WaitingForCapacity) => {
+                                    ("waiting_for_capacity".to_string(), None, None)
                                 }
-                                ServiceState::Launching {
+                                Some(WorkloadState::Launching {
                                     pod_id, worker_id, ..
-                                } => (
+                                }) => (
                                     "launching".to_string(),
                                     Some(pod_id.clone()),
                                     Some(worker_id.clone()),
-                                    None,
                                 ),
-                                ServiceState::Active {
-                                    pod_id,
-                                    worker_id,
-                                    backend_need,
-                                    ..
-                                } => (
-                                    "active".to_string(),
+                                Some(WorkloadState::Running {
+                                    pod_id, worker_id, ..
+                                }) => (
+                                    "running".to_string(),
                                     Some(pod_id.clone()),
                                     Some(worker_id.clone()),
-                                    Some(backend_need.clone()),
                                 ),
                             };
 
-                            let activation_enabled = ns
-                                .spec
-                                .services
-                                .get(svc_id)
-                                .and_then(|s| s.activation.as_ref())
-                                .is_some();
-                            let spliced = matches!(
-                                svc_state,
-                                ServiceState::Active {
-                                    hosting: ServiceHosting::Spliced { .. },
-                                    ..
+                            let svc_state_str = match &svc.state {
+                                ServiceState::Pending => "pending".to_string(),
+                                ServiceState::Idle => "idle".to_string(),
+                                ServiceState::NeedBackend => "need_backend".to_string(),
+                                ServiceState::Active { .. } => "active".to_string(),
+                            };
+
+                            let backend_need = match &svc.state {
+                                ServiceState::Active { backend_need, .. } => {
+                                    Some(backend_need.clone())
                                 }
+                                _ => None,
+                            };
+
+                            let spliced = matches!(
+                                wl.map(|w| &w.state),
+                                Some(WorkloadState::Running {
+                                    hosting: WorkloadHosting::Spliced { .. },
+                                    ..
+                                })
                             );
 
                             services.insert(
                                 svc_id.clone(),
                                 ServiceStatusReport {
-                                    state: state_str,
+                                    service_state: svc_state_str,
+                                    workload_id: wl_id.clone(),
+                                    workload_state: wl_state_str,
                                     pod_id,
                                     worker_id,
                                     backend_need,
-                                    activation_enabled,
+                                    activation_enabled: svc.has_activation,
                                     spliced,
                                 },
                             );
@@ -185,14 +192,14 @@ impl Orchestrator {
             }
             ClientCommand::Splice {
                 namespace_id,
-                service_id,
+                workload_id,
                 worker_id,
             } => {
                 self.route_namespace_input(
                     namespace_id,
                     NamespaceInput::Splice {
                         client_id,
-                        service_id,
+                        workload_id,
                         worker_id,
                     },
                     out,
@@ -200,13 +207,13 @@ impl Orchestrator {
             }
             ClientCommand::Unsplice {
                 namespace_id,
-                service_id,
+                workload_id,
             } => {
                 self.route_namespace_input(
                     namespace_id,
                     NamespaceInput::Unsplice {
                         client_id,
-                        service_id,
+                        workload_id,
                     },
                     out,
                 );
@@ -273,7 +280,7 @@ impl Orchestrator {
             self.assign_worker_to_namespace(&ns_id, &worker_id, out);
         }
 
-        // Check all namespaces for services waiting for capacity and schedule them.
+        // Check all namespaces for workloads waiting for capacity and schedule them.
         self.schedule_waiting_pods(out);
     }
 
@@ -347,7 +354,7 @@ impl Orchestrator {
                 let pod_id = self.gen_pod_id();
                 if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
                     let launch_out = ns.step(NamespaceInput::LaunchPod {
-                        service_id: req.service_id,
+                        workload_id: req.workload_id,
                         worker_id,
                         pod_id,
                     });
@@ -364,7 +371,7 @@ impl Orchestrator {
                     }
                 }
             }
-            // If no worker available, service stays in WaitingForCapacity.
+            // If no worker available, workload stays in WaitingForCapacity.
         }
 
         // If namespace is fully destroyed, remove it and clean up worker references.
@@ -377,24 +384,26 @@ impl Orchestrator {
     }
 
     fn schedule_waiting_pods(&mut self, out: &mut OrchestratorOutput) {
-        // Collect (namespace_id, service_id) pairs for services waiting for capacity.
-        let waiting: Vec<(NamespaceId, ServiceId)> = self
+        // Collect (namespace_id, workload_id) pairs for workloads waiting for capacity.
+        // Skip namespaces in Destroying state.
+        let waiting: Vec<(NamespaceId, WorkloadId)> = self
             .namespaces
             .iter()
+            .filter(|(_, ns)| ns.status != NamespaceStatus::Destroying)
             .flat_map(|(ns_id, ns)| {
-                ns.services
+                ns.workloads
                     .iter()
-                    .filter(|(_, state)| matches!(state, ServiceState::WaitingForCapacity))
-                    .map(move |(svc_id, _)| (ns_id.clone(), svc_id.clone()))
+                    .filter(|(_, wl)| matches!(wl.state, WorkloadState::WaitingForCapacity))
+                    .map(move |(wl_id, _)| (ns_id.clone(), wl_id.clone()))
             })
             .collect();
 
-        for (ns_id, svc_id) in waiting {
+        for (ns_id, wl_id) in waiting {
             if let Some(worker_id) = self.select_worker_for_pod(&ns_id) {
                 let pod_id = self.gen_pod_id();
                 if let Some(ns) = self.namespaces.get_mut(&ns_id) {
                     let launch_out = ns.step(NamespaceInput::LaunchPod {
-                        service_id: svc_id,
+                        workload_id: wl_id,
                         worker_id,
                         pod_id,
                     });
@@ -452,12 +461,19 @@ impl Orchestrator {
         if let Some(ws) = self.workers.get_mut(worker_id) {
             ws.namespaces.insert(namespace_id.clone());
         }
-        out.worker_commands.push((
-            worker_id.clone(),
-            WorkerCommand::CreateNamespace {
-                namespace_id: namespace_id.clone(),
-            },
-        ));
+        let network = self
+            .namespaces
+            .get(namespace_id)
+            .map(|ns| ns.spec.network.clone());
+        if let Some(network) = network {
+            out.worker_commands.push((
+                worker_id.clone(),
+                WorkerCommand::CreateNamespace {
+                    namespace_id: namespace_id.clone(),
+                    network,
+                },
+            ));
+        }
     }
 }
 

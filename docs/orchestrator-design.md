@@ -102,9 +102,9 @@ enum NamespaceInput {
     Splice { client_id: ClientId, workload_id: WorkloadId, worker_id: WorkerId },
     Unsplice { client_id: ClientId, workload_id: WorkloadId },
     StreamLogs { client_id: ClientId, service_id: Option<ServiceId> },
-    /// A new worker is available. Re-reconcile workloads that may be
-    /// waiting for capacity.
-    CapacityAvailable,
+    /// Outer layer injects this when it has selected a worker and
+    /// generated a pod ID for a workload's PodRequest.
+    LaunchPod { workload_id: WorkloadId, pod_id: PodId, worker_id: WorkerId },
 }
 
 struct NamespaceOutput {
@@ -112,14 +112,13 @@ struct NamespaceOutput {
     client_events: Vec<(ClientId, ClientEvent)>,
     timers_set: Vec<(TimerKey, Duration)>,
     timers_cancel: Vec<TimerKey>,
-    /// Signals to the outer layer that this namespace needs worker
-    /// capacity it couldn't find. Drives the CapacityManager.
-    capacity_requests: Vec<CapacityRequest>,
+    /// Workloads that need a pod. The outer layer selects a worker,
+    /// generates a pod ID, and injects LaunchPod back.
+    pod_requests: Vec<PodRequest>,
 }
 
-struct CapacityRequest {
+struct PodRequest {
     workload_id: WorkloadId,
-    memory_mb: u64,
 }
 ```
 
@@ -134,8 +133,9 @@ enum WorkloadInput {
     DemandUp,
     /// A service no longer needs this workload running.
     DemandDown,
-    /// Worker capacity became available (retry scheduling).
-    CapacityAvailable,
+    /// Outer layer has assigned a pod and worker — launch it.
+    /// The workload doesn't select workers; the outer layer does.
+    LaunchPod { pod_id: PodId, worker_id: WorkerId },
     /// Worker reports pod status change.
     WorkerEvent { worker_id: WorkerId, event: WorkerEvent },
     /// Worker hosting this workload's pod disconnected.
@@ -150,8 +150,9 @@ enum WorkloadOutput {
     BecameReady { pod_id: PodId, worker_id: WorkerId },
     /// The workload's pod is no longer available.
     BecameUnready,
-    /// Need worker capacity — forward to outer layer.
-    NeedCapacity { memory_mb: u64 },
+    /// The workload needs a pod — outer layer should select a worker,
+    /// generate a pod ID, and inject LaunchPod back.
+    PodRequest,
     /// Worker commands to emit.
     WorkerCommand { worker_id: WorkerId, command: WorkerCommand },
     /// Timer management.
@@ -237,7 +238,8 @@ async fn run(mut orch: Orchestrator, /* connections */) {
 - **Fuzz testing**: Coverage-guided fuzzer drives the step function, finds edge cases.
 - **Model checking**: Stateright can exhaustively explore all interleavings.
 - **Reasoning**: No hidden state changes from async timing, channel backpressure, etc.
-- **Per-namespace isolation**: Each namespace state machine is independently testable with a small state space.
+- **Per-namespace isolation**: Each namespace state machine is independently testable.
+- **Sub-SM isolation**: Workload and service state machines have tiny state spaces (~4 states each), enabling exhaustive model checking that would be intractable on the monolithic design.
 
 ---
 
@@ -275,8 +277,9 @@ struct NamespaceStateMachine {
     spec: NamespaceSpec,
     status: NamespaceStatus,
     workers: HashMap<WorkerId, NamespaceWorkerState>,
-    services: HashMap<ServiceId, ServiceState>,
-    pods: HashMap<PodId, PodInfo>,
+    service_workload: HashMap<ServiceId, WorkloadId>,
+    workloads: HashMap<WorkloadId, WorkloadStateMachine>,
+    services: HashMap<ServiceId, ServiceStateMachine>,
 }
 
 enum NamespaceStatus {
@@ -287,7 +290,10 @@ enum NamespaceStatus {
     /// A clone operation is reading from this namespace's spec.
     /// Destroy commands are deferred until cloning completes.
     Cloning { pending_destroy: bool },
-    /// DestroyNamespace sent, waiting for cleanup.
+    /// DestroyNamespace sent to all workers, waiting for cleanup.
+    /// The namespace emits DestroyNamespace commands to each worker
+    /// and waits for confirmation or worker disconnect. The outer layer
+    /// removes the namespace once all workers have confirmed or disconnected.
     Destroying,
 }
 
@@ -334,87 +340,69 @@ The worker reports `BackendNeed` via two distinct events:
 - **`ServiceActivation`** — first traffic hits a service with no backend at all. Triggers pod launch.
 - **`ServiceBackendNeed`** — ongoing signal from the protocol activator about traffic level. Drives idle timeout reset/scale-down while a backend exists.
 
-### Service State Machine
+### Workload State Machine
 
-Each service has an independent lifecycle driven by reconciliation:
+Each workload manages the pod lifecycle independently, driven by demand signals from services:
 
 ```
-                         +---------------+
-                         |  Pending      |  spec exists, nothing on worker yet
-                         +-------+-------+
-                                 | CreateService
-                                 v
-                    +-------------------------+
-         +-------->|  Idle (with activation)  |<-----------------+
-         |         |  service entity exists,  |                  |
-         |         |  no pod running          |                  |
-         |         +------------+-------------+                  |
-         |                      | ServiceActivation              |
-         |                      v                                |
-         |      +------------------------------+                 |
-         |      |  WaitingForCapacity          |                 |
-         |      |  need pod, no worker fits    |                 |
-         |      +------------+-----------------+                 |
-         |                   | CapacityAvailable                 |
-         |                   | (worker found)                    |
-         |                   v                                   |
-         |         +-------------------------+                   |
-         |         |  Launching              |                   |
-         |         |  pod starting up        |                   |
-         |         +------------+------------+                   |
-         |                      | PodRunning                     |
-         |                      | + UpdateServiceBackend         |
-         |                      | + ServiceReady                 |
-         |                      v                                |
-         |         +-------------------------+   idle timeout    |
-         |         |  Active                 |   expired &       |
-         |         |  pod running, traffic   +---BackendNeed-----+
-         |         |  flowing                |   ::None
-         |         +------------+------------+   + StopPod
-         |                      |                + UpdateServiceBackend(None)
-         |                      | PodExited / PodFailed
-         |                      | (unexpected)
-         +-----------<----------+
-           restart / re-activate
+                    +---------------+
+                    |  Dormant      |  no services need this workload
+                    +-------+-------+
+                            | DemandUp (demand_count 0 -> 1)
+                            v
+               +------------------------------+
+               |  WaitingForCapacity          |
+               |  emits PodRequest            |
+               +------------+-----------------+
+                            | LaunchPod (from outer layer)
+                            v
+                  +-------------------------+
+                  |  Launching              |
+                  |  pod starting up        |
+                  +------------+------------+
+                               | PodRunning
+                               | -> emit BecameReady
+                               v
+                  +-------------------------+
+     DemandDown   |  Running               |  WorkerLost / PodFailed
+     (demand_count|  pod running, demand>0 |  -> emit BecameUnready
+      -> 0)       +------------+------------+  -> transition to Dormant
+     -> StopPod                                   or WaitingForCapacity
+     -> emit BecameUnready                        (if demand > 0)
+     -> Dormant
 
-Without activation (always-on):
-  Pending -> WaitingForCapacity (if needed) -> Launching -> Active -> (restart on exit)
+WaitingForCapacity emits PodRequest to the outer layer. The outer
+layer selects a worker, generates a pod ID, and injects LaunchPod.
+This keeps worker selection out of the workload SM entirely.
 ```
 
-Note: `WaitingForCapacity` is skipped when a suitable worker is immediately available. The service transitions directly from `Idle`/`Pending` to `Launching` in that case.
-
-**Idle timeout lifecycle**: When a service is `Active` and receives `ServiceBackendNeed(None)`, the orchestrator starts the idle timer. If `ServiceBackendNeed(Traffic)` or `ServiceBackendNeed(Active)` arrives before the timer fires, the timer is cancelled. If the timer fires while `BackendNeed` is still `None`, the service scales down: `StopPod` + `UpdateServiceBackend(None)` transitions it back to `Idle`.
+The workload doesn't know about activation, idle timeouts, service routing, or worker selection — it only knows whether any service needs it running (demand_count > 0). Pod ID generation and worker selection are the outer layer's responsibility.
 
 ```rust
-enum ServiceState {
-    /// Spec exists but service entity hasn't been created on any worker yet.
-    Pending,
-    /// Service entity exists on worker(s), no pod running.
-    /// Only valid for services with activation enabled.
-    Idle,
-    /// Need to launch a pod but no worker has capacity.
-    /// Emits a CapacityRequest. Transitions to Launching when
-    /// CapacityAvailable arrives and a worker can be selected.
+enum WorkloadState {
+    /// No services need this workload. No pod running.
+    Dormant,
+    /// At least one service needs this workload, but no pod assigned yet.
+    /// Emits PodRequest. Transitions to Launching when the outer layer
+    /// injects LaunchPod with an assigned worker and pod ID.
     WaitingForCapacity,
-    /// Pod is starting up. Waiting for PodRunning.
+    /// Pod is starting up. Waiting for PodRunning from worker.
     Launching {
         pod_id: PodId,
         worker_id: WorkerId,
         launch_timeout: TimerKey,
     },
-    /// Pod is running and serving traffic.
-    Active {
+    /// Pod is running. Stays here as long as demand_count > 0.
+    Running {
         pod_id: PodId,
         worker_id: WorkerId,
-        hosting: ServiceHosting,
-        backend_need: BackendNeed,
-        idle_timer: Option<TimerKey>,
+        hosting: WorkloadHosting,
     },
 }
 
-/// Tracks whether a service's pod is running on its normal worker
+/// Tracks whether a workload's pod is running on its normal worker
 /// or has been spliced to a different worker.
-enum ServiceHosting {
+enum WorkloadHosting {
     /// Pod runs on the namespace's normal worker.
     Normal,
     /// Pod has been spliced to a different worker.
@@ -422,6 +410,87 @@ enum ServiceHosting {
     Spliced { original_worker_id: WorkerId },
 }
 ```
+
+### Service State Machine
+
+Each service manages activation, idle timeout, and backend routing. It signals demand to its workload via the coordinator:
+
+```
+                    +---------------+
+                    |  Pending      |  spec exists, nothing on worker yet
+                    +-------+-------+
+                            | CreateService
+                            v
+               +-------------------------+
+    +-------->|  Idle (with activation)  |<-----------------+
+    |         |  service entity exists,  |                  |
+    |         |  workload not demanded   |                  |
+    |         +------------+-------------+                  |
+    |                      | ServiceActivation              |
+    |                      | -> emit DemandUp               |
+    |                      v                                |
+    |         +-------------------------+                   |
+    |         |  NeedBackend            |                   |
+    |         |  waiting for workload   |                   |
+    |         |  to become ready        |                   |
+    |         +------------+------------+                   |
+    |                      | WorkloadReady                  |
+    |                      | + UpdateServiceBackend         |
+    |                      | + ServiceReady                 |
+    |                      v                                |
+    |         +-------------------------+   idle timeout    |
+    |         |  Active                 |   expired &       |
+    |         |  workload running,      +---BackendNeed-----+
+    |         |  traffic flowing        |   ::None
+    |         +------------+------------+   + emit DemandDown
+    |                      |                + UpdateServiceBackend(None)
+    |                      | WorkloadUnready
+    |                      | (unexpected pod loss)
+    +-----------<----------+
+      re-activate (back to Idle or NeedBackend)
+
+Without activation (always-on):
+  Pending -> NeedBackend (emit DemandUp) -> Active -> (re-activate on loss)
+```
+
+Note: `NeedBackend` is typically short-lived — if the workload is already `Running` (shared by another service that already demanded it), the coordinator immediately forwards `WorkloadReady` and the service transitions straight to `Active`.
+
+**Idle timeout lifecycle**: When a service is `Active` and receives `ServiceBackendNeed(None)`, the service starts its idle timer. If `ServiceBackendNeed(Traffic)` or `ServiceBackendNeed(Active)` arrives before the timer fires, the timer is cancelled. If the timer fires while `BackendNeed` is still `None`, the service emits `DemandDown` + `UpdateServiceBackend(None)` and transitions back to `Idle`. If this was the last service demanding the workload (demand_count drops to 0), the workload stops the pod.
+
+```rust
+enum ServiceState {
+    /// Spec exists but service entity hasn't been created on any worker yet.
+    Pending,
+    /// Service entity exists on worker(s), workload not demanded.
+    /// Only valid for services with activation enabled.
+    Idle,
+    /// Service needs a backend but workload isn't ready yet.
+    /// DemandUp has been emitted; waiting for WorkloadReady.
+    NeedBackend,
+    /// Workload is running, service is routing traffic to it.
+    Active {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        backend_need: BackendNeed,
+        idle_timer: Option<TimerKey>,
+    },
+}
+```
+
+Note that `pod_id` and `worker_id` in `ServiceState::Active` are cached copies from the `WorkloadReady` signal — the source of truth for pod location is the `WorkloadStateMachine`. Similarly, `WorkloadHosting` (splice state) lives in the workload, not the service.
+
+### Coupling Interface
+
+The workload and service sub-SMs communicate through exactly four signals, routed by the coordinator:
+
+| Signal | Direction | Meaning |
+|---|---|---|
+| `DemandUp` | Service → Workload | A service needs the workload running. Increments `demand_count`. |
+| `DemandDown` | Service → Workload | A service no longer needs the workload. Decrements `demand_count`. |
+| `BecameReady` | Workload → Service(s) | Pod is running. Carries `pod_id` and `worker_id`. |
+| `BecameUnready` | Workload → Service(s) | Pod is no longer available (exited, failed, worker lost). |
+
+The coordinator maintains `service_workload: HashMap<ServiceId, WorkloadId>` and fans out workload signals to all services mapped to that workload.
 
 ### Worker State
 
@@ -454,21 +523,23 @@ The pure state machine needs a way to express "fire this timer in N seconds" wit
 ```rust
 enum TimerKey {
     /// Idle timeout for a service with activation.
+    /// Owned by ServiceStateMachine.
     IdleTimeout { service_id: ServiceId },
     /// Launch timeout — pod took too long to start.
-    LaunchTimeout { service_id: ServiceId, pod_id: PodId },
+    /// Owned by WorkloadStateMachine.
+    LaunchTimeout { workload_id: WorkloadId, pod_id: PodId },
 }
 ```
 
-Setting a new timer with the same key implicitly cancels the previous one. The `NamespaceOutput` has both `timers_set` and `timers_cancel` for explicit lifecycle management.
+Each timer is owned by a specific sub-SM. The coordinator routes `TimerFired` to the owning sub-SM based on the `TimerKey` variant. Setting a new timer with the same key implicitly cancels the previous one. The `NamespaceOutput` has both `timers_set` and `timers_cancel` for explicit lifecycle management.
 
 ### Stale Timer Handling
 
-Timer fires are treated as **hints, not commands**. The `step` function checks whether the current state still warrants the timer's action:
+Timer fires are treated as **hints, not commands**. Each sub-SM checks whether its current state still warrants the timer's action:
 
-- `IdleTimeout` fires but service is already `Idle` → no-op.
+- `IdleTimeout` fires but service is already `Idle` → no-op (ServiceStateMachine).
 - `IdleTimeout` fires but `backend_need` is `Active` → no-op (timer should have been cancelled, but this is a safe fallback).
-- `LaunchTimeout` fires but pod is already `Active` → no-op.
+- `LaunchTimeout` fires but workload is already `Running` → no-op (WorkloadStateMachine).
 
 This makes the system naturally tolerant of races between timer fires and state transitions. The semantic key structure also makes cleanup easy — destroying a namespace cancels all timers with keys that belong to it.
 
@@ -513,15 +584,14 @@ The capacity manager runs on two triggers:
 
 1. **Proactive (headroom)** — after every `step()`, the outer layer checks total cluster free capacity against `min_free_slots`. If headroom is below threshold, it provisions workers *before* anything is blocked. This means workers are often already booting by the time demand arrives.
 
-2. **Reactive (capacity requests)** — when a namespace's `step()` output contains `capacity_requests`, the outer layer queues them and provisions if no pending workers will satisfy the need.
+2. **Reactive (pod requests)** — when a namespace's `step()` output contains `pod_requests` and no worker has capacity, the outer layer queues them and provisions if no pending workers will satisfy the need.
 
 ### Worker Connected Flow
 
 When a new `WorkerConnected` arrives (whether from proactive provisioning or an externally-added worker):
 
 1. Outer layer adds the worker to its `workers` map.
-2. Drains the `waiting` queue — injects `CapacityAvailable` into each waiting namespace.
-3. Those namespaces re-run `reconcile_all_services()`. Services in `WaitingForCapacity` retry `select_worker_for_pod()` — if a worker fits, they proceed to `Launching`. If still nothing fits, they stay parked.
+2. Drains the pending pod request queue — for each queued `PodRequest`, the outer layer tries `select_worker_for_pod()`. If a worker fits, it generates a pod ID and injects `LaunchPod` into the namespace. If nothing fits, the request stays queued.
 
 ### Provisioning Output
 
@@ -545,13 +615,15 @@ When cluster headroom exceeds an upper bound (too many idle workers), the capaci
 
 ### Latency Characteristics
 
-Worker provisioning is slow (e.g. ~30s for an EC2 instance). This latency is invisible to the namespace state machine — it just sees the service go to `WaitingForCapacity`, then eventually `CapacityAvailable` arrives when the worker connects. The proactive headroom policy is the primary mitigation: by keeping spare capacity, most scheduling requests never hit `WaitingForCapacity` at all.
+Worker provisioning is slow (e.g. ~30s for an EC2 instance). This latency is invisible to the namespace state machine — it just sees the workload emit `PodRequest`, then eventually the outer layer injects `LaunchPod` when a worker is available. The proactive headroom policy is the primary mitigation: by keeping spare capacity, most scheduling requests are fulfilled immediately.
 
 ---
 
 ## Reconciliation
 
 The orchestrator is a **level-triggered controller**. On every input, it can re-evaluate the desired vs actual state for affected resources and emit commands to close the gap. This makes it naturally idempotent and resilient to missed events.
+
+The coordinator routes inputs to the appropriate sub-SM and forwards internal signals between them:
 
 ```rust
 impl NamespaceStateMachine {
@@ -561,20 +633,40 @@ impl NamespaceStateMachine {
         match input {
             NamespaceInput::WorkerEvent { worker_id, event } => {
                 self.apply_worker_event(&worker_id, &event);
-                self.reconcile_from_event(&worker_id, &event, &mut out);
+                // Route to the appropriate workload SM based on the event's pod/service.
+                // Forward any BecameReady/BecameUnready outputs to service SMs.
+                self.route_worker_event(&worker_id, &event, &mut out);
             }
             NamespaceInput::WorkerLost { worker_id } => {
+                // Forward WorkerLost to all workloads with pods on that worker.
+                // Workloads emit BecameUnready, which we forward to their services.
                 self.handle_worker_loss(&worker_id, &mut out);
             }
             NamespaceInput::TimerFired { timer_key } => {
-                self.handle_timer(&timer_key, &mut out);
+                // Route to owning sub-SM based on timer key variant.
+                match &timer_key {
+                    TimerKey::IdleTimeout { service_id } => {
+                        let svc_outputs = self.services[service_id]
+                            .step(ServiceInput::TimerFired { timer_key });
+                        self.forward_service_outputs(service_id, svc_outputs, &mut out);
+                    }
+                    TimerKey::LaunchTimeout { workload_id, .. } => {
+                        let wl_outputs = self.workloads[workload_id]
+                            .step(WorkloadInput::TimerFired { timer_key });
+                        self.forward_workload_outputs(workload_id, wl_outputs, &mut out);
+                    }
+                }
             }
-            NamespaceInput::CapacityAvailable => {
-                self.reconcile_all_services(&mut out);
+            NamespaceInput::LaunchPod { workload_id, pod_id, worker_id } => {
+                // Outer layer selected a worker and generated a pod ID.
+                // Forward to the workload SM.
+                let wl_outputs = self.workloads[&workload_id]
+                    .step(WorkloadInput::LaunchPod { pod_id, worker_id });
+                self.forward_workload_outputs(&workload_id, wl_outputs, &mut out);
             }
             NamespaceInput::UpdateSpec { client_id, spec } => {
                 self.spec = spec;
-                self.reconcile_all_services(&mut out);
+                self.reconcile_all(&mut out);
                 out.client_events.push((client_id, ClientEvent::Ok));
             }
             NamespaceInput::Delete { client_id } => {
@@ -587,56 +679,100 @@ impl NamespaceStateMachine {
         out
     }
 
-    fn reconcile_service(
+    /// Forward outputs from a service sub-SM. DemandUp/DemandDown
+    /// get routed to the service's workload.
+    fn forward_service_outputs(
         &mut self,
-        svc_id: &ServiceId,
+        service_id: &ServiceId,
+        outputs: Vec<ServiceOutput>,
         out: &mut NamespaceOutput,
     ) {
-        let spec = &self.spec.services[svc_id];
-        let state = &self.services[svc_id];
+        let workload_id = &self.service_workload[service_id];
+        for svc_out in outputs {
+            match svc_out {
+                ServiceOutput::DemandUp => {
+                    let wl_outputs = self.workloads[workload_id]
+                        .step(WorkloadInput::DemandUp);
+                    self.forward_workload_outputs(workload_id, wl_outputs, out);
+                }
+                ServiceOutput::DemandDown => {
+                    let wl_outputs = self.workloads[workload_id]
+                        .step(WorkloadInput::DemandDown);
+                    self.forward_workload_outputs(workload_id, wl_outputs, out);
+                }
+                ServiceOutput::WorkerCommand { worker_id, command } => {
+                    out.worker_commands.push((worker_id, command));
+                }
+                ServiceOutput::SetTimer { key, duration } => {
+                    out.timers_set.push((key, duration));
+                }
+                ServiceOutput::CancelTimer { key } => {
+                    out.timers_cancel.push(key);
+                }
+            }
+        }
+    }
 
-        match (spec.activation.is_some(), state) {
-            // Has activation, currently pending -> create idle service
-            (true, ServiceState::Pending) => {
-                // Send CreateService to all workers with active fabric segments
-                for (wid, ws) in &self.workers {
-                    if ws.fabric_status == FabricStatus::Active {
-                        out.worker_commands.push((*wid, WorkerCommand::CreateService { .. }));
+    /// Forward outputs from a workload sub-SM. BecameReady/BecameUnready
+    /// get fanned out to all services mapped to this workload.
+    fn forward_workload_outputs(
+        &mut self,
+        workload_id: &WorkloadId,
+        outputs: Vec<WorkloadOutput>,
+        out: &mut NamespaceOutput,
+    ) {
+        for wl_out in outputs {
+            match wl_out {
+                WorkloadOutput::BecameReady { pod_id, worker_id } => {
+                    // Fan out to all services on this workload.
+                    for (svc_id, wl_id) in &self.service_workload {
+                        if wl_id == workload_id {
+                            let svc_outputs = self.services[svc_id]
+                                .step(ServiceInput::WorkloadReady { pod_id, worker_id });
+                            self.forward_service_outputs(svc_id, svc_outputs, out);
+                        }
                     }
                 }
-            }
-            // No activation, currently pending -> create service + launch pod
-            (false, ServiceState::Pending) | (_, ServiceState::WaitingForCapacity) => {
-                match self.select_worker_for_pod() {
-                    Some(target_worker) => {
-                        out.worker_commands.push((target_worker, WorkerCommand::CreateService { .. }));
-                        out.worker_commands.push((target_worker, WorkerCommand::LaunchPod { .. }));
-                    }
-                    None => {
-                        // No worker has capacity. Park the service and signal
-                        // the outer layer to provision more compute.
-                        self.services.insert(*svc_id, ServiceState::WaitingForCapacity);
-                        out.capacity_requests.push(CapacityRequest {
-                            service_id: *svc_id,
-                            memory_mb: spec.container_config.memory_mb,
-                        });
+                WorkloadOutput::BecameUnready => {
+                    for (svc_id, wl_id) in &self.service_workload {
+                        if wl_id == workload_id {
+                            let svc_outputs = self.services[svc_id]
+                                .step(ServiceInput::WorkloadUnready);
+                            self.forward_service_outputs(svc_id, svc_outputs, out);
+                        }
                     }
                 }
+                WorkloadOutput::PodRequest => {
+                    out.pod_requests.push(PodRequest {
+                        workload_id: *workload_id,
+                    });
+                }
+                WorkloadOutput::WorkerCommand { worker_id, command } => {
+                    out.worker_commands.push((worker_id, command));
+                }
+                WorkloadOutput::SetTimer { key, duration } => {
+                    out.timers_set.push((key, duration));
+                }
+                WorkloadOutput::CancelTimer { key } => {
+                    out.timers_cancel.push(key);
+                }
             }
-            // Active with idle timeout expired -> scale down
-            (true, ServiceState::Active {
-                idle_timer: None,
-                backend_need: BackendNeed::None,
-                ..
-            }) => {
-                // StopPod + UpdateServiceBackend(None) -> transition to Idle
-            }
-            // ... other transitions
-            _ => {}
         }
     }
 }
 ```
+
+Note how the coordinator is pure routing — no business logic about activation, idle timeouts, or pod scheduling. This makes it easy to test with proptest (generate random signal sequences, verify routing correctness) while the sub-SMs are small enough for exhaustive model checking.
+
+### Registry Sync
+
+Rather than emitting individual `UpdateServiceBackend` commands per service, the namespace broadcasts a full **RegistrySync** — the complete set of service entries (IP, MAC, backend info) — to all active workers in the namespace. This is emitted on key state transitions:
+
+- Namespace becomes Active (initial reconciliation)
+- A service backend changes (pod ready, backend cleared)
+- Worker loss (surviving workers get updated registry)
+
+This approach is simpler and naturally idempotent — workers always converge to the correct state regardless of missed individual updates. It replaces the per-service `UpdateServiceBackend` + `ServiceReady` commands described elsewhere in this doc with a single broadcast.
 
 ---
 
@@ -655,15 +791,15 @@ enum ClientCommand {
     GetNamespaceStatus { namespace_id: String },
     ListNamespaces,
 
-    // Splice: route a service to a local worker
+    // Splice: route a workload to a local worker
     Splice {
         namespace_id: String,
-        service_id: String,
+        workload_id: String,
         local_worker_id: String,
     },
     Unsplice {
         namespace_id: String,
-        service_id: String,
+        workload_id: String,
     },
 
     // Namespace cloning
@@ -699,12 +835,14 @@ struct NamespaceStatusReport {
 }
 
 struct ServiceStatusReport {
-    state: String,              // "pending", "idle", "waiting_for_capacity", "launching", "active"
+    state: String,              // "pending", "idle", "need_backend", "active"
+    workload_id: String,
+    workload_state: String,     // "dormant", "waiting_for_capacity", "launching", "running"
     pod_id: Option<String>,
     worker_id: Option<String>,
     backend_need: Option<BackendNeed>,
     activation_enabled: bool,
-    spliced: bool,
+    spliced: bool,              // from workload hosting state
 }
 ```
 
@@ -716,41 +854,45 @@ Clients maintain persistent connections for streaming (logs, status watches). Th
 
 ## Splice
 
-Splice allows a user to inject a local pod into a remote namespace, replacing a service's backend with a locally-running instance. This is the primary developer experience feature — edit code locally, have it receive real traffic from the staging environment.
+Splice allows a user to inject a local pod into a remote namespace, replacing a workload's backend with a locally-running instance. This is the primary developer experience feature — edit code locally, have it receive real traffic from the staging environment.
 
 ### State Model
 
-Splice is represented in the service state via `ServiceHosting`:
+Splice operates at the **workload level**, not the service level. The pod belongs to the workload, and moving it automatically updates all services that share that workload.
+
+Splice state is tracked in `WorkloadHosting`:
 
 ```rust
-enum ServiceHosting {
+enum WorkloadHosting {
     Normal,
     Spliced { original_worker_id: WorkerId },
 }
 ```
 
-When a service is spliced, the namespace expands to span multiple workers. The `NamespaceWorkerState` map tracks fabric segments on each participating worker.
+When a workload is spliced, the namespace expands to span multiple workers. The `NamespaceWorkerState` map tracks fabric segments on each participating worker.
 
 ### Flow
 
 1. User runs a local distvirt worker on their machine, connects to orchestrator.
-2. User sends `Splice { namespace_id, service_id, local_worker_id }`.
-3. Namespace state machine:
+2. User sends `Splice { namespace_id, workload_id, local_worker_id }`.
+3. Namespace coordinator:
    - Adds the local worker to `self.workers` if not already present.
    - Sends `CreateNamespace` to the local worker (if first time this worker participates in this namespace).
    - Waits for `NamespaceCreated` from the local worker.
-   - Stops the existing pod for that service on the cloud worker (if running).
-   - Sends `CreateService` to the local worker for all services (services are projected to all participating workers).
-   - Updates fabric routes: sends `FabricRouteUpdate` to both workers so L2 frames tunnel between them.
-   - Launches the pod on the local worker instead.
-   - `UpdateServiceBackend` on all participating workers points at the local pod's IP/MAC.
-   - `ServiceReady` flushes any buffered traffic.
-   - Sets `ServiceHosting::Spliced { original_worker_id }` on the service.
+   - Forwards the splice to the workload SM, which:
+     - Stops the existing pod on the cloud worker (if running) → emits `BecameUnready`.
+     - Sends `CreateService` to the local worker for all services (services are projected to all participating workers).
+     - Updates fabric routes: sends `FabricRouteUpdate` to both workers so L2 frames tunnel between them.
+     - Launches the pod on the local worker instead.
+     - On `PodRunning` → emits `BecameReady` with the new worker_id.
+     - Sets `WorkloadHosting::Spliced { original_worker_id }`.
+   - Coordinator forwards `BecameReady` to all services on this workload.
+   - Services emit `UpdateServiceBackend` + `ServiceReady` pointing at the new pod.
 4. From the perspective of other services, nothing changed — same service IP/MAC, traffic just routes through the tunnel now.
 
 ### Unsplice
 
-Reverse the process: stop local pod, re-launch on the `original_worker_id` from the `Spliced` state, update routes, set hosting back to `Normal`. If the local worker no longer hosts any pods in this namespace, the namespace state machine can tear down its fabric segment and remove it from `self.workers`.
+Reverse the process: workload SM stops local pod (emits `BecameUnready`), re-launches on the `original_worker_id` from the `Spliced` state (emits `BecameReady`), sets hosting back to `Normal`. Coordinator forwards the signals to services, which update their backends. If the local worker no longer hosts any pods in this namespace, the namespace coordinator can tear down its fabric segment and remove it from `self.workers`.
 
 ### Requirements
 
@@ -812,15 +954,37 @@ With snapshots: clone creation triggers snapshot of each source pod (one-time co
 
 ### Worker Disconnect
 
-When a worker disconnects, the outer layer fans out a `WorkerLost` event to every namespace state machine that had the worker in its `workers` map. Each namespace state machine:
+When a worker disconnects, the outer layer fans out a `WorkerLost` event to every namespace state machine that had the worker in its `workers` map. The coordinator routes this through the sub-SM layers:
 
-- Marks all pods on that worker as lost.
-- For services with pods on the lost worker:
-  - If `ServiceHosting::Spliced { original_worker_id }` and the splice worker is lost → re-launch on the original worker (unsplice).
-  - If `ServiceHosting::Normal` → transition service to `Idle` (if activation-enabled) or `WaitingForCapacity`/`Launching` (if always-on, to trigger re-launch on another worker — `WaitingForCapacity` if no other worker has room).
-- Removes the worker from its `workers` map.
-- Cancels any timers associated with pods on that worker.
-- No commands are sent to the disconnected worker.
+1. **Coordinator** forwards `WorkerLost` to all workload SMs with pods on that worker.
+2. **WorkloadStateMachine** marks the pod as lost and emits `BecameUnready`. Then:
+   - If `WorkloadHosting::Spliced { original_worker_id }` and the splice worker is lost → transition to `Launching` on the original worker (unsplice).
+   - If `WorkloadHosting::Normal` and `demand_count > 0` → transition to `WaitingForCapacity` (to re-launch on another worker).
+   - If `demand_count == 0` → transition to `Dormant`.
+3. **Coordinator** forwards `BecameUnready` to all services mapped to affected workloads.
+4. **ServiceStateMachine** receives `WorkloadUnready`:
+   - If activation-enabled → transition to `Idle` (ready to re-activate on next traffic).
+   - If always-on → transition to `NeedBackend` (will get `WorkloadReady` when workload re-launches).
+5. Coordinator removes the worker from its `workers` map.
+6. Cancels any timers associated with pods on that worker.
+7. No commands are sent to the disconnected worker.
+
+### Namespace Deletion
+
+Namespace deletion is a **stateful teardown**, not fire-and-forget. This matters because a namespace can span multiple workers (especially with splice), and each worker must clean up its fabric segment and pods.
+
+1. Client sends `Delete { client_id }`.
+2. Namespace transitions to `Destroying`:
+   - Cancels all timers (idle timeouts, launch timeouts).
+   - Stops accepting new inputs (activation events, spec updates).
+   - Emits `DestroyNamespace` to every worker in `self.workers`.
+3. As each worker confirms destruction (or disconnects), the namespace removes it from `self.workers`.
+4. When `self.workers` is empty, the namespace signals it is fully destroyed.
+5. The outer layer removes the namespace from its map.
+
+While in `Destroying`, the namespace ignores all inputs except `WorkerEvent` (to process destruction confirmations) and `WorkerLost` (to remove disconnected workers). This ensures cleanup completes even if workers are slow to respond.
+
+The `Cloning { pending_destroy }` status defers entry into `Destroying` until the clone operation completes reading the spec.
 
 ### Orchestrator Death
 
@@ -832,7 +996,7 @@ This is a deliberate simplicity choice. The orchestrator is the single source of
 
 ### Service Creation Failure
 
-The namespace state machine defines a `ServiceFailed` transition regardless of whether the worker protocol currently sends such an event. The state machine should handle it gracefully — transitioning the service back to `Pending` (for retry) or to an error state depending on the failure mode. This ensures the orchestrator is ready when the worker protocol adds the event, and makes the state machine robust under model checking (stateright can inject failures at any point).
+The workload and service sub-SMs define failure transitions regardless of whether the worker protocol currently sends such events. The workload SM handles `PodFailed` gracefully — emitting `BecameUnready` and transitioning to `Dormant` or `WaitingForCapacity` depending on demand. The service SM handles `WorkloadUnready` by transitioning back to `Idle` or `NeedBackend`. This ensures the orchestrator is ready when the worker protocol adds failure events, and makes each sub-SM robust under model checking (stateright can inject failures at any point).
 
 Currently the worker protocol does not define a `ServiceFailed` event — this is a gap to be addressed. The orchestrator assigns IPs/MACs, so conflicts shouldn't happen in a correctly functioning system, but defensive handling in the state machine costs nothing and prevents undefined behavior if something unexpected occurs.
 
@@ -872,84 +1036,148 @@ Only enough to cover the common case. Not a full k8s implementation.
 
 ## Testing Strategy
 
-The pure state machine architecture enables a layered testing approach, from fast property tests to exhaustive model checking. The per-namespace state machine boundary keeps the state space small and tractable.
+The workload/service split is designed primarily to improve testability. Each sub-SM has a tiny state space that can be model-checked exhaustively, while the coordinator is thin routing logic testable with property-based tests.
+
+### Key Payoff: Independent Model Checking
+
+The monolithic design had state space O(states^N) — all services interleaved. The split gives O(states × N):
+
+- **WorkloadStateMachine**: ~4 states (Dormant, WaitingForCapacity, Launching, Running). With demand_count and hosting variant, the full state space is small enough for exhaustive stateright exploration.
+- **ServiceStateMachine**: ~4 states (Pending, Idle, NeedBackend, Active) × 3 backend_need values. Also tiny.
+- **Coordinator**: Pure routing logic (no business decisions). Testable with proptest — generate random signal sequences, verify signals are forwarded correctly.
+
+Each sub-SM can be checked in isolation with a mock environment, then composition correctness is verified at the coordinator level.
 
 ### Layer 1: Deterministic Unit Tests
 
-Direct step-by-step tests of the namespace state machine. Feed specific input sequences, assert exact state and outputs.
+Direct step-by-step tests of sub-SMs and the full coordinator. Feed specific input sequences, assert exact state and outputs.
 
 ```rust
 #[test]
-fn service_activation_lifecycle() {
-    let spec = NamespaceSpec { /* ... service with activation ... */ };
-    let mut ns = NamespaceStateMachine::new(spec);
+fn workload_demand_lifecycle() {
+    let mut wl = WorkloadStateMachine::new(workload_spec());
+    assert!(matches!(wl.state, WorkloadState::Dormant));
 
-    // Worker confirms namespace created
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: w1,
-        event: WorkerEvent::NamespaceCreated { .. },
-    });
-    assert!(out.worker_commands.contains(&(w1, WorkerCommand::CreateService { .. })));
+    // First service demands the workload
+    let out = wl.step(WorkloadInput::DemandUp);
+    // Workload should try to launch (or emit NeedCapacity)
+    assert!(matches!(wl.state, WorkloadState::Launching { .. })
+         || matches!(wl.state, WorkloadState::WaitingForCapacity));
 
-    // Traffic arrives, activation fires
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: w1,
-        event: WorkerEvent::ServiceActivation { .. },
-    });
-    assert!(out.worker_commands.contains(&(w1, WorkerCommand::LaunchPod { .. })));
-
-    // Pod running, wire up backend
-    let out = ns.step(NamespaceInput::WorkerEvent {
+    // Pod starts running
+    let out = wl.step(WorkloadInput::WorkerEvent {
         worker_id: w1,
         event: WorkerEvent::PodRunning { .. },
     });
-    assert!(out.worker_commands.contains(&(w1, WorkerCommand::UpdateServiceBackend { .. })));
-    assert!(out.worker_commands.contains(&(w1, WorkerCommand::ServiceReady { .. })));
+    assert!(matches!(wl.state, WorkloadState::Running { .. }));
+    assert!(out.iter().any(|o| matches!(o, WorkloadOutput::BecameReady { .. })));
+
+    // Last service drops demand
+    let out = wl.step(WorkloadInput::DemandDown);
+    assert!(matches!(wl.state, WorkloadState::Dormant));
+    assert!(out.iter().any(|o| matches!(o, WorkloadOutput::BecameUnready)));
+}
+
+#[test]
+fn service_activation_lifecycle() {
+    let mut svc = ServiceStateMachine::new(service_spec_with_activation(), wl_id);
+    assert!(matches!(svc.state, ServiceState::Idle));
+
+    // Traffic arrives
+    let out = svc.step(ServiceInput::ServiceActivation);
+    assert!(matches!(svc.state, ServiceState::NeedBackend));
+    assert!(out.iter().any(|o| matches!(o, ServiceOutput::DemandUp)));
+
+    // Workload becomes ready
+    let out = svc.step(ServiceInput::WorkloadReady { pod_id: p1, worker_id: w1 });
+    assert!(matches!(svc.state, ServiceState::Active { .. }));
+    assert!(out.iter().any(|o| matches!(o,
+        ServiceOutput::WorkerCommand { command: WorkerCommand::UpdateServiceBackend { .. }, .. }
+    )));
 
     // Backend need drops to None, idle timer starts
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: w1,
-        event: WorkerEvent::ServiceBackendNeed { need: BackendNeed::None, .. },
-    });
-    assert!(out.timers_set.iter().any(|(k, _)| matches!(k, TimerKey::IdleTimeout { .. })));
+    let out = svc.step(ServiceInput::ServiceBackendNeed { need: BackendNeed::None });
+    assert!(out.iter().any(|o| matches!(o, ServiceOutput::SetTimer { .. })));
 
     // Idle timer fires, service scales down
-    let out = ns.step(NamespaceInput::TimerFired {
+    let out = svc.step(ServiceInput::TimerFired {
         timer_key: TimerKey::IdleTimeout { service_id: svc1 },
     });
-    assert!(out.worker_commands.contains(&(w1, WorkerCommand::StopPod { .. })));
-    assert!(out.worker_commands.contains(&(w1, WorkerCommand::UpdateServiceBackend {
-        backend: None, ..
-    })));
+    assert!(matches!(svc.state, ServiceState::Idle));
+    assert!(out.iter().any(|o| matches!(o, ServiceOutput::DemandDown)));
 }
 ```
 
 ### Layer 2: Property-Based Testing (proptest)
 
-Generate random sequences of valid inputs and check invariants hold after every step.
+Generate random sequences of valid inputs and check invariants hold after every step. Tests are written at three levels:
+
+**Sub-SM level** — test each sub-SM in isolation:
 
 ```rust
 proptest! {
     #[test]
-    fn invariants_hold(inputs in vec(arb_namespace_input(), 0..200)) {
+    fn workload_invariants(inputs in vec(arb_workload_input(), 0..100)) {
+        let mut wl = WorkloadStateMachine::new(arb_workload_spec());
+        for input in inputs {
+            let outputs = wl.step(input);
+            // demand_count is always >= 0
+            assert!(wl.demand_count >= 0);
+            // BecameReady only emitted when transitioning to Running
+            // BecameUnready only emitted when leaving Running
+            // NeedCapacity only emitted when in WaitingForCapacity
+            check_workload_invariants(&wl, &outputs);
+        }
+    }
+
+    #[test]
+    fn service_invariants(inputs in vec(arb_service_input(), 0..100)) {
+        let mut svc = ServiceStateMachine::new(arb_service_spec(), arb_workload_id());
+        for input in inputs {
+            let outputs = svc.step(input);
+            check_service_invariants(&svc, &outputs);
+        }
+    }
+}
+```
+
+**Coordinator level** — test signal routing correctness:
+
+```rust
+proptest! {
+    #[test]
+    fn coordinator_routing(inputs in vec(arb_namespace_input(), 0..200)) {
         let mut ns = NamespaceStateMachine::new(arb_spec());
         for input in inputs {
             let output = ns.step(input);
-            check_invariants(&ns, &output);
+            check_coordinator_invariants(&ns, &output);
         }
     }
 }
 
-fn check_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutput) {
-    for (svc_id, svc) in &ns.services {
-        // A service in Active state always has a valid pod_id
-        if let ServiceState::Active { pod_id, worker_id, .. } = svc {
-            assert!(ns.pods.contains_key(pod_id));
-            assert!(ns.workers.contains_key(worker_id));
-        }
+fn check_coordinator_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutput) {
+    // No commands sent to workers not in our workers map
+    for (wid, _) in &output.worker_commands {
+        assert!(ns.workers.contains_key(wid));
+    }
 
-        // A service in Idle state never has ServiceReady in the output
-        if let ServiceState::Idle { .. } = svc {
+    // Every service's workload_id points to a valid workload
+    for (svc_id, wl_id) in &ns.service_workload {
+        assert!(ns.workloads.contains_key(wl_id));
+    }
+
+    // A service in Active state has a workload in Running state
+    for (svc_id, svc) in &ns.services {
+        if let ServiceState::Active { pod_id, worker_id, .. } = &svc.state {
+            let wl_id = &ns.service_workload[svc_id];
+            let wl = &ns.workloads[wl_id];
+            assert!(matches!(wl.state, WorkloadState::Running { .. }));
+        }
+    }
+
+    // A service in Idle state never has ServiceReady in the output
+    for (svc_id, svc) in &ns.services {
+        if let ServiceState::Idle = &svc.state {
             assert!(!output.worker_commands.iter().any(|(_, cmd)| matches!(
                 cmd,
                 WorkerCommand::ServiceReady { service_id, .. }
@@ -957,42 +1185,44 @@ fn check_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutput) {
             )));
         }
     }
-
-    // No commands sent to workers not in our workers map
-    for (wid, _) in &output.worker_commands {
-        assert!(ns.workers.contains_key(wid));
-    }
 }
 ```
 
-Key invariants to check:
+Key invariants:
 - No `ServiceReady` without a backend assigned.
-- No `LaunchPod` for a service that already has a running pod.
+- No `LaunchPod` for a workload that already has a running pod.
 - No commands sent to workers not in the namespace's worker map.
+- `DemandUp`/`DemandDown` are always balanced (demand_count never goes negative).
+- `BecameReady`/`BecameUnready` are forwarded to all services on the workload.
 - Idle timer is set when `BackendNeed::None` is received for an active service with activation.
 - Idle timer is cancelled when `BackendNeed::Traffic` or `BackendNeed::Active` arrives.
-- `WorkerLost` triggers cleanup of all pods on that worker.
-- A spliced service tracks its `original_worker_id` correctly.
+- `WorkerLost` triggers `BecameUnready` for all workloads on that worker, which cascades to services.
 - Stale timer fires are no-ops (don't cause invalid state transitions).
-- A service in `WaitingForCapacity` always has a corresponding `CapacityRequest` in the output (or one was emitted previously).
-- `CapacityAvailable` never leaves a service in `WaitingForCapacity` if a suitable worker exists.
+- A workload in `WaitingForCapacity` always has a corresponding `PodRequest` output.
 
 ### Layer 3: Fuzz Testing (cargo-fuzz)
 
-Coverage-guided fuzzing of the step function. The fuzzer learns which byte sequences (mapped to input sequences via `Arbitrary`) explore new code paths.
+Coverage-guided fuzzing of each sub-SM's step function. Separate fuzz targets for workload, service, and coordinator:
 
 ```rust
-// fuzz/fuzz_targets/namespace.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-use arbitrary::Arbitrary;
-
+// fuzz/fuzz_targets/workload_sm.rs
 fuzz_target!(|data: &[u8]| {
-    if let Ok(inputs) = Vec::<NamespaceInput>::arbitrary(&mut Unstructured::new(data)) {
-        let mut ns = NamespaceStateMachine::new(default_spec());
+    if let Ok(inputs) = Vec::<WorkloadInput>::arbitrary(&mut Unstructured::new(data)) {
+        let mut wl = WorkloadStateMachine::new(default_workload_spec());
         for input in inputs {
-            let output = ns.step(input);
-            check_invariants(&ns, &output);
+            let outputs = wl.step(input);
+            check_workload_invariants(&wl, &outputs);
+        }
+    }
+});
+
+// fuzz/fuzz_targets/service_sm.rs
+fuzz_target!(|data: &[u8]| {
+    if let Ok(inputs) = Vec::<ServiceInput>::arbitrary(&mut Unstructured::new(data)) {
+        let mut svc = ServiceStateMachine::new(default_service_spec(), default_workload_id());
+        for input in inputs {
+            let outputs = svc.step(input);
+            check_service_invariants(&svc, &outputs);
         }
     }
 });
@@ -1000,91 +1230,109 @@ fuzz_target!(|data: &[u8]| {
 
 ### Layer 4: Model Checking (Stateright)
 
-Exhaustive exploration of all possible message orderings for critical subsystems. The per-namespace state machine is the natural unit for model checking — small enough for tractable exploration.
+This is where the split pays off most. Each sub-SM is small enough for exhaustive exploration.
 
-Particularly valuable for:
-
-- **Activation lifecycle**: Worker disconnect during activation, concurrent activation + scale-down, activation of service being destroyed.
-- **Splice flow**: Concurrent splice + unsplice, worker disconnect during splice, splice of activating service.
-- **Idle timeout races**: `BackendNeed::Traffic` arriving just as idle timer fires, timer fire after service already scaled down.
+#### WorkloadStateMachine Model
 
 ```rust
-use stateright::*;
-use stateright::actor::*;
+struct WorkloadModel {
+    /// Number of services that can send DemandUp/DemandDown.
+    num_services: usize,
+}
 
-struct NamespaceModel;
-
-impl Actor for NamespaceModel {
-    type Msg = NamespaceInput;
-    type State = NamespaceStateMachine;
+impl Actor for WorkloadModel {
+    type Msg = WorkloadInput;
+    type State = WorkloadStateMachine;
     type Timer = TimerKey;
 
-    fn on_msg(
-        &self,
-        _id: Id,
-        state: &mut Cow<Self::State>,
-        _src: Id,
-        msg: Self::Msg,
-        o: &mut Out<Self>,
-    ) {
-        let output = state.to_mut().step(msg);
-        for (worker_id, cmd) in output.worker_commands {
-            o.send(worker_id_to_actor(worker_id), cmd.into());
+    fn on_msg(&self, _id: Id, state: &mut Cow<Self::State>, src: Id, msg: Self::Msg, o: &mut Out<Self>) {
+        let outputs = state.to_mut().step(msg);
+        for wl_out in outputs {
+            match wl_out {
+                WorkloadOutput::SetTimer { key, duration } => o.set_timer(key, duration),
+                WorkloadOutput::WorkerCommand { worker_id, command } => {
+                    o.send(worker_id_to_actor(worker_id), command.into());
+                }
+                _ => {} // BecameReady/BecameUnready checked via properties
+            }
         }
-        for (timer_key, duration) in output.timers_set {
-            o.set_timer(timer_key, duration);
-        }
-    }
-
-    fn on_timeout(
-        &self,
-        _id: Id,
-        state: &mut Cow<Self::State>,
-        timer: &Self::Timer,
-        o: &mut Out<Self>,
-    ) {
-        let output = state.to_mut().step(NamespaceInput::TimerFired {
-            timer_key: timer.clone(),
-        });
-        // dispatch outputs...
     }
 
     fn properties(&self) -> Vec<Property<ActorModel<Self>>> {
         vec![
-            // Safety: no service reports ready without a backend
-            Property::<ActorModel<Self>>::always("ready implies backend", |_, state| {
-                // check all services
-                true // placeholder
+            Property::always("no pod without demand", |_, state| {
+                // If demand_count == 0, state must be Dormant
+                let wl = &state.actor_states[0];
+                wl.demand_count > 0 || matches!(wl.state, WorkloadState::Dormant)
             }),
-            // Safety: stale timer fires never cause invalid transitions
-            Property::<ActorModel<Self>>::always("timer safety", |_, state| {
-                true // placeholder
-            }),
-            // Liveness: activation eventually leads to active or idle
-            Property::<ActorModel<Self>>::eventually("activation resolves", |_, state| {
-                // no service stuck in Launching forever
-                true // placeholder
+            Property::always("launch timeout respected", |_, state| {
+                // Launching state always has a launch timeout timer set
+                true // check timer exists
             }),
         ]
     }
 }
 
-// Mock worker actor that responds with realistic events
-struct MockWorker;
-impl Actor for MockWorker {
-    type Msg = NamespaceInput;
-    type State = MockWorkerState;
-    type Timer = ();
-
-    fn on_msg(&self, _id: Id, state: &mut Cow<Self::State>, src: Id, msg: Self::Msg, o: &mut Out<Self>) {
-        // On LaunchPod: non-deterministically respond with PodRunning or PodFailed
-        // On CreateNamespace: respond with NamespaceCreated or NamespaceFailed
-        // Randomly: disconnect (triggers WorkerLost at the namespace level)
-    }
-}
+// Mock service actors that non-deterministically send DemandUp/DemandDown.
+// Mock worker actor that non-deterministically responds to LaunchPod.
 ```
 
-Stateright will explore all possible orderings of messages between the namespace state machine and mock workers, including worker failures at every possible point, and verify that safety/liveness properties hold in every reachable state.
+State space: ~4 states × demand_count range × hosting variant. Easily exhaustible.
+
+#### ServiceStateMachine Model
+
+```rust
+struct ServiceModel;
+
+impl Actor for ServiceModel {
+    type Msg = ServiceInput;
+    type State = ServiceStateMachine;
+    type Timer = TimerKey;
+
+    fn on_msg(&self, _id: Id, state: &mut Cow<Self::State>, _src: Id, msg: Self::Msg, o: &mut Out<Self>) {
+        let outputs = state.to_mut().step(msg);
+        for svc_out in outputs {
+            match svc_out {
+                ServiceOutput::SetTimer { key, duration } => o.set_timer(key, duration),
+                ServiceOutput::CancelTimer { key } => o.cancel_timer(key),
+                _ => {}
+            }
+        }
+    }
+
+    fn properties(&self) -> Vec<Property<ActorModel<Self>>> {
+        vec![
+            Property::always("no ready without backend", |_, state| {
+                // ServiceReady only emitted when transitioning to Active
+                true
+            }),
+            Property::always("idle timeout safety", |_, state| {
+                // Stale idle timeout fires don't cause invalid transitions
+                true
+            }),
+            Property::eventually("activation resolves", |_, state| {
+                // No service stuck in NeedBackend forever
+                // (assuming workload eventually becomes ready or fails)
+                true
+            }),
+        ]
+    }
+}
+
+// Mock workload that non-deterministically sends WorkloadReady/WorkloadUnready.
+// Mock activator that non-deterministically sends ServiceActivation/BackendNeed.
+```
+
+State space: ~4 states × 3 backend_need × idle_timer presence. Easily exhaustible.
+
+#### Composition Testing
+
+The coordinator is thin routing logic — no business decisions, just signal forwarding. This means composition correctness reduces to:
+1. Each sub-SM is correct in isolation (verified by stateright above).
+2. The coordinator routes signals correctly (verified by proptest).
+3. The `service_workload` mapping is maintained correctly (verified by proptest invariants).
+
+This avoids the combinatorial explosion of model-checking the full composed system while still providing strong correctness guarantees.
 
 ### Integration / E2E Tests
 
@@ -1095,10 +1343,10 @@ The existing e2e test infrastructure (see `distvirt-worker/tests/e2e.rs`) covers
 
 ### Test Priority
 
-1. **Pure step tests**: Write these as you implement each feature. Fast, easy, high coverage.
-2. **proptest invariants**: Set up the framework early. Continuously add invariants as you discover them. These find the "I didn't think of that combination" bugs.
-3. **Fuzz harness**: Set up once, run in CI. Finds edge cases proptest misses through coverage guidance.
-4. **Stateright model**: Build for activation + splice specifically. These subsystems have the most interleaving complexity and benefit most from exhaustive checking.
+1. **Pure step tests**: Write these as you implement each feature. Fast, easy, high coverage. Test sub-SMs individually first, then coordinator integration.
+2. **proptest invariants**: Set up the framework early for each sub-SM. Continuously add invariants as you discover them. These find the "I didn't think of that combination" bugs.
+3. **Stateright models**: Build for workload SM and service SM independently. The tiny state spaces make exhaustive checking fast (~seconds). This is now practical where the monolithic design was not.
+4. **Fuzz harness**: Set up once per sub-SM, run in CI. Finds edge cases proptest misses through coverage guidance.
 
 ---
 

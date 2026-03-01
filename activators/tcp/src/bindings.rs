@@ -309,7 +309,9 @@ impl ::core::fmt::Debug for Action {
             Action::ResumeDownstream(e) => {
                 f.debug_tuple("Action::ResumeDownstream").field(e).finish()
             }
-            Action::UpstreamConnect(e) => f.debug_tuple("Action::UpstreamConnect").field(e).finish(),
+            Action::UpstreamConnect(e) => {
+                f.debug_tuple("Action::UpstreamConnect").field(e).finish()
+            }
             Action::UpstreamSend(e) => {
                 f.debug_tuple("Action::UpstreamSend").field(e).finish()
             }
@@ -591,7 +593,7 @@ pub unsafe fn _export_process_events_cabi<T: Guest>(
                 }
                 Action::UpstreamConnect(e) => {
                     *base.add(0).cast::<u8>() = (9i32) as u8;
-                    *base.add(8).cast::<u16>() = e;
+                    *base.add(8).cast::<u16>() = (_rt::as_i32(e)) as u16;
                 }
                 Action::UpstreamSend(e) => {
                     *base.add(0).cast::<u8>() = (10i32) as u8;
@@ -775,6 +777,65 @@ mod _rt {
             self as i64
         }
     }
+    pub fn as_i32<T: AsI32>(t: T) -> i32 {
+        t.as_i32()
+    }
+    pub trait AsI32 {
+        fn as_i32(self) -> i32;
+    }
+    impl<'a, T: Copy + AsI32> AsI32 for &'a T {
+        fn as_i32(self) -> i32 {
+            (*self).as_i32()
+        }
+    }
+    impl AsI32 for i32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u32 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u16 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for i8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for u8 {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for char {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
+    impl AsI32 for usize {
+        #[inline]
+        fn as_i32(self) -> i32 {
+            self as i32
+        }
+    }
     pub use alloc_crate::alloc;
     extern crate alloc as alloc_crate;
 }
@@ -813,8 +874,8 @@ pub(crate) use __export_activator_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1119] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xdf\x07\x01A\x02\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 1120] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe0\x07\x01A\x02\x01\
 A#\x01w\x03\0\x0bpacket-flow\x03\0\0\x01w\x03\0\x0dstream-handle\x03\0\x02\x01m\x03\
 \x03tcp\x03udp\x05other\x03\0\x0bip-protocol\x03\0\x04\x01p}\x01k}\x01r\x09\x04f\
 low\x01\x08src-addr\x06\x08dst-addr\x06\x08src-port{\x08dst-port{\x08protocol\x05\
@@ -832,7 +893,7 @@ am-close\x01\x03\0\x03\0\x05event\x03\0\x18\x01o\x02\x01\x0d\x01o\x02\x01\x06\x0
 o\x02\x03\x06\x01q\x0e\x10set-backend-need\x01\x13\0\x03log\x01\x17\0\x0fpacket-\
 decision\x01\x1a\0\x0cpacket-reply\x01\x1b\0\x0dreplay-packet\x01\x06\0\x0fdowns\
 tream-send\x01\x1c\0\x10downstream-close\x01\x03\0\x10pause-downstream\x01\x03\0\
-\x11resume-downstream\x01\x03\0\x10upstream-connect\0\0\x0dupstream-send\x01\x1c\
+\x11resume-downstream\x01\x03\0\x10upstream-connect\x01{\0\x0dupstream-send\x01\x1c\
 \0\x0eupstream-close\x01\x03\0\x0epause-upstream\x01\x03\0\x0fresume-upstream\x01\
 \x03\0\x03\0\x06action\x03\0\x1d\x01p\x19\x01p\x1e\x01@\x01\x06events\x1f\0\x20\x04\
 \0\x0eprocess-events\x01!\x04\0\x1cdistvirt:activator/activator\x04\0\x0b\x0f\x01\

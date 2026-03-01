@@ -1,23 +1,20 @@
 //! Rust-side event/action types mirroring the WIT interface.
 //!
-//! These types are used at the boundary between the fabric and the activator
-//! runtime, avoiding direct exposure of wasmtime-generated bindings.
+//! Re-exports portable types from `activator_types` and adds host-specific
+//! types that use `std::net::IpAddr`.
 
 use std::net::IpAddr;
 
-/// L3 flow identifier — fabric-tracked packet correlation.
-pub type PacketFlow = u64;
+// Re-export all shared types.
+pub use activator_types::{
+    Action, Activator, BackendNeed, IpProtocol, LogAction, LogLevel, PacketDecision, PacketFlow,
+    Stream,
+};
 
-/// L4 stream identifier — fabric-managed TCP connection.
-pub type Stream = u64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpProtocol {
-    Tcp,
-    Udp,
-    Other,
-}
-
+/// Host-side packet info using `IpAddr` for addresses.
+///
+/// This wraps the portable `activator_types::PacketInfo` with `IpAddr` fields
+/// for ergonomic use on the host side.
 #[derive(Debug, Clone)]
 pub struct PacketInfo {
     pub flow: PacketFlow,
@@ -31,35 +28,7 @@ pub struct PacketInfo {
     pub raw_frame: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PacketDecision {
-    Buffered,
-    Drop,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendNeed {
-    None,
-    Traffic,
-    Active,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub struct LogAction {
-    pub level: LogLevel,
-    pub message: String,
-}
-
-/// Events delivered from the fabric to the activator.
+/// Host-side events using `IpAddr`-based `PacketInfo`.
 #[derive(Debug, Clone)]
 pub enum Event {
     BackendAvailable(bool),
@@ -73,21 +42,50 @@ pub enum Event {
     UpstreamClose(Stream),
 }
 
-/// Actions returned from the activator to the fabric.
-#[derive(Debug, Clone)]
-pub enum Action {
-    SetBackendNeed(BackendNeed),
-    Log(LogAction),
-    PacketDecision { flow: PacketFlow, decision: PacketDecision },
-    PacketReply { flow: PacketFlow, data: Vec<u8> },
-    ReplayPacket(Vec<u8>),
-    DownstreamSend { stream: Stream, data: Vec<u8> },
-    DownstreamClose(Stream),
-    PauseDownstream(Stream),
-    ResumeDownstream(Stream),
-    UpstreamConnect { port: u16 },
-    UpstreamSend { stream: Stream, data: Vec<u8> },
-    UpstreamClose(Stream),
-    PauseUpstream(Stream),
-    ResumeUpstream(Stream),
+impl Event {
+    /// Convert host Event to portable activator_types::Event.
+    pub fn to_shared(&self) -> activator_types::Event {
+        match self {
+            Event::BackendAvailable(b) => activator_types::Event::BackendAvailable(*b),
+            Event::Tick => activator_types::Event::Tick,
+            Event::Packet(info) => {
+                let src_addr = match info.src_addr {
+                    IpAddr::V4(v4) => v4.octets().to_vec(),
+                    IpAddr::V6(v6) => v6.octets().to_vec(),
+                };
+                let dst_addr = match info.dst_addr {
+                    IpAddr::V4(v4) => v4.octets().to_vec(),
+                    IpAddr::V6(v6) => v6.octets().to_vec(),
+                };
+                activator_types::Event::Packet(activator_types::PacketInfo {
+                    flow: info.flow,
+                    src_addr,
+                    dst_addr,
+                    src_port: info.src_port,
+                    dst_port: info.dst_port,
+                    protocol: info.protocol,
+                    tcp_flags: info.tcp_flags,
+                    payload_len: info.payload_len,
+                    raw_frame: info.raw_frame.clone(),
+                })
+            }
+            Event::StreamOpen(s) => activator_types::Event::StreamOpen(*s),
+            Event::StreamData { stream, data } => activator_types::Event::StreamData {
+                stream: *stream,
+                data: data.clone(),
+            },
+            Event::StreamClose(s) => activator_types::Event::StreamClose(*s),
+            Event::UpstreamConnectResult { stream, ok } => {
+                activator_types::Event::UpstreamConnectResult {
+                    stream: *stream,
+                    ok: *ok,
+                }
+            }
+            Event::UpstreamData { stream, data } => activator_types::Event::UpstreamData {
+                stream: *stream,
+                data: data.clone(),
+            },
+            Event::UpstreamClose(s) => activator_types::Event::UpstreamClose(*s),
+        }
+    }
 }

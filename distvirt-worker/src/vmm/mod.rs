@@ -13,6 +13,7 @@ pub struct NetConfig {
     pub guest_ip: String,
     pub netmask: String,
     pub gateway: String,
+    pub guest_mac: [u8; 6],
 }
 
 /// Configuration for launching a VM.

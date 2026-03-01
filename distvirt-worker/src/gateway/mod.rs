@@ -14,9 +14,13 @@ use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket as TokioUdpSocket;
 use tokio::sync::mpsc;
 
-use super::dns::{self, DnsRegistry};
-use super::switch::{ETH_HEADER_LEN, GATEWAY_IP, GATEWAY_MAC, VNET_HDR_SZ};
-use super::tun::{configure_tun_ip, create_tun, tun_read, tun_write};
+pub(crate) mod dns;
+mod tun;
+
+pub use dns::DnsRegistry;
+
+use crate::fabric::switch::{ETH_HEADER_LEN, FabricFrame, GATEWAY_IP, GATEWAY_MAC, VNET_HDR_SZ, with_vnet_header};
+use tun::{configure_tun_ip, create_tun, tun_read, tun_write};
 
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
@@ -261,9 +265,7 @@ impl FabricGateway {
         let ts = self.smoltcp_now();
         self.iface.poll(ts, &mut self.device, &mut self.sockets);
         while let Some(eth_frame) = self.device.tx_queue.pop_front() {
-            let mut frame = Vec::with_capacity(VNET_HDR_SZ + eth_frame.len());
-            frame.extend_from_slice(&[0u8; VNET_HDR_SZ]);
-            frame.extend_from_slice(&eth_frame);
+            let frame = with_vnet_header(&eth_frame);
             if let Err(e) = self.ingress_tx.try_send(frame) {
                 log::warn!("gateway: ingress channel send error: {}", e);
             }
@@ -396,12 +398,12 @@ impl FabricGateway {
                         }
                     };
 
-                    if frame.len() < VNET_HDR_SZ + ETH_HEADER_LEN {
-                        continue;
-                    }
-
-                    let eth_frame = &frame[VNET_HDR_SZ..];
-                    let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+                    let ff = match FabricFrame::new(&frame) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    let eth_frame = ff.eth_payload();
+                    let ethertype = ff.ethertype();
 
                     // Determine if this frame should go to smoltcp or TUN.
                     let to_smoltcp = if ethertype == ETHERTYPE_ARP {
@@ -428,14 +430,14 @@ impl FabricGateway {
                         && eth_frame.len() >= ETH_HEADER_LEN + 20
                     {
                         // Internet egress: learn src MAC, strip Ethernet, write to TUN.
-                        let src_mac: [u8; 6] = eth_frame[6..12].try_into().unwrap();
+                        let src_mac = ff.src_mac();
                         let ip_packet = &eth_frame[ETH_HEADER_LEN..];
                         let src_ip: [u8; 4] = ip_packet[12..16].try_into().unwrap();
                         self.ip_mac_table.insert(src_ip, (src_mac, Instant::now()));
 
                         // Copy vnet header and adjust csum_start for TUN (IP-level,
                         // no ethernet header), then write [vnet_hdr][ip_packet] to TUN.
-                        let mut vnet_hdr: [u8; VNET_HDR_SZ] = frame[..VNET_HDR_SZ].try_into().unwrap();
+                        let mut vnet_hdr = ff.vnet_hdr();
                         adjust_vnet_csum_start(&mut vnet_hdr, -(ETH_HEADER_LEN as i16));
                         let mut tun_buf_out = Vec::with_capacity(VNET_HDR_SZ + ip_packet.len());
                         tun_buf_out.extend_from_slice(&vnet_hdr);

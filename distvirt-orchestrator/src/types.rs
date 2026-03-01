@@ -1,21 +1,21 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-// --- ID Newtypes ---
+// --- Re-exports from protocol ---
+
+pub use distvirt_worker_protocol::{
+    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, NamespaceId, NetworkConfig,
+    PodId, PodNetworkConfig, RegistryEntry, ServiceBackend, ServiceId, ServicePolicy,
+    WorkerCommand, WorkerId,
+};
+
+// --- Orchestrator-only ID Newtypes ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct NamespaceId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct WorkerId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ServiceId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct PodId(pub String);
+pub struct WorkloadId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClientId(pub u64);
@@ -25,7 +25,7 @@ pub struct ClientId(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TimerKey {
     IdleTimeout { service_id: ServiceId },
-    LaunchTimeout { service_id: ServiceId, pod_id: PodId },
+    LaunchTimeout { workload_id: WorkloadId, pod_id: PodId },
 }
 
 // --- Orchestrator-Level Input/Output ---
@@ -58,8 +58,8 @@ pub enum ClientCommand {
     DeleteNamespace { namespace_id: NamespaceId },
     GetNamespaceStatus { namespace_id: NamespaceId },
     ListNamespaces,
-    Splice { namespace_id: NamespaceId, service_id: ServiceId, worker_id: WorkerId },
-    Unsplice { namespace_id: NamespaceId, service_id: ServiceId },
+    Splice { namespace_id: NamespaceId, workload_id: WorkloadId, worker_id: WorkerId },
+    Unsplice { namespace_id: NamespaceId, workload_id: WorkloadId },
     CloneNamespace {
         source_namespace_id: NamespaceId,
         target_namespace_id: NamespaceId,
@@ -85,7 +85,9 @@ pub struct NamespaceStatusReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceStatusReport {
-    pub state: String,
+    pub service_state: String,
+    pub workload_id: WorkloadId,
+    pub workload_state: String,
     pub pod_id: Option<PodId>,
     pub worker_id: Option<WorkerId>,
     pub backend_need: Option<BackendNeed>,
@@ -103,11 +105,11 @@ pub enum NamespaceInput {
     UpdateSpec { client_id: ClientId, spec: NamespaceSpec },
     Delete { client_id: ClientId },
     GetStatus { client_id: ClientId },
-    Splice { client_id: ClientId, service_id: ServiceId, worker_id: WorkerId },
-    Unsplice { client_id: ClientId, service_id: ServiceId },
+    Splice { client_id: ClientId, workload_id: WorkloadId, worker_id: WorkerId },
+    Unsplice { client_id: ClientId, workload_id: WorkloadId },
     StreamLogs { client_id: ClientId, service_id: Option<ServiceId> },
     LaunchPod {
-        service_id: ServiceId,
+        workload_id: WorkloadId,
         worker_id: WorkerId,
         pod_id: PodId,
     },
@@ -123,43 +125,24 @@ pub struct NamespaceOutput {
     pub destroyed: bool,
 }
 
-// --- Worker Protocol (Orchestrator-Domain) ---
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerCommand {
-    CreateNamespace { namespace_id: NamespaceId },
-    DestroyNamespace { namespace_id: NamespaceId },
-    CreateService { namespace_id: NamespaceId, service_id: ServiceId, spec: ServiceSpec },
-    LaunchPod { namespace_id: NamespaceId, pod_id: PodId, service_id: ServiceId },
-    StopPod { namespace_id: NamespaceId, pod_id: PodId },
-    UpdateServiceBackend {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-        backend: Option<PodId>,
-    },
-    ServiceReady { namespace_id: NamespaceId, service_id: ServiceId },
-}
+// --- Orchestrator-domain WorkerEvent ---
+// This is the orchestrator's view of worker events. It omits `namespace_id`
+// (the shell/router strips it) and wire-only variants like `ShuttingDown`,
+// `PodLogStreamError`, `FabricRouteMiss`.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkerEvent {
     NamespaceCreated,
-    ServiceCreated { service_id: ServiceId },
+    NamespaceFailed { error: String },
+    NamespaceDestroyed,
+    PodRunning { pod_id: PodId },
+    PodExited { pod_id: PodId, exit_code: i32 },
+    PodFailed { pod_id: PodId, error: String },
     ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
-    PodRunning { pod_id: PodId },
-    PodExited { pod_id: PodId },
-    PodFailed { pod_id: PodId, reason: String },
-    NamespaceDestroyed,
 }
 
 // --- Domain Enums ---
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum BackendNeed {
-    None,
-    Traffic,
-    Active,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NamespaceStatus {
@@ -170,26 +153,36 @@ pub enum NamespaceStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ServiceState {
-    Pending,
-    Idle,
+pub enum WorkloadState {
+    Dormant,
     WaitingForCapacity,
     Launching {
         pod_id: PodId,
         worker_id: WorkerId,
         launch_timeout: TimerKey,
     },
+    Running {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        hosting: WorkloadHosting,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ServiceState {
+    Pending,
+    Idle,
+    NeedBackend,
     Active {
         pod_id: PodId,
         worker_id: WorkerId,
-        hosting: ServiceHosting,
         backend_need: BackendNeed,
         idle_timer: Option<TimerKey>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ServiceHosting {
+pub enum WorkloadHosting {
     Normal,
     Spliced { original_worker_id: WorkerId },
 }
@@ -206,12 +199,12 @@ pub enum FabricStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceWorkerState {
     pub fabric_status: FabricStatus,
-    pub pods: HashSet<PodId>,
+    pub pods: std::collections::HashSet<PodId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PodInfo {
-    pub service_id: ServiceId,
+    pub workload_id: WorkloadId,
     pub worker_id: WorkerId,
 }
 
@@ -219,7 +212,7 @@ pub struct PodInfo {
 pub struct WorkerState {
     pub capabilities: WorkerCapabilities,
     pub status: WorkerStatus,
-    pub namespaces: HashSet<NamespaceId>,
+    pub namespaces: std::collections::HashSet<NamespaceId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,19 +228,30 @@ pub struct WorkerCapabilities {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PodRequest {
-    pub service_id: ServiceId,
+    pub workload_id: WorkloadId,
 }
 
 // --- Spec Types ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSpec {
+    pub network: NetworkConfig,
+    pub workloads: HashMap<WorkloadId, WorkloadSpec>,
     pub services: HashMap<ServiceId, ServiceSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkloadSpec {
+    pub containers: Vec<ContainerSpec>,
+    pub network: PodNetworkConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceSpec {
-    pub image: String,
+    pub workload_id: WorkloadId,
+    pub ip: Ipv4Addr,
+    pub mac: [u8; 6],
+    pub policy: ServicePolicy,
     pub activation: Option<ActivationSpec>,
 }
 

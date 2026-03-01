@@ -26,4 +26,8 @@ if [[ -n "${SUDO_ASKPASS:-}" ]]; then
     SUDO_FLAGS+=(-A)
 fi
 
+# Build as the current (non-root) user first so build artifacts don't end up
+# owned by root.
+"$CARGO" test --package distvirt-worker --test e2e --no-run "$@"
+
 exec sudo "${SUDO_FLAGS[@]}" env DISTVIRT_E2E=1 "$CARGO" test --package distvirt-worker --test e2e "$@"

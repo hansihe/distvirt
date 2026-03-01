@@ -21,4 +21,4 @@ pub use instance::ActivatorInstance;
 pub use packet_parse::{parse_frame_to_packet_info, FlowTracker};
 pub use runtime::ActivatorRuntime;
 pub use stream_manager::{StreamManager, StreamManagerConfig, StreamManagerOutput, is_l4_action};
-pub use types::{Action, BackendNeed, Event, PacketInfo};
+pub use types::{Action, Activator, BackendNeed, Event, PacketInfo};

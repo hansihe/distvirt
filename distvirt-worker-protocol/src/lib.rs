@@ -149,5 +149,8 @@ pub mod codec;
 pub mod connection;
 pub mod types;
 
-pub use connection::{LogStreamOpener, OrchestratorConnection, WorkerConnection};
+pub use connection::{
+    LogStreamOpener, OrchestratorConnection, OrchestratorReader, OrchestratorWriter,
+    WorkerConnection,
+};
 pub use types::*;

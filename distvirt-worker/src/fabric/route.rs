@@ -95,7 +95,7 @@ impl RouteTable {
         match &state.entry.destination {
             RouteDestination::RemoteWorker { worker_id } => {
                 let action = RouteAction::RemoteWorker {
-                    worker_id: worker_id.clone(),
+                    worker_id: worker_id.0.clone(),
                 };
                 (action, false)
             }
@@ -179,7 +179,7 @@ mod tests {
             ip,
             mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
             destination: RouteDestination::RemoteWorker {
-                worker_id: worker_id.to_string(),
+                worker_id: worker_id.to_string().into(),
             },
         }
     }

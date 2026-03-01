@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::Context;
 use distvirt_activator::{ActivatorInstance, ActivatorRuntime, StreamManager, StreamManagerConfig};
 use distvirt_worker_protocol::{
-    ActivatorConfig, ContainerSpec, LogStreamHeader, LogStreamOpener, NetworkConfig,
-    PodNetworkConfig, RegistryEntry, WorkerCommand, WorkerConnection, WorkerEvent,
+    ActivatorConfig, ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, NetworkConfig,
+    PodId, PodNetworkConfig, RegistryEntry, ServiceId, WorkerCommand, WorkerConnection,
+    WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -16,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::task_handle::TaskHandle;
 
-use crate::fabric::{DnsRegistry, Fabric, FabricEvent, FabricGateway, RouteTable, ServiceTable};
+use crate::fabric::{Fabric, FabricContextInner, FabricEvent, Port};
+use crate::gateway::{DnsRegistry, FabricGateway};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
 use crate::managed_vm::{ImageOverrides, ManagedVm, merge_config};
@@ -58,12 +60,11 @@ struct PodState {
 /// the one-for-all supervision pattern instead of growing this struct.
 struct NamespaceState {
     fabric: Arc<tokio::sync::Mutex<Fabric>>,
-    route_table: Arc<std::sync::Mutex<RouteTable>>,
-    service_table: Arc<std::sync::Mutex<ServiceTable>>,
+    tables: Arc<FabricContextInner<Port>>,
     _gateway_task: TaskHandle<()>,
     _event_bridge_task: TaskHandle<()>,
     registry: DnsRegistry,
-    pods: HashMap<String, PodState>,
+    pods: HashMap<PodId, PodState>,
     token: CancellationToken,
 }
 
@@ -74,7 +75,7 @@ struct NamespaceState {
 pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     kernel_path: PathBuf,
     rootfs_image_path: PathBuf,
-    namespaces: HashMap<String, NamespaceState>,
+    namespaces: HashMap<NamespaceId, NamespaceState>,
     vmm: Arc<V>,
     image_provider: Arc<P>,
     /// Channel for background tasks to send events back to the main loop.
@@ -245,7 +246,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 ip,
                 mac,
                 policy,
-            } => self.handle_create_service(&namespace_id, service_id, ip, mac, policy),
+            } => self.handle_create_service(&namespace_id, &service_id, ip, mac, policy),
             WorkerCommand::UpdateServiceBackend {
                 namespace_id,
                 service_id,
@@ -268,7 +269,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     async fn handle_create_namespace(
         &mut self,
-        namespace_id: String,
+        namespace_id: NamespaceId,
         network: NetworkConfig,
     ) -> Result<(), FatalError> {
         let mut fabric = Fabric::new();
@@ -279,8 +280,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let (fabric_event_tx, mut fabric_event_rx) = mpsc::channel::<FabricEvent>(64);
         fabric.set_event_channel(fabric_event_tx);
 
-        let route_table = fabric.route_table();
-        let service_table = fabric.service_table();
+        let tables = fabric.tables();
 
         let pod_gateway_ip = network.gateway.octets();
         let (gateway, egress_tx, ingress_rx) =
@@ -333,7 +333,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                         if let Err(e) = bridge_event_tx
                             .try_send(WorkerEvent::ServiceActivation {
                                 namespace_id: bridge_ns_id.clone(),
-                                service_id,
+                                service_id: ServiceId::from(service_id),
                                 dst_ip,
                             })
                         {
@@ -344,7 +344,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                         if let Err(e) = bridge_event_tx
                             .send(WorkerEvent::ServiceBackendNeed {
                                 namespace_id: bridge_ns_id.clone(),
-                                service_id,
+                                service_id: ServiceId::from(service_id),
                                 need,
                             }).await
                         {
@@ -362,8 +362,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
         let ns = NamespaceState {
             fabric: Arc::new(tokio::sync::Mutex::new(fabric)),
-            route_table,
-            service_table,
+            tables,
             _gateway_task: gateway_task,
             _event_bridge_task: event_bridge_task,
             registry,
@@ -382,7 +381,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         Ok(())
     }
 
-    async fn handle_destroy_namespace(&mut self, namespace_id: &str) -> Result<(), FatalError> {
+    async fn handle_destroy_namespace(&mut self, namespace_id: &NamespaceId) -> Result<(), FatalError> {
         if let Some(ns) = self.namespaces.remove(namespace_id) {
             // Cancel the namespace token, cascading to all pods.
             ns.token.cancel();
@@ -414,13 +413,21 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             }
             // ns._gateway_task (TaskHandle) drops here, automatically aborting.
             log::info!("worker: destroyed namespace '{}'", namespace_id);
+
+            send_event(
+                &self.bg_event_tx,
+                WorkerEvent::NamespaceDestroyed {
+                    namespace_id: namespace_id.clone(),
+                },
+            )
+            .await;
         }
         Ok(())
     }
 
     fn handle_registry_sync(
         &mut self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         entries: Vec<RegistryEntry>,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
@@ -441,14 +448,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     fn handle_fabric_route_sync(
         &mut self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         routes: Vec<distvirt_worker_protocol::FabricRouteEntry>,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
-        let mut rt = ns.route_table.lock().map_err(|e| {
+        let mut rt = ns.tables.route_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("route table lock poisoned: {}", e))
         })?;
         rt.sync(routes);
@@ -462,7 +469,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     fn handle_fabric_route_update(
         &mut self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         added: Vec<distvirt_worker_protocol::FabricRouteEntry>,
         removed_ips: Vec<std::net::Ipv4Addr>,
     ) -> Result<(), FatalError> {
@@ -470,7 +477,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
-        let mut rt = ns.route_table.lock().map_err(|e| {
+        let mut rt = ns.tables.route_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("route table lock poisoned: {}", e))
         })?;
         rt.update(added, removed_ips);
@@ -484,8 +491,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     fn handle_create_service(
         &mut self,
-        namespace_id: &str,
-        service_id: String,
+        namespace_id: &NamespaceId,
+        service_id: &ServiceId,
         ip: std::net::Ipv4Addr,
         mac: [u8; 6],
         policy: distvirt_worker_protocol::ServicePolicy,
@@ -537,10 +544,10 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             _ => None,
         };
 
-        let mut st = ns.service_table.lock().map_err(|e| {
+        let mut st = ns.tables.service_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        st.create(service_id.clone(), ip, mac, policy, activator, stream_manager);
+        st.create(service_id.0.clone(), ip, mac, policy, activator, stream_manager);
 
         log::info!(
             "worker: created service '{}' with ip {} in namespace '{}'",
@@ -551,19 +558,19 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     fn handle_update_service_backend(
         &mut self,
-        namespace_id: &str,
-        service_id: &str,
+        namespace_id: &NamespaceId,
+        service_id: &ServiceId,
         backend: Option<distvirt_worker_protocol::ServiceBackend>,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
-        let mut st = ns.service_table.lock().map_err(|e| {
+        let mut st = ns.tables.service_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
         let backend_tuple = backend.map(|b| (b.pod_ip, b.pod_mac));
-        st.update_backend(service_id, backend_tuple);
+        st.update_backend(service_id.as_ref(), backend_tuple);
 
         log::info!(
             "worker: updated service backend '{}' in namespace '{}'",
@@ -574,33 +581,33 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     async fn handle_service_ready(
         &mut self,
-        namespace_id: &str,
-        service_id: &str,
+        namespace_id: &NamespaceId,
+        service_id: &ServiceId,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
         let flush_data = {
-            let mut st = ns.service_table.lock().map_err(|e| {
+            let mut st = ns.tables.service_table.lock().map_err(|e| {
                 FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
             })?;
-            st.mark_ready(service_id)
+            st.mark_ready(service_id.as_ref())
         };
 
         if let Some(result) = flush_data {
             use crate::fabric::service::{MarkReadyResult, ServiceAction};
             let fabric = ns.fabric.lock().await;
             match result {
-                MarkReadyResult::Passthrough { frames, backend_mac, actions } => {
+                MarkReadyResult::Passthrough { frames, backend_mac, backend_ip, service_ip, service_mac, actions } => {
                     if !frames.is_empty() {
-                        fabric.flush_service_frames(frames, backend_mac);
+                        fabric.flush_service_frames(frames, backend_mac, backend_ip, service_ip, service_mac);
                     }
-                    fabric.dispatch_actions(&actions, service_id).await;
+                    fabric.dispatch_actions(&actions, service_id.as_ref()).await;
                 }
                 MarkReadyResult::L4(ServiceAction::L4Result { actions, frames, .. }) => {
                     fabric.send_l4_frames(frames);
-                    fabric.dispatch_actions(&actions, service_id).await;
+                    fabric.dispatch_actions(&actions, service_id.as_ref()).await;
                 }
                 _ => {}
             }
@@ -615,17 +622,17 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     fn handle_destroy_service(
         &mut self,
-        namespace_id: &str,
-        service_id: &str,
+        namespace_id: &NamespaceId,
+        service_id: &ServiceId,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
-        let mut st = ns.service_table.lock().map_err(|e| {
+        let mut st = ns.tables.service_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        st.destroy(service_id);
+        st.destroy(service_id.as_ref());
 
         log::info!(
             "worker: destroyed service '{}' in namespace '{}'",
@@ -636,8 +643,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     async fn handle_launch_pod(
         &mut self,
-        namespace_id: &str,
-        pod_id: String,
+        namespace_id: &NamespaceId,
+        pod_id: PodId,
         network: PodNetworkConfig,
         containers: Vec<ContainerSpec>,
         log_opener: &LogStreamOpener,
@@ -654,7 +661,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let kernel_path = self.kernel_path.clone();
         let rootfs_image_path = self.rootfs_image_path.clone();
         let log_opener = log_opener.clone();
-        let ns_id = namespace_id.to_string();
+        let ns_id = namespace_id.clone();
         let pid = pod_id.clone();
         let cancel_clone = pod_cancel.clone();
 
@@ -689,7 +696,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     /// Remove a finished pod from its namespace. The TaskHandle is dropped
     /// (harmless since the supervisor already exited).
-    fn remove_finished_pod(&mut self, namespace_id: &str, pod_id: &str) {
+    fn remove_finished_pod(&mut self, namespace_id: &NamespaceId, pod_id: &PodId) {
         if let Some(ns) = self.namespaces.get_mut(namespace_id) {
             ns.pods.remove(pod_id);
         }
@@ -697,8 +704,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     async fn handle_stop_pod(
         &mut self,
-        namespace_id: &str,
-        pod_id: &str,
+        namespace_id: &NamespaceId,
+        pod_id: &PodId,
         graceful: bool,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
@@ -768,8 +775,8 @@ async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>(
     log_opener: LogStreamOpener,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<WorkerEvent>,
-    namespace_id: String,
-    pod_id: String,
+    namespace_id: NamespaceId,
+    pod_id: PodId,
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
 ) {
@@ -839,8 +846,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     rootfs_image_path: &PathBuf,
     log_opener: &LogStreamOpener,
     event_tx: &mpsc::Sender<WorkerEvent>,
-    namespace_id: &str,
-    pod_id: &str,
+    namespace_id: &NamespaceId,
+    pod_id: &PodId,
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
     cancel: &CancellationToken,
@@ -890,6 +897,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         guest_ip: network.ip.to_string(),
         netmask: network.netmask.clone(),
         gateway: network.gateway.to_string(),
+        guest_mac: network.mac,
     };
 
     let vm_config = VmConfig {
@@ -917,7 +925,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         let (_port_id, task) = fabric
             .lock()
             .await
-            .add_port_with_ip(tap, network.ip)
+            .add_port_with_ip(tap, network.ip, network.mac)
             .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
         log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
         Some(task)
@@ -949,8 +957,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         match vm.accept_output_stream().await {
             Ok((_cid, session)) => {
                 let header = LogStreamHeader {
-                    namespace_id: namespace_id.to_string(),
-                    pod_id: pod_id.to_string(),
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
                     container_id: container_id.to_string(),
                 };
                 match log_opener.open_log_stream(&header).await {
@@ -960,8 +968,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                         send_event(
                             event_tx,
                             WorkerEvent::PodLogStreamError {
-                                namespace_id: namespace_id.to_string(),
-                                pod_id: pod_id.to_string(),
+                                namespace_id: namespace_id.clone(),
+                                pod_id: pod_id.clone(),
                                 container_id: container_id.to_string(),
                                 phase: "open_stream".to_string(),
                                 error: format!("{:#}", e),
@@ -977,8 +985,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                 send_event(
                     event_tx,
                     WorkerEvent::PodLogStreamError {
-                        namespace_id: namespace_id.to_string(),
-                        pod_id: pod_id.to_string(),
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
                         container_id: container_id.to_string(),
                         phase: "connect".to_string(),
                         error: format!("{:#}", e),
@@ -1006,8 +1014,8 @@ async fn pod_monitor<I: VmInstance>(
     port_task: Option<TaskHandle<()>>,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<WorkerEvent>,
-    namespace_id: String,
-    pod_id: String,
+    namespace_id: NamespaceId,
+    pod_id: PodId,
 ) {
     // Spawn log streaming as a non-fatal sub-task.
     // Uses TaskHandle so it's automatically aborted when monitor exits.
@@ -1131,4 +1139,855 @@ async fn pod_monitor<I: VmInstance>(
 
     // Send the event back to the main loop.
     send_event(&event_tx, event).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    use distvirt_worker_protocol::{
+        BufferPolicy, ContainerConfig, ContainerSpec, FabricRouteEntry, PodNetworkConfig,
+        RegistryEntry, RouteDestination, ServiceBackend, ServicePolicy,
+    };
+    use tokio::net::UnixStream;
+
+    use crate::fabric::{Fabric, Port};
+    use crate::image_provider::{ImageProvider, PreparedArtifact};
+    use crate::tap::TapDevice;
+    use crate::vmm::{VmConfig, VmInstance, Vmm};
+
+    // -----------------------------------------------------------------------
+    // Stubs (panic if called — for tests that don't launch pods)
+    // -----------------------------------------------------------------------
+
+    struct StubVmm;
+
+    impl Vmm for StubVmm {
+        type Instance = StubVmInstance;
+        async fn launch(&self, _config: &VmConfig) -> anyhow::Result<StubVmInstance> {
+            panic!("StubVmm::launch should not be called in state management tests");
+        }
+    }
+
+    struct StubVmInstance;
+
+    impl VmInstance for StubVmInstance {
+        async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
+            panic!("StubVmInstance::connect_vsock called");
+        }
+        fn tap(&self) -> Option<&TapDevice> {
+            None
+        }
+        fn take_tap(&mut self) -> Option<TapDevice> {
+            None
+        }
+        async fn wait(&mut self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+        async fn kill(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StubImageProvider;
+
+    impl ImageProvider for StubImageProvider {
+        async fn prepare(&self, _image_ref: &str) -> anyhow::Result<PreparedArtifact> {
+            panic!("StubImageProvider::prepare should not be called in state management tests");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn make_worker() -> Worker<StubVmm, StubImageProvider> {
+        Worker::new(
+            PathBuf::from("/fake/kernel"),
+            PathBuf::from("/fake/rootfs"),
+            StubVmm,
+            StubImageProvider,
+            None, // no activator component dir
+        )
+    }
+
+    /// Inject a NamespaceState directly into the worker, bypassing
+    /// handle_create_namespace (which requires root for TUN/gateway).
+    fn inject_namespace(worker: &mut Worker<StubVmm, StubImageProvider>, ns_id: &str) {
+        let fabric = Fabric::<Port>::new();
+        let tables = fabric.tables();
+
+        // Fabric event channel — receiver intentionally dropped (events go nowhere).
+        let (fabric_event_tx, _rx) = mpsc::channel::<FabricEvent>(64);
+        // We don't call set_event_channel since we don't need events in these tests.
+        let _ = fabric_event_tx;
+
+        let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
+
+        let ns_token = worker.worker_token.child_token();
+
+        // Dummy task handles that pend forever.
+        let gateway_task = TaskHandle::spawn(std::future::pending::<()>());
+        let event_bridge_task = TaskHandle::spawn(std::future::pending::<()>());
+
+        let ns = NamespaceState {
+            fabric: Arc::new(tokio::sync::Mutex::new(fabric)),
+            tables,
+            _gateway_task: gateway_task,
+            _event_bridge_task: event_bridge_task,
+            registry,
+            pods: HashMap::new(),
+            token: ns_token,
+        };
+
+        worker
+            .namespaces
+            .insert(NamespaceId::from(ns_id), ns);
+    }
+
+    fn make_log_opener() -> LogStreamOpener {
+        LogStreamOpener::disconnected()
+    }
+
+    // -----------------------------------------------------------------------
+    // Registry tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn registry_sync_populates_entries() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+
+        let entries = vec![
+            RegistryEntry {
+                name: "api".to_string(),
+                ip: Ipv4Addr::new(172, 16, 0, 10),
+            },
+            RegistryEntry {
+                name: "db".to_string(),
+                ip: Ipv4Addr::new(172, 16, 0, 11),
+            },
+        ];
+
+        w.handle_registry_sync(&NamespaceId::from("ns1"), entries)
+            .unwrap();
+
+        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        let map = ns.registry.read().unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("api"), Some(&Ipv4Addr::new(172, 16, 0, 10)));
+        assert_eq!(map.get("db"), Some(&Ipv4Addr::new(172, 16, 0, 11)));
+    }
+
+    #[tokio::test]
+    async fn registry_sync_replaces_on_resync() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+
+        let entries1 = vec![RegistryEntry {
+            name: "api".to_string(),
+            ip: Ipv4Addr::new(172, 16, 0, 10),
+        }];
+        w.handle_registry_sync(&NamespaceId::from("ns1"), entries1)
+            .unwrap();
+
+        // Re-sync with different entries.
+        let entries2 = vec![RegistryEntry {
+            name: "web".to_string(),
+            ip: Ipv4Addr::new(172, 16, 0, 20),
+        }];
+        w.handle_registry_sync(&NamespaceId::from("ns1"), entries2)
+            .unwrap();
+
+        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        let map = ns.registry.read().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.get("api").is_none());
+        assert_eq!(map.get("web"), Some(&Ipv4Addr::new(172, 16, 0, 20)));
+    }
+
+    #[tokio::test]
+    async fn registry_sync_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w.handle_registry_sync(&NamespaceId::from("nonexistent"), vec![]);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fabric route tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fabric_route_sync_populates_routes() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+
+        let routes = vec![FabricRouteEntry {
+            ip: Ipv4Addr::new(172, 16, 0, 10),
+            mac: [0x02, 0, 0, 0, 0, 0x10],
+            destination: RouteDestination::Placeholder {
+                buffer_policy: BufferPolicy {
+                    buffer_frames: 10,
+                    timeout_ms: 5000,
+                },
+            },
+        }];
+
+        w.handle_fabric_route_sync(&NamespaceId::from("ns1"), routes)
+            .unwrap();
+
+        // Verify via lookup_and_buffer (requires &mut).
+        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        let mut rt = ns.tables.route_table.lock().unwrap();
+        let (action, _) = rt.lookup_and_buffer(Ipv4Addr::new(172, 16, 0, 10), &[0xDE, 0xAD]);
+        assert!(
+            !matches!(action, crate::fabric::route::RouteAction::NoRoute),
+            "expected a route entry, got NoRoute"
+        );
+    }
+
+    #[tokio::test]
+    async fn fabric_route_sync_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w.handle_fabric_route_sync(&NamespaceId::from("nope"), vec![]);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fabric_route_update_adds_and_removes() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+        let ns_id = NamespaceId::from("ns1");
+
+        // Sync initial route.
+        let routes = vec![FabricRouteEntry {
+            ip: Ipv4Addr::new(172, 16, 0, 10),
+            mac: [0x02, 0, 0, 0, 0, 0x10],
+            destination: RouteDestination::Placeholder {
+                buffer_policy: BufferPolicy {
+                    buffer_frames: 5,
+                    timeout_ms: 5000,
+                },
+            },
+        }];
+        w.handle_fabric_route_sync(&ns_id, routes).unwrap();
+
+        // Update: add a new route, remove the old one.
+        let added = vec![FabricRouteEntry {
+            ip: Ipv4Addr::new(172, 16, 0, 20),
+            mac: [0x02, 0, 0, 0, 0, 0x20],
+            destination: RouteDestination::RemoteWorker {
+                worker_id: "w2".to_string().into(),
+            },
+        }];
+        w.handle_fabric_route_update(
+            &ns_id,
+            added,
+            vec![Ipv4Addr::new(172, 16, 0, 10)],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fabric_route_update_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result =
+            w.handle_fabric_route_update(&NamespaceId::from("nope"), vec![], vec![]);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Service lifecycle tests
+    // -----------------------------------------------------------------------
+
+    fn default_policy() -> ServicePolicy {
+        ServicePolicy {
+            buffer_frames: 10,
+            timeout_ms: 5000,
+            activator: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn service_create_and_destroy() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+        let ns_id = NamespaceId::from("ns1");
+        let svc_id = ServiceId::from("svc1");
+
+        w.handle_create_service(
+            &ns_id,
+            &svc_id,
+            Ipv4Addr::new(172, 16, 0, 100),
+            [0x02, 0, 0, 0, 0, 0xAA],
+            default_policy(),
+        )
+        .unwrap();
+
+        // Verify service exists by checking the service table.
+        {
+            let ns = w.namespaces.get(&ns_id).unwrap();
+            let st = ns.tables.service_table.lock().unwrap();
+            assert_eq!(
+                st.get_ip_by_id("svc1"),
+                Some(Ipv4Addr::new(172, 16, 0, 100))
+            );
+        }
+
+        // Destroy.
+        w.handle_destroy_service(&ns_id, &svc_id).unwrap();
+
+        {
+            let ns = w.namespaces.get(&ns_id).unwrap();
+            let st = ns.tables.service_table.lock().unwrap();
+            assert_eq!(st.get_ip_by_id("svc1"), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn service_create_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w.handle_create_service(
+            &NamespaceId::from("nope"),
+            &ServiceId::from("svc1"),
+            Ipv4Addr::new(172, 16, 0, 100),
+            [0x02, 0, 0, 0, 0, 0xAA],
+            default_policy(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn service_update_backend() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+        let ns_id = NamespaceId::from("ns1");
+        let svc_id = ServiceId::from("svc1");
+
+        w.handle_create_service(
+            &ns_id,
+            &svc_id,
+            Ipv4Addr::new(172, 16, 0, 100),
+            [0x02, 0, 0, 0, 0, 0xAA],
+            default_policy(),
+        )
+        .unwrap();
+
+        // Assign backend.
+        w.handle_update_service_backend(
+            &ns_id,
+            &svc_id,
+            Some(ServiceBackend {
+                pod_ip: Ipv4Addr::new(172, 16, 0, 10),
+                pod_mac: [0x02, 0, 0, 0, 0, 0x10],
+            }),
+        )
+        .unwrap();
+
+        // Remove backend.
+        w.handle_update_service_backend(&ns_id, &svc_id, None)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_update_backend_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w.handle_update_service_backend(
+            &NamespaceId::from("nope"),
+            &ServiceId::from("svc1"),
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn service_ready_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w
+            .handle_service_ready(&NamespaceId::from("nope"), &ServiceId::from("svc1"))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn service_ready_on_existing_service() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+        let ns_id = NamespaceId::from("ns1");
+        let svc_id = ServiceId::from("svc1");
+
+        w.handle_create_service(
+            &ns_id,
+            &svc_id,
+            Ipv4Addr::new(172, 16, 0, 100),
+            [0x02, 0, 0, 0, 0, 0xAA],
+            default_policy(),
+        )
+        .unwrap();
+
+        w.handle_update_service_backend(
+            &ns_id,
+            &svc_id,
+            Some(ServiceBackend {
+                pod_ip: Ipv4Addr::new(172, 16, 0, 10),
+                pod_mac: [0x02, 0, 0, 0, 0, 0x10],
+            }),
+        )
+        .unwrap();
+
+        // ServiceReady should succeed (no buffered frames, so no flush).
+        w.handle_service_ready(&ns_id, &svc_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_destroy_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w.handle_destroy_service(
+            &NamespaceId::from("nope"),
+            &ServiceId::from("svc1"),
+        );
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Namespace destruction tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn destroy_namespace_removes_state() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+        assert!(w.namespaces.contains_key(&NamespaceId::from("ns1")));
+
+        w.handle_destroy_namespace(&NamespaceId::from("ns1"))
+            .await
+            .unwrap();
+        assert!(!w.namespaces.contains_key(&NamespaceId::from("ns1")));
+    }
+
+    #[tokio::test]
+    async fn destroy_namespace_noop_for_nonexistent() {
+        let mut w = make_worker();
+        // Should not error.
+        w.handle_destroy_namespace(&NamespaceId::from("nope"))
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Stop pod tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stop_pod_errors_on_missing_namespace() {
+        let mut w = make_worker();
+        let result = w
+            .handle_stop_pod(&NamespaceId::from("nope"), &PodId::from("pod1"), true)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_pod_noop_for_missing_pod() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+
+        // Stopping a pod that doesn't exist should succeed (no-op).
+        w.handle_stop_pod(&NamespaceId::from("ns1"), &PodId::from("pod1"), true)
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Shutdown all tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn shutdown_all_drains_namespaces() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+        inject_namespace(&mut w, "ns2");
+        assert_eq!(w.namespaces.len(), 2);
+
+        w.shutdown_all().await;
+        assert!(w.namespaces.is_empty());
+        assert!(w.worker_token.is_cancelled());
+    }
+
+    // -----------------------------------------------------------------------
+    // Full command dispatch tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_command_dispatches_registry_sync() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+
+        let log_opener = make_log_opener();
+
+        let cmd = WorkerCommand::RegistrySync {
+            namespace_id: NamespaceId::from("ns1"),
+            entries: vec![RegistryEntry {
+                name: "api".to_string(),
+                ip: Ipv4Addr::new(172, 16, 0, 10),
+            }],
+        };
+
+        w.handle_command(cmd, &log_opener).await.unwrap();
+
+        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        let map = ns.registry.read().unwrap();
+        assert_eq!(map.get("api"), Some(&Ipv4Addr::new(172, 16, 0, 10)));
+    }
+
+    #[tokio::test]
+    async fn handle_command_dispatches_destroy_namespace() {
+        let mut w = make_worker();
+        inject_namespace(&mut w, "ns1");
+
+        let log_opener = make_log_opener();
+
+        let cmd = WorkerCommand::DestroyNamespace {
+            namespace_id: NamespaceId::from("ns1"),
+        };
+
+        w.handle_command(cmd, &log_opener).await.unwrap();
+        assert!(!w.namespaces.contains_key(&NamespaceId::from("ns1")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pod lifecycle tests (mock VM)
+    // -----------------------------------------------------------------------
+
+    struct MockVmm {
+        /// If Some, launch() returns this error.
+        launch_error: Option<String>,
+        /// The mock VM's vsock socket (worker side).
+        vm_socket: tokio::sync::Mutex<Option<UnixStream>>,
+    }
+
+    struct MockVmInstance {
+        vsock_socket: tokio::sync::Mutex<Option<UnixStream>>,
+        killed: tokio::sync::Mutex<bool>,
+    }
+
+    impl Vmm for MockVmm {
+        type Instance = MockVmInstance;
+        async fn launch(&self, _config: &VmConfig) -> anyhow::Result<MockVmInstance> {
+            if let Some(ref err) = self.launch_error {
+                return Err(anyhow::anyhow!("{}", err));
+            }
+            let socket = self
+                .vm_socket
+                .lock()
+                .await
+                .take()
+                .expect("MockVmm: socket already taken");
+            Ok(MockVmInstance {
+                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
+                killed: tokio::sync::Mutex::new(false),
+            })
+        }
+    }
+
+    impl VmInstance for MockVmInstance {
+        async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
+            self.vsock_socket
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("MockVmInstance: vsock already connected"))
+        }
+        fn tap(&self) -> Option<&TapDevice> {
+            None
+        }
+        fn take_tap(&mut self) -> Option<TapDevice> {
+            None
+        }
+        async fn wait(&mut self) -> anyhow::Result<()> {
+            // Wait forever (or until killed).
+            std::future::pending().await
+        }
+        async fn kill(&mut self) -> anyhow::Result<()> {
+            *self.killed.lock().await = true;
+            Ok(())
+        }
+    }
+
+    struct FailingImageProvider {
+        error_msg: String,
+    }
+
+    impl ImageProvider for FailingImageProvider {
+        async fn prepare(&self, _image_ref: &str) -> anyhow::Result<PreparedArtifact> {
+            Err(anyhow::anyhow!("{}", self.error_msg))
+        }
+    }
+
+    struct MockImageProvider;
+
+    impl ImageProvider for MockImageProvider {
+        async fn prepare(&self, _image_ref: &str) -> anyhow::Result<PreparedArtifact> {
+            Ok(PreparedArtifact::new(
+                PathBuf::from("/fake/image.ext4"),
+                None, // no OCI config
+                (),   // no cleanup
+            ))
+        }
+    }
+
+    fn make_pod_network() -> PodNetworkConfig {
+        PodNetworkConfig {
+            ip: Ipv4Addr::new(172, 16, 0, 10),
+            mac: [0x02, 0, 0, 0, 0, 0x10],
+            gateway: Ipv4Addr::new(172, 16, 0, 1),
+            netmask: "255.255.255.0".to_string(),
+        }
+    }
+
+    fn make_containers() -> Vec<ContainerSpec> {
+        vec![ContainerSpec {
+            container_id: "main".to_string(),
+            image_ref: "test-image:latest".to_string(),
+            config: ContainerConfig {
+                entrypoint: "/bin/echo".to_string(),
+                args: vec!["hello".to_string()],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: false,
+            },
+        }]
+    }
+
+    #[tokio::test]
+    async fn image_provider_failure_sends_pod_failed() {
+        let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
+        let image_provider = Arc::new(FailingImageProvider {
+            error_msg: "image not found".to_string(),
+        });
+        let vmm = Arc::new(StubVmm);
+        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<Port>::new()));
+        let cancel = CancellationToken::new();
+
+        let log_opener = make_log_opener();
+
+        let ns_id = NamespaceId::from("ns1");
+        let pod_id = PodId::from("pod1");
+
+        // Run pod_supervisor directly.
+        tokio::spawn({
+            let ns_id = ns_id.clone();
+            let pod_id = pod_id.clone();
+            let cancel = cancel.clone();
+            async move {
+                pod_supervisor(
+                    vmm,
+                    image_provider,
+                    fabric,
+                    PathBuf::from("/fake/kernel"),
+                    PathBuf::from("/fake/rootfs"),
+                    log_opener,
+                    cancel,
+                    bg_event_tx,
+                    ns_id,
+                    pod_id,
+                    make_pod_network(),
+                    make_containers(),
+                )
+                .await;
+            }
+        });
+
+        // Should receive PodFailed.
+        let event = tokio::time::timeout(Duration::from_secs(5), bg_event_rx.recv())
+            .await
+            .expect("timeout waiting for event")
+            .expect("channel closed");
+
+        match event {
+            WorkerEvent::PodFailed {
+                namespace_id,
+                pod_id,
+                error,
+            } => {
+                assert_eq!(namespace_id, "ns1");
+                assert_eq!(pod_id, "pod1");
+                assert!(
+                    error.contains("image not found"),
+                    "error should mention image failure: {}",
+                    error
+                );
+            }
+            other => panic!("expected PodFailed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn vm_launch_failure_sends_pod_failed() {
+        let (worker_socket, _guest_socket) = UnixStream::pair().unwrap();
+        let vmm = Arc::new(MockVmm {
+            launch_error: Some("VM exploded".to_string()),
+            vm_socket: tokio::sync::Mutex::new(Some(worker_socket)),
+        });
+        let image_provider = Arc::new(MockImageProvider);
+        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<Port>::new()));
+        let cancel = CancellationToken::new();
+
+        let log_opener = make_log_opener();
+        let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
+
+        let ns_id = NamespaceId::from("ns1");
+        let pod_id = PodId::from("pod1");
+
+        tokio::spawn({
+            let ns_id = ns_id.clone();
+            let pod_id = pod_id.clone();
+            let cancel = cancel.clone();
+            async move {
+                pod_supervisor(
+                    vmm,
+                    image_provider,
+                    fabric,
+                    PathBuf::from("/fake/kernel"),
+                    PathBuf::from("/fake/rootfs"),
+                    log_opener,
+                    cancel,
+                    bg_event_tx,
+                    ns_id,
+                    pod_id,
+                    make_pod_network(),
+                    make_containers(),
+                )
+                .await;
+            }
+        });
+
+        let event = tokio::time::timeout(Duration::from_secs(5), bg_event_rx.recv())
+            .await
+            .expect("timeout waiting for event")
+            .expect("channel closed");
+
+        match event {
+            WorkerEvent::PodFailed { error, .. } => {
+                assert!(
+                    error.contains("VM exploded"),
+                    "error should mention VM failure: {}",
+                    error
+                );
+            }
+            other => panic!("expected PodFailed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_image_prepare_sends_pod_exited() {
+        // Use a slow image provider that waits forever.
+        struct HangingImageProvider;
+        impl ImageProvider for HangingImageProvider {
+            async fn prepare(&self, _image_ref: &str) -> anyhow::Result<PreparedArtifact> {
+                std::future::pending().await
+            }
+        }
+
+        let vmm = Arc::new(StubVmm);
+        let image_provider = Arc::new(HangingImageProvider);
+        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<Port>::new()));
+        let cancel = CancellationToken::new();
+
+        let log_opener = make_log_opener();
+        let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            pod_supervisor(
+                vmm,
+                image_provider,
+                fabric,
+                PathBuf::from("/fake/kernel"),
+                PathBuf::from("/fake/rootfs"),
+                log_opener,
+                cancel_clone,
+                bg_event_tx,
+                NamespaceId::from("ns1"),
+                PodId::from("pod1"),
+                make_pod_network(),
+                make_containers(),
+            )
+            .await;
+        });
+
+        // Cancel after a short delay.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), bg_event_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+
+        match event {
+            WorkerEvent::PodExited { exit_code, .. } => {
+                assert_eq!(exit_code, -1, "cancelled pod should exit with -1");
+            }
+            other => panic!("expected PodExited(-1), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_launch_pod_registers_pod_state() {
+        // Verify that handle_launch_pod creates PodState in the namespace.
+        let (worker_socket, _guest_socket) = UnixStream::pair().unwrap();
+        let vmm = MockVmm {
+            launch_error: None,
+            vm_socket: tokio::sync::Mutex::new(Some(worker_socket)),
+        };
+        // Use FailingImageProvider so the supervisor fails quickly —
+        // we just want to verify the PodState was registered.
+        let mut w = Worker::new(
+            PathBuf::from("/fake/kernel"),
+            PathBuf::from("/fake/rootfs"),
+            vmm,
+            FailingImageProvider {
+                error_msg: "intentional".to_string(),
+            },
+            None,
+        );
+
+        // Inject namespace manually.
+        {
+            let fabric = Fabric::<Port>::new();
+            let tables = fabric.tables();
+            let ns_token = w.worker_token.child_token();
+            let ns = NamespaceState {
+                fabric: Arc::new(tokio::sync::Mutex::new(fabric)),
+                tables,
+                _gateway_task: TaskHandle::spawn(std::future::pending::<()>()),
+                _event_bridge_task: TaskHandle::spawn(std::future::pending::<()>()),
+                registry: Arc::new(RwLock::new(HashMap::new())),
+                pods: HashMap::new(),
+                token: ns_token,
+            };
+            w.namespaces.insert(NamespaceId::from("ns1"), ns);
+        }
+
+        let log_opener = make_log_opener();
+
+        w.handle_launch_pod(
+            &NamespaceId::from("ns1"),
+            PodId::from("pod1"),
+            make_pod_network(),
+            make_containers(),
+            &log_opener,
+        )
+        .await
+        .unwrap();
+
+        // Pod should be registered.
+        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        assert!(ns.pods.contains_key(&PodId::from("pod1")));
+    }
 }

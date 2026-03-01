@@ -1,18 +1,15 @@
-pub(crate) mod dns;
 mod forwarding;
-pub(crate) mod gateway;
+pub(crate) mod nat;
 pub(crate) mod port;
 pub(crate) mod route;
 pub(crate) mod service;
 pub(crate) mod switch;
-pub(crate) mod tun;
 
-pub use dns::DnsRegistry;
-pub use gateway::FabricGateway;
 pub use switch::GATEWAY_IP_STR;
 pub use port::{FramePort, Port, PortId};
 pub use route::RouteTable;
 pub use service::ServiceTable;
+pub(crate) use forwarding::FabricContextInner;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -22,8 +19,8 @@ use tokio::sync::mpsc;
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
 use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
-use forwarding::{port_read_loop, gateway_ingress_task};
-use switch::{MacTable, VNET_HDR_SZ, format_mac};
+use forwarding::{FabricContext, port_read_loop, gateway_ingress_task};
+use switch::{MacTable, VNET_HDR_SZ, format_mac, rewrite_dst_mac};
 
 /// Convert activator BackendNeed to protocol BackendNeed.
 pub(crate) fn convert_backend_need(need: &ActivatorBackendNeed) -> distvirt_worker_protocol::BackendNeed {
@@ -73,13 +70,8 @@ type SharedPort<P> = Arc<P>;
 /// Port tasks are owned by the caller (returned as `TaskHandle`). Port map
 /// cleanup is automatic via `PortGuard`.
 pub struct Fabric<P: FramePort = Port> {
-    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-    mac_table: Arc<Mutex<MacTable>>,
-    route_table: Arc<Mutex<RouteTable>>,
-    service_table: Arc<Mutex<ServiceTable>>,
+    ctx: FabricContext<P>,
     next_port_id: PortId,
-    gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
-    event_tx: Option<mpsc::Sender<FabricEvent>>,
     _gateway_ingress_task: Option<TaskHandle<()>>,
 }
 
@@ -91,18 +83,19 @@ impl Fabric<Port> {
     /// aborts the task and the `PortGuard` cleans up the port map entry.
     pub fn add_port(&mut self, tap: TapDevice) -> std::io::Result<(PortId, TaskHandle<()>)> {
         let port = Port::new(tap)?;
-        Ok(self.add_port_inner(port, None))
+        Ok(self.add_port_inner(port, None, None))
     }
 
-    /// Add a TAP device as a port, flush any buffered frames for `pod_ip`,
-    /// and start the forwarding task.
+    /// Add a TAP device as a port, pre-register its MAC, flush any buffered
+    /// frames for `pod_ip`, and start the forwarding task.
     pub fn add_port_with_ip(
         &mut self,
         tap: TapDevice,
         pod_ip: Ipv4Addr,
+        pod_mac: [u8; 6],
     ) -> std::io::Result<(PortId, TaskHandle<()>)> {
         let port = Port::new(tap)?;
-        Ok(self.add_port_inner(port, Some(pod_ip)))
+        Ok(self.add_port_inner(port, Some(pod_ip), Some(pod_mac)))
     }
 }
 
@@ -110,13 +103,18 @@ impl<P: FramePort> Fabric<P> {
     /// Create a new empty fabric.
     pub fn new() -> Self {
         Fabric {
-            ports: Arc::new(Mutex::new(HashMap::new())),
-            mac_table: Arc::new(Mutex::new(MacTable::new())),
-            route_table: Arc::new(Mutex::new(RouteTable::new())),
-            service_table: Arc::new(Mutex::new(ServiceTable::new())),
+            ctx: FabricContext {
+                inner: Arc::new(FabricContextInner {
+                    ports: Mutex::new(HashMap::new()),
+                    mac_table: Mutex::new(MacTable::new()),
+                    route_table: Mutex::new(RouteTable::new()),
+                    service_table: Mutex::new(ServiceTable::new()),
+                    nat_table: Mutex::new(nat::NatTable::new()),
+                }),
+                gateway_tx: None,
+                event_tx: None,
+            },
             next_port_id: 0,
-            gateway_tx: None,
-            event_tx: None,
             _gateway_ingress_task: None,
         }
     }
@@ -126,31 +124,43 @@ impl<P: FramePort> Fabric<P> {
     /// Returns the assigned port ID and a `TaskHandle` that owns the port's
     /// read loop task.
     pub fn add_port_raw(&mut self, port: P) -> (PortId, TaskHandle<()>) {
-        self.add_port_inner(port, None)
+        self.add_port_inner(port, None, None)
     }
 
     /// Add a pre-constructed port with an associated IP, flush buffered frames,
     /// and start the forwarding task.
     pub fn add_port_raw_with_ip(&mut self, port: P, pod_ip: Ipv4Addr) -> (PortId, TaskHandle<()>) {
-        self.add_port_inner(port, Some(pod_ip))
+        self.add_port_inner(port, Some(pod_ip), None)
+    }
+
+    /// Add a pre-constructed port with an associated IP and MAC, pre-register
+    /// the MAC, flush buffered frames, and start the forwarding task.
+    pub fn add_port_raw_with_ip_mac(&mut self, port: P, pod_ip: Ipv4Addr, pod_mac: [u8; 6]) -> (PortId, TaskHandle<()>) {
+        self.add_port_inner(port, Some(pod_ip), Some(pod_mac))
     }
 
     /// Shared implementation for all add_port variants.
-    fn add_port_inner(&mut self, port: P, pod_ip: Option<Ipv4Addr>) -> (PortId, TaskHandle<()>) {
+    fn add_port_inner(&mut self, port: P, pod_ip: Option<Ipv4Addr>, pod_mac: Option<[u8; 6]>) -> (PortId, TaskHandle<()>) {
         let port_id = self.next_port_id;
         self.next_port_id += 1;
 
         let port = Arc::new(port);
 
         {
-            let mut ports = self.ports.lock().unwrap();
+            let mut ports = self.ctx.inner.ports.lock().unwrap();
             ports.insert(port_id, Arc::clone(&port));
+        }
+
+        // Pre-register MAC so the switch can forward to this port immediately.
+        if let Some(mac) = pod_mac {
+            let mut table = self.ctx.inner.mac_table.lock().unwrap();
+            table.learn(mac, port_id);
         }
 
         // Flush buffered frames if an IP was provided.
         if let Some(pod_ip) = pod_ip {
             let buffered = {
-                let mut rt = self.route_table.lock().unwrap();
+                let mut rt = self.ctx.inner.route_table.lock().unwrap();
                 rt.flush_buffer(pod_ip)
             };
             if !buffered.is_empty() {
@@ -171,12 +181,7 @@ impl<P: FramePort> Fabric<P> {
         let task = TaskHandle::spawn(port_read_loop(
             port_id,
             Arc::clone(&port),
-            Arc::clone(&self.ports),
-            Arc::clone(&self.mac_table),
-            Arc::clone(&self.route_table),
-            Arc::clone(&self.service_table),
-            self.gateway_tx.clone(),
-            self.event_tx.clone(),
+            self.ctx.clone(),
         ));
 
         match pod_ip {
@@ -197,32 +202,28 @@ impl<P: FramePort> Fabric<P> {
         egress_tx: mpsc::Sender<Vec<u8>>,
         ingress_rx: mpsc::Receiver<Vec<u8>>,
     ) {
-        self.gateway_tx = Some(egress_tx);
-
-        let ports = Arc::clone(&self.ports);
-        let mac_table = Arc::clone(&self.mac_table);
-        let route_table = Arc::clone(&self.route_table);
-        let service_table = Arc::clone(&self.service_table);
-        let event_tx = self.event_tx.clone();
+        self.ctx.gateway_tx = Some(egress_tx);
 
         self._gateway_ingress_task = Some(TaskHandle::spawn(gateway_ingress_task(
             ingress_rx,
-            ports,
-            mac_table.clone(),
-            route_table,
-            service_table,
-            event_tx,
+            self.ctx.clone(),
         )));
 
-        // Spawn periodic MAC table GC task.
+        // Spawn periodic MAC table + NAT table GC task.
         {
-            let mac_table = mac_table;
+            let inner = Arc::clone(&self.ctx.inner);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
-                    let mut table = mac_table.lock().unwrap();
-                    table.gc(std::time::Duration::from_secs(300));
+                    {
+                        let mut table = inner.mac_table.lock().unwrap();
+                        table.gc(std::time::Duration::from_secs(300));
+                    }
+                    {
+                        let mut nat = inner.nat_table.lock().unwrap();
+                        nat.gc(std::time::Duration::from_secs(300));
+                    }
                 }
             });
         }
@@ -232,56 +233,18 @@ impl<P: FramePort> Fabric<P> {
 
     /// Set the event channel for fabric events (route misses, etc.).
     pub fn set_event_channel(&mut self, tx: mpsc::Sender<FabricEvent>) {
-        self.event_tx = Some(tx);
+        self.ctx.event_tx = Some(tx);
     }
 
-    /// Get a reference to the route table.
-    pub fn route_table(&self) -> Arc<Mutex<RouteTable>> {
-        Arc::clone(&self.route_table)
-    }
-
-    /// Get a reference to the service table.
-    pub fn service_table(&self) -> Arc<Mutex<ServiceTable>> {
-        Arc::clone(&self.service_table)
+    /// Get a shared reference to the fabric tables (ports, MAC, route, service).
+    pub fn tables(&self) -> Arc<FabricContextInner<P>> {
+        Arc::clone(&self.ctx.inner)
     }
 
     /// Send raw Ethernet frames (no vnet header) out to the port that owns
     /// the given destination MAC. Prepends a zeroed vnet header before sending.
     pub fn send_l4_frames(&self, frames: Vec<Vec<u8>>) {
-        if frames.is_empty() {
-            return;
-        }
-
-        for eth_frame in frames {
-            if eth_frame.len() < 6 {
-                continue;
-            }
-            let dst_mac: [u8; 6] = eth_frame[0..6].try_into().unwrap();
-            let port_id = {
-                let mt = self.mac_table.lock().unwrap();
-                mt.lookup(&dst_mac)
-            };
-            if let Some(port_id) = port_id {
-                let port = {
-                    let p = self.ports.lock().unwrap();
-                    p.get(&port_id).cloned()
-                };
-                if let Some(port) = port {
-                    let mut frame = vec![0u8; VNET_HDR_SZ];
-                    frame.extend_from_slice(&eth_frame);
-                    tokio::spawn(async move {
-                        if let Err(e) = port.send_frame(&frame).await {
-                            log::warn!("fabric: send_l4_frame error: {}", e);
-                        }
-                    });
-                }
-            } else {
-                log::debug!(
-                    "fabric: send_l4_frame: dst MAC {} not in mac_table",
-                    format_mac(&dst_mac)
-                );
-            }
-        }
+        forwarding::send_l4_frames(&frames, &self.ctx);
     }
 
     /// Dispatch activator actions from mark_ready (replay packets, log, backend need).
@@ -294,14 +257,13 @@ impl<P: FramePort> Fabric<P> {
         service_id: &str,
     ) {
         let dst_ip = {
-            let st = self.service_table.lock().unwrap();
+            let st = self.ctx.inner.service_table.lock().unwrap();
             st.get_ip_by_id(service_id)
                 .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
         };
         for action in actions {
             forwarding::dispatch_action(
-                action, service_id, dst_ip,
-                &self.service_table, &self.mac_table, &self.ports, &self.event_tx,
+                action, service_id, dst_ip, &self.ctx,
             ).await;
         }
     }
@@ -309,44 +271,64 @@ impl<P: FramePort> Fabric<P> {
     /// Flush buffered service frames to the backend port.
     ///
     /// Looks up the backend MAC in the mac_table to find the port,
-    /// rewrites the destination MAC in each frame, and sends them.
-    pub fn flush_service_frames(&self, frames: Vec<Vec<u8>>, backend_mac: [u8; 6]) {
-        let port_id = {
-            let mac_table = self.mac_table.lock().unwrap();
-            match mac_table.lookup(&backend_mac) {
-                Some(id) => id,
-                None => {
-                    log::warn!(
-                        "fabric: flush_service_frames: backend MAC {} not in mac_table, dropping {} frames",
-                        format_mac(&backend_mac),
-                        frames.len()
-                    );
-                    return;
-                }
+    /// rewrites the destination MAC and IP (DNAT) in each frame, and sends them.
+    pub fn flush_service_frames(
+        &self,
+        frames: Vec<Vec<u8>>,
+        backend_mac: [u8; 6],
+        backend_ip: std::net::Ipv4Addr,
+        service_ip: std::net::Ipv4Addr,
+        service_mac: [u8; 6],
+    ) {
+        let dst_port = match self.ctx.inner.resolve_mac(&backend_mac) {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "fabric: flush_service_frames: backend MAC {} not resolved, dropping {} frames",
+                    format_mac(&backend_mac),
+                    frames.len()
+                );
+                return;
             }
         };
-        let dst_port = {
-            let ports = self.ports.lock().unwrap();
-            match ports.get(&port_id) {
-                Some(p) => Arc::clone(p),
-                None => {
-                    log::warn!(
-                        "fabric: flush_service_frames: port {} gone, dropping {} frames",
-                        port_id,
-                        frames.len()
-                    );
-                    return;
+
+        // Insert NAT entries for all flushed frames.
+        {
+            let mut nat = self.ctx.inner.nat_table.lock().unwrap();
+            for frame in &frames {
+                if let Some(ff) = switch::FabricFrame::new(frame) {
+                    let eth = ff.eth_payload();
+                    if let Some(src_ip) = switch::extract_ipv4_src(eth) {
+                        let protocol = switch::extract_ip_protocol(eth).unwrap_or(0);
+                        let (src_port, dst_port_val) = switch::extract_transport_ports(eth).unwrap_or((0, 0));
+                        let reverse_key = nat::NatFlowKey {
+                            src_ip: backend_ip,
+                            dst_ip: src_ip,
+                            protocol,
+                            src_port: dst_port_val,
+                            dst_port: src_port,
+                        };
+                        let nat_entry = nat::NatEntry {
+                            service_ip,
+                            service_mac,
+                            backend_ip,
+                            last_seen: std::time::Instant::now(),
+                        };
+                        nat.insert(reverse_key, nat_entry);
+                    }
                 }
             }
-        };
+        }
 
         let count = frames.len();
         tokio::spawn(async move {
             for mut frame in frames {
                 // Rewrite dst MAC in the frame (after vnet header).
                 if frame.len() >= VNET_HDR_SZ + 6 {
-                    frame[VNET_HDR_SZ..VNET_HDR_SZ + 6].copy_from_slice(&backend_mac);
+                    rewrite_dst_mac(&mut frame, &backend_mac);
                 }
+                // DNAT: rewrite dst IP from service_ip to backend_ip.
+                switch::rewrite_ipv4_dst(&mut frame, service_ip, backend_ip);
                 if let Err(e) = dst_port.send_frame(&frame).await {
                     log::warn!("fabric: flush_service_frames send error: {}", e);
                     break;

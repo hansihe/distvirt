@@ -3,9 +3,20 @@ name = "distvirt-orchestrator"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+shell = ["dep:tokio", "dep:anyhow"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
+anyhow = { version = "1", optional = true }
 
 [dev-dependencies]
 proptest = "1"
 stateright = "0.31"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+[[test]]
+name = "shell_integration"
+required-features = ["shell"]

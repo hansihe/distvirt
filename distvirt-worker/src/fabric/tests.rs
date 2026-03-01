@@ -1,6 +1,6 @@
 use super::*;
 use super::forwarding::flood_frame;
-use switch::{ETH_HEADER_LEN, GATEWAY_MAC};
+use switch::{ETH_HEADER_LEN, FabricFrame, GATEWAY_MAC, VNET_HDR_SZ, with_vnet_header};
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// Channel-backed test double for FramePort.
@@ -57,12 +57,12 @@ impl FramePort for TestPort {
 
 /// Build a valid test frame: [vnet_hdr (10 bytes)][eth_hdr (14 bytes)][payload...]
 fn make_frame(dst_mac: [u8; 6], src_mac: [u8; 6], ethertype: u16, payload: &[u8]) -> Vec<u8> {
-    let mut frame = vec![0u8; VNET_HDR_SZ]; // zeroed vnet header
-    frame.extend_from_slice(&dst_mac);
-    frame.extend_from_slice(&src_mac);
-    frame.extend_from_slice(&ethertype.to_be_bytes());
-    frame.extend_from_slice(payload);
-    frame
+    let mut eth = Vec::with_capacity(14 + payload.len());
+    eth.extend_from_slice(&dst_mac);
+    eth.extend_from_slice(&src_mac);
+    eth.extend_from_slice(&ethertype.to_be_bytes());
+    eth.extend_from_slice(payload);
+    with_vnet_header(&eth)
 }
 
 /// Helper: try to receive a frame with a timeout. Returns None if no frame arrives.
@@ -396,21 +396,20 @@ async fn flood_frame_with_empty_ports_no_panic() {
 /// Build a valid IPv4 test frame with specific dst IP.
 /// Layout: [vnet_hdr(10)][eth_hdr(14)][ip_hdr(20)]
 fn make_ipv4_frame(dst_mac: [u8; 6], src_mac: [u8; 6], dst_ip: Ipv4Addr) -> Vec<u8> {
-    let mut frame = vec![0u8; VNET_HDR_SZ]; // zeroed vnet header
+    let mut eth = Vec::with_capacity(14 + 20);
     // Ethernet header
-    frame.extend_from_slice(&dst_mac);
-    frame.extend_from_slice(&src_mac);
-    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+    eth.extend_from_slice(&dst_mac);
+    eth.extend_from_slice(&src_mac);
+    eth.extend_from_slice(&0x0800u16.to_be_bytes());
     // Minimal IP header (20 bytes)
     let mut ip_hdr = [0u8; 20];
     ip_hdr[0] = 0x45; // version=4, IHL=5
     // src IP at offset 12..16
     ip_hdr[12..16].copy_from_slice(&[10, 0, 0, 1]);
     // dst IP at offset 16..20
-    let dst_octets = dst_ip.octets();
-    ip_hdr[16..20].copy_from_slice(&dst_octets);
-    frame.extend_from_slice(&ip_hdr);
-    frame
+    ip_hdr[16..20].copy_from_slice(&dst_ip.octets());
+    eth.extend_from_slice(&ip_hdr);
+    with_vnet_header(&eth)
 }
 
 /// Helper: try to receive a FabricEvent with timeout.
@@ -435,8 +434,8 @@ async fn placeholder_route_buffers_instead_of_flooding() {
 
     // Add a placeholder route for pod_ip.
     {
-        let rt_arc = fabric.route_table();
-        let mut rt = rt_arc.lock().unwrap();
+        let tables = fabric.tables();
+        let mut rt = tables.route_table.lock().unwrap();
         rt.sync(vec![FabricRouteEntry {
             ip: pod_ip,
             mac: MAC_C,
@@ -501,8 +500,8 @@ async fn buffered_frames_flushed_to_new_port() {
 
     // Add a placeholder route.
     {
-        let rt_arc = fabric.route_table();
-        let mut rt = rt_arc.lock().unwrap();
+        let tables = fabric.tables();
+        let mut rt = tables.route_table.lock().unwrap();
         rt.sync(vec![FabricRouteEntry {
             ip: pod_ip,
             mac: MAC_C,
@@ -551,8 +550,8 @@ async fn route_miss_debounced_on_rapid_frames() {
     let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
 
     {
-        let rt_arc = fabric.route_table();
-        let mut rt = rt_arc.lock().unwrap();
+        let tables = fabric.tables();
+        let mut rt = tables.route_table.lock().unwrap();
         rt.sync(vec![FabricRouteEntry {
             ip: pod_ip,
             mac: MAC_C,
@@ -612,10 +611,7 @@ fn make_tcp_frame(
     let tcp_start = 14 + 20;
     eth_frame[tcp_start + 13] = tcp_flags;
 
-    // Prepend 10-byte zeroed vnet header
-    let mut frame = vec![0u8; VNET_HDR_SZ];
-    frame.extend_from_slice(&eth_frame);
-    frame
+    with_vnet_header(&eth_frame)
 }
 
 /// Try to load the TCP activator component. Returns None if WASM components
@@ -635,11 +631,11 @@ fn make_arp_request(
     sender_ip: [u8; 4],
     target_ip: [u8; 4],
 ) -> Vec<u8> {
-    let mut frame = vec![0u8; VNET_HDR_SZ]; // vnet header
+    let mut eth = Vec::with_capacity(14 + 28);
     // Ethernet header: broadcast dst, sender src, ARP ethertype
-    frame.extend_from_slice(&BROADCAST);
-    frame.extend_from_slice(&sender_mac);
-    frame.extend_from_slice(&0x0806u16.to_be_bytes());
+    eth.extend_from_slice(&BROADCAST);
+    eth.extend_from_slice(&sender_mac);
+    eth.extend_from_slice(&0x0806u16.to_be_bytes());
     // ARP payload (28 bytes)
     let mut arp = [0u8; 28];
     arp[0..2].copy_from_slice(&[0x00, 0x01]); // hardware type: Ethernet
@@ -651,8 +647,8 @@ fn make_arp_request(
     arp[14..18].copy_from_slice(&sender_ip);    // sender protocol address
     // target hardware address [18..24] = zeroed (unknown)
     arp[24..28].copy_from_slice(&target_ip);    // target protocol address
-    frame.extend_from_slice(&arp);
-    frame
+    eth.extend_from_slice(&arp);
+    with_vnet_header(&eth)
 }
 
 const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 50);
@@ -673,8 +669,8 @@ async fn activator_tcp_syn_emits_backend_need() {
 
     // Create service with TCP activator.
     {
-        let st = fabric.service_table();
-        let mut st = st.lock().unwrap();
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
         st.create(
             "svc-tcp".into(),
             SVC_IP,
@@ -736,8 +732,8 @@ async fn activator_tcp_rst_dropped() {
     fabric.set_event_channel(event_tx);
 
     {
-        let st = fabric.service_table();
-        let mut st = st.lock().unwrap();
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
         st.create(
             "svc-tcp".into(),
             SVC_IP,
@@ -798,8 +794,8 @@ async fn activator_forwards_when_ready() {
 
     // Create service with TCP activator.
     {
-        let st = fabric.service_table();
-        let mut st = st.lock().unwrap();
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
         st.create(
             "svc-tcp".into(),
             SVC_IP,
@@ -846,8 +842,8 @@ async fn activator_forwards_when_ready() {
     assert!(received.is_some(), "frame should be forwarded to backend port");
     let received = received.unwrap();
     // Check dst MAC was rewritten.
-    let dst_mac: [u8; 6] = received[VNET_HDR_SZ..VNET_HDR_SZ + 6].try_into().unwrap();
-    assert_eq!(dst_mac, POD_MAC, "dst MAC should be rewritten to backend MAC");
+    let ff = FabricFrame::new(&received).unwrap();
+    assert_eq!(ff.dst_mac(), POD_MAC, "dst MAC should be rewritten to backend MAC");
 }
 
 #[tokio::test]
@@ -862,8 +858,8 @@ async fn activator_service_arp_reply() {
     let mut fabric: Fabric<TestPort> = Fabric::new();
 
     {
-        let st = fabric.service_table();
-        let mut st = st.lock().unwrap();
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
         st.create(
             "svc-tcp".into(),
             SVC_IP,
@@ -899,11 +895,238 @@ async fn activator_service_arp_reply() {
     let reply = reply.unwrap();
 
     // Verify it's an ARP reply with service MAC.
-    let eth_frame = &reply[VNET_HDR_SZ..];
-    let ethertype = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
-    assert_eq!(ethertype, 0x0806, "should be ARP");
-    let arp_op = u16::from_be_bytes([eth_frame[14 + 6], eth_frame[14 + 7]]);
+    let ff = FabricFrame::new(&reply).unwrap();
+    assert_eq!(ff.ethertype(), 0x0806, "should be ARP");
+    let arp = &ff.eth_payload()[14..]; // ARP payload after eth header
+    let arp_op = u16::from_be_bytes([arp[6], arp[7]]);
     assert_eq!(arp_op, 2, "should be ARP reply");
-    let sender_mac: [u8; 6] = eth_frame[14 + 8..14 + 14].try_into().unwrap();
+    let sender_mac: [u8; 6] = arp[8..14].try_into().unwrap();
     assert_eq!(sender_mac, SVC_MAC, "ARP reply should have service MAC");
+}
+
+// --- NAT tests ---
+
+const CLIENT_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 0, 1);
+const CLIENT_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
+
+#[tokio::test]
+async fn service_nat_dnat_rewrites_dst_ip() {
+    let mut fabric: Fabric<TestPort> = Fabric::new();
+
+    // Create a service with backend, mark ready.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
+        st.create(
+            "svc-nat".into(),
+            SVC_IP,
+            SVC_MAC,
+            distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+                activator: None,
+            },
+            None,
+            None,
+        );
+        st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
+        st.mark_ready("svc-nat");
+    }
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id1, _task1) = fabric.add_port_raw(port1);
+
+    // Learn POD_MAC on port 1.
+    let learn_frame = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
+    handle1.inject_tx.send(learn_frame).await.unwrap();
+    let _ = try_recv(&handle0).await;
+
+    // Send TCP SYN from client to service IP.
+    let syn_frame = make_tcp_frame(
+        SVC_MAC, CLIENT_MAC,
+        CLIENT_IP.octets(), SVC_IP.octets(),
+        12345, 80,
+        0x02, // SYN
+    );
+    handle0.inject_tx.send(syn_frame).await.unwrap();
+
+    // Frame should arrive at port 1 (backend) with DNAT applied.
+    let received = try_recv(&handle1).await;
+    assert!(received.is_some(), "frame should be forwarded to backend port");
+    let received = received.unwrap();
+
+    let ff = FabricFrame::new(&received).unwrap();
+    // dst MAC should be rewritten to POD_MAC.
+    assert_eq!(ff.dst_mac(), POD_MAC, "dst MAC should be rewritten to backend MAC");
+    // dst IP should be rewritten from SVC_IP to POD_IP.
+    assert_eq!(ff.ipv4_dst(), Some(POD_IP), "dst IP should be DNAT'd to backend IP");
+    // src IP should be unchanged.
+    assert_eq!(ff.ipv4_src(), Some(CLIENT_IP), "src IP should be unchanged");
+}
+
+#[tokio::test]
+async fn service_nat_snat_rewrites_return_traffic() {
+    let mut fabric: Fabric<TestPort> = Fabric::new();
+
+    // Create a service with backend, mark ready.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
+        st.create(
+            "svc-nat".into(),
+            SVC_IP,
+            SVC_MAC,
+            distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+                activator: None,
+            },
+            None,
+            None,
+        );
+        st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
+        st.mark_ready("svc-nat");
+    }
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id1, _task1) = fabric.add_port_raw(port1);
+
+    // Learn CLIENT_MAC on port 0, POD_MAC on port 1.
+    let learn0 = make_frame(BROADCAST, CLIENT_MAC, 0x0806, &[0u8; 28]);
+    handle0.inject_tx.send(learn0).await.unwrap();
+    let _ = try_recv(&handle1).await;
+
+    let learn1 = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
+    handle1.inject_tx.send(learn1).await.unwrap();
+    let _ = try_recv(&handle0).await;
+
+    // Step 1: Send forward traffic (client→service) to install NAT entry.
+    let syn_frame = make_tcp_frame(
+        SVC_MAC, CLIENT_MAC,
+        CLIENT_IP.octets(), SVC_IP.octets(),
+        12345, 80,
+        0x02, // SYN
+    );
+    handle0.inject_tx.send(syn_frame).await.unwrap();
+
+    // Drain the DNAT'd frame from port 1.
+    let dnat_frame = try_recv(&handle1).await;
+    assert!(dnat_frame.is_some(), "DNAT'd frame should arrive at backend");
+
+    // Step 2: Send return traffic (backend→client) — should be SNAT'd.
+    let syn_ack_frame = make_tcp_frame(
+        CLIENT_MAC, POD_MAC,
+        POD_IP.octets(), CLIENT_IP.octets(),
+        80, 12345,
+        0x12, // SYN+ACK
+    );
+    handle1.inject_tx.send(syn_ack_frame).await.unwrap();
+
+    // Frame should arrive at port 0 with SNAT applied.
+    let received = try_recv(&handle0).await;
+    assert!(received.is_some(), "return frame should arrive at client port");
+    let received = received.unwrap();
+
+    let ff = FabricFrame::new(&received).unwrap();
+    // src MAC should be rewritten to SVC_MAC.
+    assert_eq!(ff.src_mac(), SVC_MAC, "src MAC should be SNAT'd to service MAC");
+    // src IP should be rewritten from POD_IP to SVC_IP.
+    assert_eq!(ff.ipv4_src(), Some(SVC_IP), "src IP should be SNAT'd to service IP");
+    // dst should be unchanged.
+    assert_eq!(ff.dst_mac(), CLIENT_MAC, "dst MAC should be unchanged");
+    assert_eq!(ff.ipv4_dst(), Some(CLIENT_IP), "dst IP should be unchanged");
+}
+
+#[tokio::test]
+async fn non_natted_unicast_not_affected() {
+    // Regular unicast traffic that doesn't match any NAT entry should pass through unchanged.
+    let mut fabric: Fabric<TestPort> = Fabric::new();
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id1, _task1) = fabric.add_port_raw(port1);
+
+    // Learn MAC_A on port 0.
+    let learn = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 28]);
+    handle0.inject_tx.send(learn).await.unwrap();
+    let _ = try_recv(&handle1).await;
+
+    // Port 1 sends unicast to MAC_A — not NAT'd, should pass through unchanged.
+    let frame = make_tcp_frame(
+        MAC_A, MAC_B,
+        [10, 0, 0, 2], [10, 0, 0, 1],
+        5000, 8080,
+        0x02,
+    );
+    handle1.inject_tx.send(frame.clone()).await.unwrap();
+
+    let received = try_recv(&handle0).await;
+    assert!(received.is_some(), "frame should be forwarded");
+    let received = received.unwrap();
+
+    // Frame should be byte-identical (no NAT rewrite).
+    assert_eq!(received, frame, "non-NAT'd unicast should pass through unchanged");
+}
+
+#[tokio::test]
+async fn service_nat_ip_checksum_valid() {
+    // Verify that the IP header checksum is still valid after DNAT.
+    let mut fabric: Fabric<TestPort> = Fabric::new();
+
+    {
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
+        st.create(
+            "svc-nat".into(),
+            SVC_IP,
+            SVC_MAC,
+            distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+                activator: None,
+            },
+            None,
+            None,
+        );
+        st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
+        st.mark_ready("svc-nat");
+    }
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id1, _task1) = fabric.add_port_raw(port1);
+
+    // Learn POD_MAC on port 1.
+    let learn = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
+    handle1.inject_tx.send(learn).await.unwrap();
+    let _ = try_recv(&handle0).await;
+
+    let syn = make_tcp_frame(
+        SVC_MAC, CLIENT_MAC,
+        CLIENT_IP.octets(), SVC_IP.octets(),
+        12345, 80,
+        0x02,
+    );
+    handle0.inject_tx.send(syn).await.unwrap();
+
+    let received = try_recv(&handle1).await.unwrap();
+    let ff = FabricFrame::new(&received).unwrap();
+    let eth = ff.eth_payload();
+
+    // Verify IP header checksum: compute from scratch and compare.
+    let ip_hdr = &eth[14..34]; // 20-byte IP header
+    let mut sum: u32 = 0;
+    for i in (0..20).step_by(2) {
+        sum += u16::from_be_bytes([ip_hdr[i], ip_hdr[i + 1]]) as u32;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    assert_eq!(!sum as u16, 0, "IP header checksum should be valid after DNAT");
 }

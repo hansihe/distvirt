@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use distvirt_orchestrator::namespace::NamespaceStateMachine;
@@ -13,6 +14,14 @@ fn arb_service_id() -> impl Strategy<Value = ServiceId> {
         Just(ServiceId("svc1".into())),
         Just(ServiceId("svc2".into())),
         Just(ServiceId("svc3".into())),
+    ]
+}
+
+fn arb_workload_id() -> impl Strategy<Value = WorkloadId> {
+    prop_oneof![
+        Just(WorkloadId("svc1".into())),
+        Just(WorkloadId("svc2".into())),
+        Just(WorkloadId("svc3".into())),
     ]
 }
 
@@ -38,8 +47,8 @@ fn arb_pod_id() -> impl Strategy<Value = PodId> {
 fn arb_timer_key() -> impl Strategy<Value = TimerKey> {
     prop_oneof![
         arb_service_id().prop_map(|sid| TimerKey::IdleTimeout { service_id: sid }),
-        (arb_service_id(), arb_pod_id()).prop_map(|(sid, pid)| TimerKey::LaunchTimeout {
-            service_id: sid,
+        (arb_workload_id(), arb_pod_id()).prop_map(|(wlid, pid)| TimerKey::LaunchTimeout {
+            workload_id: wlid,
             pod_id: pid
         }),
     ]
@@ -56,8 +65,10 @@ fn arb_backend_need() -> impl Strategy<Value = BackendNeed> {
 fn arb_worker_event() -> impl Strategy<Value = WorkerEvent> {
     prop_oneof![
         Just(WorkerEvent::NamespaceCreated),
+        Just(WorkerEvent::NamespaceFailed {
+            error: "test failure".into(),
+        }),
         Just(WorkerEvent::NamespaceDestroyed),
-        arb_service_id().prop_map(|sid| WorkerEvent::ServiceCreated { service_id: sid }),
         arb_service_id().prop_map(|sid| WorkerEvent::ServiceActivation { service_id: sid }),
         (arb_service_id(), arb_backend_need()).prop_map(|(sid, need)| {
             WorkerEvent::ServiceBackendNeed {
@@ -66,10 +77,13 @@ fn arb_worker_event() -> impl Strategy<Value = WorkerEvent> {
             }
         }),
         arb_pod_id().prop_map(|pid| WorkerEvent::PodRunning { pod_id: pid }),
-        arb_pod_id().prop_map(|pid| WorkerEvent::PodExited { pod_id: pid }),
+        arb_pod_id().prop_map(|pid| WorkerEvent::PodExited {
+            pod_id: pid,
+            exit_code: 0,
+        }),
         arb_pod_id().prop_map(|pid| WorkerEvent::PodFailed {
             pod_id: pid,
-            reason: "test failure".into(),
+            error: "test failure".into(),
         }),
     ]
 }
@@ -100,9 +114,9 @@ fn arb_namespace_input() -> impl Strategy<Value = NamespaceInput> {
                 spec,
             }
         }),
-        (arb_service_id(), arb_worker_id(), arb_pod_id()).prop_map(|(sid, wid, pid)| {
+        (arb_workload_id(), arb_worker_id(), arb_pod_id()).prop_map(|(wlid, wid, pid)| {
             NamespaceInput::LaunchPod {
-                service_id: sid,
+                workload_id: wlid,
                 worker_id: wid,
                 pod_id: pid,
             }
@@ -110,51 +124,153 @@ fn arb_namespace_input() -> impl Strategy<Value = NamespaceInput> {
     ]
 }
 
+fn test_network_config() -> NetworkConfig {
+    NetworkConfig {
+        subnet: Ipv4Addr::new(172, 16, 0, 0),
+        gateway: Ipv4Addr::new(172, 16, 0, 1),
+        prefix_len: 24,
+    }
+}
+
+fn test_pod_network_config() -> PodNetworkConfig {
+    PodNetworkConfig {
+        ip: Ipv4Addr::new(172, 16, 0, 10),
+        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x10],
+        gateway: Ipv4Addr::new(172, 16, 0, 1),
+        netmask: "255.255.255.0".into(),
+    }
+}
+
+fn test_service_policy() -> ServicePolicy {
+    ServicePolicy {
+        buffer_frames: 100,
+        timeout_ms: 5000,
+        activator: None,
+    }
+}
+
+fn test_container_spec() -> ContainerSpec {
+    ContainerSpec {
+        container_id: "main".into(),
+        image_ref: "test-image:latest".into(),
+        config: ContainerConfig {
+            entrypoint: "/bin/sh".into(),
+            args: vec![],
+            env: vec![],
+            working_dir: None,
+            uid: None,
+            gid: None,
+            hostname: None,
+            capture_output: false,
+        },
+    }
+}
+
 fn single_service_spec() -> NamespaceSpec {
+    let mut workloads = HashMap::new();
+    workloads.insert(
+        WorkloadId("svc1".into()),
+        WorkloadSpec {
+            containers: vec![test_container_spec()],
+            network: test_pod_network_config(),
+        },
+    );
     let mut services = HashMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
-            image: "test-image:latest".into(),
+            workload_id: WorkloadId("svc1".into()),
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
+            policy: test_service_policy(),
             activation: None,
         },
     );
-    NamespaceSpec { services }
+    NamespaceSpec {
+        network: test_network_config(),
+        workloads,
+        services,
+    }
 }
 
 fn multi_service_spec() -> NamespaceSpec {
+    let mut workloads = HashMap::new();
+    workloads.insert(
+        WorkloadId("svc1".into()),
+        WorkloadSpec {
+            containers: vec![test_container_spec()],
+            network: test_pod_network_config(),
+        },
+    );
+    workloads.insert(
+        WorkloadId("svc2".into()),
+        WorkloadSpec {
+            containers: vec![test_container_spec()],
+            network: PodNetworkConfig {
+                ip: Ipv4Addr::new(172, 16, 0, 11),
+                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+                gateway: Ipv4Addr::new(172, 16, 0, 1),
+                netmask: "255.255.255.0".into(),
+            },
+        },
+    );
     let mut services = HashMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
-            image: "test-image:latest".into(),
+            workload_id: WorkloadId("svc1".into()),
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
+            policy: test_service_policy(),
             activation: None,
         },
     );
     services.insert(
         ServiceId("svc2".into()),
         ServiceSpec {
-            image: "test-image:latest".into(),
+            workload_id: WorkloadId("svc2".into()),
+            ip: Ipv4Addr::new(172, 16, 0, 101),
+            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x01],
+            policy: test_service_policy(),
             activation: Some(ActivationSpec {
                 idle_timeout: Duration::from_secs(30),
             }),
         },
     );
-    NamespaceSpec { services }
+    NamespaceSpec {
+        network: test_network_config(),
+        workloads,
+        services,
+    }
 }
 
 fn activation_only_spec() -> NamespaceSpec {
+    let mut workloads = HashMap::new();
+    workloads.insert(
+        WorkloadId("svc1".into()),
+        WorkloadSpec {
+            containers: vec![test_container_spec()],
+            network: test_pod_network_config(),
+        },
+    );
     let mut services = HashMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
-            image: "test-image:latest".into(),
+            workload_id: WorkloadId("svc1".into()),
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
+            policy: test_service_policy(),
             activation: Some(ActivationSpec {
                 idle_timeout: Duration::from_secs(30),
             }),
         },
     );
-    NamespaceSpec { services }
+    NamespaceSpec {
+        network: test_network_config(),
+        workloads,
+        services,
+    }
 }
 
 // --- Invariant Checkers ---
@@ -169,53 +285,87 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
         );
     }
 
-    // Every pod in the pods map should reference a known service.
+    // Every pod in the pods map should reference a known workload.
     for (pid, pod_info) in &ns.pods {
         assert!(
-            ns.spec.services.contains_key(&pod_info.service_id)
-                || ns.services.contains_key(&pod_info.service_id),
-            "Pod {:?} references unknown service {:?}",
+            ns.workloads.contains_key(&pod_info.workload_id),
+            "Pod {:?} references unknown workload {:?}",
             pid,
-            pod_info.service_id
+            pod_info.workload_id
         );
     }
 
-    // Services in Launching/Active must reference pods in the pods map.
-    for (sid, svc) in &ns.services {
-        match svc {
-            ServiceState::Launching {
+    // Workloads in Launching/Running must reference pods in the pods map.
+    for (wl_id, wl) in &ns.workloads {
+        match &wl.state {
+            WorkloadState::Launching {
                 pod_id, worker_id, ..
             } => {
                 assert!(
                     ns.pods.contains_key(pod_id),
-                    "Service {:?} in Launching references unknown pod {:?}",
-                    sid,
+                    "Workload {:?} in Launching references unknown pod {:?}",
+                    wl_id,
                     pod_id
                 );
                 assert!(
                     ns.workers.contains_key(worker_id),
-                    "Service {:?} in Launching references unknown worker {:?}",
-                    sid,
+                    "Workload {:?} in Launching references unknown worker {:?}",
+                    wl_id,
                     worker_id
                 );
             }
-            ServiceState::Active {
+            WorkloadState::Running {
                 pod_id, worker_id, ..
             } => {
                 assert!(
                     ns.pods.contains_key(pod_id),
-                    "Service {:?} in Active references unknown pod {:?}",
-                    sid,
+                    "Workload {:?} in Running references unknown pod {:?}",
+                    wl_id,
                     pod_id
                 );
                 assert!(
                     ns.workers.contains_key(worker_id),
-                    "Service {:?} in Active references unknown worker {:?}",
-                    sid,
+                    "Workload {:?} in Running references unknown worker {:?}",
+                    wl_id,
                     worker_id
                 );
             }
             _ => {}
+        }
+    }
+
+    // Services in Active must have a workload that is Running.
+    for (sid, svc) in &ns.services {
+        if let ServiceState::Active { pod_id, worker_id, .. } = &svc.state {
+            let wl = ns.workloads.get(&svc.workload_id);
+            assert!(
+                matches!(
+                    wl.map(|w| &w.state),
+                    Some(WorkloadState::Running { .. })
+                ),
+                "Service {:?} is Active but workload {:?} is not Running",
+                sid,
+                svc.workload_id
+            );
+            // Pod and worker should match the workload's.
+            if let Some(wl) = wl {
+                if let WorkloadState::Running { pod_id: wl_pid, worker_id: wl_wid, .. } = &wl.state {
+                    assert_eq!(pod_id, wl_pid, "Service {:?} pod_id doesn't match workload", sid);
+                    assert_eq!(worker_id, wl_wid, "Service {:?} worker_id doesn't match workload", sid);
+                }
+            }
+        }
+    }
+
+    // Workers in Destroying namespace must have fabric_status == Destroying.
+    if ns.status == NamespaceStatus::Destroying {
+        for (wid, ws) in &ns.workers {
+            assert!(
+                ws.fabric_status == FabricStatus::Destroying,
+                "Worker {:?} in Destroying namespace has fabric_status {:?}, expected Destroying",
+                wid,
+                ws.fabric_status
+            );
         }
     }
 
@@ -312,12 +462,14 @@ proptest! {
                     },
                 },
                 _ => {
-                    // NamespaceDestroyed event routed to a namespace.
+                    // NamespaceFailed event routed to a namespace.
                     OrchestratorInput::NamespaceInput {
                         namespace_id: NamespaceId(format!("ns-{}", rng_state % 5)),
                         input: NamespaceInput::WorkerEvent {
                             worker_id: WorkerId(format!("w-{}", rng_state % 3)),
-                            event: WorkerEvent::NamespaceDestroyed,
+                            event: WorkerEvent::NamespaceFailed {
+                                error: "test".into(),
+                            },
                         },
                     }
                 }

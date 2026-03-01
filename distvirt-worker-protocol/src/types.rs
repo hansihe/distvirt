@@ -1,6 +1,59 @@
+use std::fmt;
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
+
+// --- ID Newtypes ---
+// These are the canonical typed identifiers used on the wire between
+// orchestrator and worker. `#[serde(transparent)]` ensures they serialize
+// identically to bare `String`, preserving wire compatibility.
+
+macro_rules! define_id_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub String);
+
+        impl From<String> for $name {
+            fn from(s: String) -> Self { $name(s) }
+        }
+        impl From<&str> for $name {
+            fn from(s: &str) -> Self { $name(s.to_string()) }
+        }
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str { &self.0 }
+        }
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool { self.0 == other }
+        }
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool { self.0 == *other }
+        }
+    };
+}
+
+define_id_newtype!(
+    /// Identifies a namespace on the wire.
+    NamespaceId
+);
+define_id_newtype!(
+    /// Identifies a worker on the wire.
+    WorkerId
+);
+define_id_newtype!(
+    /// Identifies a pod on the wire.
+    PodId
+);
+define_id_newtype!(
+    /// Identifies a service on the wire.
+    ServiceId
+);
 
 /// Network configuration for a namespace's fabric segment.
 ///
@@ -9,7 +62,7 @@ use serde::{Deserialize, Serialize};
 /// DNS resolution and TUN-based egress for pods.
 ///
 /// The gateway MAC is a fixed locally-administered address (`02:00:00:00:00:01`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Subnet address (e.g., `172.16.0.0`).
     pub subnet: Ipv4Addr,
@@ -24,7 +77,7 @@ pub struct NetworkConfig {
 /// The orchestrator derives this from the namespace's [`NetworkConfig`] and the
 /// pod's assigned IP/MAC. The worker uses it to configure the guest VM's network
 /// interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PodNetworkConfig {
     /// The pod's IP address on the namespace fabric.
     pub ip: Ipv4Addr,
@@ -42,7 +95,7 @@ pub struct PodNetworkConfig {
 /// config (entrypoint, cmd, env, working_dir, user) and merges it with these
 /// overrides. Explicit values here take precedence; `None`/empty fields fall
 /// through to image defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContainerConfig {
     /// Main executable path.
     pub entrypoint: String,
@@ -68,7 +121,7 @@ pub struct ContainerConfig {
 /// Pods can contain multiple containers sharing the same VM and network namespace.
 /// Currently only single-container pods are used, but the protocol supports
 /// multiple containers from day one for future sidecar/init container support.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContainerSpec {
     /// Unique identifier for this container within its pod.
     pub container_id: String,
@@ -88,7 +141,7 @@ pub struct ContainerSpec {
 /// DNS entries typically map service names to **service IPs** (not pod IPs).
 /// The fabric gateway's DNS server queries this registry to answer DNS queries
 /// from pods. Names not found are forwarded to upstream DNS.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RegistryEntry {
     /// DNS name (e.g., `"api"`, `"database"`).
     pub name: String,
@@ -102,7 +155,7 @@ pub struct RegistryEntry {
 /// running (suspended, scaled-to-zero). This provides basic best-effort
 /// buffering only — rich activation features (readiness gating, protocol
 /// activators) live on services via [`ServicePolicy`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BufferPolicy {
     /// Maximum number of frames to buffer. `0` means drop immediately
     /// (the route miss is still reported so the orchestrator can react).
@@ -120,7 +173,7 @@ pub struct BufferPolicy {
 ///
 /// When [`ServicePolicy::activator`] is `None`, the service uses the default
 /// passthrough behavior (buffer all frames, activate on first frame).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActivatorConfig {
     /// TCP SYN-based activation.
     ///
@@ -170,7 +223,7 @@ pub enum ActivatorConfig {
 ///   know exactly when the last session ends.
 ///
 /// Reported via [`WorkerEvent::ServiceBackendNeed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum BackendNeed {
     /// No meaningful traffic. The backend may be released / scaled to zero.
     None,
@@ -189,7 +242,7 @@ pub enum BackendNeed {
 ///
 /// Controls buffering behavior and optional protocol-aware activation for a
 /// service. Passed via [`WorkerCommand::CreateService`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServicePolicy {
     /// Maximum number of frames to buffer while waiting for readiness.
     pub buffer_frames: u32,
@@ -207,7 +260,7 @@ pub struct ServicePolicy {
 /// Identifies the pod that should receive traffic for a service. The backing
 /// pod can be local (has a TAP on this worker's fabric) or remote (reached
 /// via the fabric routing table).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceBackend {
     /// The backing pod's IP address on the namespace fabric.
     pub pod_ip: Ipv4Addr,
@@ -220,11 +273,11 @@ pub struct ServiceBackend {
 /// Each entry in the fabric routing table maps a pod IP/MAC to a destination.
 /// This handles **direct pod-to-pod** forwarding (not service traffic, which
 /// goes through service entities).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RouteDestination {
     /// The pod is live on another worker. The fabric forwards frames through
     /// a tunnel to that worker.
-    RemoteWorker { worker_id: String },
+    RemoteWorker { worker_id: WorkerId },
     /// The pod is not currently running (suspended, scaled-to-zero). The fabric
     /// buffers frames per the policy and reports a
     /// [`WorkerEvent::FabricRouteMiss`] so the orchestrator can react.
@@ -236,7 +289,7 @@ pub enum RouteDestination {
 /// Routes for pods that are **local** to this worker (have a TAP on the local
 /// fabric) don't need entries — the fabric already knows about them. Route
 /// entries are only needed for remote pods and placeholders.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FabricRouteEntry {
     /// The pod's IP address.
     pub ip: Ipv4Addr,
@@ -267,7 +320,7 @@ pub enum OutputStream {
 /// 3. **Route table** — destination is a pod IP with a route entry (remote
 ///    worker or placeholder).
 /// 4. **Flood** — unknown destination, standard L2 behavior.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkerCommand {
     /// Create a namespace's local fabric segment.
     ///
@@ -275,7 +328,7 @@ pub enum WorkerCommand {
     /// and TUN egress. The worker acknowledges with [`WorkerEvent::NamespaceCreated`]
     /// when the fabric segment is ready to host pods.
     CreateNamespace {
-        namespace_id: String,
+        namespace_id: NamespaceId,
         network: NetworkConfig,
     },
 
@@ -284,7 +337,7 @@ pub enum WorkerCommand {
     /// All pods in the namespace are cancelled (with a graceful shutdown window),
     /// all services and routes are removed, and the fabric segment is destroyed.
     DestroyNamespace {
-        namespace_id: String,
+        namespace_id: NamespaceId,
     },
 
     /// Full-state replacement of the DNS registry for a namespace.
@@ -293,7 +346,7 @@ pub enum WorkerCommand {
     /// Sent when the worker first joins a namespace, or when the orchestrator
     /// wants to force reconciliation.
     RegistrySync {
-        namespace_id: String,
+        namespace_id: NamespaceId,
         entries: Vec<RegistryEntry>,
     },
 
@@ -310,8 +363,8 @@ pub enum WorkerCommand {
     ///
     /// On failure, reports [`WorkerEvent::PodFailed`] and cleans up partial state.
     LaunchPod {
-        namespace_id: String,
-        pod_id: String,
+        namespace_id: NamespaceId,
+        pod_id: PodId,
         network: PodNetworkConfig,
         containers: Vec<ContainerSpec>,
     },
@@ -322,8 +375,8 @@ pub enum WorkerCommand {
     /// a graceful VM shutdown with a timeout before force-killing. If `false`,
     /// the pod supervisor is aborted immediately (VM process killed via Drop).
     StopPod {
-        namespace_id: String,
-        pod_id: String,
+        namespace_id: NamespaceId,
+        pod_id: PodId,
         /// `true` = graceful shutdown with timeout, `false` = immediate kill.
         graceful: bool,
     },
@@ -336,7 +389,7 @@ pub enum WorkerCommand {
     /// In local mode (single worker), the routing table is typically empty
     /// since all pods are local.
     FabricRouteSync {
-        namespace_id: String,
+        namespace_id: NamespaceId,
         routes: Vec<FabricRouteEntry>,
     },
 
@@ -347,7 +400,7 @@ pub enum WorkerCommand {
     /// suspended, the orchestrator updates the entry from `RemoteWorker`
     /// to `Placeholder`.
     FabricRouteUpdate {
-        namespace_id: String,
+        namespace_id: NamespaceId,
         added: Vec<FabricRouteEntry>,
         removed_ips: Vec<Ipv4Addr>,
     },
@@ -361,8 +414,8 @@ pub enum WorkerCommand {
     ///
     /// Services are projected to **all** workers participating in a namespace.
     CreateService {
-        namespace_id: String,
-        service_id: String,
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
         /// The service's virtual IP on the fabric.
         ip: Ipv4Addr,
         /// The service's virtual MAC on the fabric.
@@ -380,8 +433,8 @@ pub enum WorkerCommand {
     /// Setting `backend` to `None` returns the service to the no-backend state
     /// (scale-to-zero). Any subsequent traffic triggers activation again.
     UpdateServiceBackend {
-        namespace_id: String,
-        service_id: String,
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
         backend: Option<ServiceBackend>,
     },
 
@@ -391,16 +444,16 @@ pub enum WorkerCommand {
     /// when readiness is achieved (container started, health check passed,
     /// etc.) — this is orchestrator policy, not a worker concern.
     ServiceReady {
-        namespace_id: String,
-        service_id: String,
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
     },
 
     /// Remove a service entity from the fabric.
     ///
     /// Any buffered frames are dropped. The service IP is no longer reachable.
     DestroyService {
-        namespace_id: String,
-        service_id: String,
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
     },
 
     /// Shut down the worker entirely.
@@ -422,7 +475,7 @@ pub enum WorkerEvent {
     /// The L2 switch, smoltcp gateway, and DNS registry are initialized.
     /// Sent in response to [`WorkerCommand::CreateNamespace`].
     NamespaceCreated {
-        namespace_id: String,
+        namespace_id: NamespaceId,
     },
 
     /// The pod's VM is booted and all containers are started.
@@ -430,16 +483,16 @@ pub enum WorkerEvent {
     /// The pod is on the fabric and reachable at its assigned IP/MAC.
     /// Sent in response to [`WorkerCommand::LaunchPod`].
     PodRunning {
-        namespace_id: String,
-        pod_id: String,
+        namespace_id: NamespaceId,
+        pod_id: PodId,
     },
 
     /// The pod's main container exited.
     ///
     /// The exit code is from the main container (first in the containers list).
     PodExited {
-        namespace_id: String,
-        pod_id: String,
+        namespace_id: NamespaceId,
+        pod_id: PodId,
         exit_code: i32,
     },
 
@@ -448,8 +501,8 @@ pub enum WorkerEvent {
     /// Possible causes: image pull failed, VM failed to boot, network setup
     /// failed, etc. The worker has cleaned up any partial state.
     PodFailed {
-        namespace_id: String,
-        pod_id: String,
+        namespace_id: NamespaceId,
+        pod_id: PodId,
         /// Human-readable error description.
         error: String,
     },
@@ -459,7 +512,7 @@ pub enum WorkerEvent {
     /// All pods in the namespace are cancelled. The orchestrator should
     /// consider the namespace dead on this worker.
     NamespaceFailed {
-        namespace_id: String,
+        namespace_id: NamespaceId,
         error: String,
     },
 
@@ -470,8 +523,8 @@ pub enum WorkerEvent {
     ///
     /// The pod continues running; only log delivery is affected.
     PodLogStreamError {
-        namespace_id: String,
-        pod_id: String,
+        namespace_id: NamespaceId,
+        pod_id: PodId,
         container_id: String,
         /// Which phase of log streaming failed (e.g., "setup", "streaming").
         phase: String,
@@ -489,7 +542,7 @@ pub enum WorkerEvent {
     /// than service activation. The orchestrator can respond by scheduling a
     /// suspended pod, updating the route from placeholder to remote worker, etc.
     FabricRouteMiss {
-        namespace_id: String,
+        namespace_id: NamespaceId,
         dst_ip: Ipv4Addr,
         dst_mac: [u8; 6],
     },
@@ -506,8 +559,8 @@ pub enum WorkerEvent {
     /// protocol activator. Services with an activator use
     /// [`WorkerEvent::ServiceBackendNeed`] instead for more nuanced signaling.
     ServiceActivation {
-        namespace_id: String,
-        service_id: String,
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
         /// The service's IP that received traffic.
         dst_ip: Ipv4Addr,
     },
@@ -520,9 +573,18 @@ pub enum WorkerEvent {
     ///
     /// See [`BackendNeed`] for the signal semantics (pulse vs. level).
     ServiceBackendNeed {
-        namespace_id: String,
-        service_id: String,
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
         need: BackendNeed,
+    },
+
+    /// The namespace has been fully torn down on this worker.
+    ///
+    /// All pods have been stopped and cleaned up, all services and routes
+    /// removed, and the fabric segment destroyed. Sent in response to
+    /// [`WorkerCommand::DestroyNamespace`].
+    NamespaceDestroyed {
+        namespace_id: NamespaceId,
     },
 }
 
@@ -537,7 +599,7 @@ pub enum WorkerEvent {
 /// to receive these streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogStreamHeader {
-    pub namespace_id: String,
-    pub pod_id: String,
+    pub namespace_id: NamespaceId,
+    pub pod_id: PodId,
     pub container_id: String,
 }

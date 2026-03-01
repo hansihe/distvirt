@@ -175,6 +175,54 @@ impl OrchestratorConnection {
         let (_, empty_rx) = mpsc::unbounded_channel();
         std::mem::replace(&mut self.incoming_rx, empty_rx)
     }
+
+    /// Split into separate reader and writer halves.
+    ///
+    /// This allows concurrent reading and writing on the control stream
+    /// without cancellation-safety issues. The reader can be moved into
+    /// a background task while the writer is used for sending commands.
+    pub fn into_split(
+        self,
+    ) -> (
+        OrchestratorReader,
+        OrchestratorWriter,
+        mpsc::UnboundedReceiver<YamuxStream>,
+    ) {
+        let (read_half, write_half) = futures_lite::io::split(self.control);
+        (
+            OrchestratorReader { read_half },
+            OrchestratorWriter { write_half },
+            self.incoming_rx,
+        )
+    }
+}
+
+/// Read half of an orchestrator connection.
+pub struct OrchestratorReader {
+    read_half: futures_lite::io::ReadHalf<YamuxStream>,
+}
+
+impl OrchestratorReader {
+    /// Receive an event from the worker.
+    pub async fn recv_event(&mut self) -> anyhow::Result<WorkerEvent> {
+        recv_msg(&mut self.read_half)
+            .await
+            .context("recv event")
+    }
+}
+
+/// Write half of an orchestrator connection.
+pub struct OrchestratorWriter {
+    write_half: futures_lite::io::WriteHalf<YamuxStream>,
+}
+
+impl OrchestratorWriter {
+    /// Send a command to the worker.
+    pub async fn send_command(&mut self, cmd: &WorkerCommand) -> anyhow::Result<()> {
+        send_msg(&mut self.write_half, cmd)
+            .await
+            .context("send command")
+    }
 }
 
 /// Clonable handle for opening log streams from background tasks.
@@ -184,6 +232,17 @@ pub struct LogStreamOpener {
 }
 
 impl LogStreamOpener {
+    /// Create a disconnected opener for testing.
+    ///
+    /// Any call to `open_log_stream` will immediately fail with
+    /// "yamux driver task gone". Useful in unit tests that don't need
+    /// actual log streaming.
+    pub fn disconnected() -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Drop _rx so sends fail immediately.
+        LogStreamOpener { conn_tx: tx }
+    }
+
     /// Open a new yamux stream for container log data.
     pub async fn open_log_stream(
         &self,

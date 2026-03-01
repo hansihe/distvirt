@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "activator-types"
+version = "0.1.0"
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -957,6 +961,7 @@ dependencies = [
 name = "distvirt-activator"
 version = "0.1.0"
 dependencies = [
+ "activator-types",
  "anyhow",
  "etherparse",
  "log",
@@ -1004,9 +1009,12 @@ dependencies = [
 name = "distvirt-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "distvirt-worker-protocol",
  "proptest",
  "serde",
  "stateright",
+ "tokio",
 ]
 
 [[package]]

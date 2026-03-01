@@ -4,97 +4,36 @@ Review of `distvirt-worker/src/fabric/` — structural issues and missing abstra
 
 ## High Impact
 
-### 1. Introduce `FabricContext<P>` (parameter bag anti-pattern)
+### 1. ~~Introduce `FabricContext<P>` (parameter bag anti-pattern)~~ DONE
 
-Every function in `forwarding.rs` passes the same 5-7 `Arc<Mutex<...>>` arguments:
+Introduced `FabricContext<P>` in `forwarding.rs` holding all shared fabric state (`ports`, `mac_table`, `route_table`, `service_table`, `gateway_tx`, `event_tx`). All forwarding functions now take `&FabricContext<P>` or `FabricContext<P>` instead of 5-7 individual `Arc<Mutex<...>>` arguments. `Fabric<P>` stores a `FabricContext<P>` field internally.
 
-- `port_read_loop` — 8 params
-- `gateway_ingress_task` — 6 params
-- `handle_unknown_unicast` — 8 params
-- `dispatch_action` — 7 params
-- `schedule_poll_timer` — 6 params
-- `send_l4_frames` — 3 params
+### 2. ~~Extract "resolve MAC -> get port -> send" helper~~ DONE
 
-These are all the same shared state. A context struct would collapse this:
+Added `FabricContextInner::resolve_mac(&self, mac: &[u8; 6]) -> Option<SharedPort<P>>` which locks `mac_table` then `ports` in one call. Replaced the duplicated two-lock pattern in 5 of 6 locations: `Fabric::send_l4_frames`, `Fabric::flush_service_frames`, `handle_unknown_unicast` (Forward branch), `dispatch_action` (ReplayPacket branch), `gateway_ingress_task` (unicast branch). `port_read_loop` keeps a separate mac_table lookup for the loopback port-ID check.
 
-```rust
-struct FabricContext<P: FramePort> {
-    ports: Arc<Mutex<HashMap<PortId, SharedPort<P>>>>,
-    mac_table: Arc<Mutex<MacTable>>,
-    route_table: Arc<Mutex<RouteTable>>,
-    service_table: Arc<Mutex<ServiceTable>>,
-    gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
-    event_tx: Option<mpsc::Sender<FabricEvent>>,
-}
-```
+### 3. ~~Deduplicate frame dispatch (`port_read_loop` vs `gateway_ingress_task`)~~ DONE
 
-Turns `port_read_loop(port_id, port, ports, mac_table, route_table, service_table, gateway_tx, event_tx)` into `port_read_loop(port_id, port, ctx)`. Adding new shared state (metrics, config) becomes non-invasive.
+Extracted `FrameSource` enum (`Port` / `Gateway`) and a shared `dispatch_frame()` function in `forwarding.rs`. Both `port_read_loop` and `gateway_ingress_task` now delegate to `dispatch_frame`, which handles parsing, optional MAC learning, broadcast/multicast flooding, gateway-MAC forwarding, unicast lookup with loopback avoidance, and unknown-unicast fallback. Port-specific behavior (MAC learning, gateway forwarding, service ARP replies) is gated on the `FrameSource::Port` variant. Gateway uses `PortId::MAX` so loopback avoidance is a no-op.
 
-### 2. Extract "resolve MAC -> get port -> send" helper
+### 4. ~~Remove duplicated methods on `Fabric` vs free functions in `forwarding.rs`~~ DONE
 
-This exact sequence appears at least 6 times across `mod.rs` and `forwarding.rs`:
-
-```rust
-let port_id = { mac_table.lock().unwrap().lookup(&mac) };
-let port = { ports.lock().unwrap().get(&port_id).cloned() };
-if let Some(port) = port {
-    port.send_frame(&frame).await;
-}
-```
-
-Locations:
-- `Fabric::send_l4_frames`
-- `Fabric::flush_service_frames`
-- `handle_unknown_unicast` (ServiceAction::Forward branch)
-- `dispatch_action` (ReplayPacket branch)
-- `gateway_ingress_task` (unicast branch)
-- `port_read_loop` (unicast branch)
-
-Should be a single method on `FabricContext`:
-
-```rust
-impl<P: FramePort> FabricContext<P> {
-    fn send_to_mac(&self, mac: &[u8; 6], frame: &[u8]) -> Option<impl Future<...>>
-}
-```
-
-### 3. Deduplicate frame dispatch (`port_read_loop` vs `gateway_ingress_task`)
-
-Both follow the same structure: parse header -> broadcast check -> MAC lookup -> `handle_unknown_unicast`. Differences:
-
-- `port_read_loop` does MAC learning
-- `port_read_loop` sends broadcast copies to the gateway
-- `port_read_loop` calls `try_service_arp_reply`
-- `gateway_ingress_task` uses `PortId::MAX` as source
-
-Could share a common `dispatch_frame()` with a flag/enum for source type.
-
-### 4. Remove duplicated methods on `Fabric` vs free functions in `forwarding.rs`
-
-`Fabric::send_l4_frames` (mod.rs:250-285) is nearly identical to `forwarding::send_l4_frames` (forwarding.rs:256-289). `Fabric::flush_service_frames` also duplicates the MAC-lookup-and-send pattern. With `FabricContext`, these would be methods on the context with no duplication.
+`Fabric::send_l4_frames` now delegates to `forwarding::send_l4_frames`. The forwarding function was made `pub(super)` and got the debug log for unknown MACs that the `Fabric` method had.
 
 ## Medium Impact
 
-### 5. Frame wrapper type (raw `Vec<u8>` everywhere)
+### 5. ~~Frame wrapper type (raw `Vec<u8>` everywhere)~~ DONE
 
-Every frame is `Vec<u8>` / `&[u8]` with manual offset math (`frame[VNET_HDR_SZ..]`, `frame[VNET_HDR_SZ..VNET_HDR_SZ + 6]`, `eth_frame[14 + 16..14 + 20]`). A thin zero-copy wrapper would prevent offset bugs and make code self-documenting:
-
-```rust
-struct FabricFrame<'a> {
-    raw: &'a [u8], // includes vnet header
-}
-
-impl FabricFrame<'_> {
-    fn vnet_hdr(&self) -> &[u8; VNET_HDR_SZ] { ... }
-    fn eth_frame(&self) -> &[u8] { &self.raw[VNET_HDR_SZ..] }
-    fn dst_mac(&self) -> [u8; 6] { ... }
-    fn src_mac(&self) -> [u8; 6] { ... }
-    fn ethertype(&self) -> u16 { ... }
-    fn ipv4_dst(&self) -> Option<Ipv4Addr> { ... }
-}
-```
-
-Also centralizes the vnet header concern (multiple places prepend `vec![0u8; VNET_HDR_SZ]`).
+Added `FabricFrame<'a>` zero-copy wrapper in `switch.rs` with accessors (`dst_mac`, `src_mac`, `ethertype`, `eth_payload`, `vnet_hdr`, `ipv4_dst`). Validates minimum frame size (`VNET_HDR_SZ + ETH_HEADER_LEN`) on construction. Also added `with_vnet_header(eth_frame)` builder and `rewrite_dst_mac(frame, mac)` helper. Updated all consumers:
+- `dispatch_frame` — uses `FabricFrame::new` instead of `parse_ethernet_header(&frame[VNET_HDR_SZ..])`
+- `handle_unknown_unicast` — uses `ff.ipv4_dst()` instead of `extract_ipv4_dst(&frame[VNET_HDR_SZ..])`
+- `try_service_arp_reply` — uses `ff.eth_payload()`, `ff.ethertype()`, `ff.src_mac()`
+- `dispatch_action`, `handle_unknown_unicast` — use `rewrite_dst_mac` for MAC rewrites
+- `send_l4_frames` — uses `with_vnet_header`
+- `flush_service_frames` in `mod.rs` — uses `rewrite_dst_mac`
+- `gateway.rs` — uses `FabricFrame` for egress frame parsing, `ff.vnet_hdr()`/`ff.src_mac()` for TUN path, `with_vnet_header` for smoltcp→fabric frames
+- `service.rs` — uses `FabricFrame` to access `eth_payload()` in L4 and L3 activator paths
+- Test helpers — use `with_vnet_header` for frame construction, `FabricFrame` for assertions
 
 ### 6. Break up `FabricGateway` monolith
 
@@ -131,9 +70,9 @@ Compiler warnings flag unused fields and methods:
 
 ## Suggested Order
 
-1. **`FabricContext<P>`** — highest leverage, eliminates parameter bag and provides home for helpers
-2. **`send_to_mac` helper** — flows naturally from (1), removes 6x duplication
-3. **Deduplicate dispatch logic** — flows naturally from (1)+(2)
-4. **Remove `Fabric` method duplication** — trivial once (1) exists
-5. **Frame wrapper** — can be done independently, incremental
+1. ~~**`FabricContext<P>`**~~ — DONE
+2. ~~**`resolve_mac` helper**~~ — DONE. Method on `FabricContextInner`, removes 5x duplication.
+3. ~~**Deduplicate dispatch logic**~~ — DONE. `dispatch_frame()` + `FrameSource` enum.
+4. ~~**Remove `Fabric` method duplication**~~ — DONE. `Fabric::send_l4_frames` delegates to `forwarding::send_l4_frames`.
+5. ~~**Frame wrapper**~~ — DONE. `FabricFrame<'a>` + `with_vnet_header` + `rewrite_dst_mac`.
 6. **Gateway decomposition** — independent, can be done later

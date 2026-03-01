@@ -34,7 +34,7 @@ impl Vmm for Firecracker {
         let config_container = config.container_image_path.clone();
         let config_vcpu = config.vcpu_count;
         let config_mem = config.mem_size_mib;
-        let config_net = config.net.as_ref().map(|n| (n.guest_ip.clone(), n.netmask.clone(), n.gateway.clone()));
+        let config_net = config.net.as_ref().map(|n| (n.guest_ip.clone(), n.netmask.clone(), n.gateway.clone(), n.guest_mac));
         let config_serial = config.serial_console;
 
         let mut instance = tokio::task::spawn_blocking(move || {
@@ -74,7 +74,7 @@ fn launch_sync(
     container_image_path: &Path,
     vcpu_count: u32,
     mem_size_mib: u32,
-    net: Option<&(String, String, String)>,
+    net: Option<&(String, String, String, [u8; 6])>,
     serial_console: bool,
 ) -> anyhow::Result<FirecrackerInstance> {
     let tmpdir = tempfile::tempdir().context("create tmpdir")?;
@@ -171,7 +171,7 @@ fn launch_sync(
     .context("configure machine")?;
 
     // Configure network interface if requested.
-    let tap_name = if let Some((guest_ip, _netmask, _gateway)) = net {
+    let tap_name = if let Some((guest_ip, _netmask, _gateway, guest_mac)) = net {
         let tap_name = crate::tap::create_persistent_tap()
             .context("create TAP device")?;
 
@@ -183,7 +183,9 @@ fn launch_sync(
             &serde_json::json!({
                 "iface_id": "eth0",
                 "host_dev_name": tap_name,
-                "guest_mac": "06:00:AC:10:00:02"
+                "guest_mac": format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                    guest_mac[0], guest_mac[1], guest_mac[2],
+                    guest_mac[3], guest_mac[4], guest_mac[5])
             }),
         )
         .context("configure network interface")?;
