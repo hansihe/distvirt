@@ -23,6 +23,10 @@ service DistvirtClient {
     rpc GetWorker(GetWorkerRequest) returns (GetWorkerResponse);
     rpc ListPods(ListPodsRequest) returns (ListPodsResponse);
 
+    // Developer network access
+    rpc ConnectNetwork(ConnectNetworkRequest) returns (ConnectNetworkResponse);
+    rpc DisconnectNetwork(DisconnectNetworkRequest) returns (DisconnectNetworkResponse);
+
     // Streaming subscriptions
     rpc WatchNamespaceStatus(WatchNamespaceStatusRequest) returns (stream NamespaceStatusEvent);
     rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
@@ -227,6 +231,26 @@ message UnspliceRequest {
     string workload_id = 2;
 }
 message UnspliceResponse {}
+
+// --- Connect / Disconnect (Developer Network Access) ---
+
+message ConnectNetworkRequest {
+    string namespace_id = 1;
+    bytes client_public_key = 2;   // 32-byte X25519 public key from CLI
+}
+
+message ConnectNetworkResponse {
+    bytes server_public_key = 1;   // 32-byte X25519 public key of worker's WG adapter
+    string endpoint = 2;           // "host:port" (worker public IP + WG listen port)
+    string client_ip = 3;          // IP assigned to client on namespace subnet
+    string subnet = 4;             // Namespace subnet CIDR (becomes AllowedIPs)
+}
+
+message DisconnectNetworkRequest {
+    string namespace_id = 1;
+    bytes client_public_key = 2;
+}
+message DisconnectNetworkResponse {}
 
 // --- Cloning ---
 

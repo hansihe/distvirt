@@ -114,6 +114,7 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
                     vmm,
                     image_provider,
                     None,
+                    "127.0.0.1".into(),
                 );
                 worker.run(conn).await
             });
@@ -170,6 +171,7 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
                     vmm,
                     image_provider,
                     None,
+                    "127.0.0.1".into(),
                 );
                 worker.run(conn).await
             });

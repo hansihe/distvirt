@@ -91,7 +91,8 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         .map_err(|_| Status::invalid_argument(format!("invalid workload IP: '{}'", network.ip)))?;
     let mac = parse_mac(&network.mac)?;
 
-    // Derive gateway/netmask from the IP (these are overridden during pod launch anyway).
+    // Gateway and netmask are populated from the namespace's NetworkConfig
+    // during pod launch in NamespaceStateMachine::handle_launch_pod.
     let pod_network = PodNetworkConfig {
         ip,
         mac,
@@ -591,6 +592,62 @@ impl DistvirtClient for DistvirtClientService {
         _request: Request<proto::StreamLogsRequest>,
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
         Err(Status::unimplemented("StreamLogs not yet implemented"))
+    }
+
+    async fn connect_network(
+        &self,
+        request: Request<proto::ConnectNetworkRequest>,
+    ) -> Result<Response<proto::ConnectNetworkResponse>, Status> {
+        let req = request.into_inner();
+        if req.client_public_key.len() != 32 {
+            return Err(Status::invalid_argument("client_public_key must be 32 bytes"));
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&req.client_public_key);
+        let event = self
+            .unary_command(ClientCommand::Connect {
+                namespace_id: NamespaceId(req.namespace_id),
+                client_public_key: pubkey,
+            })
+            .await?;
+        match event {
+            ClientEvent::ConnectResult {
+                server_public_key,
+                endpoint,
+                client_ip,
+                subnet,
+            } => Ok(Response::new(proto::ConnectNetworkResponse {
+                server_public_key: server_public_key.to_vec(),
+                endpoint,
+                client_ip,
+                subnet,
+            })),
+            ClientEvent::Error { message } => Err(event_to_error_status(message)),
+            _ => Err(Status::internal("unexpected response from orchestrator")),
+        }
+    }
+
+    async fn disconnect_network(
+        &self,
+        request: Request<proto::DisconnectNetworkRequest>,
+    ) -> Result<Response<proto::DisconnectNetworkResponse>, Status> {
+        let req = request.into_inner();
+        if req.client_public_key.len() != 32 {
+            return Err(Status::invalid_argument("client_public_key must be 32 bytes"));
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&req.client_public_key);
+        let event = self
+            .unary_command(ClientCommand::Disconnect {
+                namespace_id: NamespaceId(req.namespace_id),
+                client_public_key: pubkey,
+            })
+            .await?;
+        match event {
+            ClientEvent::Ok => Ok(Response::new(proto::DisconnectNetworkResponse {})),
+            ClientEvent::Error { message } => Err(event_to_error_status(message)),
+            _ => Err(Status::internal("unexpected response from orchestrator")),
+        }
     }
 
     type StreamEventsStream = ReceiverStream<Result<proto::NamespaceEvent, Status>>;

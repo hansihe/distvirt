@@ -3,7 +3,13 @@ name = "distvirt-worker"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "distvirt-worker"
+path = "src/main.rs"
+
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
 anyhow = "1"
 containerd-client = "0.8"
 distvirt-guest-protocol = { path = "../distvirt-guest-protocol" }
@@ -21,6 +27,8 @@ tonic = "0.12"
 yamux = "0.13.9"
 tokio-util = { version = "0.7.18", features = ["compat"] }
 futures-lite = "2.6.1"
+boringtun = "0.6"
+sha2 = "0.10"
 
 [dev-dependencies]
 env_logger = "0.11"

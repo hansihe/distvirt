@@ -2,28 +2,36 @@
 //!
 //! Both sides share the same yamux session over an arbitrary async byte stream
 //! (`tokio::io::duplex` for local mode, TCP/TLS for distributed mode). The
-//! orchestrator is the yamux Client, the worker is the yamux Server.
+//! worker is the yamux Client (opens the control stream), the orchestrator is
+//! the yamux Server (accepts it). This ensures the worker's first write
+//! (`send_hello`) triggers the lazy SYN frame.
 //!
 //! # Example: In-Process Connection (Local Mode)
 //!
 //! ```rust,no_run
-//! use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
+//! use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection, WorkerHello, WorkerCapabilities};
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let (orch_transport, worker_transport) = tokio::io::duplex(64 * 1024);
 //!
 //! let (mut orch, mut worker) = tokio::try_join!(
 //!     OrchestratorConnection::connect(orch_transport),
-//!     WorkerConnection::accept(worker_transport),
+//!     async {
+//!         let mut w = WorkerConnection::accept(worker_transport).await?;
+//!         // Worker must write first to flush the yamux SYN frame.
+//!         w.send_hello(&WorkerHello {
+//!             auth_token: String::new(),
+//!             capabilities: WorkerCapabilities {
+//!                 has_kvm: false,
+//!                 has_containerd: false,
+//!                 available_adapters: vec![],
+//!                 max_pods: 0,
+//!                 available_memory_mb: 0,
+//!             },
+//!         }).await?;
+//!         Ok::<_, anyhow::Error>(w)
+//!     },
 //! )?;
-//!
-//! // Orchestrator sends commands, worker receives them:
-//! // orch.send_command(&cmd).await?;
-//! // let cmd = worker.recv_command().await?;
-//!
-//! // Worker sends events, orchestrator receives them:
-//! // worker.send_event(&event).await?;
-//! // let event = orch.recv_event().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -35,14 +43,17 @@ use tokio::sync::mpsc;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::codec;
-use crate::types::{LogStreamHeader, WorkerCommand, WorkerEvent};
+use crate::types::{
+    LogStreamHeader, WorkerAccepted, WorkerCommand, WorkerEvent, WorkerHello, WorkerReady,
+};
 
 type YamuxStream = yamux::Stream;
 
 /// Orchestrator-side connection to a worker over yamux.
 ///
-/// The orchestrator is the yamux Client — it opens the control stream.
-/// Log streams are initiated by the worker and accepted here.
+/// The orchestrator is the yamux Server — it accepts the control stream
+/// opened by the worker. Log streams are initiated by the worker and
+/// accepted here.
 pub struct OrchestratorConnection {
     control: YamuxStream,
     incoming_rx: mpsc::UnboundedReceiver<YamuxStream>,
@@ -51,55 +62,23 @@ pub struct OrchestratorConnection {
 impl OrchestratorConnection {
     /// Establish a connection over the given transport.
     ///
-    /// Creates a yamux Client connection, opens the control stream,
-    /// and spawns a background task to drive yamux and collect incoming streams.
+    /// Creates a yamux Server connection, accepts the control stream
+    /// (opened by the worker), and spawns a background task to drive yamux
+    /// and collect incoming streams (log streams).
     pub async fn connect(
         transport: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     ) -> anyhow::Result<Self> {
         let compat = transport.compat();
         let mut conn =
-            yamux::Connection::new(compat, yamux::Config::default(), yamux::Mode::Client);
+            yamux::Connection::new(compat, yamux::Config::default(), yamux::Mode::Server);
 
-        // Open control stream while driving the connection.
-        let mut control_opt: Option<YamuxStream> = None;
-        let mut early_inbound: Vec<YamuxStream> = Vec::new();
-
-        poll_fn(|cx| {
-            // Drive inbound.
-            loop {
-                match conn.poll_next_inbound(cx) {
-                    std::task::Poll::Ready(Some(Ok(stream))) => early_inbound.push(stream),
-                    std::task::Poll::Ready(Some(Err(e))) => {
-                        return std::task::Poll::Ready(Err(anyhow::Error::from(e)))
-                    }
-                    std::task::Poll::Ready(None) => {
-                        return std::task::Poll::Ready(Err(anyhow::anyhow!(
-                            "yamux connection closed"
-                        )))
-                    }
-                    std::task::Poll::Pending => break,
-                }
-            }
-            // Open outbound.
-            match conn.poll_new_outbound(cx) {
-                std::task::Poll::Ready(Ok(stream)) => {
-                    control_opt = Some(stream);
-                    std::task::Poll::Ready(Ok(()))
-                }
-                std::task::Poll::Ready(Err(e)) => {
-                    std::task::Poll::Ready(Err(anyhow::Error::from(e)))
-                }
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            }
-        })
-        .await?;
-
-        let control = control_opt.unwrap();
+        // Accept the control stream (first inbound stream from the worker).
+        let control = poll_fn(|cx| conn.poll_next_inbound(cx))
+            .await
+            .context("yamux connection closed before control stream")?
+            .context("yamux error accepting control stream")?;
 
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        for stream in early_inbound {
-            let _ = incoming_tx.send(stream);
-        }
 
         // Spawn driver task.
         tokio::spawn(async move {
@@ -127,6 +106,31 @@ impl OrchestratorConnection {
             incoming_rx,
         })
     }
+
+    // --- Handshake methods (orchestrator side) ---
+
+    /// Receive a [`WorkerHello`] from the worker.
+    pub async fn recv_hello(&mut self) -> anyhow::Result<WorkerHello> {
+        codec::recv_worker_hello(&mut self.control)
+            .await
+            .context("recv WorkerHello")
+    }
+
+    /// Send a [`WorkerAccepted`] to the worker.
+    pub async fn send_accepted(&mut self, accepted: &WorkerAccepted) -> anyhow::Result<()> {
+        codec::send_worker_accepted(&mut self.control, accepted)
+            .await
+            .context("send WorkerAccepted")
+    }
+
+    /// Receive a [`WorkerReady`] from the worker.
+    pub async fn recv_ready(&mut self) -> anyhow::Result<WorkerReady> {
+        codec::recv_worker_ready(&mut self.control)
+            .await
+            .context("recv WorkerReady")
+    }
+
+    // --- Command/event methods ---
 
     /// Send a command to the worker.
     pub async fn send_command(&mut self, cmd: &WorkerCommand) -> anyhow::Result<()> {
@@ -268,7 +272,7 @@ impl LogStreamOpener {
 
 /// Worker-side connection to the orchestrator over yamux.
 ///
-/// The worker is the yamux Server — it accepts the control stream.
+/// The worker is the yamux Client — it opens the control stream.
 /// Log streams are opened by the worker toward the orchestrator.
 pub struct WorkerConnection {
     control: YamuxStream,
@@ -282,20 +286,51 @@ struct NewStreamRequest {
 impl WorkerConnection {
     /// Accept a connection from the given transport.
     ///
-    /// Creates a yamux Server connection, accepts the control stream,
+    /// Creates a yamux Client connection, opens the control stream,
     /// and spawns a background driver task.
     pub async fn accept(
         transport: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     ) -> anyhow::Result<Self> {
         let compat = transport.compat();
         let mut conn =
-            yamux::Connection::new(compat, yamux::Config::default(), yamux::Mode::Server);
+            yamux::Connection::new(compat, yamux::Config::default(), yamux::Mode::Client);
 
-        // Accept the control stream (first inbound stream from the client).
-        let control = poll_fn(|cx| conn.poll_next_inbound(cx))
-            .await
-            .context("yamux connection closed before control stream")?
-            .context("yamux error accepting control stream")?;
+        // Open the control stream while driving the connection.
+        let mut control_opt: Option<YamuxStream> = None;
+
+        poll_fn(|cx| {
+            // Drive inbound (needed to process yamux frames from the peer).
+            loop {
+                match conn.poll_next_inbound(cx) {
+                    std::task::Poll::Ready(Some(Ok(_stream))) => {
+                        log::warn!("worker: unexpected inbound yamux stream during setup, ignoring");
+                    }
+                    std::task::Poll::Ready(Some(Err(e))) => {
+                        return std::task::Poll::Ready(Err(anyhow::Error::from(e)))
+                    }
+                    std::task::Poll::Ready(None) => {
+                        return std::task::Poll::Ready(Err(anyhow::anyhow!(
+                            "yamux connection closed"
+                        )))
+                    }
+                    std::task::Poll::Pending => break,
+                }
+            }
+            // Open the control stream outbound.
+            match conn.poll_new_outbound(cx) {
+                std::task::Poll::Ready(Ok(stream)) => {
+                    control_opt = Some(stream);
+                    std::task::Poll::Ready(Ok(()))
+                }
+                std::task::Poll::Ready(Err(e)) => {
+                    std::task::Poll::Ready(Err(anyhow::Error::from(e)))
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        })
+        .await?;
+
+        let control = control_opt.unwrap();
 
         let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<NewStreamRequest>();
 
@@ -334,6 +369,31 @@ impl WorkerConnection {
 
         Ok(WorkerConnection { control, conn_tx })
     }
+
+    // --- Handshake methods (worker side) ---
+
+    /// Send a [`WorkerHello`] to the orchestrator.
+    pub async fn send_hello(&mut self, hello: &WorkerHello) -> anyhow::Result<()> {
+        codec::send_worker_hello(&mut self.control, hello)
+            .await
+            .context("send WorkerHello")
+    }
+
+    /// Receive a [`WorkerAccepted`] from the orchestrator.
+    pub async fn recv_accepted(&mut self) -> anyhow::Result<WorkerAccepted> {
+        codec::recv_worker_accepted(&mut self.control)
+            .await
+            .context("recv WorkerAccepted")
+    }
+
+    /// Send a [`WorkerReady`] to the orchestrator.
+    pub async fn send_ready(&mut self) -> anyhow::Result<()> {
+        codec::send_worker_ready(&mut self.control, &WorkerReady {})
+            .await
+            .context("send WorkerReady")
+    }
+
+    // --- Command/event methods ---
 
     /// Receive a command from the orchestrator.
     pub async fn recv_command(&mut self) -> anyhow::Result<WorkerCommand> {

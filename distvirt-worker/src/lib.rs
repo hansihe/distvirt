@@ -1,3 +1,4 @@
+pub(crate) mod adapter;
 pub(crate) mod fabric;
 pub(crate) mod gateway;
 pub mod image_provider;

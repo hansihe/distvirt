@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use tokio::io::unix::AsyncFd;
+use tokio::sync::mpsc;
 
 use crate::tap::TapDevice;
 
@@ -118,5 +119,82 @@ impl FramePort for Port {
 
     async fn send_frame(&self, buf: &[u8]) -> io::Result<usize> {
         self.send_frame(buf).await
+    }
+}
+
+/// A channel-backed L2 port for adapter virtual interfaces.
+///
+/// The fabric side holds a `ChannelPort`; the adapter side holds the
+/// opposite ends of the mpsc channels.
+pub struct ChannelPort {
+    rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
+    tx: mpsc::Sender<Vec<u8>>,
+}
+
+impl ChannelPort {
+    /// Create a new channel port pair.
+    ///
+    /// Returns `(port, adapter_tx, adapter_rx)` where:
+    /// - `port` is the fabric-side `ChannelPort` (implements `FramePort`)
+    /// - `adapter_tx` sends frames *into* the fabric (adapter → fabric)
+    /// - `adapter_rx` receives frames *from* the fabric (fabric → adapter)
+    pub fn new(buffer_size: usize) -> (Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+        // adapter→fabric direction
+        let (adapter_tx, fabric_rx) = mpsc::channel(buffer_size);
+        // fabric→adapter direction
+        let (fabric_tx, adapter_rx) = mpsc::channel(buffer_size);
+
+        let port = ChannelPort {
+            rx: tokio::sync::Mutex::new(fabric_rx),
+            tx: fabric_tx,
+        };
+
+        (port, adapter_tx, adapter_rx)
+    }
+}
+
+impl FramePort for ChannelPort {
+    async fn recv_frame(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut rx = self.rx.lock().await;
+        match rx.recv().await {
+            Some(frame) => {
+                let len = frame.len().min(buf.len());
+                buf[..len].copy_from_slice(&frame[..len]);
+                Ok(len)
+            }
+            None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "channel closed")),
+        }
+    }
+
+    async fn send_frame(&self, buf: &[u8]) -> io::Result<usize> {
+        let data = buf.to_vec();
+        let len = data.len();
+        self.tx
+            .send(data)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "channel closed"))?;
+        Ok(len)
+    }
+}
+
+/// Enum dispatch for fabric ports: either a real TAP or a virtual channel.
+pub enum FabricPort {
+    Tap(Port),
+    Virtual(ChannelPort),
+}
+
+impl FramePort for FabricPort {
+    async fn recv_frame(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            FabricPort::Tap(p) => p.recv_frame(buf).await,
+            FabricPort::Virtual(p) => p.recv_frame(buf).await,
+        }
+    }
+
+    async fn send_frame(&self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            FabricPort::Tap(p) => p.send_frame(buf).await,
+            FabricPort::Virtual(p) => p.send_frame(buf).await,
+        }
     }
 }

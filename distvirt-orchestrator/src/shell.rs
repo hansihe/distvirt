@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use distvirt_worker_protocol::{OrchestratorConnection, OrchestratorWriter};
 
@@ -16,6 +17,8 @@ pub struct OrchestratorShell {
     msg_rx: mpsc::UnboundedReceiver<ShellMsg>,
     timer_handles: HashMap<TimerKey, tokio::task::JoinHandle<()>>,
     timer_ns: HashMap<TimerKey, NamespaceId>,
+    next_worker_id: u64,
+    wg_listen_port: u16,
 }
 
 struct WorkerHandle {
@@ -50,6 +53,9 @@ enum ShellMsg {
     ClientDisconnected {
         client_id: ClientId,
     },
+    WorkerConnection {
+        conn: OrchestratorConnection,
+    },
 }
 
 /// Cloneable handle for sending commands to the shell from gRPC handlers.
@@ -78,6 +84,11 @@ impl ShellHandle {
         let _ = self.msg_tx.send(ShellMsg::ClientDisconnected { client_id });
     }
 
+    /// Submit a new worker connection to be handled by the shell's run loop.
+    pub fn submit_worker_connection(&self, conn: OrchestratorConnection) {
+        let _ = self.msg_tx.send(ShellMsg::WorkerConnection { conn });
+    }
+
     /// Send a command and wait for the response.
     pub async fn send_command(
         &self,
@@ -99,7 +110,7 @@ impl ShellHandle {
 }
 
 impl OrchestratorShell {
-    pub fn new() -> Self {
+    pub fn new(wg_listen_port: u16) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         OrchestratorShell {
             orchestrator: Orchestrator::new(),
@@ -109,6 +120,8 @@ impl OrchestratorShell {
             msg_rx,
             timer_handles: HashMap::new(),
             timer_ns: HashMap::new(),
+            next_worker_id: 1,
+            wg_listen_port,
         }
     }
 
@@ -121,13 +134,56 @@ impl OrchestratorShell {
         }
     }
 
-    /// Add a worker connection. Spawns a reader task that pushes events into the message channel.
+    /// Add a worker connection. Performs the three-step handshake (WorkerHello →
+    /// WorkerAccepted → WorkerReady), then spawns a reader task that pushes
+    /// events into the message channel. Returns the assigned worker ID.
     pub async fn add_worker(
         &mut self,
-        worker_id: WorkerId,
-        capabilities: WorkerCapabilities,
-        conn: OrchestratorConnection,
-    ) {
+        mut conn: OrchestratorConnection,
+    ) -> anyhow::Result<WorkerId> {
+        // Allocate worker ID.
+        let id = self.next_worker_id;
+        self.next_worker_id += 1;
+        let worker_id = WorkerId::from(format!("w-{}", id));
+
+        // Handshake: recv hello, send accepted, recv ready.
+        let hello = conn.recv_hello().await?;
+
+        // Build adapter configs. If worker supports WireGuard, generate a keypair.
+        let mut adapters = vec![];
+        let mut wg_config = None;
+
+        if hello.capabilities.available_adapters.iter().any(|a| a == "wireguard") {
+            let private_key = StaticSecret::random_from_rng(rand::thread_rng());
+            let public_key = PublicKey::from(&private_key);
+            let listen_port = self.wg_listen_port;
+
+            adapters.push(distvirt_worker_protocol::AdapterConfig::WireGuard {
+                listen_port,
+                private_key: private_key.to_bytes().to_vec(),
+            });
+
+            wg_config = Some(WorkerWgConfig {
+                listen_port,
+                public_key: public_key.to_bytes(),
+            });
+        }
+
+        // Auth validation placeholder — always accept.
+        conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
+            worker_id: worker_id.clone(),
+            adapters,
+        })
+        .await?;
+        conn.recv_ready().await?;
+
+        // Map protocol capabilities to orchestrator capabilities.
+        let capabilities = WorkerCapabilities {
+            max_pods: hello.capabilities.max_pods,
+            available_memory_mb: hello.capabilities.available_memory_mb,
+            public_endpoint: hello.capabilities.public_endpoint.clone(),
+        };
+
         let tx = self.msg_tx.clone();
         let wid = worker_id.clone();
 
@@ -169,10 +225,13 @@ impl OrchestratorShell {
 
         // Feed WorkerConnected to the orchestrator SM.
         let output = self.orchestrator.step(OrchestratorInput::WorkerConnected {
-            worker_id,
+            worker_id: worker_id.clone(),
             capabilities,
+            wg_config,
         });
         self.process_output(output).await;
+
+        Ok(worker_id)
     }
 
     /// Feed a client command into the orchestrator.
@@ -255,6 +314,13 @@ impl OrchestratorShell {
                 // (already handled in process_output)
                 return;
             }
+            ShellMsg::WorkerConnection { conn } => {
+                match self.add_worker(conn).await {
+                    Ok(worker_id) => log::info!("worker connected: {}", worker_id.0),
+                    Err(e) => log::error!("worker handshake failed: {}", e),
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -280,7 +346,8 @@ impl OrchestratorShell {
             // Already handled above.
             ShellMsg::ClientConnected { .. }
             | ShellMsg::ClientDisconnected { .. }
-            | ShellMsg::ClientCommand { .. } => unreachable!(),
+            | ShellMsg::ClientCommand { .. }
+            | ShellMsg::WorkerConnection { .. } => unreachable!(),
         };
 
         if let Some(input) = input {

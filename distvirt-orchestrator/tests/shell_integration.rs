@@ -6,15 +6,11 @@ use distvirt_orchestrator::shell::OrchestratorShell;
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{
     ContainerConfig, ContainerSpec, OrchestratorConnection, PodNetworkConfig, ServicePolicy,
-    WorkerCommand, WorkerConnection, WorkerEvent,
+    WorkerCapabilities, WorkerCommand, WorkerConnection, WorkerEvent, WorkerHello,
 };
 
-/// Mock worker that auto-responds to commands.
-/// Accepts the connection internally so it can be spawned before connect().
-async fn mock_worker(
-    transport: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-) {
-    let mut conn = WorkerConnection::accept(transport).await.unwrap();
+/// Mock worker command loop. Runs after the handshake is complete.
+async fn mock_worker_loop(mut conn: WorkerConnection) {
     loop {
         match conn.recv_command().await {
             Ok(WorkerCommand::CreateNamespace { namespace_id, .. }) => {
@@ -55,6 +51,25 @@ async fn mock_worker(
             Err(_) => break,
         }
     }
+}
+
+/// Perform the worker-side handshake on an accepted connection.
+async fn mock_worker_handshake(conn: &mut WorkerConnection) {
+    conn.send_hello(&WorkerHello {
+        auth_token: "test".to_string(),
+        capabilities: WorkerCapabilities {
+            has_kvm: true,
+            has_containerd: true,
+            available_adapters: vec![],
+            max_pods: 10,
+            available_memory_mb: 1024,
+            public_endpoint: String::new(),
+        },
+    })
+    .await
+    .unwrap();
+    let _accepted = conn.recv_accepted().await.unwrap();
+    conn.send_ready().await.unwrap();
 }
 
 fn test_spec() -> NamespaceSpec {
@@ -119,28 +134,21 @@ fn test_spec() -> NamespaceSpec {
 async fn test_always_on_service_full_lifecycle() {
     let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
-    // Spawn mock worker with accept inside — yamux only sends the stream-open
-    // frame when data is first written, so accept must run concurrently with
-    // the first send_command.
-    let _worker_handle = tokio::spawn(mock_worker(worker_half));
+    // Spawn mock worker — accept + handshake + command loop.
+    // Must run concurrently because yamux needs both sides driving
+    // the connection for the handshake to complete.
+    let _worker_handle = tokio::spawn(async move {
+        let mut conn = WorkerConnection::accept(worker_half).await.unwrap();
+        mock_worker_handshake(&mut conn).await;
+        mock_worker_loop(conn).await;
+    });
 
-    // Connect orchestrator side (yamux Client opens outbound control stream,
-    // but the SYN frame is deferred until the first write).
+    // Connect orchestrator side and perform handshake.
     let orch_conn = OrchestratorConnection::connect(orch_half).await.unwrap();
 
-    // Set up shell and add worker. WorkerConnected produces no commands,
-    // so nothing is written to the control stream yet.
-    let mut shell = OrchestratorShell::new();
-    shell
-        .add_worker(
-            WorkerId::from("w-1"),
-            WorkerCapabilities {
-                max_pods: 10,
-                available_memory_mb: 1024,
-            },
-            orch_conn,
-        )
-        .await;
+    let mut shell = OrchestratorShell::new(51820);
+    let worker_id = shell.add_worker(orch_conn).await.unwrap();
+    assert_eq!(worker_id, WorkerId::from("w-1"));
 
     // Create namespace — this produces a CreateNamespace command which is
     // the FIRST write to the control stream. The yamux SYN frame is sent,

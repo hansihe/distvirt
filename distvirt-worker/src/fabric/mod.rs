@@ -6,7 +6,7 @@ pub(crate) mod service;
 pub(crate) mod switch;
 
 pub use switch::GATEWAY_IP_STR;
-pub use port::{FramePort, Port, PortId};
+pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use route::RouteTable;
 pub use service::ServiceTable;
 pub(crate) use forwarding::FabricContextInner;
@@ -91,6 +91,19 @@ impl Fabric<Port> {
     ) -> std::io::Result<(PortId, TaskHandle<()>)> {
         let port = Port::new(tap)?;
         Ok(self.add_port_inner(port, Some(pod_ip), Some(pod_mac)))
+    }
+}
+
+impl Fabric<FabricPort> {
+    /// Add a TAP device as a port, wrapping it in `FabricPort::Tap`.
+    pub fn add_tap_port(
+        &mut self,
+        tap: TapDevice,
+        pod_ip: Ipv4Addr,
+        pod_mac: [u8; 6],
+    ) -> std::io::Result<(PortId, TaskHandle<()>)> {
+        let port = Port::new(tap)?;
+        Ok(self.add_port_inner(FabricPort::Tap(port), Some(pod_ip), Some(pod_mac)))
     }
 }
 

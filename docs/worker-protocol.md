@@ -10,7 +10,7 @@ This protocol is transport-agnostic. The same message types flow over:
 
 The transport is a **yamux**-multiplexed bidirectional stream. The primary control stream carries length-prefixed **Cap'n Proto** messages (commands and events). Additional yamux streams carry out-of-band data like container log output.
 
-> **Status:** The current implementation uses postcard (a compact serde-based binary format) as a placeholder. The wire format is being migrated to Cap'n Proto for zero-copy deserialization, proper schema evolution, and first-class binary data support. The message semantics are format-agnostic — only the serialization changes.
+The wire format is Cap'n Proto, with the schema at `distvirt-worker-protocol/schema/worker_protocol.capnp`.
 
 ---
 

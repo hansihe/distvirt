@@ -7,6 +7,7 @@ mod commands;
 mod config;
 mod connection;
 mod format;
+mod tun;
 
 use commands::{LegacyCommands, OutputFormat};
 
@@ -133,6 +134,19 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ContextCommands>,
     },
+    /// Connect to a namespace network via WireGuard tunnel
+    Connect {
+        /// Namespace ID
+        namespace_id: String,
+        /// Print wg-quick config instead of establishing tunnel
+        #[arg(long)]
+        config: bool,
+    },
+    /// Disconnect from a namespace network
+    Disconnect {
+        /// Namespace ID
+        namespace_id: String,
+    },
     /// Legacy in-process commands (compose-up, run-image)
     Legacy {
         #[command(subcommand)]
@@ -252,6 +266,15 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Delete { resource, name } => {
                     commands::resource::delete(client, &resource, &name).await?;
+                }
+                Commands::Connect {
+                    namespace_id,
+                    config,
+                } => {
+                    commands::connect::connect(client, &namespace_id, config).await?;
+                }
+                Commands::Disconnect { namespace_id } => {
+                    commands::connect::disconnect(client, &namespace_id).await?;
                 }
                 Commands::Login { .. }
                 | Commands::Context { .. }

@@ -127,6 +127,7 @@ Smart overview that scales from namespace level down to individual workload deta
 ```
 $ dv status myapp
 Namespace: myapp (active)  Workers: 3  Capacity: 72%
+Ingress: wireguard (connected via dv connect)
 
 Workloads: 189 total — 12 running, 177 dormant
 Services: 247 total — 15 active, 232 idle
@@ -153,6 +154,7 @@ Workload: api (running)
   Pod: pod-3a1f on worker-east
   Image: myapp/api:v1.2
   Demand: 2 services
+  Reachable: api.myapp.dv / 10.0.1.5
 
   Services:
     SERVICE   STATE    ACTIVATION   BACKEND NEED   IDLE
@@ -161,7 +163,7 @@ Workload: api (running)
     health    active   tcp:8080     traffic        —
 ```
 
-Shows the workload's compute state and all services attached to it.
+Shows the workload's compute state and all services attached to it. The `Reachable` line appears when you have an active `dv connect` session to the namespace.
 
 ### `dv logs`
 
@@ -193,29 +195,56 @@ Without `-f`, shows recent history. With `-f`, live stream.
 
 Filters: `--workload <name>`, `--service <name>`.
 
-### `dv splice`
+### `dv connect`
 
-Splice a workload to the local machine. Runs in the foreground, holds the splice open. Sets up network plumbing so the local process can reach other services in the namespace and other services can reach it.
+Connect your local machine to a namespace's network via WireGuard. Runs in the foreground, holds the tunnel open. After connecting, all services in the namespace are reachable by IP and DNS name.
 
 ```
-$ dv splice myapp/api
-Splicing into myapp as api...
-  ✓ Connected to orchestrator
-  ✓ Fabric tunnel established
-  ✓ Network configured: api is 10.0.1.5
-    Other services reachable at their namespace IPs
-    Traffic to api (from other services) routes to localhost
-
-Run your service locally — it can reach other services
-and other services can reach it.
+$ dv connect myapp
+Connecting to myapp via WireGuard...
+  ✓ Obtained config from orchestrator
+  ✓ WireGuard tunnel established
+  ✓ Routes configured for 10.0.1.0/24
+  ✓ DNS configured: *.myapp.dv
 
   Namespace subnet: 10.0.1.0/24
-  Your IP:          10.0.1.5
+  Reachable services:
+    api        10.0.1.5   api.myapp.dv
+    postgres   10.0.1.8   postgres.myapp.dv
+    web        10.0.1.12  web.myapp.dv
 
-Ctrl+C to unsplice.
+Connected. Ctrl+C to disconnect.
 ```
 
-The local process is not containerized. Splice is about network access, not compute isolation.
+```
+dv connect <namespace>                # auto-connect (default)
+dv connect <namespace> --config       # emit wg-quick config file, don't connect
+dv connect <namespace> --qr           # QR code for mobile WireGuard clients
+dv disconnect <namespace>             # tear down from another terminal
+```
+
+`dv connect` is read-only access — you can reach services in the namespace, but you don't take over any workload's identity. See `dv splice` for that.
+
+**Implementation**: The CLI embeds a userspace WireGuard implementation ([boringtun](https://github.com/cloudflare/boringtun)) — no external WireGuard tooling required. The orchestrator provides key material and endpoint config. The CLI handles tunnel device creation, route configuration, and DNS setup.
+
+Requires elevated privileges for tunnel creation. The CLI prompts for sudo when needed.
+
+**DNS**: Each connected namespace gets a DNS domain `<namespace>.dv`. Service names resolve through a lightweight DNS resolver embedded in the CLI process.
+
+- macOS: scoped resolver via `/etc/resolver/<namespace>.dv` — only affects the namespace domain, no system-wide DNS changes.
+- Linux: `systemd-resolved` or `/etc/resolver/` depending on distro.
+
+Multiple simultaneous connections work — each gets a separate domain (`myapp.dv`, `staging.dv`) with no conflicts.
+
+**Platform-specific surface**: The WireGuard protocol (boringtun) is cross-platform. Only three concerns need platform code: tunnel device creation (`utun` on macOS, `/dev/net/tun` on Linux), route manipulation (`route` vs `ip route`), and DNS resolver configuration.
+
+**Escape hatches**: `--config` and `--qr` output standard WireGuard config without touching the system. Useful for corporate MDM environments, VPN conflicts, or platforms where the built-in tunnel doesn't work.
+
+### `dv splice`
+
+> **Status:** Deferred. Will build on the same tunnel infrastructure as `dv connect`. Design TBD.
+
+Splice a workload to the local machine — take over its identity in the namespace so other services route to your local process. Unlike `dv connect` (read-only access), splice makes you *be* the workload.
 
 ### `dv clone`
 
@@ -237,6 +266,7 @@ Systematic access to all resource types. Predictable, scriptable. Every resource
 - `workload` — pod lifecycle, compute
 - `worker` — infrastructure nodes
 - `pod` — running pod instances
+- `adapter` — ingress adapters (WireGuard, reverse proxy, etc.)
 
 ### Commands
 
@@ -256,8 +286,10 @@ dv get services -n myapp
 dv get workloads -n myapp
 dv get workers
 dv get pods -n myapp
+dv get adapters
 dv describe service myapp/grpc
 dv describe workload myapp/api
+dv describe adapter wireguard
 dv get services -n myapp -o json
 ```
 
@@ -276,6 +308,7 @@ dv get services -n myapp -o json
 
 ## Deferred
 
+- `dv splice` implementation — builds on `dv connect` tunnel infrastructure, design TBD
 - Directory-based namespace context (`.distvirt` file written by `dv up`, future commands in that directory default to the namespace)
 - `dv set` for inline spec mutations (`dv set myapp/api --image foo:latest`)
 - Worker management commands beyond `dv get workers`

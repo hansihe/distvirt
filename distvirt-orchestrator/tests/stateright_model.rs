@@ -204,6 +204,8 @@ impl NamespaceSnapshot {
                     )
                 })
                 .collect(),
+            wg_peers: std::collections::HashMap::new(),
+            wg_next_host_offset: 254,
         }
     }
 }

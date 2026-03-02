@@ -51,7 +51,7 @@ pub enum OrchestratorInput {
     ClientConnected { client_id: ClientId },
     ClientDisconnected { client_id: ClientId },
     ClientCommand { client_id: ClientId, command: ClientCommand },
-    WorkerConnected { worker_id: WorkerId, capabilities: WorkerCapabilities },
+    WorkerConnected { worker_id: WorkerId, capabilities: WorkerCapabilities, wg_config: Option<WorkerWgConfig> },
     WorkerDisconnected { worker_id: WorkerId },
     NamespaceInput { namespace_id: NamespaceId, input: NamespaceInput },
 }
@@ -84,6 +84,8 @@ pub enum ClientCommand {
     GetWorker { worker_id: WorkerId },
     ListPods { namespace_id: NamespaceId },
     StreamLogs { namespace_id: NamespaceId, service_id: Option<ServiceId> },
+    Connect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
+    Disconnect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +98,12 @@ pub enum ClientEvent {
     LogChunk { namespace_id: NamespaceId, service_id: ServiceId, data: Vec<u8> },
     Error { message: String },
     Ok,
+    ConnectResult {
+        server_public_key: [u8; 32],
+        endpoint: String,
+        client_ip: String,
+        subnet: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +164,16 @@ pub enum NamespaceInput {
         workload_id: WorkloadId,
         worker_id: WorkerId,
         pod_id: PodId,
+    },
+    Connect {
+        client_id: ClientId,
+        client_public_key: [u8; 32],
+        worker_wg_public_key: [u8; 32],
+        worker_endpoint: String,
+    },
+    Disconnect {
+        client_id: ClientId,
+        client_public_key: [u8; 32],
     },
 }
 
@@ -257,6 +275,7 @@ pub struct WorkerState {
     pub capabilities: WorkerCapabilities,
     pub status: WorkerStatus,
     pub namespaces: std::collections::HashSet<NamespaceId>,
+    pub wg_config: Option<WorkerWgConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,6 +287,13 @@ pub enum WorkerStatus {
 pub struct WorkerCapabilities {
     pub max_pods: u32,
     pub available_memory_mb: u64,
+    pub public_endpoint: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerWgConfig {
+    pub listen_port: u16,
+    pub public_key: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq)]

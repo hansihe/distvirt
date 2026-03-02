@@ -478,7 +478,9 @@ proptest! {
                     capabilities: WorkerCapabilities {
                         max_pods: 10,
                         available_memory_mb: 1024,
+                        public_endpoint: String::new(),
                     },
+                    wg_config: None,
                 },
                 3 => OrchestratorInput::WorkerDisconnected {
                     worker_id: WorkerId(format!("w-{}", rng_state % 3)),

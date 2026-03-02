@@ -12,7 +12,7 @@
 //! - **TCP/TLS** — remote workers connecting to a central orchestrator (distributed mode)
 //!
 //! The transport is a **yamux**-multiplexed bidirectional connection. The primary control
-//! stream carries length-prefixed postcard-serialized messages ([`WorkerCommand`] and
+//! stream carries length-prefixed Cap'n Proto messages ([`WorkerCommand`] and
 //! [`WorkerEvent`]). Additional yamux streams carry out-of-band data like container log
 //! output.
 //!

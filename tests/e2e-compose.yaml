@@ -1,0 +1,5 @@
+name: e2e-test
+services:
+  echo:
+    image: docker.io/library/alpine:latest
+    command: ["sh", "-c", "while true; do echo 'alive'; sleep 5; done"]

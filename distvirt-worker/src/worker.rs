@@ -8,8 +8,8 @@ use anyhow::Context;
 use distvirt_activator::{ActivatorInstance, ActivatorRuntime, StreamManager, StreamManagerConfig};
 use distvirt_worker_protocol::{
     ActivatorConfig, ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, NetworkConfig,
-    PodId, PodNetworkConfig, RegistryEntry, ServiceId, WorkerCommand, WorkerConnection,
-    WorkerEvent,
+    PodId, PodNetworkConfig, RegistryEntry, ServiceId, WorkerCapabilities, WorkerCommand,
+    WorkerConnection, WorkerEvent, WorkerHello,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -17,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::task_handle::TaskHandle;
 
-use crate::fabric::{Fabric, FabricContextInner, FabricEvent, Port};
+use crate::adapter::{AdapterManager, AdapterPortHandle};
+use crate::fabric::{Fabric, FabricContextInner, FabricEvent, FabricPort};
 use crate::gateway::{DnsRegistry, FabricGateway};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
@@ -59,10 +60,11 @@ struct PodState {
 /// metrics collection), consider extracting a `NamespaceSupervisor` to formalize
 /// the one-for-all supervision pattern instead of growing this struct.
 struct NamespaceState {
-    fabric: Arc<tokio::sync::Mutex<Fabric>>,
-    tables: Arc<FabricContextInner<Port>>,
+    fabric: Arc<tokio::sync::Mutex<Fabric<FabricPort>>>,
+    tables: Arc<FabricContextInner<FabricPort>>,
     _gateway_task: TaskHandle<()>,
     _event_bridge_task: TaskHandle<()>,
+    _adapter_ports: Vec<AdapterPortHandle>,
     registry: DnsRegistry,
     pods: HashMap<PodId, PodState>,
     token: CancellationToken,
@@ -88,6 +90,10 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     worker_token: CancellationToken,
     /// Activator WASM runtime (None if no component directory or loading failed).
     activator_runtime: Option<ActivatorRuntime>,
+    /// Ingress adapter manager, initialized from handshake config.
+    adapter_manager: AdapterManager,
+    /// Public endpoint where this worker is reachable by other workers.
+    public_endpoint: String,
 }
 
 impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
@@ -97,6 +103,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         vmm: V,
         image_provider: P,
         component_dir: Option<PathBuf>,
+        public_endpoint: String,
     ) -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel(256);
         let activator_runtime = component_dir.and_then(|dir| {
@@ -118,12 +125,54 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             bg_event_rx,
             worker_token: CancellationToken::new(),
             activator_runtime,
+            adapter_manager: AdapterManager::empty(),
+            public_endpoint,
         }
     }
 
     /// Run the worker main loop: receive commands, dispatch them,
     /// and forward background events to the orchestrator.
+    /// Detect local capabilities for the WorkerHello handshake.
+    fn detect_capabilities(&self) -> WorkerCapabilities {
+        let has_kvm = std::path::Path::new("/dev/kvm").exists();
+        let containerd_socket = std::env::var("CONTAINERD_SOCKET")
+            .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
+        let has_containerd = std::path::Path::new(&containerd_socket).exists();
+        WorkerCapabilities {
+            has_kvm,
+            has_containerd,
+            available_adapters: vec!["wireguard".to_string()],
+            max_pods: 10,
+            available_memory_mb: 1024,
+            public_endpoint: self.public_endpoint.clone(),
+        }
+    }
+
     pub async fn run(mut self, mut conn: WorkerConnection) -> anyhow::Result<()> {
+        // --- Handshake ---
+        let capabilities = self.detect_capabilities();
+        log::info!("worker: capabilities: {:?}", capabilities);
+
+        conn.send_hello(&WorkerHello {
+            auth_token: String::new(),
+            capabilities,
+        })
+        .await
+        .context("handshake: send WorkerHello")?;
+
+        let accepted = conn
+            .recv_accepted()
+            .await
+            .context("handshake: recv WorkerAccepted")?;
+        log::info!("worker: accepted as worker_id={}", accepted.worker_id);
+        self.adapter_manager = AdapterManager::new(&accepted.adapters).await;
+
+        conn.send_ready()
+            .await
+            .context("handshake: send WorkerReady")?;
+        log::info!("worker: handshake complete, entering command loop");
+
+        // --- Command loop ---
         let log_opener = conn.log_stream_opener();
 
         let result = loop {
@@ -217,6 +266,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 namespace_id,
                 entries,
             } => self.handle_registry_sync(&namespace_id, entries),
+            WorkerCommand::RegistryUpdate {
+                namespace_id,
+                added,
+                removed,
+            } => self.handle_registry_update(&namespace_id, added, removed),
             WorkerCommand::LaunchPod {
                 namespace_id,
                 pod_id,
@@ -260,6 +314,34 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 namespace_id,
                 service_id,
             } => self.handle_destroy_service(&namespace_id, &service_id),
+            WorkerCommand::AddWireGuardPeer {
+                namespace_id,
+                peer_public_key,
+                peer_ip,
+                preshared_key,
+            } => {
+                if let Some(wg) = self.adapter_manager.wireguard() {
+                    if let Err(e) = wg
+                        .add_peer(namespace_id.as_ref(), peer_public_key, peer_ip, preshared_key)
+                        .await
+                    {
+                        log::error!("wireguard: add_peer failed: {:#}", e);
+                    }
+                } else {
+                    log::warn!("wireguard: AddWireGuardPeer command but no WireGuard adapter configured");
+                }
+                Ok(())
+            }
+            WorkerCommand::RemoveWireGuardPeer { peer_public_key } => {
+                if let Some(wg) = self.adapter_manager.wireguard() {
+                    if let Err(e) = wg.remove_peer(&peer_public_key).await {
+                        log::error!("wireguard: remove_peer failed: {:#}", e);
+                    }
+                } else {
+                    log::warn!("wireguard: RemoveWireGuardPeer command but no WireGuard adapter configured");
+                }
+                Ok(())
+            }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
                 unreachable!("Shutdown handled in run()")
@@ -272,7 +354,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         namespace_id: NamespaceId,
         network: NetworkConfig,
     ) -> Result<(), FatalError> {
-        let mut fabric = Fabric::new();
+        let mut fabric = Fabric::<FabricPort>::new();
 
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
 
@@ -355,6 +437,18 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             }
         });
 
+        // Create adapter virtual ports and plug them into the fabric.
+        let adapter_ports_result = self
+            .adapter_manager
+            .create_namespace_ports(namespace_id.as_ref());
+        let mut adapter_handles = Vec::new();
+        let mut adapter_tasks = Vec::new();
+        for (channel_port, handle) in adapter_ports_result {
+            let (_port_id, task) = fabric.add_port_raw(FabricPort::Virtual(channel_port));
+            adapter_handles.push(handle);
+            adapter_tasks.push(task);
+        }
+
         log::info!(
             "worker: created namespace '{}' with fabric + gateway",
             namespace_id
@@ -365,6 +459,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             tables,
             _gateway_task: gateway_task,
             _event_bridge_task: event_bridge_task,
+            _adapter_ports: adapter_handles,
             registry,
             pods: HashMap::new(),
             token: ns_token,
@@ -443,6 +538,34 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         }
 
         log::info!("worker: synced registry for namespace '{}'", namespace_id);
+        Ok(())
+    }
+
+    fn handle_registry_update(
+        &mut self,
+        namespace_id: &NamespaceId,
+        added: Vec<RegistryEntry>,
+        removed: Vec<String>,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        let mut map = ns.registry.write().map_err(|e| {
+            FatalError::InternalInvariant(format!("registry lock poisoned: {}", e))
+        })?;
+        for name in &removed {
+            map.remove(name);
+        }
+        for entry in added {
+            map.insert(entry.name, entry.ip);
+        }
+
+        log::info!(
+            "worker: updated registry for namespace '{}' ({} removed)",
+            namespace_id,
+            removed.len()
+        );
         Ok(())
     }
 
@@ -769,7 +892,7 @@ async fn send_event(tx: &mpsc::Sender<WorkerEvent>, event: WorkerEvent) {
 async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>(
     vmm: Arc<V>,
     image_provider: Arc<P>,
-    fabric: Arc<tokio::sync::Mutex<Fabric>>,
+    fabric: Arc<tokio::sync::Mutex<Fabric<FabricPort>>>,
     kernel_path: PathBuf,
     rootfs_image_path: PathBuf,
     log_opener: LogStreamOpener,
@@ -841,7 +964,7 @@ async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>(
 async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     vmm: &V,
     image_provider: &P,
-    fabric: &tokio::sync::Mutex<Fabric>,
+    fabric: &tokio::sync::Mutex<Fabric<FabricPort>>,
     kernel_path: &PathBuf,
     rootfs_image_path: &PathBuf,
     log_opener: &LogStreamOpener,
@@ -925,7 +1048,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         let (_port_id, task) = fabric
             .lock()
             .await
-            .add_port_with_ip(tap, network.ip, network.mac)
+            .add_tap_port(tap, network.ip, network.mac)
             .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
         log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
         Some(task)
@@ -1152,7 +1275,7 @@ mod tests {
     };
     use tokio::net::UnixStream;
 
-    use crate::fabric::{Fabric, Port};
+    use crate::fabric::{Fabric, FabricPort};
     use crate::image_provider::{ImageProvider, PreparedArtifact};
     use crate::tap::TapDevice;
     use crate::vmm::{VmConfig, VmInstance, Vmm};
@@ -1209,13 +1332,14 @@ mod tests {
             StubVmm,
             StubImageProvider,
             None, // no activator component dir
+            String::new(),
         )
     }
 
     /// Inject a NamespaceState directly into the worker, bypassing
     /// handle_create_namespace (which requires root for TUN/gateway).
     fn inject_namespace(worker: &mut Worker<StubVmm, StubImageProvider>, ns_id: &str) {
-        let fabric = Fabric::<Port>::new();
+        let fabric = Fabric::<FabricPort>::new();
         let tables = fabric.tables();
 
         // Fabric event channel — receiver intentionally dropped (events go nowhere).
@@ -1236,6 +1360,7 @@ mod tests {
             tables,
             _gateway_task: gateway_task,
             _event_bridge_task: event_bridge_task,
+            _adapter_ports: Vec::new(),
             registry,
             pods: HashMap::new(),
             token: ns_token,
@@ -1770,7 +1895,7 @@ mod tests {
             error_msg: "image not found".to_string(),
         });
         let vmm = Arc::new(StubVmm);
-        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<Port>::new()));
+        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<FabricPort>::new()));
         let cancel = CancellationToken::new();
 
         let log_opener = make_log_opener();
@@ -1834,7 +1959,7 @@ mod tests {
             vm_socket: tokio::sync::Mutex::new(Some(worker_socket)),
         });
         let image_provider = Arc::new(MockImageProvider);
-        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<Port>::new()));
+        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<FabricPort>::new()));
         let cancel = CancellationToken::new();
 
         let log_opener = make_log_opener();
@@ -1895,7 +2020,7 @@ mod tests {
 
         let vmm = Arc::new(StubVmm);
         let image_provider = Arc::new(HangingImageProvider);
-        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<Port>::new()));
+        let fabric = Arc::new(tokio::sync::Mutex::new(Fabric::<FabricPort>::new()));
         let cancel = CancellationToken::new();
 
         let log_opener = make_log_opener();
@@ -1955,11 +2080,12 @@ mod tests {
                 error_msg: "intentional".to_string(),
             },
             None,
+            String::new(),
         );
 
         // Inject namespace manually.
         {
-            let fabric = Fabric::<Port>::new();
+            let fabric = Fabric::<FabricPort>::new();
             let tables = fabric.tables();
             let ns_token = w.worker_token.child_token();
             let ns = NamespaceState {
@@ -1967,6 +2093,7 @@ mod tests {
                 tables,
                 _gateway_task: TaskHandle::spawn(std::future::pending::<()>()),
                 _event_bridge_task: TaskHandle::spawn(std::future::pending::<()>()),
+                _adapter_ports: Vec::new(),
                 registry: Arc::new(RwLock::new(HashMap::new())),
                 pods: HashMap::new(),
                 token: ns_token,

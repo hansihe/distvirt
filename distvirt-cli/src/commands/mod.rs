@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod connect;
 pub mod legacy;
 pub mod namespace;
 pub mod resource;

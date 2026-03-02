@@ -6,6 +6,14 @@ The orchestrator is the central control plane for distvirt. It manages workers, 
 
 The orchestrator is a **pure state machine** at its core. All logic lives in a synchronous `step(input) -> output` function with no I/O. An async shell dispatches inputs from network connections and timers, and sends outputs to workers and clients. This separation is the foundation for testing, model checking, and fuzzing.
 
+### Implementation Status
+
+The core orchestrator (namespace/workload/service state machines, worker management, gRPC server) is implemented and functional. The following features described in this document are **stubs or not yet wired**:
+
+- **Splice / Unsplice** — handlers exist but are no-ops (return Ok without modifying state)
+- **CloneNamespace** — returns "not yet implemented" error
+- **Streaming gRPC RPCs** — `WatchNamespaceStatus`, `StreamLogs`, and `StreamEvents` are defined in the proto but return "not yet implemented" status in the gRPC handlers
+
 ---
 
 ## Core Architecture

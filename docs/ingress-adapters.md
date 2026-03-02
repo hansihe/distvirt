@@ -1,5 +1,7 @@
 # Ingress Adapters
 
+> **Status:** This document is a design proposal. No ingress adapter implementation exists yet in the codebase.
+
 Ingress adapters provide external access into the networking fabric. The fabric is an isolated per-namespace L2 network — adapters bridge traffic from outside into it, allowing developers and external systems to reach services and pods within a namespace.
 
 The primary use case is **developer access to staging environments**.

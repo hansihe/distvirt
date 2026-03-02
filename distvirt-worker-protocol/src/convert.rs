@@ -416,6 +416,9 @@ pub fn write_worker_capabilities(
     for (i, a) in val.available_adapters.iter().enumerate() {
         adapters.set(i as u32, a);
     }
+    builder.set_max_pods(val.max_pods);
+    builder.set_available_memory_mb(val.available_memory_mb);
+    builder.set_public_endpoint(&val.public_endpoint);
 }
 
 pub fn read_worker_capabilities(
@@ -430,6 +433,9 @@ pub fn read_worker_capabilities(
         has_kvm: reader.get_has_kvm(),
         has_containerd: reader.get_has_containerd(),
         available_adapters: v,
+        max_pods: reader.get_max_pods(),
+        available_memory_mb: reader.get_available_memory_mb(),
+        public_endpoint: reader.get_public_endpoint()?.to_string()?,
     })
 }
 
@@ -661,6 +667,28 @@ pub fn write_worker_command(
             b.set_namespace_id(namespace_id.as_ref());
             b.set_service_id(service_id.as_ref());
         }
+        WorkerCommand::AddWireGuardPeer {
+            namespace_id,
+            peer_public_key,
+            peer_ip,
+            preshared_key,
+        } => {
+            let mut b = builder.init_add_wire_guard_peer();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_peer_public_key(peer_public_key);
+            write_ipv4(&mut b.reborrow().init_peer_ip(), peer_ip);
+            match preshared_key {
+                Some(psk) => {
+                    b.set_has_preshared_key(true);
+                    b.set_preshared_key(psk);
+                }
+                None => b.set_has_preshared_key(false),
+            }
+        }
+        WorkerCommand::RemoveWireGuardPeer { peer_public_key } => {
+            let mut b = builder.init_remove_wire_guard_peer();
+            b.set_peer_public_key(peer_public_key);
+        }
         WorkerCommand::Shutdown => {
             builder.set_shutdown(());
         }
@@ -672,14 +700,21 @@ pub fn read_worker_command(
 ) -> capnp::Result<WorkerCommand> {
     use schema::worker_command::*;
     match reader.which()? {
-        CreateNamespace(r) => Ok(WorkerCommand::CreateNamespace {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            network: read_network_config(r.get_network()?)?,
-        }),
-        DestroyNamespace(r) => Ok(WorkerCommand::DestroyNamespace {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-        }),
+        CreateNamespace(r) => {
+            let r = r?;
+            Ok(WorkerCommand::CreateNamespace {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                network: read_network_config(r.get_network()?)?,
+            })
+        }
+        DestroyNamespace(r) => {
+            let r = r?;
+            Ok(WorkerCommand::DestroyNamespace {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+            })
+        }
         RegistrySync(r) => {
+            let r = r?;
             let entries = r.get_entries()?;
             let mut v = Vec::with_capacity(entries.len() as usize);
             for i in 0..entries.len() {
@@ -691,6 +726,7 @@ pub fn read_worker_command(
             })
         }
         RegistryUpdate(r) => {
+            let r = r?;
             let added_list = r.get_added()?;
             let mut added = Vec::with_capacity(added_list.len() as usize);
             for i in 0..added_list.len() {
@@ -708,6 +744,7 @@ pub fn read_worker_command(
             })
         }
         LaunchPod(r) => {
+            let r = r?;
             let specs = r.get_containers()?;
             let mut containers = Vec::with_capacity(specs.len() as usize);
             for i in 0..specs.len() {
@@ -720,12 +757,16 @@ pub fn read_worker_command(
                 containers,
             })
         }
-        StopPod(r) => Ok(WorkerCommand::StopPod {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-            graceful: r.get_graceful(),
-        }),
+        StopPod(r) => {
+            let r = r?;
+            Ok(WorkerCommand::StopPod {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                graceful: r.get_graceful(),
+            })
+        }
         FabricRouteSync(r) => {
+            let r = r?;
             let routes_list = r.get_routes()?;
             let mut routes = Vec::with_capacity(routes_list.len() as usize);
             for i in 0..routes_list.len() {
@@ -737,6 +778,7 @@ pub fn read_worker_command(
             })
         }
         FabricRouteUpdate(r) => {
+            let r = r?;
             let added_list = r.get_added()?;
             let mut added = Vec::with_capacity(added_list.len() as usize);
             for i in 0..added_list.len() {
@@ -753,14 +795,18 @@ pub fn read_worker_command(
                 removed_ips,
             })
         }
-        CreateService(r) => Ok(WorkerCommand::CreateService {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-            ip: read_ipv4(r.get_ip()?),
-            mac: read_mac(r.get_mac()?),
-            policy: read_service_policy(r.get_policy()?)?,
-        }),
+        CreateService(r) => {
+            let r = r?;
+            Ok(WorkerCommand::CreateService {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
+                ip: read_ipv4(r.get_ip()?),
+                mac: read_mac(r.get_mac()?),
+                policy: read_service_policy(r.get_policy()?)?,
+            })
+        }
         UpdateServiceBackend(r) => {
+            let r = r?;
             let backend = if r.get_has_backend() {
                 Some(read_service_backend(r.get_backend()?)?)
             } else {
@@ -772,14 +818,53 @@ pub fn read_worker_command(
                 backend,
             })
         }
-        ServiceReady(r) => Ok(WorkerCommand::ServiceReady {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-        }),
-        DestroyService(r) => Ok(WorkerCommand::DestroyService {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-        }),
+        ServiceReady(r) => {
+            let r = r?;
+            Ok(WorkerCommand::ServiceReady {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
+            })
+        }
+        DestroyService(r) => {
+            let r = r?;
+            Ok(WorkerCommand::DestroyService {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
+            })
+        }
+        AddWireGuardPeer(r) => {
+            let r = r?;
+            let pubkey_data = r.get_peer_public_key()?;
+            let mut peer_public_key = [0u8; 32];
+            if pubkey_data.len() >= 32 {
+                peer_public_key.copy_from_slice(&pubkey_data[..32]);
+            }
+            let preshared_key = if r.get_has_preshared_key() {
+                let psk_data = r.get_preshared_key()?;
+                let mut psk = [0u8; 32];
+                if psk_data.len() >= 32 {
+                    psk.copy_from_slice(&psk_data[..32]);
+                }
+                Some(psk)
+            } else {
+                None
+            };
+            Ok(WorkerCommand::AddWireGuardPeer {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                peer_public_key,
+                peer_ip: read_ipv4(r.get_peer_ip()?),
+                preshared_key,
+            })
+        }
+        RemoveWireGuardPeer(r) => {
+            let r = r?;
+            let pubkey_data = r.get_peer_public_key()?;
+            let mut peer_public_key = [0u8; 32];
+            if pubkey_data.len() >= 32 {
+                peer_public_key.copy_from_slice(&pubkey_data[..32]);
+            }
+            Ok(WorkerCommand::RemoveWireGuardPeer { peer_public_key })
+        }
         Shutdown(()) => Ok(WorkerCommand::Shutdown),
     }
 }
@@ -890,53 +975,83 @@ pub fn read_worker_event(
 ) -> capnp::Result<WorkerEvent> {
     use schema::worker_event::*;
     match reader.which()? {
-        NamespaceCreated(r) => Ok(WorkerEvent::NamespaceCreated {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-        }),
-        NamespaceFailed(r) => Ok(WorkerEvent::NamespaceFailed {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            error: r.get_error()?.to_string()?,
-        }),
-        NamespaceDestroyed(r) => Ok(WorkerEvent::NamespaceDestroyed {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-        }),
-        PodRunning(r) => Ok(WorkerEvent::PodRunning {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-        }),
-        PodExited(r) => Ok(WorkerEvent::PodExited {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-            exit_code: r.get_exit_code(),
-        }),
-        PodFailed(r) => Ok(WorkerEvent::PodFailed {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-            error: r.get_error()?.to_string()?,
-        }),
+        NamespaceCreated(r) => {
+            let r = r?;
+            Ok(WorkerEvent::NamespaceCreated {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+            })
+        }
+        NamespaceFailed(r) => {
+            let r = r?;
+            Ok(WorkerEvent::NamespaceFailed {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                error: r.get_error()?.to_string()?,
+            })
+        }
+        NamespaceDestroyed(r) => {
+            let r = r?;
+            Ok(WorkerEvent::NamespaceDestroyed {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+            })
+        }
+        PodRunning(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodRunning {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+            })
+        }
+        PodExited(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodExited {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                exit_code: r.get_exit_code(),
+            })
+        }
+        PodFailed(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodFailed {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                error: r.get_error()?.to_string()?,
+            })
+        }
         ShuttingDown(()) => Ok(WorkerEvent::ShuttingDown),
-        PodLogStreamError(r) => Ok(WorkerEvent::PodLogStreamError {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-            container_id: r.get_container_id()?.to_string()?,
-            phase: r.get_phase()?.to_string()?,
-            error: r.get_error()?.to_string()?,
-        }),
-        ServiceActivation(r) => Ok(WorkerEvent::ServiceActivation {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-            dst_ip: read_ipv4(r.get_dst_ip()?),
-        }),
-        ServiceBackendNeed(r) => Ok(WorkerEvent::ServiceBackendNeed {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-            need: read_backend_need(r.get_need()?)?,
-        }),
-        FabricRouteMiss(r) => Ok(WorkerEvent::FabricRouteMiss {
-            namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-            dst_ip: read_ipv4(r.get_dst_ip()?),
-            dst_mac: read_mac(r.get_dst_mac()?),
-        }),
+        PodLogStreamError(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodLogStreamError {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                container_id: r.get_container_id()?.to_string()?,
+                phase: r.get_phase()?.to_string()?,
+                error: r.get_error()?.to_string()?,
+            })
+        }
+        ServiceActivation(r) => {
+            let r = r?;
+            Ok(WorkerEvent::ServiceActivation {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
+                dst_ip: read_ipv4(r.get_dst_ip()?),
+            })
+        }
+        ServiceBackendNeed(r) => {
+            let r = r?;
+            Ok(WorkerEvent::ServiceBackendNeed {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
+                need: read_backend_need(r.get_need()?)?,
+            })
+        }
+        FabricRouteMiss(r) => {
+            let r = r?;
+            Ok(WorkerEvent::FabricRouteMiss {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                dst_ip: read_ipv4(r.get_dst_ip()?),
+                dst_mac: read_mac(r.get_dst_mac()?),
+            })
+        }
     }
 }
 

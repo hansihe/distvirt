@@ -18,7 +18,7 @@ use futures_lite::io::AsyncReadExt;
 use distvirt_worker_protocol::{
     ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, NetworkConfig,
     OrchestratorConnection, PodNetworkConfig, RegistryEntry, ServiceBackend, ServicePolicy,
-    WorkerCommand, WorkerConnection, WorkerEvent,
+    WorkerAccepted, WorkerCommand, WorkerConnection, WorkerEvent, WorkerId,
 };
 
 /// Returns `true` if the E2E env var is set, otherwise prints a skip message.
@@ -73,11 +73,25 @@ async fn setup_inner(component_dir: Option<PathBuf>) -> anyhow::Result<(Orchestr
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let worker = distvirt_worker::worker::Worker::new(kernel, rootfs, vmm, image_provider, component_dir);
+        let worker = distvirt_worker::worker::Worker::new(kernel, rootfs, vmm, image_provider, component_dir, String::new());
         worker.run(conn).await
     });
 
-    let conn = OrchestratorConnection::connect(orch_half).await?;
+    let mut conn = OrchestratorConnection::connect(orch_half).await?;
+
+    // Perform handshake
+    let hello = conn.recv_hello().await?;
+    eprintln!("e2e: worker capabilities: {:?}", hello.capabilities);
+
+    conn.send_accepted(&WorkerAccepted {
+        worker_id: WorkerId::from("test-worker"),
+        adapters: vec![],
+    })
+    .await?;
+
+    conn.recv_ready().await?;
+    eprintln!("e2e: handshake complete");
+
     Ok((conn, worker_handle))
 }
 

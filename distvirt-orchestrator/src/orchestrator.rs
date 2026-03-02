@@ -42,8 +42,9 @@ impl Orchestrator {
             OrchestratorInput::WorkerConnected {
                 worker_id,
                 capabilities,
+                wg_config,
             } => {
-                self.handle_worker_connected(worker_id, capabilities, &mut out);
+                self.handle_worker_connected(worker_id, capabilities, wg_config, &mut out);
             }
             OrchestratorInput::WorkerDisconnected { worker_id } => {
                 self.handle_worker_disconnected(worker_id, &mut out);
@@ -332,6 +333,25 @@ impl Orchestrator {
                     out,
                 );
             }
+            ClientCommand::Connect {
+                namespace_id,
+                client_public_key,
+            } => {
+                self.handle_connect(client_id, namespace_id, client_public_key, out);
+            }
+            ClientCommand::Disconnect {
+                namespace_id,
+                client_public_key,
+            } => {
+                self.route_namespace_input(
+                    namespace_id,
+                    NamespaceInput::Disconnect {
+                        client_id,
+                        client_public_key,
+                    },
+                    out,
+                );
+            }
         }
     }
 
@@ -339,6 +359,7 @@ impl Orchestrator {
         &mut self,
         worker_id: WorkerId,
         capabilities: WorkerCapabilities,
+        wg_config: Option<WorkerWgConfig>,
         out: &mut OrchestratorOutput,
     ) {
         // If this worker was already connected, clean up old assignments first.
@@ -352,6 +373,7 @@ impl Orchestrator {
                 capabilities,
                 status: WorkerStatus::Connected,
                 namespaces: HashSet::new(),
+                wg_config,
             },
         );
 
@@ -525,6 +547,97 @@ impl Orchestrator {
             .map(|(wid, _)| wid.clone())
     }
 
+    fn handle_connect(
+        &mut self,
+        client_id: ClientId,
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+        out: &mut OrchestratorOutput,
+    ) {
+        // Find the namespace and an active worker with WG config.
+        let ns = match self.namespaces.get(&namespace_id) {
+            Some(ns) => ns,
+            None => {
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "namespace not found".to_string(),
+                    },
+                ));
+                return;
+            }
+        };
+
+        // Find an active worker for this namespace.
+        let worker_id = match ns
+            .workers
+            .iter()
+            .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+            .map(|(wid, _)| wid.clone())
+        {
+            Some(wid) => wid,
+            None => {
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "no active worker for namespace".to_string(),
+                    },
+                ));
+                return;
+            }
+        };
+
+        // Look up worker's WG config and public endpoint.
+        let ws = match self.workers.get(&worker_id) {
+            Some(ws) => ws,
+            None => {
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "worker not found".to_string(),
+                    },
+                ));
+                return;
+            }
+        };
+
+        let wg_config = match &ws.wg_config {
+            Some(cfg) => cfg.clone(),
+            None => {
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "worker does not have WireGuard configured".to_string(),
+                    },
+                ));
+                return;
+            }
+        };
+
+        if ws.capabilities.public_endpoint.is_empty() {
+            out.client_events.push((
+                client_id,
+                ClientEvent::Error {
+                    message: "worker has no public endpoint".to_string(),
+                },
+            ));
+            return;
+        }
+
+        let worker_endpoint = format!("{}:{}", ws.capabilities.public_endpoint, wg_config.listen_port);
+
+        self.route_namespace_input(
+            namespace_id,
+            NamespaceInput::Connect {
+                client_id,
+                client_public_key,
+                worker_wg_public_key: wg_config.public_key,
+                worker_endpoint,
+            },
+            out,
+        );
+    }
+
     fn pick_worker_for_namespace(&self) -> Option<WorkerId> {
         self.workers
             .iter()
@@ -574,7 +687,9 @@ fn extract_client_id(input: &NamespaceInput) -> Option<ClientId> {
         | NamespaceInput::GetStatus { client_id, .. }
         | NamespaceInput::Splice { client_id, .. }
         | NamespaceInput::Unsplice { client_id, .. }
-        | NamespaceInput::StreamLogs { client_id, .. } => Some(client_id.clone()),
+        | NamespaceInput::StreamLogs { client_id, .. }
+        | NamespaceInput::Connect { client_id, .. }
+        | NamespaceInput::Disconnect { client_id, .. } => Some(client_id.clone()),
         _ => None,
     }
 }
