@@ -62,8 +62,8 @@ struct NamespaceStateMachine {
     status: NamespaceStatus,
     workers: HashMap<WorkerId, NamespaceWorkerState>,
 
-    /// Maps each service to its workload. Multiple services can share
-    /// a workload (e.g. sidecar pattern, or services with identical pods).
+    /// Derived from ServiceSpec.workload_id. Multiple services can share
+    /// a workload (e.g. multiple entry points into the same pod).
     service_workload: HashMap<ServiceId, WorkloadId>,
     workloads: HashMap<WorkloadId, WorkloadStateMachine>,
     services: HashMap<ServiceId, ServiceStateMachine>,
@@ -249,16 +249,29 @@ async fn run(mut orch: Orchestrator, /* connections */) {
 
 The namespace spec is the declarative description of what should exist. Frontends (compose, k8s-lite) produce this; the orchestrator reconciles toward it.
 
+Workloads and services are both **top-level** in the spec. A workload describes what to run — when scheduled, it becomes a pod (a microVM that can host multiple containers). A service is a network entity that NATs to its backing pod, referenced via `workload_id`. This binding is mutable — changing a service's `workload_id` retargets it. Multiple services can share a single workload.
+
 ```rust
 struct NamespaceSpec {
     network: NetworkConfig,
+    workloads: HashMap<WorkloadId, WorkloadSpec>,
     services: HashMap<ServiceId, ServiceSpec>,
 }
 
-struct ServiceSpec {
+struct WorkloadSpec {
+    network: PodNetworkConfig,             // pod IP, MAC (assigned by orchestrator)
+    containers: Vec<ContainerSpec>,        // one or more containers in the pod
+}
+
+struct ContainerSpec {
+    name: String,
     image: String,
-    container_config: ContainerConfig,
-    network: ServiceNetworkConfig,     // ip, mac (assigned by orchestrator)
+    config: ContainerConfig,
+}
+
+struct ServiceSpec {
+    workload_id: WorkloadId,               // which workload backs this service
+    network: ServiceNetworkConfig,         // service IP, MAC (assigned by orchestrator)
     activation: Option<ActivationSpec>,
     expose: Vec<ExposeSpec>,
 }
@@ -831,18 +844,24 @@ enum ClientEvent {
 struct NamespaceStatusReport {
     namespace_id: String,
     status: NamespaceStatus,
+    workloads: HashMap<String, WorkloadStatusReport>,
     services: HashMap<String, ServiceStatusReport>,
 }
 
+struct WorkloadStatusReport {
+    state: WorkloadState,       // Dormant, WaitingForCapacity, Launching, Running
+    spliced: bool,              // from workload hosting state
+}
+
 struct ServiceStatusReport {
-    state: String,              // "pending", "idle", "need_backend", "active"
     workload_id: String,
-    workload_state: String,     // "dormant", "waiting_for_capacity", "launching", "running"
+    state: ServiceState,        // Pending, Idle, NeedBackend, Active
+    activation_enabled: bool,
+    spliced: bool,              // from workload hosting state
+    // When Active:
     pod_id: Option<String>,
     worker_id: Option<String>,
     backend_need: Option<BackendNeed>,
-    activation_enabled: bool,
-    spliced: bool,              // from workload hosting state
 }
 ```
 
@@ -930,7 +949,7 @@ If a `Delete` command arrives while the namespace is in `Cloning` state:
 
 ### Snapshot-Accelerated Clones (Future)
 
-For faster clone activation, the orchestrator can snapshot source service pods and restore them in the clone:
+For faster clone activation, the orchestrator can snapshot source workload pods and restore them in the clone:
 
 ```rust
 // New worker protocol commands needed:
@@ -938,15 +957,15 @@ WorkerCommand::SnapshotPod { namespace_id, pod_id, snapshot_id }
 WorkerCommand::LaunchPodFromSnapshot { namespace_id, pod_id, snapshot_id, network }
 ```
 
-When a cloned service activates:
-- Instead of cold-booting from the image, restore from the source service's snapshot.
+When a cloned workload's service activates:
+- Instead of cold-booting from the image, restore from the source workload's pod snapshot.
 - Firecracker snapshot restore is ~5-10ms vs ~100ms+ cold boot.
 - The restored VM gets new network config (different IP) injected post-restore.
 
 ### Cost Model
 
 Without snapshots: a clone is just metadata + service entities. Essentially free.
-With snapshots: clone creation triggers snapshot of each source pod (one-time cost), then each activation in the clone is a fast restore.
+With snapshots: clone creation triggers snapshot of each source workload's pod (one-time cost), then each activation in the clone is a fast restore.
 
 ---
 
@@ -1008,26 +1027,27 @@ Frontends run client-side (in the CLI) and translate their format into `Namespac
 
 ### Compose Frontend
 
-Parses `docker-compose.yml`, maps to `NamespaceSpec`:
+Parses `docker-compose.yml`, maps to `NamespaceSpec`. Each compose service produces **both** a `WorkloadSpec` and a `ServiceSpec` with matching names. The compose frontend synthesizes both entities — the orchestrator sees the same flat workloads + services model regardless of the frontend.
 
 | Compose concept | NamespaceSpec mapping |
 |---|---|
-| `services.<name>.image` | `ServiceSpec.image` |
-| `services.<name>.command` | `ServiceSpec.container_config.entrypoint/args` |
-| `services.<name>.environment` | `ServiceSpec.container_config.env` |
+| `services.<name>` | Creates `WorkloadSpec` with name `<name>` and `ServiceSpec` with name `<name>` pointing at `workload_id: <name>` |
+| `services.<name>.image` | `WorkloadSpec.containers[0].image` |
+| `services.<name>.command` | `WorkloadSpec.containers[0].config.entrypoint/args` |
+| `services.<name>.environment` | `WorkloadSpec.containers[0].config.env` |
 | `services.<name>.ports` | `ServiceSpec.expose` |
 | `services.<name>.depends_on` | Launch ordering hint (not modeled in spec, handled by orchestrator) |
-| Network assignment | Orchestrator auto-assigns IPs/MACs from namespace subnet |
+| Network assignment | Orchestrator auto-assigns IPs/MACs from namespace subnet (service IPs and pod IPs separately) |
 
 ### K8s-Lite Frontend (Future)
 
-Subset of Kubernetes resources:
+Subset of Kubernetes resources. Like the compose frontend, the k8s-lite frontend synthesizes both `WorkloadSpec` and `ServiceSpec` entries from k8s resources:
 
 | K8s resource | NamespaceSpec mapping |
 |---|---|
-| `Deployment` | `ServiceSpec` (one service per deployment) |
-| `Service` (ClusterIP) | `ServiceSpec.network` (virtual IP) |
-| `ConfigMap` | Injected into `container_config.env` or volume mount |
+| `Deployment` | `WorkloadSpec` (containers from pod template) + `ServiceSpec` if a matching k8s `Service` exists |
+| `Service` (ClusterIP) | `ServiceSpec.network` (virtual IP) with `workload_id` pointing at the backing `Deployment`'s workload |
+| `ConfigMap` | Injected into `WorkloadSpec.containers[].config.env` or volume mount |
 | `Ingress` | `ServiceSpec.expose` |
 
 Only enough to cover the common case. Not a full k8s implementation.

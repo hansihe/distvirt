@@ -473,6 +473,28 @@ impl NamespaceStateMachine {
             }
         }
 
+        // Warn about in-place spec changes (not yet handled beyond add/remove).
+        for (wl_id, new_wl_spec) in &spec.workloads {
+            if let Some(old_wl_spec) = self.spec.workloads.get(wl_id) {
+                if old_wl_spec != new_wl_spec {
+                    log::warn!(
+                        "Workload {:?} spec changed in-place (not yet handled, update silently applied)",
+                        wl_id
+                    );
+                }
+            }
+        }
+        for (svc_id, new_svc_spec) in &spec.services {
+            if let Some(old_svc_spec) = self.spec.services.get(svc_id) {
+                if old_svc_spec != new_svc_spec {
+                    log::warn!(
+                        "Service {:?} spec changed in-place (not yet handled, update silently applied)",
+                        svc_id
+                    );
+                }
+            }
+        }
+
         self.spec = spec;
 
         if self.status == NamespaceStatus::Active {
@@ -662,6 +684,11 @@ impl NamespaceStateMachine {
         };
 
         // Register pod.
+        debug_assert!(
+            !self.pods.contains_key(pod_id),
+            "Pod {:?} already exists in pods map — outer-layer bug",
+            pod_id
+        );
         self.pods.insert(
             pod_id.clone(),
             PodInfo {

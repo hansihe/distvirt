@@ -68,6 +68,7 @@ fn is_multicast(mac: &[u8; 6]) -> bool {
 
 /// Parse the destination MAC, source MAC, and ethertype from an Ethernet frame.
 /// Returns None if the frame is too short.
+#[allow(dead_code)]
 pub fn parse_ethernet_header(frame: &[u8]) -> Option<([u8; 6], [u8; 6], u16)> {
     if frame.len() < ETH_HEADER_LEN {
         return None;
@@ -113,12 +114,8 @@ impl<'a> FabricFrame<'a> {
         Some(FabricFrame { raw })
     }
 
-    /// Raw bytes of the entire frame (vnet header + ethernet frame).
-    pub fn as_bytes(&self) -> &'a [u8] {
-        self.raw
-    }
-
     /// Total frame length including vnet header.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.raw.len()
     }

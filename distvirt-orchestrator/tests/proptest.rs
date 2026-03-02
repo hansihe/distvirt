@@ -357,6 +357,41 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
         }
     }
 
+    // service_workload consistency: every key exists in services, every value in workloads.
+    for (svc_id, wl_id) in &ns.service_workload {
+        assert!(
+            ns.services.contains_key(svc_id),
+            "service_workload references unknown service {:?}",
+            svc_id
+        );
+        assert!(
+            ns.workloads.contains_key(wl_id),
+            "service_workload references unknown workload {:?}",
+            wl_id
+        );
+    }
+
+    // demand_count consistency: for each workload, demand_count should equal the
+    // number of services mapped to it that are in NeedBackend or Active state.
+    for (wl_id, wl) in &ns.workloads {
+        let expected_demand: u32 = ns
+            .service_workload
+            .iter()
+            .filter(|(_, w)| *w == wl_id)
+            .filter(|(svc_id, _)| {
+                matches!(
+                    ns.services.get(svc_id).map(|s| &s.state),
+                    Some(ServiceState::NeedBackend) | Some(ServiceState::Active { .. })
+                )
+            })
+            .count() as u32;
+        assert_eq!(
+            wl.demand_count, expected_demand,
+            "Workload {:?} demand_count={} but {} services demand it (NeedBackend|Active)",
+            wl_id, wl.demand_count, expected_demand
+        );
+    }
+
     // Workers in Destroying namespace must have fabric_status == Destroying.
     if ns.status == NamespaceStatus::Destroying {
         for (wid, ws) in &ns.workers {

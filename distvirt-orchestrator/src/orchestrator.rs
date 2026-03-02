@@ -230,6 +230,95 @@ impl Orchestrator {
                     },
                 ));
             }
+            ClientCommand::ListWorkers => {
+                let workers = self
+                    .workers
+                    .iter()
+                    .map(|(worker_id, ws)| {
+                        let active_pods: u32 = self
+                            .namespaces
+                            .values()
+                            .flat_map(|ns| ns.pods.values())
+                            .filter(|p| p.worker_id == *worker_id)
+                            .count() as u32;
+                        WorkerStatusReport {
+                            worker_id: worker_id.clone(),
+                            max_pods: ws.capabilities.max_pods,
+                            available_memory_mb: ws.capabilities.available_memory_mb,
+                            active_pods,
+                        }
+                    })
+                    .collect();
+                out.client_events
+                    .push((client_id, ClientEvent::WorkerList { workers }));
+            }
+            ClientCommand::GetWorker { worker_id } => {
+                if let Some(ws) = self.workers.get(&worker_id) {
+                    let active_pods: u32 = self
+                        .namespaces
+                        .values()
+                        .flat_map(|ns| ns.pods.values())
+                        .filter(|p| p.worker_id == worker_id)
+                        .count() as u32;
+                    out.client_events.push((
+                        client_id,
+                        ClientEvent::WorkerStatus {
+                            worker: WorkerStatusReport {
+                                worker_id,
+                                max_pods: ws.capabilities.max_pods,
+                                available_memory_mb: ws.capabilities.available_memory_mb,
+                                active_pods,
+                            },
+                        },
+                    ));
+                } else {
+                    out.client_events.push((
+                        client_id,
+                        ClientEvent::Error {
+                            message: format!("worker '{}' not found", worker_id.0),
+                        },
+                    ));
+                }
+            }
+            ClientCommand::ListPods { namespace_id } => {
+                if let Some(ns) = self.namespaces.get(&namespace_id) {
+                    let pods = ns
+                        .pods
+                        .iter()
+                        .map(|(pod_id, info)| {
+                            let is_running = ns
+                                .workloads
+                                .get(&info.workload_id)
+                                .map_or(false, |wl| match &wl.state {
+                                    WorkloadState::Running {
+                                        pod_id: running_pod, ..
+                                    } => running_pod == pod_id,
+                                    _ => false,
+                                });
+                            let state = if is_running {
+                                PodStatus::Running
+                            } else {
+                                PodStatus::Launching
+                            };
+                            PodStatusReport {
+                                pod_id: pod_id.clone(),
+                                workload_id: info.workload_id.clone(),
+                                worker_id: info.worker_id.clone(),
+                                state,
+                            }
+                        })
+                        .collect();
+                    out.client_events
+                        .push((client_id, ClientEvent::PodList { pods }));
+                } else {
+                    out.client_events.push((
+                        client_id,
+                        ClientEvent::Error {
+                            message: format!("namespace '{}' not found", namespace_id.0),
+                        },
+                    ));
+                }
+            }
             ClientCommand::StreamLogs {
                 namespace_id,
                 service_id,

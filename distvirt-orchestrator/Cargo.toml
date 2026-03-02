@@ -5,12 +5,18 @@ edition = "2024"
 
 [features]
 shell = ["dep:tokio", "dep:anyhow"]
+grpc = ["shell", "dep:tonic", "dep:prost", "dep:tokio-stream", "dep:distvirt-client-protocol"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+log = "0.4"
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
 anyhow = { version = "1", optional = true }
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+distvirt-client-protocol = { path = "../distvirt-client-protocol", optional = true }
 
 [dev-dependencies]
 proptest = "1"

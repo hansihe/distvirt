@@ -34,6 +34,7 @@ impl<T> TaskHandle<T> {
     }
 
     /// Explicitly abort the task.
+    #[allow(dead_code)]
     pub fn abort(&self) {
         if let Some(ref handle) = self.handle {
             handle.abort();
@@ -44,6 +45,7 @@ impl<T> TaskHandle<T> {
     ///
     /// Returns the underlying `JoinHandle`. The task will no longer be
     /// aborted when this `TaskHandle` is dropped.
+    #[allow(dead_code)]
     pub fn detach(mut self) -> JoinHandle<T> {
         self.handle.take().expect("handle already taken")
     }

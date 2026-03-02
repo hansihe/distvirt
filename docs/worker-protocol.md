@@ -8,16 +8,36 @@ This protocol is transport-agnostic. The same message types flow over:
 - **Unix domain socket** — local mode, CLI acting as orchestrator
 - **TCP/TLS** — distributed mode, remote workers connecting to a central orchestrator
 
-The transport is a **yamux**-multiplexed bidirectional stream. The primary control stream carries length-prefixed JSON messages (commands and events). Additional yamux streams carry out-of-band data like container log output. The wire format may move to Protobuf in the future, but the message semantics are format-agnostic.
+The transport is a **yamux**-multiplexed bidirectional stream. The primary control stream carries length-prefixed **Cap'n Proto** messages (commands and events). Additional yamux streams carry out-of-band data like container log output.
+
+> **Status:** The current implementation uses postcard (a compact serde-based binary format) as a placeholder. The wire format is being migrated to Cap'n Proto for zero-copy deserialization, proper schema evolution, and first-class binary data support. The message semantics are format-agnostic — only the serialization changes.
+
+---
+
+## Cluster Identity
+
+The cluster has a single root identity established at cluster creation time. All cryptographic material in the system derives from this root:
+
+- **Worker authentication** — workers present a token or certificate derived from the cluster identity when connecting. The orchestrator validates against the cluster root. No per-worker allowlists needed.
+- **Ingress adapter keys** — WireGuard private keys, TLS certificates for reverse proxies, etc. are derived from the cluster identity and pushed to workers during the handshake. This means a developer's WireGuard config doesn't break when their namespace moves to a different worker — the cluster identity is the same, only the endpoint address changes.
+- **Inter-worker tunnels** (future) — tunnel encryption keys derive from the cluster identity.
+
+The orchestrator holds the root secret (or delegates to a secret manager). Workers never see the root — they receive only the derived key material they need for their assigned adapters.
+
+**Worker bootstrap** is minimal: a worker image (AMI, container, etc.) only needs:
+- Orchestrator address
+- Auth token or mTLS certificate (derived from cluster identity)
+
+Everything else — which adapters to run, listen ports, key material, namespace assignments — comes from the orchestrator during the handshake.
 
 ---
 
 ## Connection Lifecycle
 
 Workers connect to the orchestrator, not the other way around. This means:
-- No discovery problem — workers know the orchestrator address (config, AMI bake, etc.)
+- No discovery problem — workers know the orchestrator address
 - NAT-friendly — workers behind NATs connect outbound
-- Ephemeral workers — spin up EC2 instances with a pre-built AMI, they auto-register on boot; terminate them, orchestrator detects the disconnect
+- Ephemeral workers — spin up identical instances, they auto-register on boot; terminate them, orchestrator detects the disconnect
 - Local mode — same flow, just `unix:///run/distvirt.sock`
 
 ```
@@ -25,6 +45,12 @@ Worker                              Orchestrator
   |                                      |
   |──── Connect (TCP/UDS) ──────────────>|
   |──── Establish yamux session ────────>|
+  |                                      |
+  |──── WorkerHello (capabilities) ────>|
+  |<─── WorkerAccepted (config) ────────|
+  |                                      |
+  |   (worker sets up adapters, etc.)    |
+  |──── WorkerReady ───────────────────>|
   |                                      |
   |   control stream (commands/events)   |
   |<──── commands ───────────────────────|
@@ -39,7 +65,17 @@ Worker                              Orchestrator
 
 The orchestrator is the yamux Client (opens the control stream). The worker is the yamux Server (accepts the control stream, opens log streams back toward the orchestrator).
 
-**Worker registration** (future): For distributed mode, the first message on the control stream will be a `WorkerHello`/`WorkerAccepted` handshake to assign a stable `worker_id`. In local mode (single in-process worker), this is skipped.
+### Handshake
+
+The first messages on the control stream are a three-step handshake before normal command/event flow begins:
+
+1. **`WorkerHello`** — the worker identifies itself and advertises its capabilities (what it can do, not what it should do).
+2. **`WorkerAccepted`** — the orchestrator assigns a stable `worker_id`, pushes adapter configuration, and delivers any derived key material the worker needs.
+3. **`WorkerReady`** — the worker confirms it has set up its assigned adapters and is ready to accept namespace/pod commands.
+
+In local mode (single in-process worker), the handshake is still performed but with a fixed worker ID and no adapter config (adapters are not used in local mode).
+
+After `WorkerReady`, normal command/event flow begins. The orchestrator will not send namespace or pod commands until it has received `WorkerReady`.
 
 On disconnect, the orchestrator considers all pods on that worker lost. It may reschedule them to other workers depending on policy.
 
@@ -54,6 +90,7 @@ A worker process running on a machine (physical or virtual). It owns local resou
 The worker is responsible for:
 - Managing the local VMM (Firecracker)
 - Managing local fabric segments (one per namespace it participates in)
+- Running ingress adapters as assigned by the orchestrator during handshake
 - Preparing container images
 - Reporting pod lifecycle events
 
@@ -140,6 +177,54 @@ Services are the recommended path for inter-service communication. Pod routes pr
 
 ---
 
+## Messages: Handshake
+
+```
+WorkerHello {
+  auth_token: String,             // cluster-derived auth credential
+  capabilities: WorkerCapabilities,
+}
+
+WorkerCapabilities {
+  has_kvm: bool,
+  has_containerd: bool,
+  available_adapters: Vec<String>, // e.g. ["wireguard", "reverse_proxy", "os_routing"]
+  // resource info (CPUs, memory, etc.) can be added here
+}
+
+WorkerAccepted {
+  worker_id: String,
+  adapters: Vec<AdapterConfig>,
+}
+
+enum AdapterConfig {
+  WireGuard {
+    listen_port: u16,
+    private_key: [u8; 32],        // derived from cluster identity
+  },
+  ReverseProxy {
+    listen_port: u16,
+    tls_cert: Vec<u8>,            // derived from cluster identity
+    tls_key: Vec<u8>,
+  },
+  OsRouting {
+    interface: String,
+  },
+}
+
+WorkerReady {}
+```
+
+`WorkerHello` — sent by the worker immediately after the yamux session is established. The `auth_token` is validated against the cluster identity. `capabilities` tells the orchestrator what this worker can do — the orchestrator uses this to decide what config to assign.
+
+`WorkerAccepted` — the orchestrator assigns a stable `worker_id` and pushes adapter configuration. The adapter list is the intersection of what the worker can do (capabilities) and what the orchestrator wants it to do (cluster policy). Key material (WireGuard private key, TLS certs) is derived from the cluster identity — all workers sharing the same adapter type get the same keys, so clients aren't affected by namespace migration between workers.
+
+`WorkerReady` — the worker has initialized all assigned adapters (bound sockets, loaded keys) and is ready to accept namespace and pod commands.
+
+If authentication fails, the orchestrator closes the connection without sending `WorkerAccepted`.
+
+---
+
 ## Messages: Orchestrator to Worker (Commands)
 
 ### Namespace Lifecycle
@@ -205,6 +290,20 @@ CreateService {
 ServicePolicy {
   buffer_frames: u32,       // max frames to buffer (0 = drop immediately)
   timeout_ms: u32,          // how long to buffer before giving up
+  activator: Option<ActivatorConfig>,  // protocol-aware activation (None = default passthrough)
+}
+
+enum ActivatorConfig {
+  // TCP SYN-based activation. Detects new connections via SYN flags,
+  // filters RSTs and stale keepalives, replays buffered SYNs to backend.
+  Tcp {
+    ports: Option<Vec<u16>>,  // destination ports to activate on (None = all)
+    tcp_only: bool,           // drop non-TCP frames if true
+    max_flows: u32,           // max tracked source IP+port combinations
+  },
+  // HTTP/2 stream-aware activation (future). Full H2 proxy that maintains
+  // client connections and signals precise backend need based on open streams.
+  Http2 {},
 }
 
 UpdateServiceBackend {
@@ -371,6 +470,10 @@ PodFailed {
 
 ShuttingDown {}
 
+NamespaceDestroyed {
+  namespace_id: String,
+}
+
 PodLogStreamError {
   namespace_id: String,
   pod_id: String,
@@ -391,6 +494,8 @@ PodLogStreamError {
 `PodFailed` — the pod could not start (image pull failed, VM failed to boot, etc.). The worker has cleaned up any partial state.
 
 `ShuttingDown` — acknowledges a `Shutdown` command. The worker is tearing down.
+
+`NamespaceDestroyed` — the namespace has been fully torn down on this worker. All pods stopped, all services and routes removed, fabric segment destroyed. Sent in response to `DestroyNamespace`.
 
 `PodLogStreamError` — a non-fatal error occurred while setting up or streaming container logs. The pod continues running; only log delivery is affected.
 
@@ -424,19 +529,39 @@ FabricRouteMiss {
   dst_ip: Ipv4Addr,
   dst_mac: [u8; 6],
 }
+
+ServiceBackendNeed {
+  namespace_id: String,
+  service_id: String,
+  need: BackendNeed,
+}
+
+enum BackendNeed {
+  None,      // no meaningful traffic, backend may be released
+  Traffic,   // pulse: meaningful traffic detected (e.g. TCP SYN), start/extend timeout
+  Active,    // level: active sessions require backend (e.g. open H2 streams)
+}
 ```
 
 `ServiceActivation` — traffic arrived at a service that has no backend (or whose backend isn't ready). The service entity buffers frames per its policy and emits this event so the orchestrator can schedule a pod, assign it as the backend, and eventually send `ServiceReady`. Debounced per service to avoid event floods.
 
 `FabricRouteMiss` — the worker's fabric received a frame for a **pod IP** (not a service IP) that it can't deliver locally. This fires for both unknown destinations (no route entry at all) and placeholders (route entry exists but destination is a `Placeholder`). For placeholders, the fabric applies the basic buffer policy before reporting the miss. The orchestrator can respond by scheduling a suspended pod, updating the route entry from placeholder to remote worker, etc. This is the pod-to-pod activation path — simpler and more limited than service activation.
 
+`ServiceBackendNeed` — a protocol activator is signaling its backend need level. Only emitted for services with an `ActivatorConfig`. The `BackendNeed` value distinguishes pulse signals (`Traffic` — something meaningful happened, start/extend a timeout) from level signals (`Active` — sessions are open, keep the backend up). Services without an activator use `ServiceActivation` instead.
+
 ---
 
 ## Message Framing
 
-All commands and events are tagged enums (Rust `enum`) serialized as length-prefixed JSON on the yamux control stream:
+The handshake uses its own message types (exchanged before normal command/event flow). All subsequent messages are tagged enums (Rust `enum`) serialized as length-prefixed Cap'n Proto on the yamux control stream:
 
 ```
+// Handshake (exchanged first, in order)
+WorkerHello { ... }        // worker → orchestrator
+WorkerAccepted { ... }     // orchestrator → worker
+WorkerReady { ... }        // worker → orchestrator
+
+// Normal operation (after handshake)
 WorkerCommand = CreateNamespace { ... }
              | DestroyNamespace { ... }
              | RegistrySync { ... }
@@ -453,16 +578,18 @@ WorkerCommand = CreateNamespace { ... }
 
 WorkerEvent = NamespaceCreated { ... }
            | NamespaceFailed { ... }
+           | NamespaceDestroyed { ... }
            | PodRunning { ... }
            | PodExited { ... }
            | PodFailed { ... }
            | ShuttingDown
            | PodLogStreamError { ... }
            | ServiceActivation { ... }
+           | ServiceBackendNeed { ... }
            | FabricRouteMiss { ... }
 ```
 
-Over the wire: `[u32 LE length][JSON payload]` on the yamux control stream. Log streams use the same framing for the initial `LogStreamHeader`, then raw bytes.
+Over the wire: `[u32 LE length][Cap'n Proto payload]` on the yamux control stream. Log streams use the same framing for the initial `LogStreamHeader`, then raw bytes.
 
 ### Transport
 
@@ -561,4 +688,4 @@ These are out of scope but the protocol is designed to accommodate them:
 - **Exec**: `ExecInPod { pod_id, container_id, command }` — run a command in a running container.
 - **Tunnel Management**: `ConnectFabric { namespace, peer_worker, tunnel_config }` — orchestrator tells workers to establish tunnel ports between each other.
 - **Autoscaling / Scale-to-Zero**: orchestrator-level concerns built on the service model — the orchestrator reacts to `ServiceActivation` events by scheduling pods, and manages service backend assignment. No additional worker protocol changes needed.
-- **Protocol Activators**: `ServicePolicy` can be extended with protocol-aware activation (TCP SYN hold, HTTP/2 stream detection). These layer on top of the basic service buffering model — same commands, richer policy.
+- **Protocol Activators**: TCP activation is in the protocol via `ActivatorConfig::Tcp` on `ServicePolicy`. HTTP/2 stream-aware activation (`ActivatorConfig::Http2`) is defined but not yet implemented.

@@ -1,0 +1,406 @@
+syntax = "proto3";
+package distvirt.client.v1;
+
+// --- Service Definition ---
+
+service DistvirtClient {
+    // Namespace lifecycle
+    rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+    rpc UpdateNamespace(UpdateNamespaceRequest) returns (UpdateNamespaceResponse);
+    rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+    rpc GetNamespaceStatus(GetNamespaceStatusRequest) returns (GetNamespaceStatusResponse);
+    rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+
+    // Splice / Unsplice
+    rpc Splice(SpliceRequest) returns (SpliceResponse);
+    rpc Unsplice(UnspliceRequest) returns (UnspliceResponse);
+
+    // Cloning
+    rpc CloneNamespace(CloneNamespaceRequest) returns (CloneNamespaceResponse);
+
+    // Layer 2 resource queries
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+    rpc GetWorker(GetWorkerRequest) returns (GetWorkerResponse);
+    rpc ListPods(ListPodsRequest) returns (ListPodsResponse);
+
+    // Streaming subscriptions
+    rpc WatchNamespaceStatus(WatchNamespaceStatusRequest) returns (stream NamespaceStatusEvent);
+    rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
+    rpc StreamEvents(StreamEventsRequest) returns (stream NamespaceEvent);
+}
+
+// --- Spec Types ---
+
+message NamespaceSpec {
+    NetworkConfig network = 1;
+    map<string, WorkloadSpec> workloads = 2;
+    map<string, ServiceSpec> services = 3;
+}
+
+message WorkloadSpec {
+    PodNetworkConfig network = 1;
+    repeated ContainerSpec containers = 2;
+}
+
+message ContainerSpec {
+    string name = 1;
+    string image = 2;
+    ContainerConfig config = 3;
+}
+
+message PodNetworkConfig {
+    string ip = 1;
+    string mac = 2;
+}
+
+message ServiceSpec {
+    string workload_id = 1;
+    ServiceNetworkConfig network = 2;
+    ActivationSpec activation = 3;
+    repeated ExposeSpec expose = 4;
+}
+
+message ActivationSpec {
+    ActivatorConfig activator = 1;
+    ServicePolicy buffer_policy = 2;
+    uint64 idle_timeout_ms = 3;
+}
+
+message ActivatorConfig {
+    oneof activator {
+        TcpActivator tcp = 1;
+        Http2Activator http2 = 2;
+    }
+}
+
+message TcpActivator {
+    repeated uint32 ports = 1;
+}
+
+message Http2Activator {}
+
+message ContainerConfig {
+    repeated string entrypoint = 1;
+    repeated string args = 2;
+    map<string, string> env = 3;
+    uint64 memory_mb = 4;
+    uint32 vcpus = 5;
+}
+
+message ServiceNetworkConfig {
+    string ip = 1;
+    string mac = 2;
+}
+
+message NetworkConfig {
+    string subnet = 1;
+}
+
+message ExposeSpec {
+    uint32 container_port = 1;
+    uint32 host_port = 2;
+    string protocol = 3;
+}
+
+message ServicePolicy {
+    // Buffer policy configuration for activation.
+}
+
+// --- Namespace Lifecycle ---
+
+message CreateNamespaceRequest {
+    string namespace_id = 1;
+    NamespaceSpec spec = 2;
+}
+message CreateNamespaceResponse {}
+
+message UpdateNamespaceRequest {
+    string namespace_id = 1;
+    NamespaceSpec spec = 2;
+}
+message UpdateNamespaceResponse {}
+
+message DeleteNamespaceRequest {
+    string namespace_id = 1;
+}
+message DeleteNamespaceResponse {}
+
+message GetNamespaceStatusRequest {
+    string namespace_id = 1;
+}
+message GetNamespaceStatusResponse {
+    NamespaceStatusReport status = 1;
+}
+
+message ListNamespacesRequest {}
+message ListNamespacesResponse {
+    repeated NamespaceStatusReport namespaces = 1;
+}
+
+// --- Status Reporting ---
+
+message NamespaceStatusReport {
+    string namespace_id = 1;
+    NamespaceState state = 2;
+    map<string, WorkloadStatusReport> workloads = 3;
+    map<string, ServiceStatusReport> services = 4;
+}
+
+enum NamespaceState {
+    NAMESPACE_STATE_UNSPECIFIED = 0;
+    NAMESPACE_STATE_CREATING = 1;
+    NAMESPACE_STATE_ACTIVE = 2;
+    NAMESPACE_STATE_DESTROYING = 3;
+}
+
+message WorkloadStatusReport {
+    WorkloadState state = 1;
+    bool spliced = 2;
+}
+
+message WorkloadState {
+    oneof state {
+        WorkloadDormant dormant = 1;
+        WorkloadWaitingForCapacity waiting_for_capacity = 2;
+        WorkloadLaunching launching = 3;
+        WorkloadRunning running = 4;
+    }
+}
+
+message WorkloadDormant {}
+message WorkloadWaitingForCapacity {}
+
+message WorkloadLaunching {
+    string pod_id = 1;
+    string worker_id = 2;
+}
+
+message WorkloadRunning {
+    string pod_id = 1;
+    string worker_id = 2;
+}
+
+message ServiceStatusReport {
+    string workload_id = 1;
+    ServiceState state = 2;
+    bool activation_enabled = 3;
+    bool spliced = 4;
+}
+
+message ServiceState {
+    oneof state {
+        ServicePending pending = 1;
+        ServiceIdle idle = 2;
+        ServiceNeedBackend need_backend = 3;
+        ServiceActive active = 4;
+    }
+}
+
+message ServicePending {}
+message ServiceIdle {}
+message ServiceNeedBackend {}
+
+message ServiceActive {
+    string pod_id = 1;
+    string worker_id = 2;
+    BackendNeed backend_need = 3;
+}
+
+enum BackendNeed {
+    BACKEND_NEED_UNSPECIFIED = 0;
+    BACKEND_NEED_NONE = 1;
+    BACKEND_NEED_TRAFFIC = 2;
+    BACKEND_NEED_ACTIVE = 3;
+}
+
+// --- Splice ---
+
+message SpliceRequest {
+    string namespace_id = 1;
+    string workload_id = 2;
+    string local_worker_id = 3;
+}
+message SpliceResponse {}
+
+message UnspliceRequest {
+    string namespace_id = 1;
+    string workload_id = 2;
+}
+message UnspliceResponse {}
+
+// --- Cloning ---
+
+message CloneNamespaceRequest {
+    string source_namespace_id = 1;
+    string target_namespace_id = 2;
+    NamespaceOverrides overrides = 3;
+}
+message CloneNamespaceResponse {}
+
+message NamespaceOverrides {
+    map<string, WorkloadOverrides> workloads = 1;
+    map<string, ServiceOverrides> services = 2;
+}
+
+message WorkloadOverrides {
+    optional string image = 1;
+    map<string, string> env_overrides = 2;
+}
+
+message ServiceOverrides {
+    optional string workload_id = 1;
+}
+
+// --- Layer 2: Resource Queries ---
+
+message ListWorkersRequest {}
+message ListWorkersResponse {
+    repeated WorkerInfo workers = 1;
+}
+
+message GetWorkerRequest {
+    string worker_id = 1;
+}
+message GetWorkerResponse {
+    WorkerInfo worker = 1;
+}
+
+message WorkerInfo {
+    string worker_id = 1;
+    uint32 max_pods = 2;
+    uint64 available_memory_mb = 3;
+    uint32 active_pods = 4;
+}
+
+message ListPodsRequest {
+    string namespace_id = 1;
+}
+message ListPodsResponse {
+    repeated PodInfo pods = 1;
+}
+
+message PodInfo {
+    string pod_id = 1;
+    string workload_id = 2;
+    string worker_id = 3;
+    string ip = 4;
+    string mac = 5;
+    PodState state = 6;
+}
+
+enum PodState {
+    POD_STATE_UNSPECIFIED = 0;
+    POD_STATE_LAUNCHING = 1;
+    POD_STATE_RUNNING = 2;
+}
+
+// --- Events ---
+
+message StreamEventsRequest {
+    string namespace_id = 1;
+    optional string workload_id = 2;
+    optional string service_id = 3;
+}
+
+message NamespaceEvent {
+    int64 timestamp_unix_ms = 1;
+    oneof event {
+        WorkloadEvent workload_event = 2;
+        ServiceEvent service_event = 3;
+    }
+}
+
+message WorkloadEvent {
+    string workload_id = 1;
+    oneof event {
+        WorkloadDemandChanged demand_changed = 2;
+        WorkloadPodLaunching pod_launching = 3;
+        WorkloadPodRunning pod_running = 4;
+        WorkloadPodStopped pod_stopped = 5;
+        WorkloadPodFailed pod_failed = 6;
+        WorkloadSpliced spliced = 7;
+        WorkloadUnspliced unspliced = 8;
+    }
+}
+
+message WorkloadDemandChanged {
+    uint32 demanding_services = 1;
+}
+
+message WorkloadPodLaunching {
+    string pod_id = 1;
+    string worker_id = 2;
+}
+
+message WorkloadPodRunning {
+    string pod_id = 1;
+    string worker_id = 2;
+}
+
+message WorkloadPodStopped {
+    string reason = 1;
+}
+
+message WorkloadPodFailed {
+    string reason = 1;
+}
+
+message WorkloadSpliced {
+    string worker_id = 1;
+}
+
+message WorkloadUnspliced {}
+
+message ServiceEvent {
+    string service_id = 1;
+    string workload_id = 2;
+    oneof event {
+        ServiceActivated activated = 3;
+        ServiceBackendReady backend_ready = 4;
+        ServiceIdleTimerStarted idle_timer_started = 5;
+        ServiceIdleTimerCancelled idle_timer_cancelled = 6;
+        ServiceIdleTimeoutFired idle_timeout_fired = 7;
+        ServiceDeactivated deactivated = 8;
+    }
+}
+
+message ServiceActivated {
+    string trigger = 1;
+}
+
+message ServiceBackendReady {}
+
+message ServiceIdleTimerStarted {
+    uint64 timeout_ms = 1;
+}
+
+message ServiceIdleTimerCancelled {
+    string reason = 1;
+}
+
+message ServiceIdleTimeoutFired {}
+
+message ServiceDeactivated {
+    string reason = 1;
+}
+
+// --- Streaming (Logs, Status Watch) ---
+
+message StreamLogsRequest {
+    string namespace_id = 1;
+    optional string workload_id = 2;
+}
+
+message WatchNamespaceStatusRequest {
+    string namespace_id = 1;
+}
+
+message NamespaceStatusEvent {
+    NamespaceStatusReport status = 1;
+}
+
+message LogChunk {
+    string workload_id = 1;
+    bytes data = 2;
+    int64 timestamp_unix_ms = 3;
+}

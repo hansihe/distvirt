@@ -1,3 +1,19 @@
+//! Orchestrator state-machine types.
+//!
+//! These types are the SM's canonical internal representation. They are intentionally
+//! separate from both the worker protocol types and the client protocol types:
+//!
+//! - **SM types** (this module): owned by the state machine, may contain only a subset
+//!   of the data present in outer types. The SM never sees wire formats directly.
+//! - **Worker protocol types**: defined in `distvirt-worker-protocol`, re-exported here
+//!   for convenience where they happen to match. The shell layer maps between SM outputs
+//!   and wire commands.
+//! - **Client protocol types**: defined in `distvirt-client-protocol`. The gRPC shell
+//!   layer maps between SM events and client-facing protobuf messages.
+//!
+//! This decoupling is a feature — each layer can evolve independently, and the SM
+//! remains testable without any wire format dependencies.
+
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -64,6 +80,9 @@ pub enum ClientCommand {
         source_namespace_id: NamespaceId,
         target_namespace_id: NamespaceId,
     },
+    ListWorkers,
+    GetWorker { worker_id: WorkerId },
+    ListPods { namespace_id: NamespaceId },
     StreamLogs { namespace_id: NamespaceId, service_id: Option<ServiceId> },
 }
 
@@ -71,9 +90,34 @@ pub enum ClientCommand {
 pub enum ClientEvent {
     NamespaceStatus { namespace_id: NamespaceId, status: NamespaceStatusReport },
     NamespaceList { namespaces: Vec<NamespaceStatusReport> },
+    WorkerList { workers: Vec<WorkerStatusReport> },
+    WorkerStatus { worker: WorkerStatusReport },
+    PodList { pods: Vec<PodStatusReport> },
     LogChunk { namespace_id: NamespaceId, service_id: ServiceId, data: Vec<u8> },
     Error { message: String },
     Ok,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerStatusReport {
+    pub worker_id: WorkerId,
+    pub max_pods: u32,
+    pub available_memory_mb: u64,
+    pub active_pods: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PodStatusReport {
+    pub pod_id: PodId,
+    pub workload_id: WorkloadId,
+    pub worker_id: WorkerId,
+    pub state: PodStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PodStatus {
+    Launching,
+    Running,
 }
 
 #[derive(Debug, Clone, PartialEq)]

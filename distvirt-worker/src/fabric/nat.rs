@@ -17,6 +17,7 @@ pub struct NatFlowKey {
 pub struct NatEntry {
     pub service_ip: Ipv4Addr,
     pub service_mac: [u8; 6],
+    #[allow(dead_code)]
     pub backend_ip: Ipv4Addr,
     pub last_seen: Instant,
 }

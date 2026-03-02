@@ -352,13 +352,6 @@ impl ServiceTable {
         Some((ServiceAction::Buffered, should_activate))
     }
 
-    /// Look up the backend MAC for a service by its ID.
-    pub fn get_backend_mac_by_id(&self, service_id: &str) -> Option<[u8; 6]> {
-        let ip = self.id_to_ip.get(service_id)?;
-        let entity = self.by_ip.get(ip)?;
-        entity.backend_mac
-    }
-
     /// Look up NAT-relevant info for a service by its ID.
     /// Returns `(service_ip, service_mac, backend_ip, backend_mac)`.
     pub fn get_nat_info_by_id(&self, service_id: &str) -> Option<(Ipv4Addr, [u8; 6], Ipv4Addr, [u8; 6])> {

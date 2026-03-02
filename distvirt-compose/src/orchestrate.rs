@@ -1,8 +1,9 @@
 use anyhow::Context;
-use distvirt_worker_protocol::codec::recv_msg;
+use distvirt_worker_protocol::codec::recv_log_header;
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, LogStreamHeader, NetworkConfig, OrchestratorConnection,
-    PodNetworkConfig, RegistryEntry, ServiceBackend, ServicePolicy, WorkerCommand, WorkerEvent,
+    ContainerConfig, ContainerSpec, LogStreamHeader, NamespaceId, NetworkConfig,
+    OrchestratorConnection, PodNetworkConfig, RegistryEntry, ServiceBackend, ServiceId,
+    ServicePolicy, WorkerCommand, WorkerEvent,
 };
 use futures_lite::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -75,7 +76,7 @@ pub async fn run_compose(
     conn: &mut OrchestratorConnection,
 ) -> anyhow::Result<()> {
     let plan = crate::deployment::plan(deployment).context("planning deployment")?;
-    let namespace_id = deployment.name.clone();
+    let namespace_id: NamespaceId = deployment.name.clone().into();
 
     // Take the log stream receiver and spawn a background log acceptor.
     let mut log_rx = conn.take_log_stream_receiver();
@@ -83,11 +84,11 @@ pub async fn run_compose(
 
     tokio::spawn(async move {
         while let Some(mut stream) = log_rx.recv().await {
-            let header: Result<LogStreamHeader, _> = recv_msg(&mut stream).await;
+            let header: Result<LogStreamHeader, _> = recv_log_header(&mut stream).await;
             match header {
                 Ok(header) => {
                     let tx = log_line_tx.clone();
-                    let pod_id = header.pod_id.clone();
+                    let pod_id = header.pod_id.to_string();
                     tokio::spawn(async move {
                         let mut buf = vec![0u8; 8192];
                         loop {
@@ -157,7 +158,7 @@ pub async fn run_compose(
     for planned in &plan.services {
         conn.send_command(&WorkerCommand::CreateService {
             namespace_id: namespace_id.clone(),
-            service_id: planned.name.clone(),
+            service_id: ServiceId::from(planned.name.as_str()),
             ip: planned.service_ip,
             mac: planned.service_mac,
             policy: ServicePolicy {
@@ -195,7 +196,7 @@ pub async fn run_compose(
 
         conn.send_command(&WorkerCommand::LaunchPod {
             namespace_id: namespace_id.clone(),
-            pod_id: planned.name.clone(),
+            pod_id: planned.name.clone().into(),
             network: PodNetworkConfig {
                 ip: planned.pod_ip,
                 mac: planned.pod_mac,
@@ -234,10 +235,10 @@ pub async fn run_compose(
                     } => {
                         log::info!("pod '{}' is running", pod_id);
                         // Wire up the service backend and mark ready.
-                        if let Some(planned) = planned_by_name.get(pod_id.as_str()) {
+                        if let Some(planned) = planned_by_name.get(pod_id.as_ref()) {
                             conn.send_command(&WorkerCommand::UpdateServiceBackend {
                                 namespace_id: namespace_id.clone(),
-                                service_id: pod_id.clone(),
+                                service_id: ServiceId::from(pod_id.as_ref()),
                                 backend: Some(ServiceBackend {
                                     pod_ip: planned.pod_ip,
                                     pod_mac: planned.pod_mac,
@@ -248,7 +249,7 @@ pub async fn run_compose(
 
                             conn.send_command(&WorkerCommand::ServiceReady {
                                 namespace_id: namespace_id.clone(),
-                                service_id: pod_id.clone(),
+                                service_id: ServiceId::from(pod_id.as_ref()),
                             })
                             .await
                             .with_context(|| format!("send service ready '{}'", pod_id))?;
@@ -311,6 +312,9 @@ pub async fn run_compose(
                     }
                     WorkerEvent::ServiceBackendNeed { namespace_id: _, service_id, need } => {
                         log::debug!("service backend need for '{}': {:?}", service_id, need);
+                    }
+                    WorkerEvent::NamespaceDestroyed { namespace_id: _ } => {
+                        log::info!("namespace destroyed");
                     }
                 }
             }

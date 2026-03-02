@@ -217,6 +217,9 @@ struct ModelState {
     /// Monotonic flag: set to true once any pod has been launched.
     /// Used only for reachability properties (false→true only, no divergence).
     ever_launched_pod: bool,
+    /// Whether all worker commands in the last transition targeted workers
+    /// present in the namespace's worker map at the time the commands were emitted.
+    last_output_commands_valid: bool,
 }
 
 // --- Model Actions ---
@@ -279,6 +282,7 @@ impl Model for NamespaceModel {
             namespace: snapshot,
             pending_timers: BTreeSet::new(),
             ever_launched_pod: false,
+            last_output_commands_valid: true,
         }]
     }
 
@@ -421,7 +425,16 @@ impl Model for NamespaceModel {
             },
         };
 
+        // Snapshot pre-step workers for command validity check.
+        let pre_step_workers: BTreeSet<WorkerId> = sm.workers.keys().cloned().collect();
+
         let output = sm.step(input);
+
+        // Check that all worker commands target workers present pre-step.
+        let mut commands_valid = output
+            .worker_commands
+            .iter()
+            .all(|(wid, _)| pre_step_workers.contains(wid));
 
         // Update pending timers from output.
         let mut pending_timers = state.pending_timers.clone();
@@ -435,11 +448,13 @@ impl Model for NamespaceModel {
         // Process pod_requests: simulate outer-layer scheduling.
         let mut ever_launched_pod = state.ever_launched_pod;
         for req in &output.pod_requests {
+            // Pick the lowest active worker ID for deterministic scheduling.
             let active_worker = sm
                 .workers
                 .iter()
-                .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
-                .map(|(wid, _)| wid.clone());
+                .filter(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+                .map(|(wid, _)| wid.clone())
+                .min();
 
             if let Some(wid) = active_worker {
                 // Allocate lowest free pod ID for state convergence.
@@ -452,6 +467,11 @@ impl Model for NamespaceModel {
                     pod_id,
                 });
 
+                commands_valid = commands_valid
+                    && launch_out
+                        .worker_commands
+                        .iter()
+                        .all(|(wid, _)| sm.workers.contains_key(wid));
                 for (timer_key, _duration) in &launch_out.timers_set {
                     pending_timers.insert(timer_key.clone());
                 }
@@ -465,6 +485,7 @@ impl Model for NamespaceModel {
             namespace: NamespaceSnapshot::from_state_machine(&sm),
             pending_timers,
             ever_launched_pod,
+            last_output_commands_valid: commands_valid,
         })
     }
 
@@ -535,6 +556,11 @@ impl Model for NamespaceModel {
                     }
                 }
                 true
+            }),
+            // Safety: No worker commands to absent workers (checked against
+            // pre-transition worker set during next_state).
+            Property::<Self>::always("no worker commands to absent workers", |_model, state| {
+                state.last_output_commands_valid
             }),
             // Reachability: Can reach a Running workload state.
             Property::<Self>::sometimes("can reach active service", |_model, state| {

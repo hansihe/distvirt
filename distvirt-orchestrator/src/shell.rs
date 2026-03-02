@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use distvirt_worker_protocol::{OrchestratorConnection, OrchestratorWriter};
 
@@ -10,6 +11,7 @@ use crate::types::*;
 pub struct OrchestratorShell {
     orchestrator: Orchestrator,
     workers: HashMap<WorkerId, WorkerHandle>,
+    clients: HashMap<ClientId, ClientSender>,
     msg_tx: mpsc::UnboundedSender<ShellMsg>,
     msg_rx: mpsc::UnboundedReceiver<ShellMsg>,
     timer_handles: HashMap<TimerKey, tokio::task::JoinHandle<()>>,
@@ -19,6 +21,10 @@ pub struct OrchestratorShell {
 struct WorkerHandle {
     writer: OrchestratorWriter,
     _reader_task: tokio::task::JoinHandle<()>,
+}
+
+struct ClientSender {
+    pending: HashMap<u64, oneshot::Sender<ClientEvent>>,
 }
 
 enum ShellMsg {
@@ -32,6 +38,64 @@ enum ShellMsg {
     TimerFired {
         timer_key: TimerKey,
     },
+    ClientCommand {
+        client_id: ClientId,
+        request_id: u64,
+        command: ClientCommand,
+        response_tx: oneshot::Sender<ClientEvent>,
+    },
+    ClientConnected {
+        client_id: ClientId,
+    },
+    ClientDisconnected {
+        client_id: ClientId,
+    },
+}
+
+/// Cloneable handle for sending commands to the shell from gRPC handlers.
+#[derive(Clone)]
+pub struct ShellHandle {
+    msg_tx: mpsc::UnboundedSender<ShellMsg>,
+    next_client_id: &'static AtomicU64,
+    next_request_id: &'static AtomicU64,
+}
+
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ShellHandle {
+    /// Allocate a new client ID and register it with the shell.
+    pub fn connect_client(&self) -> ClientId {
+        let id = ClientId(self.next_client_id.fetch_add(1, Ordering::Relaxed));
+        let _ = self.msg_tx.send(ShellMsg::ClientConnected {
+            client_id: id.clone(),
+        });
+        id
+    }
+
+    /// Disconnect a client from the shell.
+    pub fn disconnect_client(&self, client_id: ClientId) {
+        let _ = self.msg_tx.send(ShellMsg::ClientDisconnected { client_id });
+    }
+
+    /// Send a command and wait for the response.
+    pub async fn send_command(
+        &self,
+        client_id: ClientId,
+        command: ClientCommand,
+    ) -> Result<ClientEvent, anyhow::Error> {
+        let (tx, rx) = oneshot::channel();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        self.msg_tx
+            .send(ShellMsg::ClientCommand {
+                client_id,
+                request_id,
+                command,
+                response_tx: tx,
+            })
+            .map_err(|_| anyhow::anyhow!("shell closed"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("shell dropped response channel"))
+    }
 }
 
 impl OrchestratorShell {
@@ -40,10 +104,20 @@ impl OrchestratorShell {
         OrchestratorShell {
             orchestrator: Orchestrator::new(),
             workers: HashMap::new(),
+            clients: HashMap::new(),
             msg_tx,
             msg_rx,
             timer_handles: HashMap::new(),
             timer_ns: HashMap::new(),
+        }
+    }
+
+    /// Create a cloneable handle for sending commands from gRPC handlers.
+    pub fn handle(&self) -> ShellHandle {
+        ShellHandle {
+            msg_tx: self.msg_tx.clone(),
+            next_client_id: &NEXT_CLIENT_ID,
+            next_request_id: &NEXT_REQUEST_ID,
         }
     }
 
@@ -140,6 +214,50 @@ impl OrchestratorShell {
     }
 
     async fn handle_msg(&mut self, msg: ShellMsg) {
+        match msg {
+            ShellMsg::ClientConnected { client_id } => {
+                self.clients.insert(
+                    client_id.clone(),
+                    ClientSender {
+                        pending: HashMap::new(),
+                    },
+                );
+                let output = self.orchestrator.step(OrchestratorInput::ClientConnected {
+                    client_id,
+                });
+                self.process_output(output).await;
+                return;
+            }
+            ShellMsg::ClientDisconnected { client_id } => {
+                self.clients.remove(&client_id);
+                let output = self.orchestrator.step(OrchestratorInput::ClientDisconnected {
+                    client_id,
+                });
+                self.process_output(output).await;
+                return;
+            }
+            ShellMsg::ClientCommand {
+                client_id,
+                request_id,
+                command,
+                response_tx,
+            } => {
+                // Register the pending response before stepping.
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.pending.insert(request_id, response_tx);
+                }
+                let output = self.orchestrator.step(OrchestratorInput::ClientCommand {
+                    client_id: client_id.clone(),
+                    command,
+                });
+                self.process_output(output).await;
+                // Route any client events produced for this client to the pending sender.
+                // (already handled in process_output)
+                return;
+            }
+            _ => {}
+        }
+
         let input = match msg {
             ShellMsg::WorkerEvent { worker_id, event } => {
                 self.convert_worker_event(worker_id, event)
@@ -159,6 +277,10 @@ impl OrchestratorShell {
                     None
                 }
             }
+            // Already handled above.
+            ShellMsg::ClientConnected { .. }
+            | ShellMsg::ClientDisconnected { .. }
+            | ShellMsg::ClientCommand { .. } => unreachable!(),
         };
 
         if let Some(input) = input {
@@ -268,6 +390,31 @@ impl OrchestratorShell {
         for (ns_id, ns_out) in &output.namespace_outputs {
             for (timer_key, _) in &ns_out.timers_set {
                 self.timer_ns.insert(timer_key.clone(), ns_id.clone());
+            }
+        }
+
+        // Route client events to pending response senders.
+        for (client_id, event) in output.client_events {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                // Send to the first pending sender (FIFO — commands are serialized per client).
+                if let Some((&req_id, _)) = client.pending.iter().next() {
+                    if let Some(tx) = client.pending.remove(&req_id) {
+                        let _ = tx.send(event);
+                    }
+                }
+            }
+        }
+
+        // Also route client events from namespace outputs.
+        for (_ns_id, ns_out) in &output.namespace_outputs {
+            for (client_id, event) in &ns_out.client_events {
+                if let Some(client) = self.clients.get_mut(client_id) {
+                    if let Some((&req_id, _)) = client.pending.iter().next() {
+                        if let Some(tx) = client.pending.remove(&req_id) {
+                            let _ = tx.send(event.clone());
+                        }
+                    }
+                }
             }
         }
 

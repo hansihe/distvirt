@@ -201,6 +201,12 @@ Protocol-aware activation and traffic management for service entities, implement
 
 See **[Protocol Activators](protocol-activators.md)** for the full design.
 
+### Ingress Adapters
+
+External access into the fabric for developer access, shareable URLs, and infrastructure integration. Adapters are worker-level components that demultiplex to per-namespace virtual ports on the fabric. WireGuard (via boringtun) is the primary strategy for staging environments.
+
+See **[Ingress Adapters](ingress-adapters.md)** for the full design.
+
 ### Multi-Worker Tunneling
 
 For distributed mode, fabric segments on different workers need to communicate:

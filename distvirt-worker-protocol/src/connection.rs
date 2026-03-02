@@ -34,7 +34,7 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use crate::codec::{recv_msg, send_msg};
+use crate::codec;
 use crate::types::{LogStreamHeader, WorkerCommand, WorkerEvent};
 
 type YamuxStream = yamux::Stream;
@@ -130,14 +130,14 @@ impl OrchestratorConnection {
 
     /// Send a command to the worker.
     pub async fn send_command(&mut self, cmd: &WorkerCommand) -> anyhow::Result<()> {
-        send_msg(&mut self.control, cmd)
+        codec::send_worker_command(&mut self.control, cmd)
             .await
             .context("send command")
     }
 
     /// Receive an event from the worker.
     pub async fn recv_event(&mut self) -> anyhow::Result<WorkerEvent> {
-        recv_msg(&mut self.control)
+        codec::recv_worker_event(&mut self.control)
             .await
             .context("recv event")
     }
@@ -153,7 +153,7 @@ impl OrchestratorConnection {
             .await
             .context("yamux connection closed, no more incoming streams")?;
 
-        let header: LogStreamHeader = recv_msg(&mut stream)
+        let header: LogStreamHeader = codec::recv_log_header(&mut stream)
             .await
             .context("read log stream header")?;
 
@@ -205,7 +205,7 @@ pub struct OrchestratorReader {
 impl OrchestratorReader {
     /// Receive an event from the worker.
     pub async fn recv_event(&mut self) -> anyhow::Result<WorkerEvent> {
-        recv_msg(&mut self.read_half)
+        codec::recv_worker_event(&mut self.read_half)
             .await
             .context("recv event")
     }
@@ -219,7 +219,7 @@ pub struct OrchestratorWriter {
 impl OrchestratorWriter {
     /// Send a command to the worker.
     pub async fn send_command(&mut self, cmd: &WorkerCommand) -> anyhow::Result<()> {
-        send_msg(&mut self.write_half, cmd)
+        codec::send_worker_command(&mut self.write_half, cmd)
             .await
             .context("send command")
     }
@@ -258,7 +258,7 @@ impl LogStreamOpener {
             .map_err(|_| anyhow::anyhow!("yamux driver task gone"))?
             .context("open outbound yamux stream")?;
 
-        send_msg(&mut stream, header)
+        codec::send_log_header(&mut stream, header)
             .await
             .context("send log stream header")?;
 
@@ -337,14 +337,14 @@ impl WorkerConnection {
 
     /// Receive a command from the orchestrator.
     pub async fn recv_command(&mut self) -> anyhow::Result<WorkerCommand> {
-        recv_msg(&mut self.control)
+        codec::recv_worker_command(&mut self.control)
             .await
             .context("recv command")
     }
 
     /// Send an event to the orchestrator.
     pub async fn send_event(&mut self, event: &WorkerEvent) -> anyhow::Result<()> {
-        send_msg(&mut self.control, event)
+        codec::send_worker_event(&mut self.control, event)
             .await
             .context("send event")
     }

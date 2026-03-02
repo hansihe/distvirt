@@ -306,6 +306,62 @@ pub enum OutputStream {
     Stderr,
 }
 
+// --- Handshake Types ---
+
+/// Sent by the worker immediately after the yamux session is established.
+///
+/// The `auth_token` is validated against the cluster identity.
+/// `capabilities` tells the orchestrator what this worker can do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerHello {
+    /// Cluster-derived auth credential.
+    pub auth_token: String,
+    /// What this worker can do.
+    pub capabilities: WorkerCapabilities,
+}
+
+/// Advertised capabilities of a worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerCapabilities {
+    pub has_kvm: bool,
+    pub has_containerd: bool,
+    /// e.g. `["wireguard", "reverse_proxy", "os_routing"]`
+    pub available_adapters: Vec<String>,
+}
+
+/// Sent by the orchestrator after validating `WorkerHello`.
+///
+/// Assigns a stable worker ID and pushes adapter configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerAccepted {
+    pub worker_id: WorkerId,
+    pub adapters: Vec<AdapterConfig>,
+}
+
+/// Configuration for an ingress adapter assigned to a worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdapterConfig {
+    WireGuard {
+        listen_port: u16,
+        /// 32-byte private key derived from cluster identity.
+        private_key: Vec<u8>,
+    },
+    ReverseProxy {
+        listen_port: u16,
+        tls_cert: Vec<u8>,
+        tls_key: Vec<u8>,
+    },
+    OsRouting {
+        interface: String,
+    },
+}
+
+/// Sent by the worker after it has initialized all assigned adapters.
+///
+/// After this, the orchestrator may begin sending namespace/pod commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerReady {}
+
 /// Commands sent from the orchestrator to the worker.
 ///
 /// The orchestrator drives all state by sending commands over the control
@@ -348,6 +404,15 @@ pub enum WorkerCommand {
     RegistrySync {
         namespace_id: NamespaceId,
         entries: Vec<RegistryEntry>,
+    },
+
+    /// Incremental update to the DNS registry for a namespace.
+    ///
+    /// The worker applies additions and removals to its local registry.
+    RegistryUpdate {
+        namespace_id: NamespaceId,
+        added: Vec<RegistryEntry>,
+        removed: Vec<String>,
     },
 
     /// Launch a pod (Firecracker VM) in a namespace.

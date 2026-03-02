@@ -141,20 +141,6 @@ pub struct StreamManagerOutput {
     pub frames: Vec<Vec<u8>>,
 }
 
-impl StreamManagerOutput {
-    fn new() -> Self {
-        StreamManagerOutput {
-            events: Vec::new(),
-            frames: Vec::new(),
-        }
-    }
-
-    fn merge(&mut self, other: StreamManagerOutput) {
-        self.events.extend(other.events);
-        self.frames.extend(other.frames);
-    }
-}
-
 /// L4 stream manager: smoltcp-based TCP stack that translates between raw
 /// Ethernet frames and stream events/actions.
 pub struct StreamManager {
@@ -1139,7 +1125,7 @@ mod tests {
     fn test_poll_delay_returns_some_after_close() {
         let config = make_config(SVC_IP, SVC_MAC, vec![80]);
         let mut sm = StreamManager::new(config);
-        let (_stream_id, server_seq) = do_handshake(&mut sm);
+        let (_stream_id, _server_seq) = do_handshake(&mut sm);
 
         // Close from server side.
         sm.execute_action(&Action::DownstreamClose(_stream_id));

@@ -47,12 +47,17 @@ pub(crate) fn handle_log_action(service_id: &str, log_action: &LogAction) {
 #[derive(Debug, Clone)]
 pub enum FabricEvent {
     /// A frame hit a placeholder route or no route was found for a routed IP.
-    RouteMiss { dst_ip: Ipv4Addr, dst_mac: [u8; 6] },
+    RouteMiss {
+        #[allow(dead_code)]
+        dst_ip: Ipv4Addr,
+        dst_mac: [u8; 6],
+    },
     /// A frame hit a service IP that has no ready backend.
     ServiceActivation { service_id: String, dst_ip: Ipv4Addr },
     /// An activator signaled a backend need level change.
     ServiceBackendNeed {
         service_id: String,
+        #[allow(dead_code)]
         dst_ip: Ipv4Addr,
         need: distvirt_worker_protocol::BackendNeed,
     },
@@ -76,16 +81,6 @@ pub struct Fabric<P: FramePort = Port> {
 }
 
 impl Fabric<Port> {
-    /// Add a TAP device as a port and start its forwarding task.
-    ///
-    /// Returns the assigned port ID and a `TaskHandle` that owns the port's
-    /// read loop task. The caller must keep the handle alive; dropping it
-    /// aborts the task and the `PortGuard` cleans up the port map entry.
-    pub fn add_port(&mut self, tap: TapDevice) -> std::io::Result<(PortId, TaskHandle<()>)> {
-        let port = Port::new(tap)?;
-        Ok(self.add_port_inner(port, None, None))
-    }
-
     /// Add a TAP device as a port, pre-register its MAC, flush any buffered
     /// frames for `pod_ip`, and start the forwarding task.
     pub fn add_port_with_ip(
@@ -123,20 +118,16 @@ impl<P: FramePort> Fabric<P> {
     ///
     /// Returns the assigned port ID and a `TaskHandle` that owns the port's
     /// read loop task.
+    #[allow(dead_code)]
     pub fn add_port_raw(&mut self, port: P) -> (PortId, TaskHandle<()>) {
         self.add_port_inner(port, None, None)
     }
 
     /// Add a pre-constructed port with an associated IP, flush buffered frames,
     /// and start the forwarding task.
+    #[allow(dead_code)]
     pub fn add_port_raw_with_ip(&mut self, port: P, pod_ip: Ipv4Addr) -> (PortId, TaskHandle<()>) {
         self.add_port_inner(port, Some(pod_ip), None)
-    }
-
-    /// Add a pre-constructed port with an associated IP and MAC, pre-register
-    /// the MAC, flush buffered frames, and start the forwarding task.
-    pub fn add_port_raw_with_ip_mac(&mut self, port: P, pod_ip: Ipv4Addr, pod_mac: [u8; 6]) -> (PortId, TaskHandle<()>) {
-        self.add_port_inner(port, Some(pod_ip), Some(pod_mac))
     }
 
     /// Shared implementation for all add_port variants.

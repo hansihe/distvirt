@@ -45,6 +45,7 @@ impl FlowTracker {
 }
 
 /// Offset of the virtio-net header prepended to frames.
+#[allow(dead_code)]
 const VNET_HDR_SZ: usize = 10;
 
 /// Parse an Ethernet frame (with vnet header) into a `PacketInfo`.

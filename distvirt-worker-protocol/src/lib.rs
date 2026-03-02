@@ -147,7 +147,12 @@
 
 pub mod codec;
 pub mod connection;
+pub mod convert;
 pub mod types;
+
+pub mod worker_protocol_capnp {
+    include!(concat!(env!("OUT_DIR"), "/worker_protocol_capnp.rs"));
+}
 
 pub use connection::{
     LogStreamOpener, OrchestratorConnection, OrchestratorReader, OrchestratorWriter,
