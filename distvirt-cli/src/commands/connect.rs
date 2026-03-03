@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use rand::rngs::OsRng;
 
 use crate::client::{self, Client};
-use crate::tun::TunDevice;
+use crate::platform::{TunDevice, configure_interface, add_route, remove_route};
 
 const MAX_PACKET_SIZE: usize = 65536;
 
@@ -65,13 +65,21 @@ pub async fn connect(
     let client_ip = &resp.client_ip;
     let subnet = &resp.subnet;
 
+    // Parse prefix length from subnet CIDR (e.g. "172.16.0.0/24" → 24).
+    let prefix_len: u8 = subnet
+        .split('/')
+        .nth(1)
+        .context("subnet missing /prefix_len")?
+        .parse()
+        .context("invalid prefix length in subnet")?;
+
     // 3. If --config: print wg-quick format and exit.
     if config_only {
         let private_key_b64 = BASE64.encode(private_key.to_bytes());
         let server_pub_b64 = BASE64.encode(server_public_key_bytes);
         println!("[Interface]");
         println!("PrivateKey = {}", private_key_b64);
-        println!("Address = {}/32", client_ip);
+        println!("Address = {}/{}", client_ip, prefix_len);
         println!();
         println!("[Peer]");
         println!("PublicKey = {}", server_pub_b64);
@@ -85,10 +93,9 @@ pub async fn connect(
     let tun = TunDevice::create().context("failed to create TUN device")?;
     let tun_name = tun.name.clone();
 
-    // 5. Configure IP + routes via `ip` commands.
-    run_cmd("ip", &["addr", "add", &format!("{}/32", client_ip), "dev", &tun_name])?;
-    run_cmd("ip", &["link", "set", &tun_name, "up"])?;
-    run_cmd("ip", &["route", "replace", subnet, "dev", &tun_name])?;
+    // 5. Configure IP + routes.
+    configure_interface(&tun_name, client_ip, prefix_len)?;
+    add_route(subnet, &tun_name)?;
 
     // 6. Create boringtun tunnel.
     let server_public = PublicKey::from(server_public_key_bytes);
@@ -137,7 +144,7 @@ pub async fn connect(
     let _ = std::fs::remove_file(&state_path);
 
     // Remove route (best-effort, interface going away will clean it too).
-    let _ = run_cmd("ip", &["route", "del", subnet, "dev", &tun_name]);
+    let _ = remove_route(subnet, &tun_name);
 
     // Call DisconnectNetwork gRPC.
     let disconnect_result = client
@@ -342,13 +349,4 @@ async fn run_tunnel(
         r = udp_to_tun => r,
         r = timer => r,
     }
-}
-
-fn run_cmd(program: &str, args: &[&str]) -> anyhow::Result<()> {
-    let output = std::process::Command::new(program).args(args).output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{} {} failed: {}", program, args.join(" "), stderr.trim());
-    }
-    Ok(())
 }

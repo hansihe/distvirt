@@ -7,7 +7,6 @@ pub(crate) mod service;
 pub(crate) mod service_activator;
 pub(crate) mod switch;
 
-pub use switch::GATEWAY_IP_STR;
 pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use route::RouteTable;
 pub use service::ServiceTable;

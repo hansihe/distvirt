@@ -691,6 +691,32 @@ pub fn write_worker_command(
             let mut b = builder.init_remove_wire_guard_peer();
             b.set_peer_public_key(peer_public_key);
         }
+        WorkerCommand::SuspendPod {
+            namespace_id,
+            pod_id,
+            snapshot_id,
+        } => {
+            let mut b = builder.init_suspend_pod();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(pod_id.as_ref());
+            b.set_snapshot_id(snapshot_id.as_ref());
+        }
+        WorkerCommand::ResumePod {
+            namespace_id,
+            pod_id,
+            snapshot_id,
+            network,
+        } => {
+            let mut b = builder.init_resume_pod();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(pod_id.as_ref());
+            b.set_snapshot_id(snapshot_id.as_ref());
+            write_pod_network_config(&mut b.reborrow().init_network(), network);
+        }
+        WorkerCommand::DeleteSnapshot { snapshot_id } => {
+            let mut b = builder.init_delete_snapshot();
+            b.set_snapshot_id(snapshot_id.as_ref());
+        }
         WorkerCommand::Shutdown => {
             builder.set_shutdown(());
         }
@@ -867,6 +893,29 @@ pub fn read_worker_command(
             }
             Ok(WorkerCommand::RemoveWireGuardPeer { peer_public_key })
         }
+        SuspendPod(r) => {
+            let r = r?;
+            Ok(WorkerCommand::SuspendPod {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+            })
+        }
+        ResumePod(r) => {
+            let r = r?;
+            Ok(WorkerCommand::ResumePod {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+                network: read_pod_network_config(r.get_network()?)?,
+            })
+        }
+        DeleteSnapshot(r) => {
+            let r = r?;
+            Ok(WorkerCommand::DeleteSnapshot {
+                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+            })
+        }
         Shutdown(()) => Ok(WorkerCommand::Shutdown),
     }
 }
@@ -969,6 +1018,28 @@ pub fn write_worker_event(
             write_ipv4(&mut b.reborrow().init_dst_ip(), dst_ip);
             write_mac(&mut b.reborrow().init_dst_mac(), dst_mac);
         }
+        WorkerEvent::PodSuspended {
+            namespace_id,
+            pod_id,
+            snapshot_id,
+            snapshot_size_bytes,
+        } => {
+            let mut b = builder.init_pod_suspended();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(pod_id.as_ref());
+            b.set_snapshot_id(snapshot_id.as_ref());
+            b.set_snapshot_size_bytes(*snapshot_size_bytes);
+        }
+        WorkerEvent::PodSuspendFailed {
+            namespace_id,
+            pod_id,
+            error,
+        } => {
+            let mut b = builder.init_pod_suspend_failed();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(pod_id.as_ref());
+            b.set_error(error);
+        }
     }
 }
 
@@ -1052,6 +1123,23 @@ pub fn read_worker_event(
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 dst_ip: read_ipv4(r.get_dst_ip()?),
                 dst_mac: read_mac(r.get_dst_mac()?),
+            })
+        }
+        PodSuspended(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodSuspended {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+                snapshot_size_bytes: r.get_snapshot_size_bytes(),
+            })
+        }
+        PodSuspendFailed(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodSuspendFailed {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                error: r.get_error()?.to_string()?,
             })
         }
     }

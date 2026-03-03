@@ -317,6 +317,12 @@ pub async fn run_compose(
                     WorkerEvent::NamespaceDestroyed { namespace_id: _ } => {
                         log::info!("namespace destroyed");
                     }
+                    WorkerEvent::PodSuspended { pod_id, snapshot_id, .. } => {
+                        log::info!("pod '{}' suspended (snapshot: {})", pod_id, snapshot_id);
+                    }
+                    WorkerEvent::PodSuspendFailed { pod_id, error, .. } => {
+                        log::error!("pod '{}' suspend failed: {}", pod_id, error);
+                    }
                 }
             }
             Some(log_line) = log_line_rx.recv() => {

@@ -7,7 +7,7 @@ mod commands;
 mod config;
 mod connection;
 mod format;
-mod tun;
+mod platform;
 
 use commands::{LegacyCommands, OutputFormat};
 

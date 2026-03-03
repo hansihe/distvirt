@@ -8,12 +8,6 @@ use crate::packet::{is_broadcast, is_multicast};
 /// Synthetic gateway MAC address (locally administered).
 pub const GATEWAY_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0xff, 0xff, 0x01];
 
-/// Gateway IP address.
-pub const GATEWAY_IP: [u8; 4] = [172, 16, 0, 1];
-
-/// Gateway IP address as a string (for use in guest configuration).
-pub const GATEWAY_IP_STR: &str = "172.16.0.1";
-
 /// MAC address learning table mapping MAC addresses to port IDs.
 pub struct MacTable {
     table: HashMap<[u8; 6], (PortId, Instant)>,

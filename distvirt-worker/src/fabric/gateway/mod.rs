@@ -15,9 +15,19 @@ pub(crate) mod tun;
 pub use dns::DnsRegistry;
 
 use crate::packet::{ETH_HDR_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, FabricFrame, with_vnet_header};
-use super::switch::{GATEWAY_IP, GATEWAY_MAC};
+use super::switch::GATEWAY_MAC;
 use dns::DnsForwarder;
 use tun::TunEgress;
+
+/// Convert a prefix length (0–32) to a 4-byte netmask.
+fn prefix_len_to_netmask(prefix_len: u8) -> [u8; 4] {
+    if prefix_len == 0 {
+        [0, 0, 0, 0]
+    } else {
+        let mask = !0u32 << (32 - prefix_len);
+        mask.to_be_bytes()
+    }
+}
 
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
@@ -126,7 +136,7 @@ impl FabricGateway {
     /// - `ingress_rx`: receive frames from the gateway to inject into the fabric
     pub fn new(registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create TUN egress sub-component.
-        let tun = TunEgress::new(GATEWAY_IP, [255, 255, 255, 0])?;
+        let tun = TunEgress::new(pod_gateway_ip, prefix_len_to_netmask(pod_prefix_len))?;
 
         // Create DNS forwarder sub-component.
         let dns = DnsForwarder::new(registry)?;
@@ -137,12 +147,6 @@ impl FabricGateway {
         let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(GATEWAY_MAC)));
         let mut iface = Interface::new(config, &mut device, SmolInstant::from_millis(0));
         iface.update_ip_addrs(|addrs| {
-            addrs
-                .push(IpCidr::new(
-                    IpAddress::v4(GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3]),
-                    24,
-                ))
-                .ok();
             addrs
                 .push(IpCidr::new(
                     IpAddress::v4(pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3]),
@@ -169,8 +173,10 @@ impl FabricGateway {
         let (ingress_tx, ingress_rx) = mpsc::channel(CHANNEL_BUF);
 
         log::info!(
-            "gateway: created TUN device {} with smoltcp interface at 172.16.0.1/24",
-            tun.name()
+            "gateway: created TUN device {} with smoltcp interface at {}.{}.{}.{}/{}",
+            tun.name(),
+            pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3],
+            pod_prefix_len,
         );
 
         Ok((
@@ -254,7 +260,7 @@ impl FabricGateway {
                         let dst_ip: [u8; 4] = eth_frame[ETH_HDR_LEN + 16..ETH_HDR_LEN + 20]
                             .try_into()
                             .unwrap();
-                        dst_ip == GATEWAY_IP || dst_ip == self.pod_gateway_ip
+                        dst_ip == self.pod_gateway_ip
                     } else {
                         false
                     };

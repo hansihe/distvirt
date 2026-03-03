@@ -185,6 +185,7 @@ pub struct NamespaceOutput {
     pub timers_set: Vec<(TimerKey, Duration)>,
     pub timers_cancel: Vec<TimerKey>,
     pub pod_requests: Vec<PodRequest>,
+    pub events: Vec<SmNamespaceEvent>,
     pub destroyed: bool,
 }
 
@@ -203,6 +204,40 @@ pub enum WorkerEvent {
     PodFailed { pod_id: PodId, error: String },
     ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
+}
+
+// --- Namespace Events (emitted during state transitions) ---
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmNamespaceEvent {
+    Workload {
+        workload_id: WorkloadId,
+        event: SmWorkloadEvent,
+    },
+    Service {
+        service_id: ServiceId,
+        workload_id: WorkloadId,
+        event: SmServiceEvent,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmWorkloadEvent {
+    DemandChanged { demanding_services: u32 },
+    PodLaunching { pod_id: PodId, worker_id: WorkerId },
+    PodRunning { pod_id: PodId, worker_id: WorkerId },
+    PodStopped { reason: String },
+    PodFailed { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SmServiceEvent {
+    Activated { trigger: String },
+    BackendReady,
+    IdleTimerStarted { timeout: Duration },
+    IdleTimerCancelled { reason: String },
+    IdleTimeoutFired,
+    Deactivated { reason: String },
 }
 
 // --- Domain Enums ---

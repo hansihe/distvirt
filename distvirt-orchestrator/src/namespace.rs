@@ -249,19 +249,53 @@ impl NamespaceStateMachine {
             }
             WorkerEvent::ServiceActivation { service_id } => {
                 if let Some(svc) = self.services.get_mut(&service_id) {
+                    let wl_id = svc.workload_id.clone();
+                    out.events.push(SmNamespaceEvent::Service {
+                        service_id: service_id.clone(),
+                        workload_id: wl_id.clone(),
+                        event: SmServiceEvent::Activated {
+                            trigger: "traffic".to_string(),
+                        },
+                    });
                     let svc_outputs =
                         svc.step(ServiceInput::ServiceActivation, &self.namespace_id);
-                    let wl_id = svc.workload_id.clone();
                     self.forward_service_outputs(&service_id.clone(), &wl_id, svc_outputs, out);
                 }
             }
             WorkerEvent::ServiceBackendNeed { service_id, need } => {
                 if let Some(svc) = self.services.get_mut(&service_id) {
+                    let wl_id = svc.workload_id.clone();
+                    // Emit idle timer events based on need transitions.
+                    match &need {
+                        BackendNeed::None => {
+                            if svc.has_activation {
+                                if let ServiceState::Active { idle_timer: None, .. } = &svc.state {
+                                    out.events.push(SmNamespaceEvent::Service {
+                                        service_id: service_id.clone(),
+                                        workload_id: wl_id.clone(),
+                                        event: SmServiceEvent::IdleTimerStarted {
+                                            timeout: svc.idle_timeout,
+                                        },
+                                    });
+                                }
+                            }
+                        }
+                        BackendNeed::Traffic | BackendNeed::Active => {
+                            if let ServiceState::Active { idle_timer: Some(_), .. } = &svc.state {
+                                out.events.push(SmNamespaceEvent::Service {
+                                    service_id: service_id.clone(),
+                                    workload_id: wl_id.clone(),
+                                    event: SmServiceEvent::IdleTimerCancelled {
+                                        reason: "new traffic".to_string(),
+                                    },
+                                });
+                            }
+                        }
+                    }
                     let svc_outputs = svc.step(
                         ServiceInput::ServiceBackendNeed { need },
                         &self.namespace_id,
                     );
-                    let wl_id = svc.workload_id.clone();
                     self.forward_service_outputs(&service_id.clone(), &wl_id, svc_outputs, out);
                 }
             }
@@ -271,6 +305,13 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+                out.events.push(SmNamespaceEvent::Workload {
+                    workload_id: wl_id.clone(),
+                    event: SmWorkloadEvent::PodRunning {
+                        pod_id: pod_id.clone(),
+                        worker_id: pod_info.worker_id.clone(),
+                    },
+                });
                 let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
                     wl.step(
                         WorkloadInput::PodRunning {
@@ -283,7 +324,7 @@ impl NamespaceStateMachine {
                 };
                 self.forward_workload_outputs(&wl_id, wl_outputs, out);
             }
-            WorkerEvent::PodExited { pod_id, .. } | WorkerEvent::PodFailed { pod_id, .. } => {
+            WorkerEvent::PodExited { pod_id, exit_code } => {
                 let pod_info = match self.pods.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
@@ -292,6 +333,39 @@ impl NamespaceStateMachine {
                     ws.pods.remove(&pod_id);
                 }
                 let wl_id = pod_info.workload_id.clone();
+                out.events.push(SmNamespaceEvent::Workload {
+                    workload_id: wl_id.clone(),
+                    event: SmWorkloadEvent::PodStopped {
+                        reason: format!("exited with code {}", exit_code),
+                    },
+                });
+                let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
+                    wl.step(
+                        WorkloadInput::PodGone {
+                            pod_id: pod_id.clone(),
+                        },
+                        &self.namespace_id,
+                    )
+                } else {
+                    return;
+                };
+                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+            }
+            WorkerEvent::PodFailed { pod_id, error } => {
+                let pod_info = match self.pods.remove(&pod_id) {
+                    Some(info) => info,
+                    None => return,
+                };
+                if let Some(ws) = self.workers.get_mut(&pod_info.worker_id) {
+                    ws.pods.remove(&pod_id);
+                }
+                let wl_id = pod_info.workload_id.clone();
+                out.events.push(SmNamespaceEvent::Workload {
+                    workload_id: wl_id.clone(),
+                    event: SmWorkloadEvent::PodFailed {
+                        reason: error,
+                    },
+                });
                 let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
                     wl.step(
                         WorkloadInput::PodGone {
@@ -362,13 +436,33 @@ impl NamespaceStateMachine {
             TimerKey::IdleTimeout { service_id } => {
                 let service_id = service_id.clone();
                 if let Some(svc) = self.services.get_mut(&service_id) {
+                    let wl_id = svc.workload_id.clone();
+                    // Check if this timer fire will cause deactivation.
+                    if let ServiceState::Active { ref idle_timer, ref backend_need, .. } = svc.state {
+                        if idle_timer.as_ref() == Some(timer_key)
+                            && *backend_need == BackendNeed::None
+                            && svc.has_activation
+                        {
+                            out.events.push(SmNamespaceEvent::Service {
+                                service_id: service_id.clone(),
+                                workload_id: wl_id.clone(),
+                                event: SmServiceEvent::IdleTimeoutFired,
+                            });
+                            out.events.push(SmNamespaceEvent::Service {
+                                service_id: service_id.clone(),
+                                workload_id: wl_id.clone(),
+                                event: SmServiceEvent::Deactivated {
+                                    reason: "idle timeout".to_string(),
+                                },
+                            });
+                        }
+                    }
                     let svc_outputs = svc.step(
                         ServiceInput::TimerFired {
                             timer_key: timer_key.clone(),
                         },
                         &self.namespace_id,
                     );
-                    let wl_id = svc.workload_id.clone();
                     self.forward_service_outputs(&service_id, &wl_id, svc_outputs, out);
                 }
             }
@@ -767,6 +861,15 @@ impl NamespaceStateMachine {
             },
         ));
 
+        // Emit pod launching event.
+        out.events.push(SmNamespaceEvent::Workload {
+            workload_id: workload_id.clone(),
+            event: SmWorkloadEvent::PodLaunching {
+                pod_id: pod_id.clone(),
+                worker_id: worker_id.clone(),
+            },
+        });
+
         // Step the workload SM.
         let wl = self.workloads.get_mut(workload_id).unwrap();
         let wl_outputs = wl.step(
@@ -944,6 +1047,14 @@ impl NamespaceStateMachine {
                     } else {
                         continue;
                     };
+                    if let Some(wl) = self.workloads.get(workload_id) {
+                        out.events.push(SmNamespaceEvent::Workload {
+                            workload_id: workload_id.clone(),
+                            event: SmWorkloadEvent::DemandChanged {
+                                demanding_services: wl.demand_count,
+                            },
+                        });
+                    }
                     self.forward_workload_outputs(workload_id, wl_outputs, out);
                 }
                 ServiceOutput::DemandDown => {
@@ -952,6 +1063,14 @@ impl NamespaceStateMachine {
                     } else {
                         continue;
                     };
+                    if let Some(wl) = self.workloads.get(workload_id) {
+                        out.events.push(SmNamespaceEvent::Workload {
+                            workload_id: workload_id.clone(),
+                            event: SmWorkloadEvent::DemandChanged {
+                                demanding_services: wl.demand_count,
+                            },
+                        });
+                    }
                     self.forward_workload_outputs(workload_id, wl_outputs, out);
                 }
                 ServiceOutput::WorkerCommand(wid, cmd) => {
@@ -986,6 +1105,21 @@ impl NamespaceStateMachine {
                     });
                 }
                 WorkloadOutput::BecameReady { pod_id, worker_id } => {
+                    // Emit backend ready for all services on this workload.
+                    let svc_ids: Vec<(ServiceId, WorkloadId)> = self
+                        .service_workload
+                        .iter()
+                        .filter(|(_, wl_id)| *wl_id == workload_id)
+                        .map(|(sid, wlid)| (sid.clone(), wlid.clone()))
+                        .collect();
+                    for (sid, wlid) in &svc_ids {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: sid.clone(),
+                            workload_id: wlid.clone(),
+                            event: SmServiceEvent::BackendReady,
+                        });
+                    }
+
                     // Construct ServiceBackend from workload's PodNetworkConfig.
                     let backend = self.spec.workloads.get(workload_id).map(|wl_spec| {
                         ServiceBackend {

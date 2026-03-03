@@ -41,6 +41,17 @@ pub enum HostMessage {
         id: String,
         signal: i32,
     },
+    /// Set the guest's system clock.
+    /// Guest should respond with `ClockSet`.
+    SetClock {
+        /// Seconds since Unix epoch.
+        epoch_secs: u64,
+        /// Nanoseconds within the current second.
+        epoch_nanos: u32,
+    },
+    /// Tells the guest to flush output buffers in preparation for suspend.
+    /// Guest should respond with `SuspendReady` when done.
+    PrepareSuspend,
     Shutdown,
 }
 
@@ -48,12 +59,19 @@ pub enum HostMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GuestMessage {
-    Ready,
+    Ready {
+        /// IDs of containers still running (non-empty on resume after suspend).
+        #[serde(default)]
+        running_containers: Vec<String>,
+    },
+    /// Guest has flushed output and is ready for vCPU freeze.
+    SuspendReady,
     ContainerAdded { id: String },
     ContainerStarted { id: String, pid: u32 },
     ContainerExited { id: String, code: i32 },
     ContainerSignaled { id: String },
     NetworkConfigured,
+    ClockSet,
     Error { message: String },
 }
 

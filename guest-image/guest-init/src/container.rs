@@ -333,6 +333,15 @@ impl ContainerManager {
         }
     }
 
+    /// Return IDs of containers that have a running process.
+    pub fn running_container_ids(&self) -> Vec<String> {
+        self.containers
+            .values()
+            .filter(|c| c.pid.is_some())
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
     /// Return all container IDs that have capture output enabled (have pipe fds).
     pub fn captured_container_ids(&self) -> Vec<String> {
         self.containers

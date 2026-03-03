@@ -39,6 +39,7 @@ define_id_newtype!(NamespaceId);
 define_id_newtype!(WorkerId);
 define_id_newtype!(PodId);
 define_id_newtype!(ServiceId);
+define_id_newtype!(SnapshotId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -246,6 +247,20 @@ pub enum WorkerCommand {
     RemoveWireGuardPeer {
         peer_public_key: [u8; 32],
     },
+    SuspendPod {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        snapshot_id: SnapshotId,
+    },
+    ResumePod {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        snapshot_id: SnapshotId,
+        network: PodNetworkConfig,
+    },
+    DeleteSnapshot {
+        snapshot_id: SnapshotId,
+    },
     Shutdown,
 }
 
@@ -294,6 +309,17 @@ pub enum WorkerEvent {
         namespace_id: NamespaceId,
         service_id: ServiceId,
         need: BackendNeed,
+    },
+    PodSuspended {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        snapshot_id: SnapshotId,
+        snapshot_size_bytes: u64,
+    },
+    PodSuspendFailed {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        error: String,
     },
     NamespaceDestroyed {
         namespace_id: NamespaceId,

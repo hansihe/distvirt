@@ -26,6 +26,19 @@ struct LogSubscriber {
     tx: mpsc::Sender<LogChunkData>,
 }
 
+#[derive(Clone)]
+pub struct EventData {
+    pub namespace_id: NamespaceId,
+    pub event: SmNamespaceEvent,
+}
+
+struct EventSubscriber {
+    namespace_id: NamespaceId,
+    workload_id: Option<WorkloadId>,
+    service_id: Option<ServiceId>,
+    tx: mpsc::Sender<EventData>,
+}
+
 pub struct OrchestratorShell {
     orchestrator: Orchestrator,
     workers: HashMap<WorkerId, WorkerHandle>,
@@ -38,6 +51,7 @@ pub struct OrchestratorShell {
     wg_listen_port: u16,
     log_subscribers: Vec<LogSubscriber>,
     log_buffers: HashMap<(NamespaceId, WorkloadId), VecDeque<LogChunkData>>,
+    event_subscribers: Vec<EventSubscriber>,
 }
 
 struct WorkerHandle {
@@ -90,6 +104,12 @@ enum ShellMsg {
         pod_id: PodId,
         reply: oneshot::Sender<Option<WorkloadId>>,
     },
+    SubscribeEvents {
+        namespace_id: NamespaceId,
+        workload_id: Option<WorkloadId>,
+        service_id: Option<ServiceId>,
+        event_tx: mpsc::Sender<EventData>,
+    },
 }
 
 /// Cloneable handle for sending commands to the shell from gRPC handlers.
@@ -139,6 +159,24 @@ impl ShellHandle {
         rx
     }
 
+    /// Subscribe to namespace events (optionally filtered to a workload or service).
+    /// Returns a receiver that yields events as they occur.
+    pub fn subscribe_events(
+        &self,
+        namespace_id: NamespaceId,
+        workload_id: Option<WorkloadId>,
+        service_id: Option<ServiceId>,
+    ) -> mpsc::Receiver<EventData> {
+        let (tx, rx) = mpsc::channel(256);
+        let _ = self.msg_tx.send(ShellMsg::SubscribeEvents {
+            namespace_id,
+            workload_id,
+            service_id,
+            event_tx: tx,
+        });
+        rx
+    }
+
     /// Send a command and wait for the response.
     pub async fn send_command(
         &self,
@@ -174,6 +212,7 @@ impl OrchestratorShell {
             wg_listen_port,
             log_subscribers: Vec::new(),
             log_buffers: HashMap::new(),
+            event_subscribers: Vec::new(),
         }
     }
 
@@ -524,6 +563,20 @@ impl OrchestratorShell {
                 let _ = reply.send(workload_id);
                 return;
             }
+            ShellMsg::SubscribeEvents {
+                namespace_id,
+                workload_id,
+                service_id,
+                event_tx,
+            } => {
+                self.event_subscribers.push(EventSubscriber {
+                    namespace_id,
+                    workload_id,
+                    service_id,
+                    tx: event_tx,
+                });
+                return;
+            }
             _ => {}
         }
 
@@ -553,7 +606,8 @@ impl OrchestratorShell {
             | ShellMsg::WorkerConnection { .. }
             | ShellMsg::LogData { .. }
             | ShellMsg::SubscribeLogs { .. }
-            | ShellMsg::ResolvePod { .. } => unreachable!(),
+            | ShellMsg::ResolvePod { .. }
+            | ShellMsg::SubscribeEvents { .. } => unreachable!(),
         };
 
         if let Some(input) = input {
@@ -716,6 +770,51 @@ impl OrchestratorShell {
                 handle.abort();
             }
             self.timer_ns.remove(timer_key);
+        }
+
+        // Distribute namespace events to matching subscribers.
+        for (ns_id, ns_out) in &output.namespace_outputs {
+            for sm_event in &ns_out.events {
+                // Extract workload_id and service_id for filtering.
+                let (event_wl_id, event_svc_id) = match sm_event {
+                    SmNamespaceEvent::Workload { workload_id, .. } => {
+                        (Some(workload_id), None)
+                    }
+                    SmNamespaceEvent::Service {
+                        workload_id,
+                        service_id,
+                        ..
+                    } => (Some(workload_id), Some(service_id)),
+                };
+
+                let event_data = EventData {
+                    namespace_id: ns_id.clone(),
+                    event: sm_event.clone(),
+                };
+
+                self.event_subscribers.retain(|sub| {
+                    if sub.namespace_id != *ns_id {
+                        return true;
+                    }
+                    // Apply workload filter.
+                    if let Some(ref filter_wl) = sub.workload_id {
+                        if event_wl_id.map_or(true, |wl| wl != filter_wl) {
+                            return true; // Keep subscriber, just doesn't match this event.
+                        }
+                    }
+                    // Apply service filter.
+                    if let Some(ref filter_svc) = sub.service_id {
+                        if event_svc_id.map_or(true, |svc| svc != filter_svc) {
+                            return true;
+                        }
+                    }
+                    match sub.tx.try_send(event_data.clone()) {
+                        Ok(()) => true,
+                        Err(mpsc::error::TrySendError::Full(_)) => true,
+                        Err(mpsc::error::TrySendError::Closed(_)) => false,
+                    }
+                });
+            }
         }
     }
 }

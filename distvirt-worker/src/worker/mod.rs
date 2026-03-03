@@ -9,7 +9,7 @@ use anyhow::Context;
 use distvirt_activator::ActivatorRuntime;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
-    PodId, PodNetworkConfig, WorkerCapabilities, WorkerCommand,
+    PodId, PodNetworkConfig, SnapshotId, WorkerCapabilities, WorkerCommand,
     WorkerConnection, WorkerEvent, WorkerHello,
 };
 use tokio::sync::mpsc;
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::AdapterManager;
 use crate::image_provider::ImageProvider;
 use namespace::{FatalError, NamespaceState};
-use supervisor::{PodState, pod_supervisor, send_event, STOP_POD_TIMEOUT};
+use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor, send_event, STOP_POD_TIMEOUT};
 use crate::task_handle::TaskHandle;
 use crate::vmm::Vmm;
 
@@ -46,6 +46,8 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     adapter_manager: AdapterManager,
     /// Public endpoint where this worker is reachable by other workers.
     public_endpoint: String,
+    /// Base directory for VM snapshots.
+    snapshot_base_dir: PathBuf,
 }
 
 impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
@@ -67,6 +69,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 }
             }
         });
+        let snapshot_base_dir = std::env::temp_dir().join(format!("distvirt-snapshots-{}", std::process::id()));
         Worker {
             kernel_path,
             rootfs_image_path,
@@ -79,6 +82,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             activator_runtime,
             adapter_manager: AdapterManager::empty(),
             public_endpoint,
+            snapshot_base_dir,
         }
     }
 
@@ -152,7 +156,9 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     // Clean up completed pods from namespace state.
                     match &event {
                         WorkerEvent::PodExited { namespace_id, pod_id, .. }
-                        | WorkerEvent::PodFailed { namespace_id, pod_id, .. } => {
+                        | WorkerEvent::PodFailed { namespace_id, pod_id, .. }
+                        | WorkerEvent::PodSuspended { namespace_id, pod_id, .. }
+                        | WorkerEvent::PodSuspendFailed { namespace_id, pod_id, .. } => {
                             self.remove_finished_pod(namespace_id, pod_id);
                         }
                         _ => {}
@@ -322,6 +328,26 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 }
                 Ok(())
             }
+            WorkerCommand::SuspendPod {
+                namespace_id,
+                pod_id,
+                snapshot_id,
+            } => {
+                self.handle_suspend_pod(&namespace_id, &pod_id, snapshot_id)
+                    .await
+            }
+            WorkerCommand::ResumePod {
+                namespace_id,
+                pod_id,
+                snapshot_id,
+                network,
+            } => {
+                self.handle_resume_pod(&namespace_id, pod_id, snapshot_id, network)
+                    .await
+            }
+            WorkerCommand::DeleteSnapshot { snapshot_id } => {
+                self.handle_delete_snapshot(&snapshot_id).await
+            }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
                 unreachable!("Shutdown handled in run()")
@@ -393,6 +419,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let pid = pod_id.clone();
         let cancel_clone = pod_cancel.clone();
 
+        let (suspend_tx, suspend_rx) = mpsc::channel(1);
+
         let supervisor = TaskHandle::spawn(async move {
             pod_supervisor(
                 vmm,
@@ -407,6 +435,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 pid,
                 network,
                 containers,
+                suspend_rx,
             )
             .await;
         });
@@ -416,6 +445,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             PodState {
                 cancel: pod_cancel,
                 supervisor,
+                suspend_tx,
             },
         );
 
@@ -495,6 +525,163 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             }
         }
 
+        Ok(())
+    }
+
+    async fn handle_suspend_pod(
+        &mut self,
+        namespace_id: &NamespaceId,
+        pod_id: &PodId,
+        snapshot_id: SnapshotId,
+    ) -> Result<(), FatalError> {
+        let snapshot_dir = self.snapshot_base_dir.join(snapshot_id.as_ref());
+
+        let suspend_tx = {
+            let ns = self.get_namespace_mut(namespace_id)?;
+            match ns.pods.get(pod_id) {
+                Some(pod) => pod.suspend_tx.clone(),
+                None => {
+                    send_event(
+                        &self.bg_event_tx,
+                        WorkerEvent::PodSuspendFailed {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            error: format!("pod '{}' not found", pod_id),
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        };
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+        let req = SuspendRequest {
+            snapshot_id: snapshot_id.clone(),
+            snapshot_dir,
+            reply: reply_tx,
+        };
+
+        if suspend_tx.send(req).await.is_err() {
+            log::error!("suspend_pod: pod '{}' supervisor already exited", pod_id);
+            send_event(
+                &self.bg_event_tx,
+                WorkerEvent::PodSuspendFailed {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    error: "pod supervisor already exited".to_string(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+
+        // Wait for the suspend to complete (the monitor handles the actual work).
+        match reply_rx.await {
+            Ok(Ok(_artifacts)) => {
+                log::info!("suspend_pod: pod '{}' suspended successfully", pod_id);
+            }
+            Ok(Err(e)) => {
+                log::error!("suspend_pod: pod '{}' suspend failed: {}", pod_id, e);
+            }
+            Err(_) => {
+                log::error!("suspend_pod: pod '{}' reply channel dropped", pod_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_resume_pod(
+        &mut self,
+        namespace_id: &NamespaceId,
+        pod_id: PodId,
+        snapshot_id: SnapshotId,
+        network: PodNetworkConfig,
+    ) -> Result<(), FatalError> {
+        let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
+            FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+        })?;
+
+        // Load snapshot metadata.
+        let snapshot_dir = self.snapshot_base_dir.join(snapshot_id.as_ref());
+        let metadata_path = snapshot_dir.join("metadata.json");
+        let metadata_bytes = tokio::fs::read(&metadata_path).await.map_err(|e| {
+            FatalError::InternalInvariant(format!(
+                "failed to read snapshot metadata at {}: {}",
+                metadata_path.display(),
+                e
+            ))
+        })?;
+        let metadata: crate::vmm::SnapshotMetadata =
+            serde_json::from_slice(&metadata_bytes).map_err(|e| {
+                FatalError::InternalInvariant(format!("invalid snapshot metadata: {}", e))
+            })?;
+
+        let snapshot = crate::vmm::SnapshotArtifacts {
+            snapshot_dir,
+            metadata,
+        };
+
+        // Register the pod's IP→MAC mapping with the WireGuard adapter.
+        if let Some(wg) = self.adapter_manager.wireguard() {
+            wg.register_pod_mac(namespace_id.as_ref(), network.ip, network.mac).await;
+        }
+
+        let pod_cancel = ns.token.child_token();
+        let event_tx = self.bg_event_tx.clone();
+        let vmm = Arc::clone(&self.vmm);
+        let fabric = Arc::clone(&ns.fabric);
+        let ns_id = namespace_id.clone();
+        let pid = pod_id.clone();
+        let cancel_clone = pod_cancel.clone();
+
+        let (suspend_tx, suspend_rx) = mpsc::channel(1);
+
+        let supervisor = TaskHandle::spawn(async move {
+            pod_resume_supervisor(
+                vmm,
+                fabric,
+                cancel_clone,
+                event_tx,
+                ns_id,
+                pid,
+                network,
+                snapshot,
+                suspend_rx,
+            )
+            .await;
+        });
+
+        ns.pods.insert(
+            pod_id,
+            PodState {
+                cancel: pod_cancel,
+                supervisor,
+                suspend_tx,
+            },
+        );
+
+        Ok(())
+    }
+
+    async fn handle_delete_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+    ) -> Result<(), FatalError> {
+        let snapshot_dir = self.snapshot_base_dir.join(snapshot_id.as_ref());
+        if snapshot_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&snapshot_dir).await {
+                log::error!(
+                    "delete_snapshot: failed to remove {}: {}",
+                    snapshot_dir.display(),
+                    e
+                );
+            } else {
+                log::info!("delete_snapshot: removed {}", snapshot_dir.display());
+            }
+        }
         Ok(())
     }
 }

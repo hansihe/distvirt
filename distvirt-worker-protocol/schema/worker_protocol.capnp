@@ -489,6 +489,46 @@ struct RemoveWireGuardPeerCmd {
   # 32-byte X25519 public key identifying the peer to remove.
 }
 
+# Suspend a running pod and snapshot its state to disk.
+#
+# The worker sends PrepareSuspend to the guest, waits for SuspendReady,
+# takes a Firecracker snapshot, and kills the VM. The snapshot is stored
+# under the worker's snapshot base directory keyed by snapshotId.
+#
+# On success, emits WorkerEvent.podSuspended. On failure, emits
+# WorkerEvent.podSuspendFailed.
+struct SuspendPodCmd {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+  snapshotId @2 :Text;
+  # Unique identifier for this snapshot (assigned by orchestrator).
+}
+
+# Resume a previously suspended pod from a snapshot.
+#
+# The worker restores the Firecracker VM from the snapshot, reconnects
+# the vsock session, and re-attaches the pod to the fabric with the
+# provided network config (which may differ from the original).
+#
+# On success, emits WorkerEvent.podRunning. On failure, emits
+# WorkerEvent.podFailed.
+struct ResumePodCmd {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+  snapshotId @2 :Text;
+  # Snapshot to restore from.
+  network @3 :PodNetworkConfig;
+  # Network config for the restored pod (fresh TAP, potentially new IP).
+}
+
+# Delete a snapshot from disk.
+#
+# Removes the snapshot directory identified by snapshotId. Idempotent --
+# succeeds even if the snapshot doesn't exist.
+struct DeleteSnapshotCmd {
+  snapshotId @0 :Text;
+}
+
 # --- Control Stream: Commands (orchestrator -> worker) ---
 
 # Commands sent from the orchestrator to the worker.
@@ -521,6 +561,9 @@ struct WorkerCommand {
     destroyService @11 :DestroyServiceCmd;
     addWireGuardPeer @12 :AddWireGuardPeerCmd;
     removeWireGuardPeer @13 :RemoveWireGuardPeerCmd;
+    suspendPod @15 :SuspendPodCmd;
+    resumePod @16 :ResumePodCmd;
+    deleteSnapshot @17 :DeleteSnapshotCmd;
     shutdown @14 :Void;
     # Shut down the worker entirely.
     #
@@ -629,6 +672,29 @@ struct ServiceBackendNeedEvt {
   need @2 :BackendNeed;
 }
 
+# The pod has been successfully suspended and its snapshot written to disk.
+#
+# The VM has been killed. The snapshot can be used to resume the pod
+# later via WorkerCommand.resumePod.
+struct PodSuspendedEvt {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+  snapshotId @2 :Text;
+  snapshotSizeBytes @3 :UInt64;
+  # Total size of the snapshot on disk (metadata + snapshot.bin + mem.bin + container.ext4).
+}
+
+# The pod could not be suspended.
+#
+# The pod may still be running (if the error occurred before the VM was
+# killed) or may be in an undefined state. The orchestrator should stop
+# the pod if it needs to recover.
+struct PodSuspendFailedEvt {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+  error @2 :Text;
+}
+
 # The fabric received a frame for a pod IP that can't be delivered locally.
 #
 # Fires for both unknown destinations (no route entry) and placeholders
@@ -666,6 +732,8 @@ struct WorkerEvent {
     serviceActivation @8 :ServiceActivationEvt;
     serviceBackendNeed @9 :ServiceBackendNeedEvt;
     fabricRouteMiss @10 :FabricRouteMissEvt;
+    podSuspended @11 :PodSuspendedEvt;
+    podSuspendFailed @12 :PodSuspendFailedEvt;
   }
 }
 

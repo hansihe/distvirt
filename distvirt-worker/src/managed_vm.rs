@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context};
 
@@ -7,7 +7,7 @@ use distvirt_worker_protocol::ContainerConfig;
 
 use crate::image_provider::containerd::{parse_user_numeric, ImageConfig};
 use crate::io_session::IoSession;
-use crate::vmm::{NetConfig, VmInstance};
+use crate::vmm::{NetConfig, SnapshotArtifacts, VmInstance};
 use crate::task_handle::TaskHandle;
 use crate::vsock_client::GuestSession;
 
@@ -23,6 +23,14 @@ pub(crate) struct ImageOverrides {
 }
 
 /// A launched VM with an established yamux session.
+///
+/// NOTE: The control protocol is strictly request-response — each method sends
+/// a command and expects the next message to be the corresponding reply.
+/// Unsolicited async events (e.g. `ContainerExited`) arriving between send and
+/// recv will cause the caller to bail. This is unlikely in practice (the guest
+/// handles commands synchronously before polling for child exits), but a proper
+/// fix would involve separating request-response from async events on the
+/// control stream (e.g. tag-based correlation or a dedicated event channel).
 pub(crate) struct ManagedVm<I> {
     instance: I,
     session: GuestSession,
@@ -47,11 +55,43 @@ impl<I: VmInstance> ManagedVm<I> {
 
         let msg: GuestMessage = session.recv().await.context("receive Ready")?;
         match msg {
-            GuestMessage::Ready => log::info!("guest is ready"),
+            GuestMessage::Ready { running_containers } => {
+                if running_containers.is_empty() {
+                    log::info!("guest is ready");
+                } else {
+                    log::info!("guest is ready (resumed, running containers: {:?})", running_containers);
+                }
+            }
             other => bail!("expected Ready, got {:?}", other),
         }
 
-        Ok((ManagedVm { instance, session, started_containers: Vec::new() }, yamux_driver))
+        let mut vm = Self { instance, session, started_containers: Vec::new() };
+        vm.set_clock().await.context("set guest clock")?;
+        Ok((vm, yamux_driver))
+    }
+
+    /// Set the guest's system clock to the host's current wall-clock time.
+    async fn set_clock(&mut self) -> anyhow::Result<()> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("system clock before Unix epoch")?;
+
+        self.session
+            .send(&HostMessage::SetClock {
+                epoch_secs: now.as_secs(),
+                epoch_nanos: now.subsec_nanos(),
+            })
+            .await
+            .context("send SetClock")?;
+
+        let msg: GuestMessage = self.session.recv().await.context("receive ClockSet")?;
+        match msg {
+            GuestMessage::ClockSet => log::info!("guest clock synchronized"),
+            GuestMessage::Error { message } => bail!("SetClock failed: {}", message),
+            other => bail!("expected ClockSet, got {:?}", other),
+        }
+
+        Ok(())
     }
 
     /// Configure the guest's network interface.
@@ -200,6 +240,46 @@ impl<I: VmInstance> ManagedVm<I> {
             .await
             .context("accept output stream")?;
         Ok((container_id, IoSession::new(stream)))
+    }
+
+    /// Suspend the VM: handshake with guest, snapshot, then kill.
+    ///
+    /// Sends `PrepareSuspend` to the guest, waits for `SuspendReady` (with
+    /// timeout), takes a Firecracker snapshot, and kills the VM process.
+    /// Returns the snapshot artifacts for later restore via `Vmm::restore()`
+    /// + `ManagedVm::connect()`.
+    pub async fn suspend(
+        &mut self,
+        snapshot_dir: &std::path::Path,
+        timeout: Duration,
+    ) -> anyhow::Result<SnapshotArtifacts> {
+        // 1. Tell guest to flush output buffers.
+        self.session
+            .send(&HostMessage::PrepareSuspend)
+            .await
+            .context("send PrepareSuspend")?;
+
+        // 2. Wait for SuspendReady (with timeout).
+        let msg: GuestMessage = tokio::time::timeout(timeout, self.session.recv())
+            .await
+            .context("timeout waiting for SuspendReady")?
+            .context("receive SuspendReady")?;
+        match msg {
+            GuestMessage::SuspendReady => log::info!("guest is ready for suspend"),
+            other => bail!("expected SuspendReady, got {:?}", other),
+        }
+
+        // 3. Snapshot the VM (pauses vCPUs, writes files).
+        let artifacts = self
+            .instance
+            .snapshot(snapshot_dir)
+            .await
+            .context("snapshot VM")?;
+
+        // 4. Kill the VM process.
+        self.instance.kill().await.context("kill VM after snapshot")?;
+
+        Ok(artifacts)
     }
 
     /// Gracefully shut down containers, then the VM.

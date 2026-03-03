@@ -1193,3 +1193,388 @@ async fn test_destroy_service() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_suspend_resume_pod() -> anyhow::Result<()> {
+    if !should_run() {
+        return Ok(());
+    }
+
+    let (mut conn, worker_handle) = setup().await?;
+
+    // Create namespace
+    conn.send_command(&WorkerCommand::CreateNamespace {
+        namespace_id: "ns-suspend".into(),
+        network: test_network_config(),
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::NamespaceCreated { .. })
+    })
+    .await?;
+
+    // Launch a long-running pod
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-suspend".into(),
+        pod_id: "pod-suspend".into(),
+        network: test_pod_network_config(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-suspend".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: "/bin/sleep".into(),
+                args: vec!["3600".into()],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: false,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    // Wait for PodRunning
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-suspend")
+    })
+    .await?;
+    eprintln!("e2e: pod-suspend is running, sending SuspendPod");
+
+    // Suspend the pod
+    conn.send_command(&WorkerCommand::SuspendPod {
+        namespace_id: "ns-suspend".into(),
+        pod_id: "pod-suspend".into(),
+        snapshot_id: "snap-1".into(),
+    })
+    .await?;
+
+    // Wait for PodSuspended (or PodSuspendFailed)
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(
+            e,
+            WorkerEvent::PodSuspended { .. } | WorkerEvent::PodSuspendFailed { .. }
+        )
+    })
+    .await?;
+
+    if let WorkerEvent::PodSuspendFailed { error, .. } = &event {
+        anyhow::bail!("suspend failed: {}", error);
+    }
+
+    match &event {
+        WorkerEvent::PodSuspended {
+            namespace_id,
+            pod_id,
+            snapshot_id,
+            snapshot_size_bytes,
+        } => {
+            assert_eq!(namespace_id, "ns-suspend");
+            assert_eq!(pod_id, "pod-suspend");
+            assert_eq!(snapshot_id, "snap-1");
+            assert!(
+                *snapshot_size_bytes > 0,
+                "snapshot should have non-zero size, got {}",
+                snapshot_size_bytes
+            );
+            eprintln!(
+                "e2e: pod suspended, snapshot_size={}",
+                snapshot_size_bytes
+            );
+        }
+        other => panic!("expected PodSuspended, got {:?}", other),
+    }
+
+    // Resume the pod from the snapshot
+    conn.send_command(&WorkerCommand::ResumePod {
+        namespace_id: "ns-suspend".into(),
+        pod_id: "pod-resumed".into(),
+        snapshot_id: "snap-1".into(),
+        network: test_pod_network_config(),
+    })
+    .await?;
+
+    // Wait for PodRunning again
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-resumed")
+    })
+    .await?;
+    eprintln!("e2e: pod-resumed is running: {:?}", event);
+
+    // Stop the resumed pod to clean up
+    conn.send_command(&WorkerCommand::StopPod {
+        namespace_id: "ns-suspend".into(),
+        pod_id: "pod-resumed".into(),
+        graceful: true,
+    })
+    .await?;
+
+    // Wait for PodExited
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-resumed")
+    })
+    .await?;
+
+    // Clean up snapshot
+    conn.send_command(&WorkerCommand::DeleteSnapshot {
+        snapshot_id: "snap-1".into(),
+    })
+    .await?;
+
+    shutdown_worker(&mut conn, worker_handle).await?;
+
+    Ok(())
+}
+
+/// Test that a pod can receive TCP traffic over the network after suspend/resume.
+///
+/// Flow:
+/// 1. Launch a server pod running a persistent TCP listener
+/// 2. Set up a service pointing at the server pod
+/// 3. Launch a client pod, verify it receives a response (pre-suspend check)
+/// 4. Suspend the server pod
+/// 5. Resume the server pod from the snapshot
+/// 6. Re-point the service at the resumed pod
+/// 7. Launch another client pod, verify it receives a response (post-resume check)
+#[tokio::test]
+async fn test_suspend_resume_network() -> anyhow::Result<()> {
+    if !should_run() {
+        return Ok(());
+    }
+
+    let (mut conn, worker_handle) = setup().await?;
+
+    // Create namespace
+    conn.send_command(&WorkerCommand::CreateNamespace {
+        namespace_id: "ns-susp-net".into(),
+        network: test_network_config(),
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::NamespaceCreated { .. })
+    })
+    .await?;
+
+    // Create service at 10.0.0.99 (no activator, simple forwarding)
+    conn.send_command(&WorkerCommand::CreateService {
+        namespace_id: "ns-susp-net".into(),
+        service_id: "svc-susp".into(),
+        ip: Ipv4Addr::new(10, 0, 0, 99),
+        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
+        policy: ServicePolicy {
+            buffer_frames: 64,
+            timeout_ms: 30000,
+            activator: None,
+        },
+    })
+    .await?;
+
+    // Launch server pod with a persistent TCP listener (responds "pong" per connection)
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-susp-net".into(),
+        pod_id: "pod-server".into(),
+        network: test_pod_network_config(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-server".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "while true; do echo pong | nc -l -p 80 -w 10; done".into(),
+                ],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: false,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server")
+    })
+    .await?;
+
+    // Point service at server pod and mark ready
+    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+        namespace_id: "ns-susp-net".into(),
+        service_id: "svc-susp".into(),
+        backend: Some(ServiceBackend {
+            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        }),
+    })
+    .await?;
+
+    conn.send_command(&WorkerCommand::ServiceReady {
+        namespace_id: "ns-susp-net".into(),
+        service_id: "svc-susp".into(),
+    })
+    .await?;
+
+    // --- Pre-suspend: verify TCP connectivity ---
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-susp-net".into(),
+        pod_id: "pod-client-pre".into(),
+        network: test_pod_network_config_2(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-client-pre".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: "/bin/sh".into(),
+                args: vec!["-c".into(), "nc -w 5 10.0.0.99 80".into()],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: true,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-client-pre")
+    })
+    .await?;
+
+    let log_str = drain_log_stream(&mut conn).await?;
+    assert!(
+        log_str.contains("pong"),
+        "expected 'pong' in pre-suspend client output, got: {:?}",
+        log_str
+    );
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client-pre")
+    })
+    .await?;
+    eprintln!("e2e: pre-suspend connectivity verified");
+
+    // --- Suspend the server pod ---
+    conn.send_command(&WorkerCommand::SuspendPod {
+        namespace_id: "ns-susp-net".into(),
+        pod_id: "pod-server".into(),
+        snapshot_id: "snap-net".into(),
+    })
+    .await?;
+
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(
+            e,
+            WorkerEvent::PodSuspended { .. } | WorkerEvent::PodSuspendFailed { .. }
+        )
+    })
+    .await?;
+
+    if let WorkerEvent::PodSuspendFailed { error, .. } = &event {
+        anyhow::bail!("suspend failed: {}", error);
+    }
+    eprintln!("e2e: server pod suspended");
+
+    // --- Resume the server pod ---
+    conn.send_command(&WorkerCommand::ResumePod {
+        namespace_id: "ns-susp-net".into(),
+        pod_id: "pod-server-resumed".into(),
+        snapshot_id: "snap-net".into(),
+        network: test_pod_network_config(),
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server-resumed")
+    })
+    .await?;
+    eprintln!("e2e: server pod resumed");
+
+    // Re-point service at resumed pod (same IP/MAC) and mark ready
+    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+        namespace_id: "ns-susp-net".into(),
+        service_id: "svc-susp".into(),
+        backend: Some(ServiceBackend {
+            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        }),
+    })
+    .await?;
+
+    conn.send_command(&WorkerCommand::ServiceReady {
+        namespace_id: "ns-susp-net".into(),
+        service_id: "svc-susp".into(),
+    })
+    .await?;
+
+    // --- Post-resume: verify TCP connectivity ---
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-susp-net".into(),
+        pod_id: "pod-client-post".into(),
+        network: test_pod_network_config_2(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-client-post".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: "/bin/sh".into(),
+                args: vec!["-c".into(), "nc -w 5 10.0.0.99 80".into()],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: true,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-client-post")
+    })
+    .await?;
+
+    let log_str = drain_log_stream(&mut conn).await?;
+    assert!(
+        log_str.contains("pong"),
+        "expected 'pong' in post-resume client output, got: {:?}",
+        log_str
+    );
+    eprintln!("e2e: post-resume connectivity verified");
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client-post")
+    })
+    .await?;
+
+    // Clean up
+    conn.send_command(&WorkerCommand::StopPod {
+        namespace_id: "ns-susp-net".into(),
+        pod_id: "pod-server-resumed".into(),
+        graceful: true,
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-server-resumed")
+    })
+    .await?;
+
+    conn.send_command(&WorkerCommand::DeleteSnapshot {
+        snapshot_id: "snap-net".into(),
+    })
+    .await?;
+
+    shutdown_worker(&mut conn, worker_handle).await?;
+
+    Ok(())
+}
+

@@ -5,10 +5,10 @@ use std::time::Duration;
 use anyhow::Context;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId, PodNetworkConfig,
-    WorkerEvent,
+    SnapshotId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::fabric::{Fabric, FabricPort};
@@ -16,7 +16,7 @@ use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
 use crate::managed_vm::{ImageOverrides, ManagedVm, merge_config};
 use crate::task_handle::TaskHandle;
-use crate::vmm::{NetConfig, VmConfig, VmInstance, Vmm};
+use crate::vmm::{NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
 
 /// Timeout for graceful guest shutdown before force-killing.
 pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,10 +24,18 @@ pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Outer timeout for awaiting a pod supervisor after cancellation.
 pub(crate) const STOP_POD_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Per-pod state: cancellation token and supervisor task handle.
+/// Request to suspend a running pod.
+pub(crate) struct SuspendRequest {
+    pub(crate) snapshot_id: SnapshotId,
+    pub(crate) snapshot_dir: PathBuf,
+    pub(crate) reply: oneshot::Sender<Result<SnapshotArtifacts, String>>,
+}
+
+/// Per-pod state: cancellation token, supervisor task handle, and suspend channel.
 pub(crate) struct PodState {
     pub(crate) cancel: CancellationToken,
     pub(crate) supervisor: TaskHandle<()>,
+    pub(crate) suspend_tx: mpsc::Sender<SuspendRequest>,
 }
 
 /// Send an event to the worker main loop, or log and return if the worker is shutting down.
@@ -54,6 +62,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
     pod_id: PodId,
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
+    suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
     match pod_launch(
         &*vmm,
@@ -81,7 +90,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
                 },
             )
             .await;
-            pod_monitor(vm, yamux_driver, io_session, port_task, cancel, event_tx, namespace_id, pod_id).await;
+            pod_monitor(vm, yamux_driver, io_session, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
         }
         Err(e) => {
             if cancel.is_cancelled() {
@@ -109,6 +118,125 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
             }
         }
     }
+}
+
+/// Top-level resume supervisor: restores a pod from a snapshot and monitors it.
+///
+/// Similar to `pod_supervisor` but calls `vmm.restore()` instead of launching fresh.
+pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
+    vmm: Arc<V>,
+    fabric: Arc<Fabric<FabricPort>>,
+    cancel: CancellationToken,
+    event_tx: mpsc::Sender<WorkerEvent>,
+    namespace_id: NamespaceId,
+    pod_id: PodId,
+    network: PodNetworkConfig,
+    snapshot: SnapshotArtifacts,
+    suspend_rx: mpsc::Receiver<SuspendRequest>,
+) {
+    match pod_restore(
+        &*vmm,
+        &fabric,
+        &event_tx,
+        &namespace_id,
+        &pod_id,
+        network,
+        snapshot,
+        &cancel,
+    )
+    .await
+    {
+        Ok((vm, yamux_driver, port_task)) => {
+            send_event(
+                &event_tx,
+                WorkerEvent::PodRunning {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                },
+            )
+            .await;
+            pod_monitor(vm, yamux_driver, None, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
+        }
+        Err(e) => {
+            if cancel.is_cancelled() {
+                log::info!("pod '{}': resume cancelled", pod_id);
+                send_event(
+                    &event_tx,
+                    WorkerEvent::PodExited {
+                        namespace_id,
+                        pod_id: pod_id.clone(),
+                        exit_code: -1,
+                    },
+                )
+                .await;
+            } else {
+                log::error!("pod '{}': resume failed: {:#}", pod_id, e);
+                send_event(
+                    &event_tx,
+                    WorkerEvent::PodFailed {
+                        namespace_id,
+                        pod_id: pod_id.clone(),
+                        error: format!("{:#}", e),
+                    },
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Perform all fallible restore: restore VM from snapshot, vsock connect,
+/// add TAP to fabric. Containers are already running in the restored VM.
+async fn pod_restore<V: Vmm + 'static>(
+    vmm: &V,
+    fabric: &Fabric<FabricPort>,
+    _event_tx: &mpsc::Sender<WorkerEvent>,
+    _namespace_id: &NamespaceId,
+    pod_id: &PodId,
+    network: PodNetworkConfig,
+    snapshot: SnapshotArtifacts,
+    cancel: &CancellationToken,
+) -> anyhow::Result<(
+    ManagedVm<V::Instance>,
+    TaskHandle<anyhow::Result<()>>,
+    Option<TaskHandle<()>>,
+)> {
+    let net_config = NetConfig {
+        guest_ip: network.ip.to_string(),
+        netmask: network.netmask.clone(),
+        gateway: network.gateway.to_string(),
+        guest_mac: network.mac,
+    };
+
+    let mut instance = tokio::select! {
+        result = vmm.restore(&snapshot, Some(&net_config)) => {
+            result.context("restore VM from snapshot")?
+        }
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled during VM restore");
+        }
+    };
+    log::info!("worker: pod '{}' VM restored from snapshot", pod_id);
+
+    let port_task = if let Some(tap) = instance.take_tap() {
+        let tap_name = tap.name.clone();
+        let (_port_id, task) = fabric
+            .add_tap_port(tap, network.ip, network.mac)
+            .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
+        log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
+        Some(task)
+    } else {
+        None
+    };
+
+    let (vm, yamux_driver) = tokio::select! {
+        result = ManagedVm::connect(instance) => { result? }
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled during VM connect after restore");
+        }
+    };
+
+    Ok((vm, yamux_driver, port_task))
 }
 
 /// Perform all fallible pod setup: image prep, VM launch, vsock connect,
@@ -217,7 +345,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
 
     vm.configure_network("eth0", &net_config).await?;
 
-    let dns_servers = vec![crate::fabric::GATEWAY_IP_STR.to_string()];
+    let dns_servers = vec![network.gateway.to_string()];
 
     let container_id = &container.container_id;
     vm.add_container(container_id, "/dev/vdb", &dns_servers)
@@ -276,10 +404,13 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     Ok((vm, yamux_driver, io_session, port_task))
 }
 
+/// Timeout for suspend handshake with guest.
+const SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Pod monitor: watches a running pod's sub-tasks and handles cleanup.
 ///
 /// This owns the `ManagedVm` and coordinates between container exit,
-/// yamux driver health, log streaming, and cancellation.
+/// yamux driver health, log streaming, suspend requests, and cancellation.
 async fn pod_monitor<I: VmInstance>(
     mut vm: ManagedVm<I>,
     mut yamux_driver: TaskHandle<anyhow::Result<()>>,
@@ -289,6 +420,7 @@ async fn pod_monitor<I: VmInstance>(
     event_tx: mpsc::Sender<WorkerEvent>,
     namespace_id: NamespaceId,
     pod_id: PodId,
+    mut suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
     // Spawn log streaming as a non-fatal sub-task.
     // Uses TaskHandle so it's automatically aborted when monitor exits.
@@ -384,6 +516,40 @@ async fn pod_monitor<I: VmInstance>(
             }
         }
 
+        // Suspend request: snapshot the VM and exit.
+        Some(req) = suspend_rx.recv() => {
+            log::info!("pod '{}': suspend requested, snapshot_id={}", pod_id, req.snapshot_id);
+            match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
+                Ok(artifacts) => {
+                    // Calculate snapshot size.
+                    let snapshot_size_bytes = dir_size(&req.snapshot_dir).await.unwrap_or(0);
+                    let _ = req.reply.send(Ok(artifacts));
+                    send_event(
+                        &event_tx,
+                        WorkerEvent::PodSuspended {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            snapshot_id: req.snapshot_id,
+                            snapshot_size_bytes,
+                        },
+                    )
+                    .await;
+                    return; // VM is dead after suspend, exit monitor.
+                }
+                Err(e) => {
+                    let err_msg = format!("{:#}", e);
+                    log::error!("pod '{}': suspend failed: {}", pod_id, err_msg);
+                    let _ = req.reply.send(Err(err_msg.clone()));
+                    let _ = vm.force_kill().await;
+                    WorkerEvent::PodSuspendFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error: err_msg,
+                    }
+                }
+            }
+        }
+
         // Cancellation: graceful shutdown requested.
         _ = cancel.cancelled() => {
             log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
@@ -412,6 +578,19 @@ async fn pod_monitor<I: VmInstance>(
 
     // Send the event back to the main loop.
     send_event(&event_tx, event).await;
+}
+
+/// Calculate the total size of files in a directory.
+async fn dir_size(path: &std::path::Path) -> anyhow::Result<u64> {
+    let mut total = 0u64;
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let meta = entry.metadata().await?;
+        if meta.is_file() {
+            total += meta.len();
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -595,6 +774,7 @@ mod tests {
             let pod_id = pod_id.clone();
             let cancel = cancel.clone();
             async move {
+                let (_suspend_tx, suspend_rx) = mpsc::channel(1);
                 pod_supervisor(
                     vmm,
                     image_provider,
@@ -608,6 +788,7 @@ mod tests {
                     pod_id,
                     make_pod_network(),
                     make_containers(),
+                    suspend_rx,
                 )
                 .await;
             }
@@ -659,6 +840,7 @@ mod tests {
             let pod_id = pod_id.clone();
             let cancel = cancel.clone();
             async move {
+                let (_suspend_tx, suspend_rx) = mpsc::channel(1);
                 pod_supervisor(
                     vmm,
                     image_provider,
@@ -672,6 +854,7 @@ mod tests {
                     pod_id,
                     make_pod_network(),
                     make_containers(),
+                    suspend_rx,
                 )
                 .await;
             }
@@ -714,6 +897,7 @@ mod tests {
 
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
+            let (_suspend_tx, suspend_rx) = mpsc::channel(1);
             pod_supervisor(
                 vmm,
                 image_provider,
@@ -727,6 +911,7 @@ mod tests {
                 PodId::from("pod1"),
                 make_pod_network(),
                 make_containers(),
+                suspend_rx,
             )
             .await;
         });

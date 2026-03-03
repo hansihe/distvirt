@@ -678,8 +678,128 @@ impl DistvirtClient for DistvirtClientService {
 
     async fn stream_events(
         &self,
-        _request: Request<proto::StreamEventsRequest>,
+        request: Request<proto::StreamEventsRequest>,
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
-        Err(Status::unimplemented("StreamEvents not yet implemented"))
+        let req = request.into_inner();
+        let namespace_id = NamespaceId(req.namespace_id);
+        let workload_id = req.workload_id.map(WorkloadId);
+        let service_id = req.service_id.map(ServiceId);
+
+        let mut event_rx =
+            self.handle
+                .subscribe_events(namespace_id, workload_id, service_id);
+
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            while let Some(event_data) = event_rx.recv().await {
+                let proto_event = convert_sm_event_to_proto(event_data.event);
+                if tx.send(Ok(proto_event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+// --- SM Event -> Proto Event conversion ---
+
+fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    match event {
+        SmNamespaceEvent::Workload {
+            workload_id,
+            event: wl_event,
+        } => {
+            let inner = match wl_event {
+                SmWorkloadEvent::DemandChanged {
+                    demanding_services,
+                } => proto::workload_event::Event::DemandChanged(
+                    proto::WorkloadDemandChanged {
+                        demanding_services,
+                    },
+                ),
+                SmWorkloadEvent::PodLaunching { pod_id, worker_id } => {
+                    proto::workload_event::Event::PodLaunching(proto::WorkloadPodLaunching {
+                        pod_id: pod_id.0,
+                        worker_id: worker_id.0,
+                    })
+                }
+                SmWorkloadEvent::PodRunning { pod_id, worker_id } => {
+                    proto::workload_event::Event::PodRunning(proto::WorkloadPodRunning {
+                        pod_id: pod_id.0,
+                        worker_id: worker_id.0,
+                    })
+                }
+                SmWorkloadEvent::PodStopped { reason } => {
+                    proto::workload_event::Event::PodStopped(proto::WorkloadPodStopped {
+                        reason,
+                    })
+                }
+                SmWorkloadEvent::PodFailed { reason } => {
+                    proto::workload_event::Event::PodFailed(proto::WorkloadPodFailed { reason })
+                }
+            };
+            proto::NamespaceEvent {
+                timestamp_unix_ms: now_ms,
+                event: Some(proto::namespace_event::Event::WorkloadEvent(
+                    proto::WorkloadEvent {
+                        workload_id: workload_id.0,
+                        event: Some(inner),
+                    },
+                )),
+            }
+        }
+        SmNamespaceEvent::Service {
+            service_id,
+            workload_id,
+            event: svc_event,
+        } => {
+            let inner = match svc_event {
+                SmServiceEvent::Activated { trigger } => {
+                    proto::service_event::Event::Activated(proto::ServiceActivated { trigger })
+                }
+                SmServiceEvent::BackendReady => {
+                    proto::service_event::Event::BackendReady(proto::ServiceBackendReady {})
+                }
+                SmServiceEvent::IdleTimerStarted { timeout } => {
+                    proto::service_event::Event::IdleTimerStarted(
+                        proto::ServiceIdleTimerStarted {
+                            timeout_ms: timeout.as_millis() as u64,
+                        },
+                    )
+                }
+                SmServiceEvent::IdleTimerCancelled { reason } => {
+                    proto::service_event::Event::IdleTimerCancelled(
+                        proto::ServiceIdleTimerCancelled { reason },
+                    )
+                }
+                SmServiceEvent::IdleTimeoutFired => {
+                    proto::service_event::Event::IdleTimeoutFired(
+                        proto::ServiceIdleTimeoutFired {},
+                    )
+                }
+                SmServiceEvent::Deactivated { reason } => {
+                    proto::service_event::Event::Deactivated(proto::ServiceDeactivated {
+                        reason,
+                    })
+                }
+            };
+            proto::NamespaceEvent {
+                timestamp_unix_ms: now_ms,
+                event: Some(proto::namespace_event::Event::ServiceEvent(
+                    proto::ServiceEvent {
+                        service_id: service_id.0,
+                        workload_id: workload_id.0,
+                        event: Some(inner),
+                    },
+                )),
+            }
+        }
     }
 }
