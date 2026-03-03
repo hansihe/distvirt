@@ -1572,8 +1572,8 @@ fn test_wg_connect_happy_path() {
     }));
 
     // Peer should be tracked.
-    assert!(ns.wg_peers.contains_key(&pubkey));
-    assert_eq!(ns.wg_next_host_offset, 253);
+    assert!(ns.wg_peer_manager.peers.contains_key(&pubkey));
+    assert_eq!(ns.wg_peer_manager.next_host_offset, 253);
 }
 
 #[test]
@@ -1588,7 +1588,7 @@ fn test_wg_connect_idempotent() {
         worker_wg_public_key: [0xab; 32],
         worker_endpoint: "1.2.3.4:51820".to_string(),
     });
-    assert_eq!(ns.wg_next_host_offset, 253);
+    assert_eq!(ns.wg_peer_manager.next_host_offset, 253);
 
     // Second connect with same key.
     let out = ns.step(NamespaceInput::Connect {
@@ -1604,7 +1604,7 @@ fn test_wg_connect_idempotent() {
             && matches!(ev, ClientEvent::ConnectResult { client_ip, .. } if client_ip == "172.16.0.254")
     }));
     assert!(out.worker_commands.is_empty());
-    assert_eq!(ns.wg_next_host_offset, 253);
+    assert_eq!(ns.wg_peer_manager.next_host_offset, 253);
 }
 
 #[test]
@@ -1634,8 +1634,8 @@ fn test_wg_connect_multiple_peers() {
         matches!(ev, ClientEvent::ConnectResult { client_ip, .. } if client_ip == "172.16.0.253")
     }));
 
-    assert_eq!(ns.wg_peers.len(), 2);
-    assert_eq!(ns.wg_next_host_offset, 252);
+    assert_eq!(ns.wg_peer_manager.peers.len(), 2);
+    assert_eq!(ns.wg_peer_manager.next_host_offset, 252);
 }
 
 #[test]
@@ -1655,13 +1655,13 @@ fn test_wg_connect_namespace_not_active() {
         *cid == client_id(1)
             && matches!(ev, ClientEvent::Error { message } if message == "namespace is not active")
     }));
-    assert!(ns.wg_peers.is_empty());
+    assert!(ns.wg_peer_manager.peers.is_empty());
 }
 
 #[test]
 fn test_wg_connect_ip_exhaustion() {
     let mut ns = active_namespace(test_spec());
-    ns.wg_next_host_offset = 1; // No IPs left (< 2).
+    ns.wg_peer_manager.next_host_offset = 1; // No IPs left (< 2).
 
     let out = ns.step(NamespaceInput::Connect {
         client_id: client_id(1),
@@ -1674,7 +1674,7 @@ fn test_wg_connect_ip_exhaustion() {
         *cid == client_id(1)
             && matches!(ev, ClientEvent::Error { message } if message == "no more WireGuard peer IPs available")
     }));
-    assert!(ns.wg_peers.is_empty());
+    assert!(ns.wg_peer_manager.peers.is_empty());
 }
 
 #[test]
@@ -1689,7 +1689,7 @@ fn test_wg_disconnect_known_peer() {
         worker_wg_public_key: [0xab; 32],
         worker_endpoint: "1.2.3.4:51820".to_string(),
     });
-    assert!(ns.wg_peers.contains_key(&pubkey));
+    assert!(ns.wg_peer_manager.peers.contains_key(&pubkey));
 
     // Disconnect.
     let out = ns.step(NamespaceInput::Disconnect {
@@ -1704,7 +1704,7 @@ fn test_wg_disconnect_known_peer() {
         *wid == worker_id(1)
             && matches!(cmd, WorkerCommand::RemoveWireGuardPeer { peer_public_key } if *peer_public_key == pubkey)
     }));
-    assert!(!ns.wg_peers.contains_key(&pubkey));
+    assert!(!ns.wg_peer_manager.peers.contains_key(&pubkey));
 }
 
 #[test]
@@ -1760,7 +1760,7 @@ fn test_wg_connect_after_disconnect() {
     assert!(out2.client_events.iter().any(|(_, ev)| {
         matches!(ev, ClientEvent::ConnectResult { client_ip, .. } if client_ip == "172.16.0.253")
     }));
-    assert_eq!(ns.wg_next_host_offset, 252);
+    assert_eq!(ns.wg_peer_manager.next_host_offset, 252);
 }
 
 // --- WireGuard Connect/Disconnect: Orchestrator-Level Tests ---

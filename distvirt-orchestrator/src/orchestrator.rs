@@ -155,14 +155,6 @@ impl Orchestrator {
                                 _ => None,
                             };
 
-                            let spliced = matches!(
-                                wl.map(|w| &w.state),
-                                Some(WorkloadState::Running {
-                                    hosting: WorkloadHosting::Spliced { .. },
-                                    ..
-                                })
-                            );
-
                             services.insert(
                                 svc_id.clone(),
                                 ServiceStatusReport {
@@ -173,7 +165,6 @@ impl Orchestrator {
                                     worker_id,
                                     backend_need,
                                     activation_enabled: svc.has_activation,
-                                    spliced,
                                 },
                             );
                         }
@@ -384,7 +375,6 @@ impl Orchestrator {
             worker_id.clone(),
             WorkerState {
                 capabilities,
-                status: WorkerStatus::Connected,
                 namespaces: HashSet::new(),
                 wg_config,
             },
@@ -652,10 +642,7 @@ impl Orchestrator {
     }
 
     fn pick_worker_for_namespace(&self) -> Option<WorkerId> {
-        self.workers
-            .iter()
-            .find(|(_, ws)| ws.status == WorkerStatus::Connected)
-            .map(|(wid, _)| wid.clone())
+        self.workers.keys().next().cloned()
     }
 
     fn assign_worker_to_namespace(

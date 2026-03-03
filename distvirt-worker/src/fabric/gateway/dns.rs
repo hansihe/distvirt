@@ -1,6 +1,11 @@
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use smoltcp::socket::udp;
+use smoltcp::wire::IpEndpoint;
+use tokio::net::UdpSocket as TokioUdpSocket;
 
 /// Shared DNS registry: service name → IPv4 address.
 pub type DnsRegistry = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
@@ -142,6 +147,160 @@ fn find_qname_end(data: &[u8], start: usize) -> Option<usize> {
         }
         pos += label_len;
     }
+}
+
+/// DNS forwarding component: resolves local names from the registry and
+/// forwards unresolved queries to upstream nameservers.
+pub(crate) struct DnsForwarder {
+    registry: DnsRegistry,
+    upstream_socket: TokioUdpSocket,
+    upstream_servers: Vec<SocketAddr>,
+    pending: HashMap<u16, (IpEndpoint, Instant)>,
+    timeout: Duration,
+}
+
+impl DnsForwarder {
+    /// Create a new DNS forwarder: parse /etc/resolv.conf and bind an upstream socket.
+    pub fn new(registry: DnsRegistry) -> anyhow::Result<Self> {
+        let upstream_servers = parse_resolv_conf();
+        log::info!("gateway: upstream DNS servers: {:?}", upstream_servers);
+
+        let upstream_socket = {
+            let std_sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+            std_sock.set_nonblocking(true)?;
+            TokioUdpSocket::from_std(std_sock)?
+        };
+
+        Ok(DnsForwarder {
+            registry,
+            upstream_socket,
+            upstream_servers,
+            pending: HashMap::new(),
+            timeout: Duration::from_secs(10),
+        })
+    }
+
+    /// Process DNS queries from the smoltcp UDP socket.
+    ///
+    /// For local hits, writes the response directly into the socket.
+    /// For misses, forwards to upstream. The caller must call `poll_and_drain()`
+    /// after this returns if it wrote to the socket (returns `true`).
+    pub async fn process_queries(&mut self, sock: &mut udp::Socket<'_>) -> bool {
+        let mut wrote_socket = false;
+        loop {
+            let (query, endpoint) = match sock.recv() {
+                Ok((data, meta)) => (data.to_vec(), meta.endpoint),
+                Err(_) => break,
+            };
+
+            if query.len() < 2 {
+                continue;
+            }
+
+            let query_id = u16::from_be_bytes([query[0], query[1]]);
+            log::info!("gateway: DNS query id={} from {}", query_id, endpoint);
+
+            // Try local registry first.
+            if let Some(response) = try_resolve(&self.registry, &query) {
+                log::info!("gateway: DNS query id={} resolved locally", query_id);
+                if let Err(e) = sock.send_slice(&response, endpoint) {
+                    log::warn!("gateway: DNS local response send: {:?}", e);
+                }
+                wrote_socket = true;
+                continue;
+            }
+
+            // Fall back to upstream.
+            self.pending.insert(query_id, (endpoint, Instant::now()));
+
+            if let Some(upstream) = self.upstream_servers.first() {
+                if let Err(e) = self.upstream_socket.send_to(&query, upstream).await {
+                    log::warn!("gateway: DNS upstream send error: {}", e);
+                }
+            }
+        }
+        wrote_socket
+    }
+
+    /// Handle a DNS response from upstream: write it to the smoltcp DNS socket
+    /// targeting the original client. Returns `true` if the socket was written to
+    /// (caller must call `poll_and_drain()`).
+    pub fn handle_response(&mut self, response: &[u8], sock: &mut udp::Socket<'_>) -> bool {
+        if response.len() < 2 {
+            return false;
+        }
+
+        let query_id = u16::from_be_bytes([response[0], response[1]]);
+        if let Some((endpoint, _)) = self.pending.remove(&query_id) {
+            log::info!("gateway: DNS response id={} -> {}", query_id, endpoint);
+            if let Err(e) = sock.send_slice(response, endpoint) {
+                log::warn!("gateway: DNS response send to smoltcp: {:?}", e);
+            }
+            true
+        } else {
+            log::info!(
+                "gateway: DNS response id={} has no pending query",
+                query_id
+            );
+            false
+        }
+    }
+
+    /// Expose the upstream socket for use in `select!`.
+    pub fn upstream_socket(&self) -> &TokioUdpSocket {
+        &self.upstream_socket
+    }
+
+    /// Remove stale pending DNS entries that have exceeded the timeout.
+    pub fn sweep_stale(&mut self) {
+        let now = Instant::now();
+        let before = self.pending.len();
+        self.pending.retain(|id, (_, inserted)| {
+            if now.duration_since(*inserted) > self.timeout {
+                log::warn!("gateway: DNS query id={} timed out, removing", id);
+                false
+            } else {
+                true
+            }
+        });
+        let expired = before - self.pending.len();
+        if expired > 0 {
+            log::info!("gateway: swept {} stale DNS entries", expired);
+        }
+    }
+}
+
+/// Parse /etc/resolv.conf for upstream nameservers. Falls back to 8.8.8.8.
+fn parse_resolv_conf() -> Vec<SocketAddr> {
+    let content = match std::fs::read_to_string("/etc/resolv.conf") {
+        Ok(c) => c,
+        Err(_) => return parse_resolv_conf_content(""),
+    };
+    parse_resolv_conf_content(&content)
+}
+
+/// Parse the content of a resolv.conf file for nameserver entries.
+/// Falls back to 8.8.8.8:53 if no valid nameservers are found.
+pub(super) fn parse_resolv_conf_content(content: &str) -> Vec<SocketAddr> {
+    let mut servers = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("nameserver") {
+            let addr_str = rest.trim();
+            if let Ok(ip) = addr_str.parse::<IpAddr>() {
+                servers.push(SocketAddr::new(ip, 53));
+            }
+        }
+    }
+
+    if servers.is_empty() {
+        servers.push(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            53,
+        ));
+    }
+
+    servers
 }
 
 #[cfg(test)]

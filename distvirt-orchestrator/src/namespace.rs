@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 
 use crate::service::{ServiceInput, ServiceOutput, ServiceStateMachine};
 use crate::types::*;
+use crate::wg_peers::{ConnectResult, WgPeerOutput, WireGuardPeerManager};
 use crate::workload::{WorkloadInput, WorkloadOutput, WorkloadStateMachine};
 
 /// Convert a CIDR prefix length (e.g. 24) to a dotted-decimal netmask string (e.g. "255.255.255.0").
@@ -15,11 +16,6 @@ fn prefix_len_to_netmask(prefix_len: u8) -> String {
     Ipv4Addr::from(mask).to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WgPeerInfo {
-    pub client_ip: Ipv4Addr,
-}
-
 pub struct NamespaceStateMachine {
     pub namespace_id: NamespaceId,
     pub spec: NamespaceSpec,
@@ -29,10 +25,8 @@ pub struct NamespaceStateMachine {
     pub service_workload: HashMap<ServiceId, WorkloadId>,
     pub pods: HashMap<PodId, PodInfo>,
     pub workers: HashMap<WorkerId, NamespaceWorkerState>,
-    /// WireGuard peers connected to this namespace, keyed by client public key.
-    pub wg_peers: HashMap<[u8; 32], WgPeerInfo>,
-    /// Next WG peer IP offset from the top of the subnet (254, 253, ...).
-    pub wg_next_host_offset: u8,
+    /// WireGuard peer IP allocation and tracking.
+    pub wg_peer_manager: WireGuardPeerManager,
 }
 
 impl NamespaceStateMachine {
@@ -66,6 +60,8 @@ impl NamespaceStateMachine {
             service_workload.insert(svc_id.clone(), wl_id);
         }
 
+        let wg_peer_manager = WireGuardPeerManager::new(spec.network.subnet, spec.network.prefix_len);
+
         NamespaceStateMachine {
             namespace_id,
             spec,
@@ -75,8 +71,7 @@ impl NamespaceStateMachine {
             service_workload,
             pods: HashMap::new(),
             workers: HashMap::new(),
-            wg_peers: HashMap::new(),
-            wg_next_host_offset: 254,
+            wg_peer_manager,
         }
     }
 
@@ -140,22 +135,34 @@ impl NamespaceStateMachine {
                 workload_id: _,
                 worker_id: _,
             } => {
-                // TODO: implement splice flow
-                out.client_events.push((client_id, ClientEvent::Ok));
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "Splice not yet implemented".to_string(),
+                    },
+                ));
             }
             NamespaceInput::Unsplice {
                 client_id,
                 workload_id: _,
             } => {
-                // TODO: implement unsplice flow
-                out.client_events.push((client_id, ClientEvent::Ok));
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "Unsplice not yet implemented".to_string(),
+                    },
+                ));
             }
             NamespaceInput::StreamLogs {
                 client_id,
                 service_id: _,
             } => {
-                // TODO: set up log streaming
-                out.client_events.push((client_id, ClientEvent::Ok));
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::Error {
+                        message: "StreamLogs not yet implemented".to_string(),
+                    },
+                ));
             }
             NamespaceInput::LaunchPod {
                 workload_id,
@@ -644,14 +651,6 @@ impl NamespaceStateMachine {
                 _ => None,
             };
 
-            let spliced = match wl.map(|w| &w.state) {
-                Some(WorkloadState::Running {
-                    hosting: WorkloadHosting::Spliced { .. },
-                    ..
-                }) => true,
-                _ => false,
-            };
-
             services.insert(
                 svc_id.clone(),
                 ServiceStatusReport {
@@ -662,7 +661,6 @@ impl NamespaceStateMachine {
                     worker_id,
                     backend_need,
                     activation_enabled: svc.has_activation,
-                    spliced,
                 },
             );
         }
@@ -802,66 +800,24 @@ impl NamespaceStateMachine {
             return;
         }
 
-        // If this pubkey is already connected, return the existing config (idempotent).
-        if let Some(peer) = self.wg_peers.get(&client_public_key) {
-            let subnet_cidr = format!("{}/{}", self.spec.network.subnet, self.spec.network.prefix_len);
-            out.client_events.push((
-                client_id,
-                ClientEvent::ConnectResult {
-                    server_public_key: worker_wg_public_key,
-                    endpoint: worker_endpoint,
-                    client_ip: peer.client_ip.to_string(),
-                    subnet: subnet_cidr,
-                },
-            ));
-            return;
+        match self.wg_peer_manager.connect(client_public_key) {
+            ConnectResult::Ok { client_ip, outputs } => {
+                self.apply_wg_outputs(outputs, out);
+                let subnet_cidr = self.wg_peer_manager.subnet_cidr();
+                out.client_events.push((
+                    client_id,
+                    ClientEvent::ConnectResult {
+                        server_public_key: worker_wg_public_key,
+                        endpoint: worker_endpoint,
+                        client_ip: client_ip.to_string(),
+                        subnet: subnet_cidr,
+                    },
+                ));
+            }
+            ConnectResult::Error { message } => {
+                out.client_events.push((client_id, ClientEvent::Error { message }));
+            }
         }
-
-        // Allocate IP from top of subnet downward.
-        if self.wg_next_host_offset < 2 {
-            out.client_events.push((
-                client_id,
-                ClientEvent::Error {
-                    message: "no more WireGuard peer IPs available".to_string(),
-                },
-            ));
-            return;
-        }
-        let subnet_u32 = u32::from(self.spec.network.subnet);
-        let client_ip = Ipv4Addr::from(subnet_u32 + self.wg_next_host_offset as u32);
-        self.wg_next_host_offset -= 1;
-
-        // Store peer.
-        self.wg_peers.insert(
-            client_public_key,
-            WgPeerInfo {
-                client_ip,
-            },
-        );
-
-        // Find an active worker to emit AddWireGuardPeer to.
-        if let Some(worker_id) = self.active_worker_ids().into_iter().next() {
-            out.worker_commands.push((
-                worker_id,
-                WorkerCommand::AddWireGuardPeer {
-                    namespace_id: self.namespace_id.clone(),
-                    peer_public_key: client_public_key,
-                    peer_ip: client_ip,
-                    preshared_key: None,
-                },
-            ));
-        }
-
-        let subnet_cidr = format!("{}/{}", self.spec.network.subnet, self.spec.network.prefix_len);
-        out.client_events.push((
-            client_id,
-            ClientEvent::ConnectResult {
-                server_public_key: worker_wg_public_key,
-                endpoint: worker_endpoint,
-                client_ip: client_ip.to_string(),
-                subnet: subnet_cidr,
-            },
-        ));
     }
 
     fn handle_disconnect(
@@ -870,18 +826,39 @@ impl NamespaceStateMachine {
         client_public_key: [u8; 32],
         out: &mut NamespaceOutput,
     ) {
-        if self.wg_peers.remove(&client_public_key).is_some() {
-            // Emit RemoveWireGuardPeer to active workers.
-            for worker_id in self.active_worker_ids() {
-                out.worker_commands.push((
-                    worker_id,
-                    WorkerCommand::RemoveWireGuardPeer {
-                        peer_public_key: client_public_key,
-                    },
-                ));
+        let outputs = self.wg_peer_manager.disconnect(client_public_key);
+        self.apply_wg_outputs(outputs, out);
+        out.client_events.push((client_id, ClientEvent::Ok));
+    }
+
+    fn apply_wg_outputs(&self, outputs: Vec<WgPeerOutput>, out: &mut NamespaceOutput) {
+        for wg_out in outputs {
+            match wg_out {
+                WgPeerOutput::AddPeer { peer_public_key, peer_ip } => {
+                    if let Some(worker_id) = self.active_worker_ids().into_iter().next() {
+                        out.worker_commands.push((
+                            worker_id,
+                            WorkerCommand::AddWireGuardPeer {
+                                namespace_id: self.namespace_id.clone(),
+                                peer_public_key,
+                                peer_ip,
+                                preshared_key: None,
+                            },
+                        ));
+                    }
+                }
+                WgPeerOutput::RemovePeer { peer_public_key } => {
+                    for worker_id in self.active_worker_ids() {
+                        out.worker_commands.push((
+                            worker_id,
+                            WorkerCommand::RemoveWireGuardPeer {
+                                peer_public_key,
+                            },
+                        ));
+                    }
+                }
             }
         }
-        out.client_events.push((client_id, ClientEvent::Ok));
     }
 
     // --- Reconciliation ---

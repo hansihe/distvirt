@@ -146,7 +146,6 @@ pub struct ServiceStatusReport {
     pub worker_id: Option<WorkerId>,
     pub backend_need: Option<BackendNeed>,
     pub activation_enabled: bool,
-    pub spliced: bool,
 }
 
 // --- Namespace-Level Input/Output ---
@@ -212,7 +211,6 @@ pub enum WorkerEvent {
 pub enum NamespaceStatus {
     Creating,
     Active,
-    Cloning { pending_destroy: bool },
     Destroying,
 }
 
@@ -228,7 +226,6 @@ pub enum WorkloadState {
     Running {
         pod_id: PodId,
         worker_id: WorkerId,
-        hosting: WorkloadHosting,
     },
 }
 
@@ -243,12 +240,6 @@ pub enum ServiceState {
         backend_need: BackendNeed,
         idle_timer: Option<TimerKey>,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum WorkloadHosting {
-    Normal,
-    Spliced { original_worker_id: WorkerId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -275,14 +266,8 @@ pub struct PodInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerState {
     pub capabilities: WorkerCapabilities,
-    pub status: WorkerStatus,
     pub namespaces: std::collections::HashSet<NamespaceId>,
     pub wg_config: Option<WorkerWgConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerStatus {
-    Connected,
 }
 
 #[derive(Debug, Clone, PartialEq)]

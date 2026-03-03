@@ -2,6 +2,7 @@ pub mod config;
 pub mod types;
 pub mod workload;
 pub mod service;
+pub mod wg_peers;
 pub mod namespace;
 pub mod orchestrator;
 

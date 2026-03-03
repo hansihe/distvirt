@@ -1,5 +1,6 @@
 use super::*;
 use super::forwarding::flood_frame;
+use super::service_activator::ServiceProcessor;
 use crate::packet::{ETH_HDR_LEN, FabricFrame, VNET_HDR_SZ, with_vnet_header};
 use switch::GATEWAY_MAC;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -91,7 +92,7 @@ const MULTICAST: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01];
 
 #[tokio::test]
 async fn known_dst_delivers_to_correct_port() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -117,7 +118,7 @@ async fn known_dst_delivers_to_correct_port() {
 
 #[tokio::test]
 async fn unknown_dst_floods_to_all_other_ports() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
     let (port2, handle2) = make_test_port();
@@ -137,7 +138,7 @@ async fn unknown_dst_floods_to_all_other_ports() {
 
 #[tokio::test]
 async fn no_loopback_to_source_port() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, _handle1) = make_test_port();
 
@@ -155,7 +156,7 @@ async fn no_loopback_to_source_port() {
 
 #[tokio::test]
 async fn broadcast_floods_to_all_other_ports_and_gateway() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -183,7 +184,7 @@ async fn broadcast_floods_to_all_other_ports_and_gateway() {
 
 #[tokio::test]
 async fn multicast_floods_to_all_other_ports_and_gateway() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -210,7 +211,7 @@ async fn multicast_floods_to_all_other_ports_and_gateway() {
 
 #[tokio::test]
 async fn gateway_mac_dst_sent_to_gateway_only() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -240,7 +241,7 @@ async fn gateway_mac_dst_sent_to_gateway_only() {
 
 #[tokio::test]
 async fn mac_learning_and_forwarding() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
     let (port2, handle2) = make_test_port();
@@ -267,7 +268,7 @@ async fn mac_learning_and_forwarding() {
 
 #[tokio::test]
 async fn mac_migration() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
     let (port2, handle2) = make_test_port();
@@ -300,7 +301,7 @@ async fn mac_migration() {
 
 #[tokio::test]
 async fn gateway_ingress_known_unicast() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -326,7 +327,7 @@ async fn gateway_ingress_known_unicast() {
 
 #[tokio::test]
 async fn gateway_ingress_unknown_unicast_floods() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -347,7 +348,7 @@ async fn gateway_ingress_unknown_unicast_floods() {
 
 #[tokio::test]
 async fn gateway_ingress_broadcast_floods_to_all() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -369,7 +370,7 @@ async fn gateway_ingress_broadcast_floods_to_all() {
 
 #[tokio::test]
 async fn runt_frame_dropped() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -427,7 +428,7 @@ async fn placeholder_route_buffers_instead_of_flooding() {
         BufferPolicy, FabricRouteEntry, RouteDestination,
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -469,7 +470,7 @@ async fn placeholder_route_buffers_instead_of_flooding() {
 
 #[tokio::test]
 async fn no_route_still_floods() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
@@ -495,7 +496,7 @@ async fn buffered_frames_flushed_to_new_port() {
         BufferPolicy, FabricRouteEntry, RouteDestination,
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
 
@@ -544,7 +545,7 @@ async fn route_miss_debounced_on_rapid_frames() {
         BufferPolicy, FabricRouteEntry, RouteDestination,
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -664,7 +665,7 @@ async fn activator_tcp_syn_emits_backend_need() {
         return;
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -685,8 +686,10 @@ async fn activator_tcp_syn_emits_backend_need() {
                     max_flows: 1024,
                 }),
             },
-            Some(instance),
-            None,
+            ServiceProcessor::L3 {
+                activator: instance,
+                flow_tracker: distvirt_activator::FlowTracker::new(),
+            },
         );
     }
 
@@ -728,7 +731,7 @@ async fn activator_tcp_rst_dropped() {
         return;
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -748,8 +751,10 @@ async fn activator_tcp_rst_dropped() {
                     max_flows: 1024,
                 }),
             },
-            Some(instance),
-            None,
+            ServiceProcessor::L3 {
+                activator: instance,
+                flow_tracker: distvirt_activator::FlowTracker::new(),
+            },
         );
     }
 
@@ -791,7 +796,7 @@ async fn activator_forwards_when_ready() {
         return;
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     // Create service with TCP activator.
     {
@@ -810,8 +815,10 @@ async fn activator_forwards_when_ready() {
                     max_flows: 1024,
                 }),
             },
-            Some(instance),
-            None,
+            ServiceProcessor::L3 {
+                activator: instance,
+                flow_tracker: distvirt_activator::FlowTracker::new(),
+            },
         );
         // Set backend and mark ready.
         st.update_backend("svc-tcp", Some((POD_IP, POD_MAC)));
@@ -856,7 +863,7 @@ async fn activator_service_arp_reply() {
         return;
     };
 
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     {
         let tables = fabric.tables();
@@ -874,8 +881,10 @@ async fn activator_service_arp_reply() {
                     max_flows: 1024,
                 }),
             },
-            Some(instance),
-            None,
+            ServiceProcessor::L3 {
+                activator: instance,
+                flow_tracker: distvirt_activator::FlowTracker::new(),
+            },
         );
     }
 
@@ -917,7 +926,7 @@ async fn activator_service_arp_reply() {
 /// with DNAT applied.
 #[tokio::test]
 async fn service_forward_without_learned_backend_mac() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     // Create a service with backend, mark ready (no activator — pure L3 passthrough).
     {
@@ -932,8 +941,7 @@ async fn service_forward_without_learned_backend_mac() {
                 timeout_ms: 30000,
                 activator: None,
             },
-            None,
-            None,
+            ServiceProcessor::Passthrough,
         );
         st.update_backend("svc-fwd", Some((POD_IP, POD_MAC)));
         st.mark_ready("svc-fwd");
@@ -983,7 +991,7 @@ const CLIENT_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
 
 #[tokio::test]
 async fn service_nat_dnat_rewrites_dst_ip() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     // Create a service with backend, mark ready.
     {
@@ -998,8 +1006,7 @@ async fn service_nat_dnat_rewrites_dst_ip() {
                 timeout_ms: 30000,
                 activator: None,
             },
-            None,
-            None,
+            ServiceProcessor::Passthrough,
         );
         st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
         st.mark_ready("svc-nat");
@@ -1040,7 +1047,7 @@ async fn service_nat_dnat_rewrites_dst_ip() {
 
 #[tokio::test]
 async fn service_nat_snat_rewrites_return_traffic() {
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     // Create a service with backend, mark ready.
     {
@@ -1055,8 +1062,7 @@ async fn service_nat_snat_rewrites_return_traffic() {
                 timeout_ms: 30000,
                 activator: None,
             },
-            None,
-            None,
+            ServiceProcessor::Passthrough,
         );
         st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
         st.mark_ready("svc-nat");
@@ -1116,7 +1122,7 @@ async fn service_nat_snat_rewrites_return_traffic() {
 #[tokio::test]
 async fn non_natted_unicast_not_affected() {
     // Regular unicast traffic that doesn't match any NAT entry should pass through unchanged.
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
@@ -1148,7 +1154,7 @@ async fn non_natted_unicast_not_affected() {
 #[tokio::test]
 async fn service_nat_ip_checksum_valid() {
     // Verify that the IP header checksum is still valid after DNAT.
-    let mut fabric: Fabric<TestPort> = Fabric::new();
+    let fabric: Fabric<TestPort> = Fabric::new();
 
     {
         let tables = fabric.tables();
@@ -1162,8 +1168,7 @@ async fn service_nat_ip_checksum_valid() {
                 timeout_ms: 30000,
                 activator: None,
             },
-            None,
-            None,
+            ServiceProcessor::Passthrough,
         );
         st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
         st.mark_ready("svc-nat");

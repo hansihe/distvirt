@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_lite::io::AsyncReadExt;
@@ -46,7 +46,7 @@ struct WorkerHandle {
 }
 
 struct ClientSender {
-    pending: HashMap<u64, oneshot::Sender<ClientEvent>>,
+    pending: BTreeMap<u64, oneshot::Sender<ClientEvent>>,
 }
 
 enum ShellMsg {
@@ -397,7 +397,7 @@ impl OrchestratorShell {
                 self.clients.insert(
                     client_id.clone(),
                     ClientSender {
-                        pending: HashMap::new(),
+                        pending: BTreeMap::new(),
                     },
                 );
                 let output = self.orchestrator.step(OrchestratorInput::ClientConnected {

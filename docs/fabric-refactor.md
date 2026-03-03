@@ -1,78 +1,70 @@
-# Fabric Module Refactor Notes
+# Worker & Fabric Refactor Notes
 
-Review of `distvirt-worker/src/fabric/` — structural issues and missing abstractions.
+Structural review of `distvirt-worker/src/` — focusing on what matters for the next round of work (tunnel ports, live migration).
+
+Previous refactor items (FabricContext, resolve_mac helper, dispatch dedup, frame wrapper) are all done and working well.
 
 ## High Impact
 
-### 1. ~~Introduce `FabricContext<P>` (parameter bag anti-pattern)~~ DONE
+### 1. ~~Extract pod supervisor from `worker.rs`~~ ✅ Done
 
-Introduced `FabricContext<P>` in `forwarding.rs` holding all shared fabric state (`ports`, `mac_table`, `route_table`, `service_table`, `gateway_tx`, `event_tx`). All forwarding functions now take `&FabricContext<P>` or `FabricContext<P>` instead of 5-7 individual `Arc<Mutex<...>>` arguments. `Fabric<P>` stores a `FabricContext<P>` field internally.
+Extracted to `supervisor.rs` (~350 lines): `PodState`, `send_event`, `pod_supervisor`, `pod_launch`, `pod_monitor`, `GRACEFUL_SHUTDOWN_TIMEOUT`, `STOP_POD_TIMEOUT`. Three pod lifecycle tests moved with their mock types.
 
-### 2. ~~Extract "resolve MAC -> get port -> send" helper~~ DONE
+### 2. ~~Extract namespace management from `worker.rs`~~ ✅ Done
 
-Added `FabricContextInner::resolve_mac(&self, mac: &[u8; 6]) -> Option<SharedPort<P>>` which locks `mac_table` then `ports` in one call. Replaced the duplicated two-lock pattern in 5 of 6 locations: `Fabric::send_l4_frames`, `Fabric::flush_service_frames`, `handle_unknown_unicast` (Forward branch), `dispatch_action` (ReplayPacket branch), `gateway_ingress_task` (unicast branch). `port_read_loop` keeps a separate mac_table lookup for the loopback port-ID check.
+Extracted to `namespace.rs` (~450 lines): `NamespaceState` with methods (`new`, `destroy`, `registry_sync`, `registry_update`, `route_sync`, `route_update`, `create_service`, `update_service_backend`, `service_ready`, `destroy_service`), plus `FatalError`. `create_service` takes `Option<&ActivatorRuntime>` to decouple from Worker. Seven namespace-scoped tests moved. `worker.rs` is now ~500 lines — thin command router as intended.
 
-### 3. ~~Deduplicate frame dispatch (`port_read_loop` vs `gateway_ingress_task`)~~ DONE
+### 3. Port classification for tunnel ports
 
-Extracted `FrameSource` enum (`Port` / `Gateway`) and a shared `dispatch_frame()` function in `forwarding.rs`. Both `port_read_loop` and `gateway_ingress_task` now delegate to `dispatch_frame`, which handles parsing, optional MAC learning, broadcast/multicast flooding, gateway-MAC forwarding, unicast lookup with loopback avoidance, and unknown-unicast fallback. Port-specific behavior (MAC learning, gateway forwarding, service ARP replies) is gated on the `FrameSource::Port` variant. Gateway uses `PortId::MAX` so loopback avoidance is a no-op.
+The fabric currently treats all ports uniformly. For multi-worker tunneling, we need:
 
-### 4. ~~Remove duplicated methods on `Fabric` vs free functions in `forwarding.rs`~~ DONE
+- **Local vs tunnel port distinction** in the port map (metadata on port entries, not a type-level split).
+- **Scoped flooding**: `flood_frame` currently sends to all ports. With tunnel ports, broadcast/unknown-unicast should flood locally, and only send to tunnels when the orchestrator's routing info says to. Without this, every broadcast is O(workers) fan-out.
+- **`RemoteWorker` route action wiring**: Currently a stub that logs and drops. Needs to resolve `worker_id` → tunnel `PortId`, which requires a new lookup in `FabricContextInner`.
 
-`Fabric::send_l4_frames` now delegates to `forwarding::send_l4_frames`. The forwarding function was made `pub(super)` and got the debug log for unknown MACs that the `Fabric` method had.
+**Scope**: Small structural change (port metadata enum, flood scope parameter), but architecturally significant. Design the port classification scheme before implementing tunnel ports.
+
+### 4. ~~Split service.rs L4/activator concerns~~ ✅ Done
+
+Extracted to `service_activator.rs` (~190 lines): `ServiceProcessor` enum with three variants (`Passthrough`, `L3 { activator, flow_tracker }`, `L4 { activator, stream_manager }`). `ServiceEntity` replaced its three separate fields with a single `processor: ServiceProcessor`. Methods `process_frame`, `on_mark_ready`, `on_backend_update`, `handle_timeout` encapsulate all L4/L3 activator logic. `service.rs` core state machine now delegates to the processor and is readable for migration work.
 
 ## Medium Impact
 
-### 5. ~~Frame wrapper type (raw `Vec<u8>` everywhere)~~ DONE
+### 5. ~~`FabricGateway` decomposition~~ ✅ Done
 
-Added `FabricFrame<'a>` zero-copy wrapper in `switch.rs` with accessors (`dst_mac`, `src_mac`, `ethertype`, `eth_payload`, `vnet_hdr`, `ipv4_dst`). Validates minimum frame size (`VNET_HDR_SZ + ETH_HEADER_LEN`) on construction. Also added `with_vnet_header(eth_frame)` builder and `rewrite_dst_mac(frame, mac)` helper. Updated all consumers:
-- `dispatch_frame` — uses `FabricFrame::new` instead of `parse_ethernet_header(&frame[VNET_HDR_SZ..])`
-- `handle_unknown_unicast` — uses `ff.ipv4_dst()` instead of `extract_ipv4_dst(&frame[VNET_HDR_SZ..])`
-- `try_service_arp_reply` — uses `ff.eth_payload()`, `ff.ethertype()`, `ff.src_mac()`
-- `dispatch_action`, `handle_unknown_unicast` — use `rewrite_dst_mac` for MAC rewrites
-- `send_l4_frames` — uses `with_vnet_header`
-- `flush_service_frames` in `mod.rs` — uses `rewrite_dst_mac`
-- `gateway.rs` — uses `FabricFrame` for egress frame parsing, `ff.vnet_hdr()`/`ff.src_mac()` for TUN path, `with_vnet_header` for smoltcp→fabric frames
-- `service.rs` — uses `FabricFrame` to access `eth_payload()` in L4 and L3 activator paths
-- Test helpers — use `with_vnet_header` for frame construction, `FabricFrame` for assertions
+Extracted `DnsForwarder` into `gateway/dns.rs` (~270 lines): registry-based local resolution, upstream forwarding with pending map, stale entry sweeping. Extracted `TunEgress` into `gateway/tun.rs` (~325 lines): TUN device creation/configuration, ip_mac_table with MAC learning, vnet header adjustment, egress/ingress frame building, stale entry sweeping. `FabricGateway` in `gateway/mod.rs` is now a thin coordinator (~350 lines) owning smoltcp, the two sub-components, and the `run()` select loop that delegates to them.
 
-### 6. Break up `FabricGateway` monolith
+### 6. ~~`Fabric` async Mutex elimination~~ ✅ Done
 
-`gateway.rs` is 530 lines combining 4 distinct responsibilities in one struct and one `run()` loop:
+`next_port_id` is now `AtomicUsize` (fetch_add with Relaxed ordering). `gateway_tx` and `event_tx` moved into `FabricContextInner` as `OnceLock<mpsc::Sender<…>>`. Task handles wrapped in `std::sync::Mutex`. All `add_port*`/`set_gateway`/`set_event_channel` methods take `&self`. The outer `Arc<tokio::sync::Mutex<Fabric>>` in `NamespaceState` and `supervisor` replaced with `Arc<Fabric>`. GC task handle now stored on `Fabric` (fixes item 8).
 
-1. **smoltcp IP stack** — ARP handling
-2. **TUN device I/O** — internet egress/ingress
-3. **DNS forwarding** — local registry + upstream resolution
-4. **IP-MAC mapping** — for return traffic routing
+### 7. TAP drain for migration suspend path
 
-Potential extractions:
-- `DnsForwarder` — `process_dns_queries`, `handle_dns_response`, `pending_dns` map, `upstream_socket`
-- `TunEgress` — `ip_mac_table`, TUN read/write logic
+The suspend flow (docs/snapshots-migration.md step 5) requires draining remaining frames from the TAP fd after vCPU pause but before port teardown. The current `Port`/`PortGuard` RAII path doesn't have a "drain then remove" step — dropping the port guard immediately removes the port from the map and the read loop exits.
 
-This would make the `run()` loop readable and each piece independently testable (currently the gateway has zero async tests).
+Need a `drain_and_remove(port_id)` method or similar that: stops the read loop, reads remaining frames from the fd, forwards them into the fabric, then removes the port. Design this before implementing `SuspendPod`.
 
 ## Low Priority / Cleanup
 
-### 7. Orphaned MAC table GC task
+### 8. ~~Orphaned MAC table GC task~~ ✅ Done (fixed as part of item 6)
 
-Spawned in `set_gateway` with bare `tokio::spawn` — the JoinHandle is dropped. If the fabric is torn down, this task leaks. Should be stored as a `TaskHandle` on the struct.
+GC task handle now stored as `_gc_task: Mutex<Option<TaskHandle<()>>>` on `Fabric`, set in `set_gateway`.
 
-### 8. `ServiceTable.lookup_and_buffer` borrow gymnastics
+### 9. `ServiceTable.lookup_and_buffer` borrow gymnastics
 
-The method re-borrows `self.by_ip.get_mut(&dst_ip).unwrap()` after touching `self.last_activation` due to split borrow issues. Sign that activation debounce tracking should either move into `ServiceEntity` or be factored out.
+Re-borrows `self.by_ip.get_mut(&dst_ip).unwrap()` after touching `self.last_activation` due to split borrow issues. Activation debounce tracking should move into `ServiceEntity` or be factored into a separate struct.
 
-### 9. Dead code cleanup
+### ~~10. Gateway imports fabric internals~~ ✅
 
-Compiler warnings flag unused fields and methods:
-- `FabricEvent::RouteMiss::dst_ip`
-- `Fabric::add_port`, `add_port_raw`, `add_port_raw_with_ip`
-- `ServiceEntity::ip`
-- `ServiceAction::Forward::pod_ip`
+Moved `gateway/` under `fabric/gateway/` and grouped `namespace.rs`/`supervisor.rs` under `worker/`. Added re-exports to `fabric/mod.rs` so consumers use `crate::fabric::{DnsRegistry, FabricGateway, ServiceProcessor, MarkReadyResult, ServiceAction}` instead of reaching into submodules.
 
 ## Suggested Order
 
-1. ~~**`FabricContext<P>`**~~ — DONE
-2. ~~**`resolve_mac` helper**~~ — DONE. Method on `FabricContextInner`, removes 5x duplication.
-3. ~~**Deduplicate dispatch logic**~~ — DONE. `dispatch_frame()` + `FrameSource` enum.
-4. ~~**Remove `Fabric` method duplication**~~ — DONE. `Fabric::send_l4_frames` delegates to `forwarding::send_l4_frames`.
-5. ~~**Frame wrapper**~~ — DONE. `FabricFrame<'a>` + `with_vnet_header` + `rewrite_dst_mac`.
-6. **Gateway decomposition** — independent, can be done later
+1. ~~**Extract pod supervisor**~~ ✅
+2. ~~**Extract namespace management**~~ ✅
+3. **Port classification design** — needed before tunnel port implementation
+4. ~~**Split service.rs L4/activator**~~ ✅
+5. ~~**FabricGateway decomposition**~~ ✅
+6. ~~**Fabric async Mutex elimination**~~ ✅
+7. **TAP drain for suspend** — design alongside SuspendPod implementation
+8. Remaining items as encountered

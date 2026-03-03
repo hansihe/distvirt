@@ -1,8 +1,10 @@
 mod forwarding;
+pub(crate) mod gateway;
 pub(crate) mod nat;
 pub(crate) mod port;
 pub(crate) mod route;
 pub(crate) mod service;
+pub(crate) mod service_activator;
 pub(crate) mod switch;
 
 pub use switch::GATEWAY_IP_STR;
@@ -10,10 +12,14 @@ pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use route::RouteTable;
 pub use service::ServiceTable;
 pub(crate) use forwarding::FabricContextInner;
+pub(crate) use service::{MarkReadyResult, ServiceAction};
+pub(crate) use service_activator::ServiceProcessor;
+pub(crate) use gateway::{DnsRegistry, FabricGateway};
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
 use crate::tap::TapDevice;
@@ -77,15 +83,16 @@ type SharedPort<P> = Arc<P>;
 /// cleanup is automatic via `PortGuard`.
 pub struct Fabric<P: FramePort = Port> {
     ctx: FabricContext<P>,
-    next_port_id: PortId,
-    _gateway_ingress_task: Option<TaskHandle<()>>,
+    next_port_id: AtomicUsize,
+    _gateway_ingress_task: Mutex<Option<TaskHandle<()>>>,
+    _gc_task: Mutex<Option<TaskHandle<()>>>,
 }
 
 impl Fabric<Port> {
     /// Add a TAP device as a port, pre-register its MAC, flush any buffered
     /// frames for `pod_ip`, and start the forwarding task.
     pub fn add_port_with_ip(
-        &mut self,
+        &self,
         tap: TapDevice,
         pod_ip: Ipv4Addr,
         pod_mac: [u8; 6],
@@ -98,7 +105,7 @@ impl Fabric<Port> {
 impl Fabric<FabricPort> {
     /// Add a TAP device as a port, wrapping it in `FabricPort::Tap`.
     pub fn add_tap_port(
-        &mut self,
+        &self,
         tap: TapDevice,
         pod_ip: Ipv4Addr,
         pod_mac: [u8; 6],
@@ -119,12 +126,13 @@ impl<P: FramePort> Fabric<P> {
                     route_table: Mutex::new(RouteTable::new()),
                     service_table: Mutex::new(ServiceTable::new()),
                     nat_table: Mutex::new(nat::NatTable::new()),
+                    gateway_tx: OnceLock::new(),
+                    event_tx: OnceLock::new(),
                 }),
-                gateway_tx: None,
-                event_tx: None,
             },
-            next_port_id: 0,
-            _gateway_ingress_task: None,
+            next_port_id: AtomicUsize::new(0),
+            _gateway_ingress_task: Mutex::new(None),
+            _gc_task: Mutex::new(None),
         }
     }
 
@@ -133,28 +141,27 @@ impl<P: FramePort> Fabric<P> {
     /// Returns the assigned port ID and a `TaskHandle` that owns the port's
     /// read loop task.
     #[allow(dead_code)]
-    pub fn add_port_raw(&mut self, port: P) -> (PortId, TaskHandle<()>) {
+    pub fn add_port_raw(&self, port: P) -> (PortId, TaskHandle<()>) {
         self.add_port_inner(port, None, None)
     }
 
     /// Add a pre-constructed port with an associated IP, flush buffered frames,
     /// and start the forwarding task.
     #[allow(dead_code)]
-    pub fn add_port_raw_with_ip(&mut self, port: P, pod_ip: Ipv4Addr) -> (PortId, TaskHandle<()>) {
+    pub fn add_port_raw_with_ip(&self, port: P, pod_ip: Ipv4Addr) -> (PortId, TaskHandle<()>) {
         self.add_port_inner(port, Some(pod_ip), None)
     }
 
     /// Add a pre-constructed port with an associated IP and MAC, flush buffered
     /// frames (both route table and service table), and start the forwarding task.
     #[allow(dead_code)]
-    pub fn add_port_raw_with_ip_mac(&mut self, port: P, pod_ip: Ipv4Addr, pod_mac: [u8; 6]) -> (PortId, TaskHandle<()>) {
+    pub fn add_port_raw_with_ip_mac(&self, port: P, pod_ip: Ipv4Addr, pod_mac: [u8; 6]) -> (PortId, TaskHandle<()>) {
         self.add_port_inner(port, Some(pod_ip), Some(pod_mac))
     }
 
     /// Shared implementation for all add_port variants.
-    fn add_port_inner(&mut self, port: P, pod_ip: Option<Ipv4Addr>, pod_mac: Option<[u8; 6]>) -> (PortId, TaskHandle<()>) {
-        let port_id = self.next_port_id;
-        self.next_port_id += 1;
+    fn add_port_inner(&self, port: P, pod_ip: Option<Ipv4Addr>, pod_mac: Option<[u8; 6]>) -> (PortId, TaskHandle<()>) {
+        let port_id = self.next_port_id.fetch_add(1, Ordering::Relaxed);
 
         let port = Arc::new(port);
 
@@ -235,13 +242,13 @@ impl<P: FramePort> Fabric<P> {
     /// `ingress_rx` is consumed by a spawned task that injects returning frames
     /// back into the fabric via MAC lookup or flooding.
     pub fn set_gateway(
-        &mut self,
+        &self,
         egress_tx: mpsc::Sender<Vec<u8>>,
         ingress_rx: mpsc::Receiver<Vec<u8>>,
     ) {
-        self.ctx.gateway_tx = Some(egress_tx);
+        let _ = self.ctx.inner.gateway_tx.set(egress_tx);
 
-        self._gateway_ingress_task = Some(TaskHandle::spawn(gateway_ingress_task(
+        *self._gateway_ingress_task.lock().unwrap() = Some(TaskHandle::spawn(gateway_ingress_task(
             ingress_rx,
             self.ctx.clone(),
         )));
@@ -249,7 +256,7 @@ impl<P: FramePort> Fabric<P> {
         // Spawn periodic MAC table + NAT table GC task.
         {
             let inner = Arc::clone(&self.ctx.inner);
-            tokio::spawn(async move {
+            let gc_task = TaskHandle::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
@@ -263,14 +270,15 @@ impl<P: FramePort> Fabric<P> {
                     }
                 }
             });
+            *self._gc_task.lock().unwrap() = Some(gc_task);
         }
 
         log::info!("fabric: gateway connected");
     }
 
     /// Set the event channel for fabric events (route misses, etc.).
-    pub fn set_event_channel(&mut self, tx: mpsc::Sender<FabricEvent>) {
-        self.ctx.event_tx = Some(tx);
+    pub fn set_event_channel(&self, tx: mpsc::Sender<FabricEvent>) {
+        let _ = self.ctx.inner.event_tx.set(tx);
     }
 
     /// Get a shared reference to the fabric tables (ports, MAC, route, service).

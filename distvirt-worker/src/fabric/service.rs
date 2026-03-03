@@ -2,11 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use distvirt_activator::{ActivatorInstance, FlowTracker, StreamManager, StreamManagerOutput, is_l4_action, parse_frame_to_packet_info};
-use distvirt_activator::types::{Action, Event};
+use distvirt_activator::types::Action;
 use distvirt_worker_protocol::ServicePolicy;
 
 use crate::packet::{FabricFrame, format_mac};
+use super::service_activator::ServiceProcessor;
 
 /// What the fabric should do with a frame that matched a service IP.
 #[derive(Debug)]
@@ -49,9 +49,7 @@ struct ServiceEntity {
     ready: bool,
     buffer: VecDeque<Vec<u8>>,
     buffer_start: Option<Instant>,
-    activator: Option<ActivatorInstance>,
-    flow_tracker: Option<FlowTracker>,
-    stream_manager: Option<StreamManager>,
+    processor: ServiceProcessor,
 }
 
 /// Result of marking a service as ready.
@@ -70,65 +68,6 @@ pub enum MarkReadyResult {
     L4(ServiceAction),
 }
 
-/// Run L4 event cycle on a service entity: feed eth_frame to StreamManager,
-/// run activator event loop, collect outgoing frames and non-L4 actions.
-fn run_l4_cycle(entity: &mut ServiceEntity, eth_frame: &[u8]) -> ServiceAction {
-    let sm = entity.stream_manager.as_mut().unwrap();
-    let sm_output = sm.receive_frame(eth_frame);
-    process_l4_output(entity, sm_output)
-}
-
-/// Process StreamManagerOutput through the activator event loop (bounded to 4 rounds).
-fn process_l4_output(entity: &mut ServiceEntity, mut sm_output: StreamManagerOutput) -> ServiceAction {
-    let sm = entity.stream_manager.as_mut().unwrap();
-    let mut all_non_l4_actions = Vec::new();
-
-    if let Some(ref mut activator) = entity.activator {
-        for _ in 0..4 {
-            for event in sm_output.events.drain(..) {
-                activator.push_event(event);
-            }
-            if !activator.has_pending_events() {
-                break;
-            }
-            let actions = match activator.process_events() {
-                Ok(a) => a,
-                Err(e) => {
-                    log::error!("activator error for service '{}': {:#}", entity.service_id, e);
-                    break;
-                }
-            };
-            let mut new_events = Vec::new();
-            for action in &actions {
-                if is_l4_action(action) {
-                    let out = sm.execute_action(action);
-                    new_events.extend(out.events);
-                    sm_output.frames.extend(out.frames);
-                }
-            }
-            all_non_l4_actions.extend(actions.into_iter().filter(|a| !is_l4_action(a)));
-            sm_output.events = new_events;
-        }
-
-        // Warn if the event loop didn't fully converge within 4 rounds.
-        if !sm_output.events.is_empty() || activator.has_pending_events() {
-            log::warn!(
-                "service '{}': L4 event loop hit 4-round cap with {} pending SM events and {} pending activator events",
-                entity.service_id,
-                sm_output.events.len(),
-                if activator.has_pending_events() { "some" } else { "no" },
-            );
-        }
-    }
-
-    let poll_delay = sm.poll_delay();
-    ServiceAction::L4Result {
-        actions: all_non_l4_actions,
-        frames: sm_output.frames,
-        service_id: entity.service_id.clone(),
-        poll_delay,
-    }
-}
 
 /// Data returned by `flush_by_backend_mac` for each service whose buffer was drained.
 pub struct ServiceFlushData {
@@ -164,14 +103,8 @@ impl ServiceTable {
         ip: Ipv4Addr,
         mac: [u8; 6],
         policy: ServicePolicy,
-        activator: Option<ActivatorInstance>,
-        stream_manager: Option<StreamManager>,
+        processor: ServiceProcessor,
     ) {
-        let flow_tracker = if activator.is_some() && stream_manager.is_none() {
-            Some(FlowTracker::new())
-        } else {
-            None
-        };
         let entity = ServiceEntity {
             service_id: service_id.clone(),
             ip,
@@ -182,9 +115,7 @@ impl ServiceTable {
             ready: false,
             buffer: VecDeque::new(),
             buffer_start: None,
-            activator,
-            flow_tracker,
-            stream_manager,
+            processor,
         };
         self.by_ip.insert(ip, entity);
         self.id_to_ip.insert(service_id, ip);
@@ -237,15 +168,11 @@ impl ServiceTable {
                 entity.buffer.clear();
                 entity.buffer_start = None;
             }
-            if let Some(ref mut sm) = entity.stream_manager {
-                sm.update_backend(
-                    entity.backend_ip,
-                    entity.backend_mac,
-                );
-            }
-            if let Some(ref mut activator) = entity.activator {
-                activator.push_event(Event::BackendAvailable(has_backend));
-            }
+            entity.processor.on_backend_update(
+                has_backend,
+                entity.backend_ip,
+                entity.backend_mac,
+            );
         }
     }
 
@@ -265,47 +192,48 @@ impl ServiceTable {
         let backend_mac = entity.backend_mac.unwrap();
 
         log::debug!(
-            "service '{}': mark_ready: buffer_len={}, has_activator={}, has_stream_manager={}",
+            "service '{}': mark_ready: buffer_len={}, has_stream_manager={}",
             entity.service_id, entity.buffer.len(),
-            entity.activator.is_some(), entity.stream_manager.is_some()
+            entity.processor.has_stream_manager()
         );
 
-        // L4 path: push BackendAvailable event through the stream manager cycle.
-        if entity.stream_manager.is_some() {
-            if let Some(ref mut activator) = entity.activator {
-                activator.push_event(Event::BackendAvailable(true));
+        // L4/L3 activator path: delegate to processor.
+        if let Some(svc_action) = entity.processor.on_mark_ready(&entity.service_id) {
+            if entity.processor.has_stream_manager() {
+                return Some(MarkReadyResult::L4(svc_action));
             }
-            let sm = entity.stream_manager.as_mut().unwrap();
-            let sm_output = sm.handle_timeout();
-            let svc_action = process_l4_output(entity, sm_output);
-            return Some(MarkReadyResult::L4(svc_action));
+            // L3 activator: drain buffer and return Passthrough with actions.
+            let frames: Vec<Vec<u8>> = entity.buffer.drain(..).collect();
+            entity.buffer_start = None;
+            let actions = match svc_action {
+                ServiceAction::ActivatorActions { actions, .. } => actions,
+                _ => Vec::new(),
+            };
+
+            log::debug!(
+                "service '{}': mark_ready produced {} frames, {} actions",
+                entity.service_id, frames.len(), actions.len()
+            );
+
+            let backend_ip = entity.backend_ip.unwrap();
+            let service_ip = entity.ip;
+            let service_mac = entity.mac;
+            return Some(MarkReadyResult::Passthrough { frames, backend_mac, backend_ip, service_ip, service_mac, actions });
         }
 
+        // Passthrough: drain buffer.
         let frames: Vec<Vec<u8>> = entity.buffer.drain(..).collect();
         entity.buffer_start = None;
 
-        let actions = if let Some(ref mut activator) = entity.activator {
-            activator.push_event(Event::BackendAvailable(true));
-            match activator.process_events() {
-                Ok(actions) => actions,
-                Err(e) => {
-                    log::error!("activator error for service '{}': {:#}", entity.service_id, e);
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
         log::debug!(
-            "service '{}': mark_ready produced {} frames, {} actions",
-            entity.service_id, frames.len(), actions.len()
+            "service '{}': mark_ready produced {} frames, 0 actions",
+            entity.service_id, frames.len()
         );
 
         let backend_ip = entity.backend_ip.unwrap();
         let service_ip = entity.ip;
         let service_mac = entity.mac;
-        Some(MarkReadyResult::Passthrough { frames, backend_mac, backend_ip, service_ip, service_mac, actions })
+        Some(MarkReadyResult::Passthrough { frames, backend_mac, backend_ip, service_ip, service_mac, actions: Vec::new() })
     }
 
     /// Check if a destination IP belongs to a service. If so, buffer or forward
@@ -338,30 +266,17 @@ impl ServiceTable {
             }
         }
 
-        // L4 stream manager path: feed raw frame, run activator event loop.
-        if entity.stream_manager.is_some() {
+        // L4/L3 activator path: delegate to processor.
+        if !matches!(entity.processor, ServiceProcessor::Passthrough) {
             let ff = FabricFrame::new(frame)?;
-            let result = run_l4_cycle(entity, ff.eth_payload());
-            return Some((result, false));
-        }
-
-        // L3 activator path: parse frame, push event, process.
-        if let Some(ref mut activator) = entity.activator {
-            let ff = FabricFrame::new(frame)?;
-            let flow_tracker = entity.flow_tracker.as_mut().unwrap();
-            if let Some(packet_info) = parse_frame_to_packet_info(ff.eth_payload(), frame, flow_tracker) {
-                activator.push_event(Event::Packet(packet_info));
+            if let Some(result) = entity.processor.process_frame(
+                &entity.service_id,
+                ff.eth_payload(),
+                frame,
+            ) {
+                return Some((result, false));
             }
-            match activator.process_events() {
-                Ok(actions) => {
-                    let service_id = entity.service_id.clone();
-                    return Some((ServiceAction::ActivatorActions { actions, service_id }, false));
-                }
-                Err(e) => {
-                    log::error!("activator error for service '{}': {:#}", entity.service_id, e);
-                    // Fall through to passthrough buffering on error
-                }
-            }
+            // process_frame returned None on L3 error — fall through to buffering.
         }
 
         // Not ready or no backend — check if we should activate (with debounce).
@@ -435,9 +350,7 @@ impl ServiceTable {
     /// and returns the resulting `ServiceAction` (if the service has an L4 path).
     pub fn handle_timeout_for_ip(&mut self, ip: Ipv4Addr) -> Option<ServiceAction> {
         let entity = self.by_ip.get_mut(&ip)?;
-        let sm = entity.stream_manager.as_mut()?;
-        let sm_output = sm.handle_timeout();
-        Some(process_l4_output(entity, sm_output))
+        entity.processor.handle_timeout(&entity.service_id)
     }
 
     /// Drain buffered frames from all ready services whose backend MAC matches `mac`.
@@ -501,7 +414,7 @@ mod tests {
     #[test]
     fn buffers_when_not_ready() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
 
         let result = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(matches!(result, Some((ServiceAction::Buffered, true))));
@@ -510,7 +423,7 @@ mod tests {
     #[test]
     fn forwards_when_ready() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
         table.mark_ready("svc1");
 
@@ -525,7 +438,7 @@ mod tests {
     #[test]
     fn mark_ready_returns_buffered_frames() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
 
         // Buffer some frames.
@@ -548,7 +461,7 @@ mod tests {
     #[test]
     fn update_backend_clears_ready_and_buffer() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
         table.mark_ready("svc1");
 
@@ -562,7 +475,7 @@ mod tests {
     #[test]
     fn destroy_removes_service() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
         assert!(table.destroy("svc1"));
         assert!(table.lookup_and_buffer(SVC_IP, FRAME, |_| true).is_none());
     }
@@ -570,7 +483,7 @@ mod tests {
     #[test]
     fn activation_debounced() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
 
         let (_, activate1) = table.lookup_and_buffer(SVC_IP, FRAME, |_| true).unwrap();
         assert!(activate1);
@@ -591,8 +504,7 @@ mod tests {
                 timeout_ms: 30000,
                 activator: None,
             },
-            None,
-            None,
+            ServiceProcessor::Passthrough,
         );
 
         table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
@@ -612,7 +524,7 @@ mod tests {
     #[test]
     fn update_backend_preserves_buffered_frames() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
 
         // Buffer 3 frames while there is no backend yet.
         for _ in 0..3 {
@@ -641,7 +553,7 @@ mod tests {
     #[test]
     fn get_mac_returns_service_mac() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
         assert_eq!(table.get_mac(&SVC_IP), Some(SVC_MAC));
     }
 
@@ -711,8 +623,7 @@ mod tests {
                     max_flows: 1024,
                 }),
             },
-            Some(instance),
-            Some(sm),
+            ServiceProcessor::L4 { activator: Some(instance), stream_manager: sm },
         );
 
         // Feed a TCP SYN to the L4 path (after vnet header).
@@ -765,8 +676,10 @@ mod tests {
             SVC_IP,
             SVC_MAC,
             default_policy(),
-            None,
-            Some(sm),
+            ServiceProcessor::L4 {
+                activator: None,
+                stream_manager: sm,
+            },
         );
 
         // handle_timeout_for_ip on a service with a StreamManager should return Some(L4Result).
@@ -781,7 +694,7 @@ mod tests {
     #[test]
     fn handle_timeout_for_ip_returns_none_for_l3() {
         let mut table = ServiceTable::new();
-        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), ServiceProcessor::Passthrough);
 
         // L3 service (no StreamManager) should return None.
         let result = table.handle_timeout_for_ip(SVC_IP);
@@ -809,8 +722,10 @@ mod tests {
                     max_flows: 1024,
                 }),
             },
-            Some(instance),
-            None,
+            ServiceProcessor::L3 {
+                activator: instance,
+                flow_tracker: distvirt_activator::FlowTracker::new(),
+            },
         );
 
         // Feed a TCP SYN frame via lookup_and_buffer.

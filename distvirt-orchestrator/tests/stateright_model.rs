@@ -204,8 +204,10 @@ impl NamespaceSnapshot {
                     )
                 })
                 .collect(),
-            wg_peers: std::collections::HashMap::new(),
-            wg_next_host_offset: 254,
+            wg_peer_manager: distvirt_orchestrator::wg_peers::WireGuardPeerManager::new(
+                self.spec.network.subnet,
+                self.spec.network.prefix_len,
+            ),
         }
     }
 }

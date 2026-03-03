@@ -1,0 +1,17 @@
+[package]
+name = "postgres-activator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+activator-types = { path = "../activator-types" }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[dev-dependencies]
+activator-types = { path = "../activator-types", features = ["test-helpers"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.component]
+package = "distvirt:activator"

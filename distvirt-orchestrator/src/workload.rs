@@ -128,7 +128,6 @@ impl WorkloadStateMachine {
                     self.state = WorkloadState::Running {
                         pod_id,
                         worker_id,
-                        hosting: WorkloadHosting::Normal,
                     };
                 }
             }

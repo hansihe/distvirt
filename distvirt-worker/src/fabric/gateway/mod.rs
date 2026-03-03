@@ -1,27 +1,23 @@
-use std::collections::{HashMap, VecDeque};
-use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::udp;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
-use tokio::io::unix::AsyncFd;
-use tokio::net::UdpSocket as TokioUdpSocket;
 use tokio::sync::mpsc;
 
 pub(crate) mod dns;
-mod tun;
+pub(crate) mod tun;
 
 pub use dns::DnsRegistry;
 
-use crate::packet::{ETH_HDR_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, FabricFrame, VNET_HDR_SZ, with_vnet_header};
-use crate::fabric::switch::{GATEWAY_IP, GATEWAY_MAC};
-use tun::{configure_tun_ip, create_tun, tun_read, tun_write};
+use crate::packet::{ETH_HDR_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, FabricFrame, with_vnet_header};
+use super::switch::{GATEWAY_IP, GATEWAY_MAC};
+use dns::DnsForwarder;
+use tun::TunEgress;
 
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
@@ -100,41 +96,26 @@ impl Device for ChannelDevice {
 
 // --- FabricGateway: smoltcp IP stack + TUN egress + DNS forwarding ---
 
-/// Combined gateway that handles ARP (via smoltcp), DNS forwarding (via smoltcp
-/// UDP socket), and internet egress (via TUN device with host NAT).
+/// Combined gateway that handles ARP (via smoltcp), DNS forwarding (via
+/// `DnsForwarder`), and internet egress (via `TunEgress`).
 pub struct FabricGateway {
-    // smoltcp userspace IP stack
+    // smoltcp userspace IP stack — coordination hub
     iface: Interface,
     device: ChannelDevice,
     sockets: SocketSet<'static>,
     dns_handle: SocketHandle,
+    boot_time: Instant,
 
-    // TUN for internet egress
-    tun: AsyncFd<OwnedFd>,
-    tun_name: String,
-    ip_mac_table: HashMap<[u8; 4], ([u8; 6], Instant)>,
+    // Extracted sub-components
+    dns: DnsForwarder,
+    tun: TunEgress,
 
     // Channels to/from fabric switch
     egress_rx: mpsc::Receiver<Vec<u8>>,
     ingress_tx: mpsc::Sender<Vec<u8>>,
 
-    // Local DNS registry (service name -> IP)
-    registry: DnsRegistry,
-
-    // DNS upstream forwarding
-    upstream_socket: TokioUdpSocket,
-    upstream_servers: Vec<SocketAddr>,
-    pending_dns: HashMap<u16, (IpEndpoint, Instant)>,
-
     // Pod subnet gateway IP (for routing DNS queries from pods)
     pod_gateway_ip: [u8; 4],
-
-    // Eviction timeouts
-    dns_timeout: Duration,
-    ip_mac_timeout: Duration,
-
-    // Timing
-    boot_time: Instant,
 }
 
 impl FabricGateway {
@@ -144,34 +125,11 @@ impl FabricGateway {
     /// - `egress_tx`: send frames destined for the gateway here
     /// - `ingress_rx`: receive frames from the gateway to inject into the fabric
     pub fn new(registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
-        // Create TUN device for internet egress.
-        let (tun_fd, tun_name) = create_tun()?;
-        configure_tun_ip(&tun_name, GATEWAY_IP, [255, 255, 255, 0])?;
-        crate::tap::bring_interface_up(&tun_name)?;
+        // Create TUN egress sub-component.
+        let tun = TunEgress::new(GATEWAY_IP, [255, 255, 255, 0])?;
 
-        // Check ip_forward.
-        match std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward") {
-            Ok(val) if val.trim() != "1" => {
-                log::warn!(
-                    "gateway: /proc/sys/net/ipv4/ip_forward is '{}', NAT will not work. \
-                     Run: sysctl -w net.ipv4.ip_forward=1",
-                    val.trim()
-                );
-            }
-            Err(e) => log::warn!("gateway: could not read ip_forward: {}", e),
-            _ => {}
-        }
-
-        // Set non-blocking on the TUN fd.
-        let raw = tun_fd.as_raw_fd();
-        let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
-        if flags < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        if unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let async_fd = AsyncFd::new(tun_fd)?;
+        // Create DNS forwarder sub-component.
+        let dns = DnsForwarder::new(registry)?;
 
         // Create smoltcp interface with gateway MAC and IP.
         let boot_time = Instant::now();
@@ -206,24 +164,13 @@ impl FabricGateway {
                 .map_err(|e| anyhow::anyhow!("bind DNS socket: {:?}", e))?;
         }
 
-        // Parse upstream DNS servers from host /etc/resolv.conf.
-        let upstream_servers = parse_resolv_conf();
-        log::info!("gateway: upstream DNS servers: {:?}", upstream_servers);
-
-        // Create upstream UDP socket on host network.
-        let upstream_socket = {
-            let std_sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
-            std_sock.set_nonblocking(true)?;
-            TokioUdpSocket::from_std(std_sock)?
-        };
-
         // Fabric channels.
         let (egress_tx, egress_rx) = mpsc::channel(CHANNEL_BUF);
         let (ingress_tx, ingress_rx) = mpsc::channel(CHANNEL_BUF);
 
         log::info!(
             "gateway: created TUN device {} with smoltcp interface at 172.16.0.1/24",
-            tun_name
+            tun.name()
         );
 
         Ok((
@@ -232,19 +179,12 @@ impl FabricGateway {
                 device,
                 sockets,
                 dns_handle,
-                tun: async_fd,
-                tun_name,
-                ip_mac_table: HashMap::new(),
+                boot_time,
+                dns,
+                tun,
                 egress_rx,
                 ingress_tx,
-                registry,
-                upstream_socket,
-                upstream_servers,
-                pending_dns: HashMap::new(),
-                dns_timeout: Duration::from_secs(10),
-                ip_mac_timeout: Duration::from_secs(300),
                 pod_gateway_ip,
-                boot_time,
             },
             egress_tx,
             ingress_rx,
@@ -266,104 +206,6 @@ impl FabricGateway {
             if let Err(e) = self.ingress_tx.try_send(frame) {
                 log::warn!("gateway: ingress channel send error: {}", e);
             }
-        }
-    }
-
-    /// Process any DNS queries received by the smoltcp UDP socket.
-    /// Forwards them to the upstream DNS server.
-    async fn process_dns_queries(&mut self) {
-        loop {
-            let (query, endpoint) = {
-                let sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-                match sock.recv() {
-                    Ok((data, meta)) => (data.to_vec(), meta.endpoint),
-                    Err(_) => break,
-                }
-            };
-
-            if query.len() < 2 {
-                continue;
-            }
-
-            let query_id = u16::from_be_bytes([query[0], query[1]]);
-            log::info!("gateway: DNS query id={} from {}", query_id, endpoint);
-
-            // Try local registry first.
-            if let Some(response) = dns::try_resolve(&self.registry, &query) {
-                log::info!("gateway: DNS query id={} resolved locally", query_id);
-                let sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-                if let Err(e) = sock.send_slice(&response, endpoint) {
-                    log::warn!("gateway: DNS local response send: {:?}", e);
-                }
-                self.poll_and_drain();
-                continue;
-            }
-
-            // Fall back to upstream.
-            self.pending_dns.insert(query_id, (endpoint, Instant::now()));
-
-            if let Some(upstream) = self.upstream_servers.first() {
-                if let Err(e) = self.upstream_socket.send_to(&query, upstream).await {
-                    log::warn!("gateway: DNS upstream send error: {}", e);
-                }
-            }
-        }
-    }
-
-    /// Handle a DNS response from upstream: write it to the smoltcp DNS socket
-    /// targeting the original client, then poll to generate the frame.
-    fn handle_dns_response(&mut self, response: &[u8]) {
-        if response.len() < 2 {
-            return;
-        }
-
-        let query_id = u16::from_be_bytes([response[0], response[1]]);
-        if let Some((endpoint, _)) = self.pending_dns.remove(&query_id) {
-            log::info!("gateway: DNS response id={} -> {}", query_id, endpoint);
-            let sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-            if let Err(e) = sock.send_slice(response, endpoint) {
-                log::warn!("gateway: DNS response send to smoltcp: {:?}", e);
-            }
-            self.poll_and_drain();
-        } else {
-            log::info!(
-                "gateway: DNS response id={} has no pending query",
-                query_id
-            );
-        }
-    }
-
-    /// Sweep stale entries from pending_dns and ip_mac_table.
-    fn sweep_stale_entries(&mut self) {
-        let now = Instant::now();
-
-        // Sweep stale DNS entries.
-        let before = self.pending_dns.len();
-        self.pending_dns.retain(|id, (_, inserted)| {
-            if now.duration_since(*inserted) > self.dns_timeout {
-                log::warn!("gateway: DNS query id={} timed out, removing", id);
-                false
-            } else {
-                true
-            }
-        });
-        let expired = before - self.pending_dns.len();
-        if expired > 0 {
-            log::info!("gateway: swept {} stale DNS entries", expired);
-        }
-
-        // Sweep stale ip_mac entries.
-        let before = self.ip_mac_table.len();
-        self.ip_mac_table.retain(|_ip, (_, inserted)| {
-            now.duration_since(*inserted) <= self.ip_mac_timeout
-        });
-        let expired = before - self.ip_mac_table.len();
-        if expired > 0 {
-            log::info!(
-                "gateway: swept {} stale ip_mac entries ({} remaining)",
-                expired,
-                self.ip_mac_table.len()
-            );
         }
     }
 
@@ -422,31 +264,20 @@ impl FabricGateway {
                         // smoltcp expects raw ethernet frames without vnet header.
                         self.device.rx_queue.push_back(eth_frame.to_vec());
                         self.poll_and_drain();
-                        self.process_dns_queries().await;
+                        let dns_sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
+                        if self.dns.process_queries(dns_sock).await {
+                            self.poll_and_drain();
+                        }
                     } else if ethertype == ETHERTYPE_IPV4
                         && eth_frame.len() >= ETH_HDR_LEN + 20
                     {
-                        // Internet egress: learn src MAC, strip Ethernet, write to TUN.
-                        let src_mac = ff.src_mac();
-                        let ip_packet = &eth_frame[ETH_HDR_LEN..];
-                        let src_ip: [u8; 4] = ip_packet[12..16].try_into().unwrap();
-                        self.ip_mac_table.insert(src_ip, (src_mac, Instant::now()));
-
-                        // Copy vnet header and adjust csum_start for TUN (IP-level,
-                        // no ethernet header), then write [vnet_hdr][ip_packet] to TUN.
-                        let mut vnet_hdr = ff.vnet_hdr();
-                        adjust_vnet_csum_start(&mut vnet_hdr, -(ETH_HDR_LEN as i16));
-                        let mut tun_buf_out = Vec::with_capacity(VNET_HDR_SZ + ip_packet.len());
-                        tun_buf_out.extend_from_slice(&vnet_hdr);
-                        tun_buf_out.extend_from_slice(ip_packet);
-                        if let Err(e) = tun_write(&self.tun, &tun_buf_out).await {
-                            log::warn!("gateway: TUN write error: {}", e);
-                        }
+                        // Internet egress via TUN sub-component.
+                        self.tun.write_egress(&ff).await;
                     }
                 }
 
                 // TUN ingress: internet -> fabric
-                result = tun_read(&self.tun, &mut tun_buf) => {
+                result = self.tun.read_ingress(&mut tun_buf) => {
                     let n = match result {
                         Ok(0) => {
                             log::info!("gateway: TUN EOF, shutting down");
@@ -459,48 +290,22 @@ impl FabricGateway {
                         }
                     };
 
-                    // TUN provides [vnet_hdr][ip_packet] via IFF_VNET_HDR.
-                    if n < VNET_HDR_SZ + 20 {
-                        continue;
-                    }
-                    let tun_vnet_hdr = &tun_buf[..VNET_HDR_SZ];
-                    let ip_packet = &tun_buf[VNET_HDR_SZ..n];
-
-                    let dst_ip: [u8; 4] = ip_packet[16..20].try_into().unwrap();
-                    let dst_mac = match self.ip_mac_table.get(&dst_ip) {
-                        Some((mac, _)) => *mac,
-                        None => {
-                            log::debug!(
-                                "gateway: ingress no MAC for {}.{}.{}.{}, dropping",
-                                dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
-                            );
-                            continue;
+                    if let Some(frame) = self.tun.build_ingress_frame(&tun_buf, n) {
+                        if let Err(e) = self.ingress_tx.send(frame).await {
+                            log::warn!("gateway: ingress channel send error: {}", e);
+                            break;
                         }
-                    };
-
-                    // Adjust vnet header csum_start for fabric (adds ethernet header).
-                    let mut vnet_hdr: [u8; VNET_HDR_SZ] = tun_vnet_hdr.try_into().unwrap();
-                    adjust_vnet_csum_start(&mut vnet_hdr, ETH_HDR_LEN as i16);
-
-                    // Build fabric frame: [vnet_hdr][eth_hdr][ip_packet]
-                    let mut frame = Vec::with_capacity(VNET_HDR_SZ + ETH_HDR_LEN + ip_packet.len());
-                    frame.extend_from_slice(&vnet_hdr);
-                    frame.extend_from_slice(&dst_mac);
-                    frame.extend_from_slice(&GATEWAY_MAC);
-                    frame.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
-                    frame.extend_from_slice(ip_packet);
-
-                    if let Err(e) = self.ingress_tx.send(frame).await {
-                        log::warn!("gateway: ingress channel send error: {}", e);
-                        break;
                     }
                 }
 
                 // DNS upstream response
-                result = self.upstream_socket.recv_from(&mut dns_buf) => {
+                result = self.dns.upstream_socket().recv_from(&mut dns_buf) => {
                     match result {
                         Ok((n, _addr)) => {
-                            self.handle_dns_response(&dns_buf[..n]);
+                            let dns_sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
+                            if self.dns.handle_response(&dns_buf[..n], dns_sock) {
+                                self.poll_and_drain();
+                            }
                         }
                         Err(e) => {
                             log::warn!("gateway: DNS upstream recv error: {}", e);
@@ -515,14 +320,15 @@ impl FabricGateway {
 
                 // Periodic sweep of stale entries
                 _ = sweep_interval.tick() => {
-                    self.sweep_stale_entries();
+                    self.dns.sweep_stale();
+                    self.tun.sweep_stale();
                 }
             }
         }
 
         log::info!(
             "gateway: shut down (TUN device {} will be destroyed)",
-            self.tun_name
+            self.tun.name()
         );
     }
 }
@@ -530,7 +336,7 @@ impl FabricGateway {
 /// Adjust the `csum_start` field of a virtio-net header by `delta` bytes.
 /// Only modifies the header if VIRTIO_NET_HDR_F_NEEDS_CSUM is set.
 /// `csum_start` is at bytes 6-7 (little-endian u16).
-fn adjust_vnet_csum_start(vnet_hdr: &mut [u8; 10], delta: i16) {
+pub(super) fn adjust_vnet_csum_start(vnet_hdr: &mut [u8; 10], delta: i16) {
     if vnet_hdr[0] & VIRTIO_NET_HDR_F_NEEDS_CSUM == 0 {
         return;
     }
@@ -539,42 +345,14 @@ fn adjust_vnet_csum_start(vnet_hdr: &mut [u8; 10], delta: i16) {
     vnet_hdr[6..8].copy_from_slice(&adjusted.to_le_bytes());
 }
 
-/// Parse /etc/resolv.conf for upstream nameservers. Falls back to 8.8.8.8.
-fn parse_resolv_conf() -> Vec<SocketAddr> {
-    let content = match std::fs::read_to_string("/etc/resolv.conf") {
-        Ok(c) => c,
-        Err(_) => return parse_resolv_conf_content(""),
-    };
-    parse_resolv_conf_content(&content)
-}
-
-/// Parse the content of a resolv.conf file for nameserver entries.
-/// Falls back to 8.8.8.8:53 if no valid nameservers are found.
-fn parse_resolv_conf_content(content: &str) -> Vec<SocketAddr> {
-    let mut servers = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("nameserver") {
-            let addr_str = rest.trim();
-            if let Ok(ip) = addr_str.parse::<IpAddr>() {
-                servers.push(SocketAddr::new(ip, 53));
-            }
-        }
-    }
-
-    if servers.is_empty() {
-        servers.push(SocketAddr::new(
-            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
-            53,
-        ));
-    }
-
-    servers
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::net::{IpAddr, SocketAddr};
+    use smoltcp::wire::IpEndpoint;
+    use dns::parse_resolv_conf_content;
+
 
     // --- adjust_vnet_csum_start tests ---
 

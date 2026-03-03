@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -20,6 +20,8 @@ pub(crate) struct FabricContextInner<P: FramePort> {
     pub(crate) route_table: Mutex<super::RouteTable>,
     pub(crate) service_table: Mutex<super::ServiceTable>,
     pub(crate) nat_table: Mutex<super::nat::NatTable>,
+    pub(crate) gateway_tx: OnceLock<mpsc::Sender<Vec<u8>>>,
+    pub(crate) event_tx: OnceLock<mpsc::Sender<FabricEvent>>,
 }
 
 impl<P: FramePort> FabricContextInner<P> {
@@ -35,22 +37,16 @@ impl<P: FramePort> FabricContextInner<P> {
 
 /// Shared fabric state passed to all forwarding functions.
 ///
-/// The four table mutexes live behind a single `Arc` to reduce heap
-/// allocations and reference-count bumps on clone. The sender fields
-/// stay outside since they're set once before sharing and are cheap
-/// to clone (each is a single internal Arc bump).
+/// Wraps a single `Arc<FabricContextInner>` containing all tables and
+/// one-shot channel senders. Cheap to clone (single Arc bump).
 pub(super) struct FabricContext<P: FramePort> {
     pub(super) inner: Arc<FabricContextInner<P>>,
-    pub(super) gateway_tx: Option<mpsc::Sender<Vec<u8>>>,
-    pub(super) event_tx: Option<mpsc::Sender<FabricEvent>>,
 }
 
 impl<P: FramePort> Clone for FabricContext<P> {
     fn clone(&self) -> Self {
         FabricContext {
             inner: Arc::clone(&self.inner),
-            gateway_tx: self.gateway_tx.clone(),
-            event_tx: self.event_tx.clone(),
         }
     }
 }
@@ -138,7 +134,7 @@ async fn dispatch_frame<P: FramePort>(
         flood_frame(frame, src_port_id, &ctx.inner.ports).await;
         // Port sources also forward broadcasts to the gateway and check service ARP.
         if let FrameSource::Port { port, .. } = &source {
-            if let Some(ref gw_tx) = ctx.gateway_tx {
+            if let Some(gw_tx) = ctx.inner.gateway_tx.get() {
                 let _ = gw_tx.try_send(frame.to_vec());
             }
             try_service_arp_reply(frame, &ctx.inner.service_table, port).await;
@@ -146,7 +142,7 @@ async fn dispatch_frame<P: FramePort>(
     } else if matches!(&source, FrameSource::Port { .. }) && dst_mac == GATEWAY_MAC {
         log::trace!("fabric: -> GATEWAY (dst_mac matches GATEWAY_MAC)");
         // Gateway-destined frame from a port: send to gateway via channel.
-        if let Some(ref gw_tx) = ctx.gateway_tx {
+        if let Some(gw_tx) = ctx.inner.gateway_tx.get() {
             let _ = gw_tx.try_send(frame.to_vec());
         }
     } else {
@@ -364,7 +360,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
         }
         Action::SetBackendNeed(need) => {
             let proto_need = convert_backend_need(need);
-            if let Some(tx) = &ctx.event_tx {
+            if let Some(tx) = ctx.inner.event_tx.get() {
                 if let Err(e) = tx.send(FabricEvent::ServiceBackendNeed {
                     service_id: service_id.to_string(),
                     dst_ip,
@@ -566,7 +562,7 @@ async fn handle_unknown_unicast<P: FramePort>(
             }
 
             if let Some(service_id) = service_id {
-                if let Some(tx) = &ctx.event_tx {
+                if let Some(tx) = ctx.inner.event_tx.get() {
                     let _ = tx.try_send(FabricEvent::ServiceActivation {
                         service_id,
                         dst_ip,
@@ -603,7 +599,7 @@ async fn handle_unknown_unicast<P: FramePort>(
         }
 
         if should_miss {
-            if let Some(tx) = &ctx.event_tx {
+            if let Some(tx) = ctx.inner.event_tx.get() {
                 let _ = tx.try_send(FabricEvent::RouteMiss {
                     dst_ip,
                     dst_mac,

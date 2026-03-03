@@ -216,7 +216,6 @@ fn convert_namespace_state(status: &NamespaceStatus) -> i32 {
     match status {
         NamespaceStatus::Creating => proto::NamespaceState::Creating as i32,
         NamespaceStatus::Active => proto::NamespaceState::Active as i32,
-        NamespaceStatus::Cloning { .. } => proto::NamespaceState::Active as i32,
         NamespaceStatus::Destroying => proto::NamespaceState::Destroying as i32,
     }
 }
@@ -236,7 +235,7 @@ fn convert_status_report(report: NamespaceStatusReport) -> proto::NamespaceStatu
                     &svc.pod_id,
                     &svc.worker_id,
                 )),
-                spliced: svc.spliced,
+                spliced: false,
             }
         });
 
@@ -251,7 +250,7 @@ fn convert_status_report(report: NamespaceStatusReport) -> proto::NamespaceStatu
                     &svc.backend_need,
                 )),
                 activation_enabled: svc.activation_enabled,
-                spliced: svc.spliced,
+                spliced: false,
             },
         );
     }
