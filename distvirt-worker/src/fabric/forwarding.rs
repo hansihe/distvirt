@@ -106,22 +106,22 @@ async fn dispatch_frame<P: FramePort>(
         FrameSource::Gateway => "gateway".to_string(),
     };
 
-    log::trace!(
-        "fabric: dispatch_frame from {} | {} -> {} ethertype=0x{:04x} len={}{}",
-        source_label,
-        format_mac(&src_mac),
-        format_mac(&dst_mac),
-        ff.ethertype(),
-        frame.len(),
-        if ff.ethertype() == 0x0800 {
-            let eth = ff.eth_payload();
-            let src_ip = extract_ipv4_src(eth);
-            let dst_ip = extract_ipv4_dst(eth);
-            format!(" | IPv4 {:?} -> {:?}", src_ip, dst_ip)
-        } else {
-            String::new()
-        }
-    );
+    if ff.ethertype() == 0x0800 {
+        let eth = ff.eth_payload();
+        let src_ip = extract_ipv4_src(eth);
+        let dst_ip = extract_ipv4_dst(eth);
+        log::debug!(
+            "fabric: dispatch_frame from {} | {} -> {} IPv4 {:?} -> {:?} len={}",
+            source_label, format_mac(&src_mac), format_mac(&dst_mac),
+            src_ip, dst_ip, frame.len()
+        );
+    } else {
+        log::trace!(
+            "fabric: dispatch_frame from {} | {} -> {} ethertype=0x{:04x} len={}",
+            source_label, format_mac(&src_mac), format_mac(&dst_mac),
+            ff.ethertype(), frame.len()
+        );
+    }
 
     if let FrameSource::Port { port_id, .. } = &source {
         // Learn source MAC.
@@ -188,6 +188,10 @@ async fn dispatch_frame<P: FramePort>(
                         // SNAT: rewrite src IP and src MAC from backend to service.
                         let ff_ref = FabricFrame::new(frame).unwrap();
                         let backend_ip = ff_ref.ipv4_src().unwrap();
+                        log::debug!(
+                            "fabric: SNAT return traffic {} -> {} (rewriting src {} -> {})",
+                            src_port_id, dst_id, backend_ip, svc_ip
+                        );
                         let mut rewritten = frame.to_vec();
                         rewrite_src_mac(&mut rewritten, &svc_mac);
                         rewrite_ipv4_src(&mut rewritten, backend_ip, svc_ip);
@@ -280,6 +284,10 @@ pub(super) async fn dispatch_action<P: FramePort>(
 ) {
     match action {
         Action::ReplayPacket(raw_frame) => {
+            log::debug!(
+                "fabric: dispatching ReplayPacket for service '{}' (frame_len={})",
+                service_id, raw_frame.len()
+            );
             let nat_info = {
                 let st = ctx.inner.service_table.lock().unwrap();
                 st.get_nat_info_by_id(service_id)
@@ -318,8 +326,23 @@ pub(super) async fn dispatch_action<P: FramePort>(
 
                     if let Err(e) = dst_port.send_frame(&rewritten).await {
                         log::warn!("fabric: replay send error: {}", e);
+                    } else {
+                        log::debug!(
+                            "fabric: ReplayPacket sent to backend MAC {} (DNAT {} -> {})",
+                            format_mac(&pod_mac), service_ip, backend_ip
+                        );
                     }
+                } else {
+                    log::warn!(
+                        "fabric: ReplayPacket for service '{}': backend MAC {} not in mac_table, dropping",
+                        service_id, format_mac(&pod_mac)
+                    );
                 }
+            } else {
+                log::warn!(
+                    "fabric: ReplayPacket for service '{}': no NAT info (backend not set?), dropping",
+                    service_id
+                );
             }
         }
         Action::SetBackendNeed(need) => {
@@ -421,9 +444,11 @@ async fn handle_unknown_unicast<P: FramePort>(
     let ff = FabricFrame::new(frame).unwrap();
     if let Some(dst_ip) = ff.ipv4_dst() {
         // 1. Check service table first.
+        // Lock service_table before mac_table (consistent ordering).
         let svc_result = {
             let mut st = ctx.inner.service_table.lock().unwrap();
-            st.lookup_and_buffer(dst_ip, frame)
+            let mac_table = ctx.inner.mac_table.lock().unwrap();
+            st.lookup_and_buffer(dst_ip, frame, |mac| mac_table.lookup(mac).is_some())
         };
 
         if let Some((svc_action, should_activate)) = svc_result {
@@ -437,6 +462,10 @@ async fn handle_unknown_unicast<P: FramePort>(
 
             match svc_action {
                 ServiceAction::Forward { pod_ip, pod_mac, service_ip, service_mac } => {
+                    log::debug!(
+                        "fabric: service Forward {} -> {} (DNAT {} -> {})",
+                        format_mac(&dst_mac), format_mac(&pod_mac), service_ip, pod_ip
+                    );
                     // Find port for backend MAC, rewrite dst MAC + DNAT, send.
                     if let Some(dst_port) = ctx.inner.resolve_mac(&pod_mac) {
                         let mut rewritten = frame.to_vec();
@@ -473,9 +502,9 @@ async fn handle_unknown_unicast<P: FramePort>(
                             log::warn!("fabric: service forward error: {}", e);
                         }
                     } else {
-                        log::debug!(
-                            "fabric: service forward to {} but backend MAC not in mac_table",
-                            format_mac(&pod_mac)
+                        log::warn!(
+                            "fabric: service forward to {} but backend MAC {} not in mac_table",
+                            dst_ip, format_mac(&pod_mac)
                         );
                     }
                 }
@@ -486,6 +515,10 @@ async fn handle_unknown_unicast<P: FramePort>(
                     log::trace!("fabric: frame to service {} dropped", dst_ip);
                 }
                 ServiceAction::ActivatorActions { actions, service_id } => {
+                    log::debug!(
+                        "fabric: service '{}' activator returned {} actions",
+                        service_id, actions.len()
+                    );
                     for action in actions {
                         dispatch_action(&action, &service_id, dst_ip, ctx).await;
                     }

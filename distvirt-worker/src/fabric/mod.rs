@@ -143,6 +143,13 @@ impl<P: FramePort> Fabric<P> {
         self.add_port_inner(port, Some(pod_ip), None)
     }
 
+    /// Add a pre-constructed port with an associated IP and MAC, flush buffered
+    /// frames (both route table and service table), and start the forwarding task.
+    #[allow(dead_code)]
+    pub fn add_port_raw_with_ip_mac(&mut self, port: P, pod_ip: Ipv4Addr, pod_mac: [u8; 6]) -> (PortId, TaskHandle<()>) {
+        self.add_port_inner(port, Some(pod_ip), Some(pod_mac))
+    }
+
     /// Shared implementation for all add_port variants.
     fn add_port_inner(&mut self, port: P, pod_ip: Option<Ipv4Addr>, pod_mac: Option<[u8; 6]>) -> (PortId, TaskHandle<()>) {
         let port_id = self.next_port_id;
@@ -159,6 +166,31 @@ impl<P: FramePort> Fabric<P> {
         if let Some(mac) = pod_mac {
             let mut table = self.ctx.inner.mac_table.lock().unwrap();
             table.learn(mac, port_id);
+        }
+
+        // Flush service table buffers for any ready service whose backend MAC
+        // matches this port's MAC. This handles the case where frames were
+        // buffered because the backend MAC wasn't reachable yet.
+        if let Some(mac) = pod_mac {
+            let service_flushes = {
+                let mut st = self.ctx.inner.service_table.lock().unwrap();
+                st.flush_by_backend_mac(&mac)
+            };
+            if !service_flushes.is_empty() {
+                log::info!(
+                    "fabric: add_port_inner: flushing {} service(s) for MAC {}",
+                    service_flushes.len(), format_mac(&mac)
+                );
+            }
+            for flush_data in service_flushes {
+                self.flush_service_frames(
+                    flush_data.frames,
+                    flush_data.backend_mac,
+                    flush_data.backend_ip,
+                    flush_data.service_ip,
+                    flush_data.service_mac,
+                );
+            }
         }
 
         // Flush buffered frames if an IP was provided.

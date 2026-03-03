@@ -722,6 +722,22 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
         if let Some(result) = flush_data {
             use crate::fabric::service::{MarkReadyResult, ServiceAction};
+            match &result {
+                MarkReadyResult::Passthrough { frames, actions, backend_mac, .. } => {
+                    log::info!(
+                        "worker: service '{}' mark_ready returned Passthrough: {} buffered frames, {} actions, backend_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        service_id, frames.len(), actions.len(),
+                        backend_mac[0], backend_mac[1], backend_mac[2],
+                        backend_mac[3], backend_mac[4], backend_mac[5],
+                    );
+                }
+                MarkReadyResult::L4(action) => {
+                    log::info!(
+                        "worker: service '{}' mark_ready returned L4: {:?}",
+                        service_id, std::mem::discriminant(action)
+                    );
+                }
+            }
             let fabric = ns.fabric.lock().await;
             match result {
                 MarkReadyResult::Passthrough { frames, backend_mac, backend_ip, service_ip, service_mac, actions } => {

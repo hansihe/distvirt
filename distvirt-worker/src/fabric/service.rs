@@ -40,6 +40,12 @@ struct ServiceEntity {
     policy: ServicePolicy,
     backend_ip: Option<Ipv4Addr>,
     backend_mac: Option<[u8; 6]>,
+    /// Implicit state machine for service lifecycle:
+    ///   Pending (no backend) → BackendAssigned (backend set, not ready)
+    ///   → Ready (mark_ready called) → Reachable (backend MAC in mac_table)
+    ///   → Draining (backend removed or changed).
+    /// Formalizing this as an explicit enum is a future option; stateright
+    /// could be used to model-check transitions.
     ready: bool,
     buffer: VecDeque<Vec<u8>>,
     buffer_start: Option<Instant>,
@@ -124,6 +130,15 @@ fn process_l4_output(entity: &mut ServiceEntity, mut sm_output: StreamManagerOut
     }
 }
 
+/// Data returned by `flush_by_backend_mac` for each service whose buffer was drained.
+pub struct ServiceFlushData {
+    pub service_ip: Ipv4Addr,
+    pub service_mac: [u8; 6],
+    pub backend_ip: Ipv4Addr,
+    pub backend_mac: [u8; 6],
+    pub frames: Vec<Vec<u8>>,
+}
+
 /// Table of service entities indexed by IP for fast frame-path lookup.
 pub struct ServiceTable {
     by_ip: HashMap<Ipv4Addr, ServiceEntity>,
@@ -186,13 +201,17 @@ impl ServiceTable {
         }
     }
 
-    /// Update the backend for a service. Clears readiness and resets the buffer.
+    /// Update the backend for a service. Clears readiness. Only clears the
+    /// buffer when the backend is removed or changes to a different pod;
+    /// setting a backend for the first time preserves buffered frames so
+    /// `mark_ready` can flush them.
     pub fn update_backend(&mut self, service_id: &str, backend: Option<(Ipv4Addr, [u8; 6])>) {
         let ip = match self.id_to_ip.get(service_id) {
             Some(ip) => *ip,
             None => return,
         };
         if let Some(entity) = self.by_ip.get_mut(&ip) {
+            let old_backend_mac = entity.backend_mac;
             let has_backend = backend.is_some();
             match backend {
                 Some((pod_ip, pod_mac)) => {
@@ -205,8 +224,19 @@ impl ServiceTable {
                 }
             }
             entity.ready = false;
-            entity.buffer.clear();
-            entity.buffer_start = None;
+
+            // Clear buffer when backend is removed or MAC changes to a
+            // different pod. When setting a backend for the first time
+            // (None → Some), preserve the buffer.
+            let should_clear = match (old_backend_mac, entity.backend_mac) {
+                (_, None) => true,                          // backend removed
+                (Some(old), Some(new)) if old != new => true, // MAC changed
+                _ => false,                                 // None → Some: keep buffer
+            };
+            if should_clear {
+                entity.buffer.clear();
+                entity.buffer_start = None;
+            }
             if let Some(ref mut sm) = entity.stream_manager {
                 sm.update_backend(
                     entity.backend_ip,
@@ -228,10 +258,17 @@ impl ServiceTable {
         };
         let entity = self.by_ip.get_mut(&ip)?;
         if entity.backend_mac.is_none() {
+            log::warn!("service '{}': mark_ready called but no backend_mac set", service_id);
             return None;
         }
         entity.ready = true;
         let backend_mac = entity.backend_mac.unwrap();
+
+        log::debug!(
+            "service '{}': mark_ready: buffer_len={}, has_activator={}, has_stream_manager={}",
+            entity.service_id, entity.buffer.len(),
+            entity.activator.is_some(), entity.stream_manager.is_some()
+        );
 
         // L4 path: push BackendAvailable event through the stream manager cycle.
         if entity.stream_manager.is_some() {
@@ -260,6 +297,11 @@ impl ServiceTable {
             Vec::new()
         };
 
+        log::debug!(
+            "service '{}': mark_ready produced {} frames, {} actions",
+            entity.service_id, frames.len(), actions.len()
+        );
+
         let backend_ip = entity.backend_ip.unwrap();
         let service_ip = entity.ip;
         let service_mac = entity.mac;
@@ -271,16 +313,28 @@ impl ServiceTable {
     ///
     /// Returns `None` if `dst_ip` is not a service IP (caller should fall through
     /// to route table logic).
-    pub fn lookup_and_buffer(&mut self, dst_ip: Ipv4Addr, frame: &[u8]) -> Option<(ServiceAction, bool)> {
+    pub fn lookup_and_buffer<F>(&mut self, dst_ip: Ipv4Addr, frame: &[u8], is_reachable: F) -> Option<(ServiceAction, bool)>
+    where
+        F: Fn(&[u8; 6]) -> bool,
+    {
         let entity = self.by_ip.get_mut(&dst_ip)?;
         let now = Instant::now();
 
-        // If ready with a backend, forward directly.
+        // If ready with a backend and the backend MAC is reachable, forward directly.
+        // If the MAC is not reachable (port not yet added), fall through to the
+        // buffering path so frames are preserved until the port appears.
         if entity.ready {
             if let (Some(pod_ip), Some(pod_mac)) = (entity.backend_ip, entity.backend_mac) {
-                let service_ip = entity.ip;
-                let service_mac = entity.mac;
-                return Some((ServiceAction::Forward { pod_ip, pod_mac, service_ip, service_mac }, false));
+                if is_reachable(&pod_mac) {
+                    let service_ip = entity.ip;
+                    let service_mac = entity.mac;
+                    return Some((ServiceAction::Forward { pod_ip, pod_mac, service_ip, service_mac }, false));
+                } else {
+                    log::debug!(
+                        "service '{}': ready but backend MAC {} not reachable, falling through to buffer",
+                        entity.service_id, super::switch::format_mac(&pod_mac)
+                    );
+                }
             }
         }
 
@@ -385,6 +439,38 @@ impl ServiceTable {
         let sm_output = sm.handle_timeout();
         Some(process_l4_output(entity, sm_output))
     }
+
+    /// Drain buffered frames from all ready services whose backend MAC matches `mac`.
+    ///
+    /// Used when a new port is added: the port's MAC becomes reachable, so any
+    /// service buffers waiting for that MAC can be flushed immediately.
+    pub fn flush_by_backend_mac(&mut self, mac: &[u8; 6]) -> Vec<ServiceFlushData> {
+        let mut result = Vec::new();
+        for (ip, entity) in self.by_ip.iter_mut() {
+            if entity.ready && entity.backend_mac.as_ref() == Some(mac) && !entity.buffer.is_empty() {
+                log::info!(
+                    "service '{}': flush_by_backend_mac draining {} frames for MAC {}",
+                    entity.service_id, entity.buffer.len(), super::switch::format_mac(mac)
+                );
+                let frames: Vec<Vec<u8>> = entity.buffer.drain(..).collect();
+                entity.buffer_start = None;
+                result.push(ServiceFlushData {
+                    service_ip: *ip,
+                    service_mac: entity.mac,
+                    backend_ip: entity.backend_ip.unwrap(),
+                    backend_mac: *mac,
+                    frames,
+                });
+            }
+        }
+        if result.is_empty() {
+            log::debug!(
+                "flush_by_backend_mac: no ready services with buffer for MAC {}",
+                super::switch::format_mac(mac)
+            );
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -409,7 +495,7 @@ mod tests {
     #[test]
     fn unknown_ip_returns_none() {
         let mut table = ServiceTable::new();
-        assert!(table.lookup_and_buffer(SVC_IP, FRAME).is_none());
+        assert!(table.lookup_and_buffer(SVC_IP, FRAME, |_| true).is_none());
     }
 
     #[test]
@@ -417,7 +503,7 @@ mod tests {
         let mut table = ServiceTable::new();
         table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
 
-        let result = table.lookup_and_buffer(SVC_IP, FRAME);
+        let result = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(matches!(result, Some((ServiceAction::Buffered, true))));
     }
 
@@ -428,7 +514,7 @@ mod tests {
         table.update_backend("svc1", Some((POD_IP, POD_MAC)));
         table.mark_ready("svc1");
 
-        let result = table.lookup_and_buffer(SVC_IP, FRAME);
+        let result = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(matches!(
             result,
             Some((ServiceAction::Forward { pod_ip, pod_mac, .. }, false))
@@ -444,7 +530,7 @@ mod tests {
 
         // Buffer some frames.
         for _ in 0..3 {
-            table.lookup_and_buffer(SVC_IP, FRAME);
+            table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         }
 
         let result = table.mark_ready("svc1");
@@ -469,7 +555,7 @@ mod tests {
         // Service is ready — now update backend clears readiness.
         table.update_backend("svc1", None);
 
-        let result = table.lookup_and_buffer(SVC_IP, FRAME);
+        let result = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(matches!(result, Some((ServiceAction::Buffered, _))));
     }
 
@@ -478,7 +564,7 @@ mod tests {
         let mut table = ServiceTable::new();
         table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
         assert!(table.destroy("svc1"));
-        assert!(table.lookup_and_buffer(SVC_IP, FRAME).is_none());
+        assert!(table.lookup_and_buffer(SVC_IP, FRAME, |_| true).is_none());
     }
 
     #[test]
@@ -486,10 +572,10 @@ mod tests {
         let mut table = ServiceTable::new();
         table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
 
-        let (_, activate1) = table.lookup_and_buffer(SVC_IP, FRAME).unwrap();
+        let (_, activate1) = table.lookup_and_buffer(SVC_IP, FRAME, |_| true).unwrap();
         assert!(activate1);
 
-        let (_, activate2) = table.lookup_and_buffer(SVC_IP, FRAME).unwrap();
+        let (_, activate2) = table.lookup_and_buffer(SVC_IP, FRAME, |_| true).unwrap();
         assert!(!activate2);
     }
 
@@ -509,9 +595,9 @@ mod tests {
             None,
         );
 
-        table.lookup_and_buffer(SVC_IP, FRAME);
-        table.lookup_and_buffer(SVC_IP, FRAME);
-        let result = table.lookup_and_buffer(SVC_IP, FRAME);
+        table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
+        table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
+        let result = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(matches!(result, Some((ServiceAction::Drop, _))));
     }
 
@@ -530,7 +616,7 @@ mod tests {
 
         // Buffer 3 frames while there is no backend yet.
         for _ in 0..3 {
-            let result = table.lookup_and_buffer(SVC_IP, FRAME);
+            let result = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
             assert!(matches!(result, Some((ServiceAction::Buffered, _))));
         }
 
@@ -638,7 +724,7 @@ mod tests {
             12345,
             80,
         );
-        let result = table.lookup_and_buffer(SVC_IP, &syn_frame);
+        let result = table.lookup_and_buffer(SVC_IP, &syn_frame, |_| true);
         assert!(
             matches!(result, Some((ServiceAction::L4Result { .. }, _))),
             "SYN should trigger L4Result"
@@ -736,7 +822,7 @@ mod tests {
             12345,
             80,
         );
-        let result = table.lookup_and_buffer(SVC_IP, &syn_frame);
+        let result = table.lookup_and_buffer(SVC_IP, &syn_frame, |_| true);
         assert!(
             matches!(result, Some((ServiceAction::ActivatorActions { .. }, _))),
             "SYN should trigger activator actions"
