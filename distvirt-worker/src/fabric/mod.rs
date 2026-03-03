@@ -91,6 +91,7 @@ pub struct Fabric<P: FramePort = Port> {
 impl Fabric<Port> {
     /// Add a TAP device as a port, pre-register its MAC, flush any buffered
     /// frames for `pod_ip`, and start the forwarding task.
+    #[allow(dead_code)]
     pub fn add_port_with_ip(
         &self,
         tap: TapDevice,

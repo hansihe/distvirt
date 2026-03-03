@@ -204,6 +204,7 @@ impl WireGuardAdapter {
     }
 
     /// Unregister a local pod's IP→MAC mapping.
+    #[allow(dead_code)]
     pub async fn unregister_pod_mac(&self, namespace_id: &str, ip: Ipv4Addr) {
         let mut state = self.state.write().await;
         state.pod_macs.remove(&(namespace_id.to_string(), ip));

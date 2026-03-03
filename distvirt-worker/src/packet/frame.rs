@@ -83,6 +83,7 @@ pub struct FabricFrameMut<'a> {
     raw: &'a mut [u8],
 }
 
+#[allow(dead_code)]
 impl<'a> FabricFrameMut<'a> {
     /// Parse a mutable raw fabric frame. Returns `None` if too short.
     pub fn new(raw: &'a mut [u8]) -> Option<Self> {
@@ -93,7 +94,6 @@ impl<'a> FabricFrameMut<'a> {
     }
 
     /// Total frame length including vnet header.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.raw.len()
     }

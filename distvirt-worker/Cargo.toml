@@ -29,6 +29,7 @@ tokio-util = { version = "0.7.18", features = ["compat"] }
 futures-lite = "2.6.1"
 boringtun = "0.6"
 sha2 = "0.10"
+hickory-resolver = "0.25"
 
 [dev-dependencies]
 env_logger = "0.11"

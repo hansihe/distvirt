@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 
+use hickory_resolver::TokioResolver;
 use smoltcp::socket::udp;
 use smoltcp::wire::IpEndpoint;
-use tokio::net::UdpSocket as TokioUdpSocket;
+use tokio::sync::mpsc;
 
 /// Shared DNS registry: service name → IPv4 address.
 pub type DnsRegistry = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
@@ -121,6 +121,36 @@ pub fn synthesize_a_response(query: &[u8], ip: Ipv4Addr) -> Vec<u8> {
     resp
 }
 
+/// Build a minimal NXDOMAIN response from a query.
+fn synthesize_nxdomain_response(query: &[u8]) -> Vec<u8> {
+    let qname_end = find_qname_end(query, 12);
+    if qname_end.is_none() {
+        return Vec::new();
+    }
+    let question_end = qname_end.unwrap() + 4;
+    if question_end > query.len() {
+        return Vec::new();
+    }
+
+    let mut resp = Vec::with_capacity(question_end);
+    resp.extend_from_slice(&query[..question_end]);
+
+    // Set QR=1 (0x80), AA=1 (0x04) in byte 2
+    resp[2] |= 0x84;
+    // Set RCODE=3 (NXDOMAIN) in byte 3
+    resp[3] = (resp[3] & 0xF0) | 0x03;
+
+    // ANCOUNT = 0, NSCOUNT = 0, ARCOUNT = 0
+    resp[6] = 0;
+    resp[7] = 0;
+    resp[8] = 0;
+    resp[9] = 0;
+    resp[10] = 0;
+    resp[11] = 0;
+
+    resp
+}
+
 /// Convenience: parse the QNAME from a query, look it up in the registry,
 /// and return a synthesized A-record response if found.
 pub fn try_resolve(registry: &DnsRegistry, query: &[u8]) -> Option<Vec<u8>> {
@@ -149,43 +179,42 @@ fn find_qname_end(data: &[u8], start: usize) -> Option<usize> {
     }
 }
 
+/// Result of an async DNS lookup via hickory-resolver.
+pub(crate) struct DnsLookupResult {
+    query: Vec<u8>,
+    endpoint: IpEndpoint,
+    result: Option<Ipv4Addr>,
+}
+
 /// DNS forwarding component: resolves local names from the registry and
-/// forwards unresolved queries to upstream nameservers.
+/// forwards unresolved queries to upstream nameservers via hickory-resolver.
 pub(crate) struct DnsForwarder {
     registry: DnsRegistry,
-    upstream_socket: TokioUdpSocket,
-    upstream_servers: Vec<SocketAddr>,
-    pending: HashMap<u16, (IpEndpoint, Instant)>,
-    timeout: Duration,
+    resolver: TokioResolver,
+    result_tx: mpsc::Sender<DnsLookupResult>,
+    result_rx: mpsc::Receiver<DnsLookupResult>,
 }
 
 impl DnsForwarder {
-    /// Create a new DNS forwarder: parse /etc/resolv.conf and bind an upstream socket.
+    /// Create a new DNS forwarder using system-configured resolvers.
     pub fn new(registry: DnsRegistry) -> anyhow::Result<Self> {
-        let upstream_servers = parse_resolv_conf();
-        log::info!("gateway: upstream DNS servers: {:?}", upstream_servers);
-
-        let upstream_socket = {
-            let std_sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
-            std_sock.set_nonblocking(true)?;
-            TokioUdpSocket::from_std(std_sock)?
-        };
+        let resolver = TokioResolver::builder_tokio()?.build();
+        let (result_tx, result_rx) = mpsc::channel(64);
 
         Ok(DnsForwarder {
             registry,
-            upstream_socket,
-            upstream_servers,
-            pending: HashMap::new(),
-            timeout: Duration::from_secs(10),
+            resolver,
+            result_tx,
+            result_rx,
         })
     }
 
     /// Process DNS queries from the smoltcp UDP socket.
     ///
     /// For local hits, writes the response directly into the socket.
-    /// For misses, forwards to upstream. The caller must call `poll_and_drain()`
-    /// after this returns if it wrote to the socket (returns `true`).
-    pub async fn process_queries(&mut self, sock: &mut udp::Socket<'_>) -> bool {
+    /// For misses, spawns an async lookup task. Results arrive on `result_rx`.
+    /// Returns `true` if the socket was written to (caller must call `poll_and_drain()`).
+    pub fn process_queries(&self, sock: &mut udp::Socket<'_>) -> bool {
         let mut wrote_socket = false;
         loop {
             let (query, endpoint) = match sock.recv() {
@@ -210,97 +239,71 @@ impl DnsForwarder {
                 continue;
             }
 
-            // Fall back to upstream.
-            self.pending.insert(query_id, (endpoint, Instant::now()));
+            // Forward to upstream via hickory-resolver.
+            let qname = match parse_qname(&query) {
+                Some(n) => n,
+                None => continue,
+            };
 
-            if let Some(upstream) = self.upstream_servers.first() {
-                if let Err(e) = self.upstream_socket.send_to(&query, upstream).await {
-                    log::warn!("gateway: DNS upstream send error: {}", e);
-                }
-            }
+            let resolver = self.resolver.clone();
+            let tx = self.result_tx.clone();
+            tokio::spawn(async move {
+                let ip = match resolver.lookup_ip(&qname).await {
+                    Ok(lookup) => lookup.iter().find_map(|addr| match addr {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    }),
+                    Err(e) => {
+                        log::warn!("gateway: DNS upstream resolve for '{}': {}", qname, e);
+                        None
+                    }
+                };
+
+                let _ = tx
+                    .send(DnsLookupResult {
+                        query,
+                        endpoint,
+                        result: ip,
+                    })
+                    .await;
+            });
         }
         wrote_socket
     }
 
-    /// Handle a DNS response from upstream: write it to the smoltcp DNS socket
-    /// targeting the original client. Returns `true` if the socket was written to
-    /// (caller must call `poll_and_drain()`).
-    pub fn handle_response(&mut self, response: &[u8], sock: &mut udp::Socket<'_>) -> bool {
-        if response.len() < 2 {
+    /// Returns the receiver for completed DNS lookup results.
+    pub fn result_rx(&mut self) -> &mut mpsc::Receiver<DnsLookupResult> {
+        &mut self.result_rx
+    }
+
+    /// Write a resolved DNS result back to the smoltcp socket.
+    /// Returns `true` if the socket was written to.
+    pub fn write_result(&self, result: DnsLookupResult, sock: &mut udp::Socket<'_>) -> bool {
+        let response = match result.result {
+            Some(ip) => synthesize_a_response(&result.query, ip),
+            None => synthesize_nxdomain_response(&result.query),
+        };
+
+        if response.is_empty() {
             return false;
         }
 
-        let query_id = u16::from_be_bytes([response[0], response[1]]);
-        if let Some((endpoint, _)) = self.pending.remove(&query_id) {
-            log::info!("gateway: DNS response id={} -> {}", query_id, endpoint);
-            if let Err(e) = sock.send_slice(response, endpoint) {
-                log::warn!("gateway: DNS response send to smoltcp: {:?}", e);
-            }
-            true
-        } else {
-            log::info!(
-                "gateway: DNS response id={} has no pending query",
-                query_id
-            );
-            false
+        let query_id = u16::from_be_bytes([result.query[0], result.query[1]]);
+        log::info!(
+            "gateway: DNS response id={} -> {} ({})",
+            query_id,
+            result.endpoint,
+            result
+                .result
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "NXDOMAIN".to_string())
+        );
+
+        if let Err(e) = sock.send_slice(&response, result.endpoint) {
+            log::warn!("gateway: DNS response send to smoltcp: {:?}", e);
         }
+        true
     }
-
-    /// Expose the upstream socket for use in `select!`.
-    pub fn upstream_socket(&self) -> &TokioUdpSocket {
-        &self.upstream_socket
-    }
-
-    /// Remove stale pending DNS entries that have exceeded the timeout.
-    pub fn sweep_stale(&mut self) {
-        let now = Instant::now();
-        let before = self.pending.len();
-        self.pending.retain(|id, (_, inserted)| {
-            if now.duration_since(*inserted) > self.timeout {
-                log::warn!("gateway: DNS query id={} timed out, removing", id);
-                false
-            } else {
-                true
-            }
-        });
-        let expired = before - self.pending.len();
-        if expired > 0 {
-            log::info!("gateway: swept {} stale DNS entries", expired);
-        }
-    }
-}
-
-/// Parse /etc/resolv.conf for upstream nameservers. Falls back to 8.8.8.8.
-fn parse_resolv_conf() -> Vec<SocketAddr> {
-    let content = match std::fs::read_to_string("/etc/resolv.conf") {
-        Ok(c) => c,
-        Err(_) => return parse_resolv_conf_content(""),
-    };
-    parse_resolv_conf_content(&content)
-}
-
-/// Parse the content of a resolv.conf file for nameserver entries.
-/// Falls back to 8.8.8.8:53 if no valid nameservers are found.
-pub(super) fn parse_resolv_conf_content(content: &str) -> Vec<SocketAddr> {
-    let mut servers = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("nameserver") {
-            let addr_str = rest.trim();
-            if let Ok(ip) = addr_str.parse::<IpAddr>() {
-                servers.push(SocketAddr::new(ip, 53));
-            }
-        }
-    }
-
-    if servers.is_empty() {
-        servers.push(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-            53,
-        ));
-    }
-
-    servers
 }
 
 #[cfg(test)]

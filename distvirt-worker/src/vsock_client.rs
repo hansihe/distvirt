@@ -161,6 +161,7 @@ impl GuestSession {
     ///
     /// Stub: not yet integrated into the pod lifecycle. Requires changes to
     /// the yamux driver to support opening outbound streams from the host side.
+    #[allow(dead_code)]
     pub async fn open_input_stream(&mut self, _container_id: &str) -> anyhow::Result<YamuxStream> {
         bail!("open_input_stream not yet integrated into yamux driver")
     }

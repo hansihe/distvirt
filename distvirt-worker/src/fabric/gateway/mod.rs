@@ -212,7 +212,6 @@ impl FabricGateway {
     /// Run the gateway main loop.
     pub async fn run(mut self) {
         let mut tun_buf = vec![0u8; 65536];
-        let mut dns_buf = vec![0u8; 4096];
         let mut sweep_interval = tokio::time::interval(Duration::from_secs(5));
 
         loop {
@@ -265,7 +264,7 @@ impl FabricGateway {
                         self.device.rx_queue.push_back(eth_frame.to_vec());
                         self.poll_and_drain();
                         let dns_sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-                        if self.dns.process_queries(dns_sock).await {
+                        if self.dns.process_queries(dns_sock) {
                             self.poll_and_drain();
                         }
                     } else if ethertype == ETHERTYPE_IPV4
@@ -298,17 +297,12 @@ impl FabricGateway {
                     }
                 }
 
-                // DNS upstream response
-                result = self.dns.upstream_socket().recv_from(&mut dns_buf) => {
-                    match result {
-                        Ok((n, _addr)) => {
-                            let dns_sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-                            if self.dns.handle_response(&dns_buf[..n], dns_sock) {
-                                self.poll_and_drain();
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("gateway: DNS upstream recv error: {}", e);
+                // DNS upstream response (from hickory-resolver)
+                result = self.dns.result_rx().recv() => {
+                    if let Some(result) = result {
+                        let dns_sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
+                        if self.dns.write_result(result, dns_sock) {
+                            self.poll_and_drain();
                         }
                     }
                 }
@@ -320,7 +314,6 @@ impl FabricGateway {
 
                 // Periodic sweep of stale entries
                 _ = sweep_interval.tick() => {
-                    self.dns.sweep_stale();
                     self.tun.sweep_stale();
                 }
             }
@@ -349,10 +342,6 @@ pub(super) fn adjust_vnet_csum_start(vnet_hdr: &mut [u8; 10], delta: i16) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::net::{IpAddr, SocketAddr};
-    use smoltcp::wire::IpEndpoint;
-    use dns::parse_resolv_conf_content;
-
 
     // --- adjust_vnet_csum_start tests ---
 
@@ -394,75 +383,6 @@ mod tests {
         assert_eq!(result, 42); // unchanged
     }
 
-    // --- parse_resolv_conf_content tests ---
-
-    #[test]
-    fn parse_resolv_conf_single_nameserver() {
-        let content = "nameserver 1.1.1.1\n";
-        let servers = parse_resolv_conf_content(content);
-        assert_eq!(servers.len(), 1);
-        assert_eq!(
-            servers[0],
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53)
-        );
-    }
-
-    #[test]
-    fn parse_resolv_conf_multiple_nameservers() {
-        let content = "nameserver 1.1.1.1\nnameserver 8.8.4.4\n";
-        let servers = parse_resolv_conf_content(content);
-        assert_eq!(servers.len(), 2);
-        assert_eq!(
-            servers[0],
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53)
-        );
-        assert_eq!(
-            servers[1],
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 4, 4)), 53)
-        );
-    }
-
-    #[test]
-    fn parse_resolv_conf_empty_falls_back() {
-        let servers = parse_resolv_conf_content("");
-        assert_eq!(servers.len(), 1);
-        assert_eq!(
-            servers[0],
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 53)
-        );
-    }
-
-    #[test]
-    fn parse_resolv_conf_comments_and_other_lines_ignored() {
-        let content = "# comment\nsearch example.com\nnameserver 9.9.9.9\noptions ndots:5\n";
-        let servers = parse_resolv_conf_content(content);
-        assert_eq!(servers.len(), 1);
-        assert_eq!(
-            servers[0],
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9)), 53)
-        );
-    }
-
-    #[test]
-    fn pending_dns_timeout_removes_stale_entries() {
-        // Simulate the retain logic used in sweep_stale_entries.
-        let mut pending: HashMap<u16, (IpEndpoint, Instant)> = HashMap::new();
-        let old = Instant::now() - Duration::from_secs(15);
-        let recent = Instant::now();
-
-        pending.insert(1, (IpEndpoint { addr: IpAddress::v4(0, 0, 0, 0), port: 0 }, old));
-        pending.insert(2, (IpEndpoint { addr: IpAddress::v4(0, 0, 0, 0), port: 0 }, recent));
-
-        let timeout = Duration::from_secs(10);
-        let now = Instant::now();
-        pending.retain(|_id, (_, inserted)| {
-            now.duration_since(*inserted) <= timeout
-        });
-
-        assert!(pending.get(&1).is_none(), "old entry should be removed");
-        assert!(pending.get(&2).is_some(), "recent entry should remain");
-    }
-
     #[test]
     fn ip_mac_table_timeout_removes_stale_entries() {
         let mut table: HashMap<[u8; 4], ([u8; 6], Instant)> = HashMap::new();
@@ -480,16 +400,5 @@ mod tests {
 
         assert!(table.get(&[10, 0, 0, 1]).is_none(), "old entry should be removed");
         assert!(table.get(&[10, 0, 0, 2]).is_some(), "recent entry should remain");
-    }
-
-    #[test]
-    fn parse_resolv_conf_ipv6_nameserver() {
-        let content = "nameserver 2001:4860:4860::8888\n";
-        let servers = parse_resolv_conf_content(content);
-        assert_eq!(servers.len(), 1);
-        assert_eq!(
-            servers[0],
-            SocketAddr::new("2001:4860:4860::8888".parse::<IpAddr>().unwrap(), 53)
-        );
     }
 }

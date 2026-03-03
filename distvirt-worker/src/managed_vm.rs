@@ -149,6 +149,7 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 
     /// Send a signal to a running container inside the guest.
+    #[allow(dead_code)]
     pub async fn signal_container(&mut self, id: &str, signal: i32) -> anyhow::Result<()> {
         self.session
             .send(&HostMessage::SignalContainer {

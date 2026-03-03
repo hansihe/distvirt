@@ -32,7 +32,7 @@ pub const IP_PROTO_UDP: u8 = 17;
 pub use arp::{build_arp_reply, parse_arp_request};
 pub use checksum::complete_checksum;
 pub use frame::{
-    FabricFrame, FabricFrameMut, extract_ip_protocol, extract_ipv4_dst, extract_ipv4_src,
+    FabricFrame, extract_ip_protocol, extract_ipv4_dst, extract_ipv4_src,
     extract_transport_ports, fabric_frame_ethertype, fabric_frame_to_ip, format_mac,
     ip_packet_dst, ip_to_fabric_frame, is_broadcast, is_multicast, rewrite_dst_mac,
     rewrite_ipv4_dst, rewrite_ipv4_src, rewrite_src_mac, with_vnet_header,
