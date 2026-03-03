@@ -359,20 +359,31 @@ fn child_exec_inner(
     util::mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, None)?;
     util::mount("tmpfs", "/tmp", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None)?;
 
-    if let (Some(stdout_fd), Some(stderr_fd)) = (stdout_write_fd, stderr_write_fd) {
-        // Capture mode: redirect stdout/stderr to pipes.
-        // Open /dev/null for stdin.
+    // Set up /dev/console as stdin and controlling terminal for both modes.
+    // This ensures the container has a proper session even in capture mode.
+    let console = CString::new("/dev/console").unwrap();
+    let console_fd = unsafe { libc::open(console.as_ptr(), libc::O_RDWR) };
+    if console_fd >= 0 {
+        unsafe { libc::ioctl(console_fd, libc::TIOCSCTTY as _, 0) };
+        unsafe {
+            libc::dup2(console_fd, 0); // stdin = console
+        }
+    } else {
+        // Fallback: /dev/null for stdin if console unavailable.
         let devnull = CString::new("/dev/null").unwrap();
         let null_fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY) };
-        if null_fd < 0 {
-            bail!("open /dev/null: {}", std::io::Error::last_os_error());
-        }
-        unsafe {
-            libc::dup2(null_fd, 0);
-            if null_fd > 2 {
-                libc::close(null_fd);
+        if null_fd >= 0 {
+            unsafe {
+                libc::dup2(null_fd, 0);
+                if null_fd > 2 {
+                    libc::close(null_fd);
+                }
             }
         }
+    }
+
+    if let (Some(stdout_fd), Some(stderr_fd)) = (stdout_write_fd, stderr_write_fd) {
+        // Capture mode: redirect stdout/stderr to pipes.
         unsafe {
             libc::dup2(stdout_fd, 1);
             libc::dup2(stderr_fd, 2);
@@ -384,20 +395,17 @@ fn child_exec_inner(
             }
         }
     } else {
-        // Legacy mode: use /dev/console for all I/O.
-        let console = CString::new("/dev/console").unwrap();
-        let fd = unsafe { libc::open(console.as_ptr(), libc::O_RDWR) };
-        if fd >= 0 {
-            unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) };
+        // Legacy mode: use console for stdout/stderr too.
+        if console_fd >= 0 {
             unsafe {
-                libc::dup2(fd, 0);
-                libc::dup2(fd, 1);
-                libc::dup2(fd, 2);
-                if fd > 2 {
-                    libc::close(fd);
-                }
+                libc::dup2(console_fd, 1);
+                libc::dup2(console_fd, 2);
             }
         }
+    }
+
+    if console_fd >= 0 && console_fd > 2 {
+        unsafe { libc::close(console_fd); }
     }
 
     // Set gid before uid (after setuid we may lack permission for setgid).

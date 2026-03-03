@@ -204,6 +204,10 @@ pub(crate) fn merge_config(
             a.extend(args);
             a
         })
+    } else if !overrides.args.is_empty() {
+        // No entrypoint override and no image entrypoint, but override args provided.
+        // Treat override args as the full command (compose `command:` replaces CMD).
+        (overrides.args[0].clone(), overrides.args[1..].to_vec())
     } else if !image.cmd.is_empty() {
         (image.cmd[0].clone(), image.cmd[1..].to_vec())
     } else {
