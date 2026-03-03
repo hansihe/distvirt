@@ -19,8 +19,9 @@ use tokio::sync::mpsc;
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
 use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
+use crate::packet::{FabricFrame, VNET_HDR_SZ, extract_ip_protocol, extract_ipv4_src, extract_transport_ports, format_mac, rewrite_dst_mac, rewrite_ipv4_dst};
 use forwarding::{FabricContext, port_read_loop, gateway_ingress_task};
-use switch::{MacTable, VNET_HDR_SZ, format_mac, rewrite_dst_mac};
+use switch::MacTable;
 
 /// Convert activator BackendNeed to protocol BackendNeed.
 pub(crate) fn convert_backend_need(need: &ActivatorBackendNeed) -> distvirt_worker_protocol::BackendNeed {
@@ -332,11 +333,11 @@ impl<P: FramePort> Fabric<P> {
         {
             let mut nat = self.ctx.inner.nat_table.lock().unwrap();
             for frame in &frames {
-                if let Some(ff) = switch::FabricFrame::new(frame) {
+                if let Some(ff) = FabricFrame::new(frame) {
                     let eth = ff.eth_payload();
-                    if let Some(src_ip) = switch::extract_ipv4_src(eth) {
-                        let protocol = switch::extract_ip_protocol(eth).unwrap_or(0);
-                        let (src_port, dst_port_val) = switch::extract_transport_ports(eth).unwrap_or((0, 0));
+                    if let Some(src_ip) = extract_ipv4_src(eth) {
+                        let protocol = extract_ip_protocol(eth).unwrap_or(0);
+                        let (src_port, dst_port_val) = extract_transport_ports(eth).unwrap_or((0, 0));
                         let reverse_key = nat::NatFlowKey {
                             src_ip: backend_ip,
                             dst_ip: src_ip,
@@ -364,10 +365,22 @@ impl<P: FramePort> Fabric<P> {
                     rewrite_dst_mac(&mut frame, &backend_mac);
                 }
                 // DNAT: rewrite dst IP from service_ip to backend_ip.
-                switch::rewrite_ipv4_dst(&mut frame, service_ip, backend_ip);
-                if let Err(e) = dst_port.send_frame(&frame).await {
-                    log::warn!("fabric: flush_service_frames send error: {}", e);
-                    break;
+                rewrite_ipv4_dst(&mut frame, service_ip, backend_ip);
+                // Log vnet header for debugging
+                if frame.len() >= VNET_HDR_SZ {
+                    log::debug!(
+                        "fabric: flush_service_frames: vnet_flags=0x{:02x} frame_len={}",
+                        frame[0], frame.len()
+                    );
+                }
+                match dst_port.send_frame(&frame).await {
+                    Err(e) => {
+                        log::warn!("fabric: flush_service_frames send error: {}", e);
+                        break;
+                    }
+                    Ok(n) => {
+                        log::debug!("fabric: flush_service_frames: sent {} bytes", n);
+                    }
                 }
             }
             log::info!("fabric: flushed {} service frames to backend", count);

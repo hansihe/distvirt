@@ -6,7 +6,7 @@ use distvirt_activator::{ActivatorInstance, FlowTracker, StreamManager, StreamMa
 use distvirt_activator::types::{Action, Event};
 use distvirt_worker_protocol::ServicePolicy;
 
-use super::switch::FabricFrame;
+use crate::packet::{FabricFrame, format_mac};
 
 /// What the fabric should do with a frame that matched a service IP.
 #[derive(Debug)]
@@ -332,7 +332,7 @@ impl ServiceTable {
                 } else {
                     log::debug!(
                         "service '{}': ready but backend MAC {} not reachable, falling through to buffer",
-                        entity.service_id, super::switch::format_mac(&pod_mac)
+                        entity.service_id, format_mac(&pod_mac)
                     );
                 }
             }
@@ -450,7 +450,7 @@ impl ServiceTable {
             if entity.ready && entity.backend_mac.as_ref() == Some(mac) && !entity.buffer.is_empty() {
                 log::info!(
                     "service '{}': flush_by_backend_mac draining {} frames for MAC {}",
-                    entity.service_id, entity.buffer.len(), super::switch::format_mac(mac)
+                    entity.service_id, entity.buffer.len(), format_mac(mac)
                 );
                 let frames: Vec<Vec<u8>> = entity.buffer.drain(..).collect();
                 entity.buffer_start = None;
@@ -466,7 +466,7 @@ impl ServiceTable {
         if result.is_empty() {
             log::debug!(
                 "flush_by_backend_mac: no ready services with buffer for MAC {}",
-                super::switch::format_mac(mac)
+                format_mac(mac)
             );
         }
         result
@@ -476,7 +476,7 @@ impl ServiceTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::switch::with_vnet_header;
+    use crate::packet::with_vnet_header;
 
     const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 2);
     const SVC_MAC: [u8; 6] = [0x06, 0x00, 0xAC, 0x10, 0x00, 0x02];

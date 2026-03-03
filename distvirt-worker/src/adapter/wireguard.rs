@@ -15,9 +15,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
-use super::ethernet::{
-    BROADCAST_MAC, build_arp_reply, complete_checksum, fabric_frame_ethertype, fabric_frame_to_ip,
-    ip_packet_dst, ip_to_fabric_frame, parse_arp_request,
+use crate::packet::{
+    BROADCAST_MAC, ETHERTYPE_ARP, build_arp_reply, complete_checksum, fabric_frame_ethertype,
+    fabric_frame_to_ip, ip_packet_dst, ip_to_fabric_frame, parse_arp_request,
 };
 use crate::fabric::ChannelPort;
 
@@ -507,7 +507,7 @@ impl WireGuardAdapter {
             );
             // Check for ARP requests first.
             if let Some(ethertype) = ethertype_val {
-                if ethertype == 0x0806 {
+                if ethertype == ETHERTYPE_ARP {
                     log::trace!("wireguard: egress: ARP frame (ethertype 0x0806)");
                     if let Some((target_ip, sender_mac, sender_ip)) = parse_arp_request(&frame) {
                         // Check if the target IP matches any peer in this namespace.
@@ -743,7 +743,7 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::ethernet::{
+    use crate::packet::{
         VNET_HDR_SZ, ETH_HDR_LEN, fabric_frame_to_ip, ip_to_fabric_frame,
     };
     use super::super::IngressAdapter;

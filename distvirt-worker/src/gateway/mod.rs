@@ -19,14 +19,11 @@ mod tun;
 
 pub use dns::DnsRegistry;
 
-use crate::fabric::switch::{ETH_HEADER_LEN, FabricFrame, GATEWAY_IP, GATEWAY_MAC, VNET_HDR_SZ, with_vnet_header};
+use crate::packet::{ETH_HDR_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, FabricFrame, VNET_HDR_SZ, with_vnet_header};
+use crate::fabric::switch::{GATEWAY_IP, GATEWAY_MAC};
 use tun::{configure_tun_ip, create_tun, tun_read, tun_write};
 
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
-
-/// EtherType constants.
-const ETHERTYPE_IPV4: u16 = 0x0800;
-const ETHERTYPE_ARP: u16 = 0x0806;
 
 /// Channel buffer size for gateway communication.
 const CHANNEL_BUF: usize = 256;
@@ -410,10 +407,10 @@ impl FabricGateway {
                         // All ARP frames go to smoltcp (it handles ARP for the gateway IP).
                         true
                     } else if ethertype == ETHERTYPE_IPV4
-                        && eth_frame.len() >= ETH_HEADER_LEN + 20
+                        && eth_frame.len() >= ETH_HDR_LEN + 20
                     {
                         // IPv4 frames destined for the gateway IP go to smoltcp (DNS etc).
-                        let dst_ip: [u8; 4] = eth_frame[ETH_HEADER_LEN + 16..ETH_HEADER_LEN + 20]
+                        let dst_ip: [u8; 4] = eth_frame[ETH_HDR_LEN + 16..ETH_HDR_LEN + 20]
                             .try_into()
                             .unwrap();
                         dst_ip == GATEWAY_IP || dst_ip == self.pod_gateway_ip
@@ -427,18 +424,18 @@ impl FabricGateway {
                         self.poll_and_drain();
                         self.process_dns_queries().await;
                     } else if ethertype == ETHERTYPE_IPV4
-                        && eth_frame.len() >= ETH_HEADER_LEN + 20
+                        && eth_frame.len() >= ETH_HDR_LEN + 20
                     {
                         // Internet egress: learn src MAC, strip Ethernet, write to TUN.
                         let src_mac = ff.src_mac();
-                        let ip_packet = &eth_frame[ETH_HEADER_LEN..];
+                        let ip_packet = &eth_frame[ETH_HDR_LEN..];
                         let src_ip: [u8; 4] = ip_packet[12..16].try_into().unwrap();
                         self.ip_mac_table.insert(src_ip, (src_mac, Instant::now()));
 
                         // Copy vnet header and adjust csum_start for TUN (IP-level,
                         // no ethernet header), then write [vnet_hdr][ip_packet] to TUN.
                         let mut vnet_hdr = ff.vnet_hdr();
-                        adjust_vnet_csum_start(&mut vnet_hdr, -(ETH_HEADER_LEN as i16));
+                        adjust_vnet_csum_start(&mut vnet_hdr, -(ETH_HDR_LEN as i16));
                         let mut tun_buf_out = Vec::with_capacity(VNET_HDR_SZ + ip_packet.len());
                         tun_buf_out.extend_from_slice(&vnet_hdr);
                         tun_buf_out.extend_from_slice(ip_packet);
@@ -483,10 +480,10 @@ impl FabricGateway {
 
                     // Adjust vnet header csum_start for fabric (adds ethernet header).
                     let mut vnet_hdr: [u8; VNET_HDR_SZ] = tun_vnet_hdr.try_into().unwrap();
-                    adjust_vnet_csum_start(&mut vnet_hdr, ETH_HEADER_LEN as i16);
+                    adjust_vnet_csum_start(&mut vnet_hdr, ETH_HDR_LEN as i16);
 
                     // Build fabric frame: [vnet_hdr][eth_hdr][ip_packet]
-                    let mut frame = Vec::with_capacity(VNET_HDR_SZ + ETH_HEADER_LEN + ip_packet.len());
+                    let mut frame = Vec::with_capacity(VNET_HDR_SZ + ETH_HDR_LEN + ip_packet.len());
                     frame.extend_from_slice(&vnet_hdr);
                     frame.extend_from_slice(&dst_mac);
                     frame.extend_from_slice(&GATEWAY_MAC);
@@ -583,26 +580,26 @@ mod tests {
 
     #[test]
     fn adjust_vnet_csum_start_with_needs_csum_negative_delta() {
-        // Simulate fabric→TUN path: subtract ETH_HEADER_LEN (14) from csum_start
+        // Simulate fabric→TUN path: subtract ETH_HDR_LEN (14) from csum_start
         let mut hdr = [0u8; 10];
         hdr[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM; // flags = NEEDS_CSUM
         let csum_start: u16 = 24; // e.g., offset to TCP header in fabric frame
         hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
 
-        adjust_vnet_csum_start(&mut hdr, -(ETH_HEADER_LEN as i16));
+        adjust_vnet_csum_start(&mut hdr, -(ETH_HDR_LEN as i16));
         let result = u16::from_le_bytes([hdr[6], hdr[7]]);
         assert_eq!(result, 10); // 24 - 14 = 10
     }
 
     #[test]
     fn adjust_vnet_csum_start_with_needs_csum_positive_delta() {
-        // Simulate TUN→fabric path: add ETH_HEADER_LEN (14) to csum_start
+        // Simulate TUN→fabric path: add ETH_HDR_LEN (14) to csum_start
         let mut hdr = [0u8; 10];
         hdr[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM;
         let csum_start: u16 = 10;
         hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
 
-        adjust_vnet_csum_start(&mut hdr, ETH_HEADER_LEN as i16);
+        adjust_vnet_csum_start(&mut hdr, ETH_HDR_LEN as i16);
         let result = u16::from_le_bytes([hdr[6], hdr[7]]);
         assert_eq!(result, 24); // 10 + 14 = 24
     }

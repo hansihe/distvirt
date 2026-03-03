@@ -1,6 +1,7 @@
 use super::*;
 use super::forwarding::flood_frame;
-use switch::{ETH_HEADER_LEN, FabricFrame, GATEWAY_MAC, VNET_HDR_SZ, with_vnet_header};
+use crate::packet::{ETH_HDR_LEN, FabricFrame, VNET_HDR_SZ, with_vnet_header};
+use switch::GATEWAY_MAC;
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// Channel-backed test double for FramePort.
@@ -375,8 +376,8 @@ async fn runt_frame_dropped() {
     let (_id0, _task0) = fabric.add_port_raw(port0);
     let (_id1, _task1) = fabric.add_port_raw(port1);
 
-    // Send a frame that is too short (< VNET_HDR_SZ + ETH_HEADER_LEN).
-    let runt = vec![0u8; VNET_HDR_SZ + ETH_HEADER_LEN - 1];
+    // Send a frame that is too short (< VNET_HDR_SZ + ETH_HDR_LEN).
+    let runt = vec![0u8; VNET_HDR_SZ + ETH_HDR_LEN - 1];
     handle0.inject_tx.send(runt).await.unwrap();
 
     assert_no_frame(&handle1).await;

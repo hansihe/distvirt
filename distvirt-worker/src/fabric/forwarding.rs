@@ -8,7 +8,8 @@ use distvirt_activator::types::Action;
 use super::route::RouteAction;
 use super::service::ServiceAction;
 use super::nat::{NatEntry, NatFlowKey};
-use super::switch::{FabricFrame, GATEWAY_MAC, MacTable, VNET_HDR_SZ, extract_ip_protocol, extract_ipv4_dst, extract_ipv4_src, extract_transport_ports, format_mac, is_broadcast, rewrite_dst_mac, rewrite_ipv4_dst, rewrite_ipv4_src, rewrite_src_mac, with_vnet_header};
+use crate::packet::{ETHERTYPE_IPV4, FabricFrame, VNET_HDR_SZ, build_arp_reply, extract_ip_protocol, extract_ipv4_dst, extract_ipv4_src, extract_transport_ports, format_mac, is_broadcast, is_multicast, parse_arp_request, rewrite_dst_mac, rewrite_ipv4_dst, rewrite_ipv4_src, rewrite_src_mac, with_vnet_header};
+use super::switch::{GATEWAY_MAC, MacTable};
 use super::port::{FramePort, PortId};
 use super::{FabricEvent, SharedPort, convert_backend_need, handle_log_action};
 
@@ -106,7 +107,7 @@ async fn dispatch_frame<P: FramePort>(
         FrameSource::Gateway => "gateway".to_string(),
     };
 
-    if ff.ethertype() == 0x0800 {
+    if ff.ethertype() == ETHERTYPE_IPV4 {
         let eth = ff.eth_payload();
         let src_ip = extract_ipv4_src(eth);
         let dst_ip = extract_ipv4_dst(eth);
@@ -116,7 +117,7 @@ async fn dispatch_frame<P: FramePort>(
             src_ip, dst_ip, frame.len()
         );
     } else {
-        log::trace!(
+        log::debug!(
             "fabric: dispatch_frame from {} | {} -> {} ethertype=0x{:04x} len={}",
             source_label, format_mac(&src_mac), format_mac(&dst_mac),
             ff.ethertype(), frame.len()
@@ -130,10 +131,10 @@ async fn dispatch_frame<P: FramePort>(
     }
 
     // Forward or flood.
-    if is_broadcast(&dst_mac) || dst_mac[0] & 0x01 != 0 {
+    if is_broadcast(&dst_mac) || is_multicast(&dst_mac) {
         // Broadcast/multicast: flood to all other ports.
         let num_ports = ctx.inner.ports.lock().unwrap().len();
-        log::trace!("fabric: -> BROADCAST/MULTICAST flood (num_ports={})", num_ports);
+        log::debug!("fabric: -> BROADCAST/MULTICAST flood (num_ports={})", num_ports);
         flood_frame(frame, src_port_id, &ctx.inner.ports).await;
         // Port sources also forward broadcasts to the gateway and check service ARP.
         if let FrameSource::Port { port, .. } = &source {
@@ -153,7 +154,7 @@ async fn dispatch_frame<P: FramePort>(
         // Gateway source uses PortId::MAX which never matches any real port.
         let dst_port_id = ctx.inner.mac_table.lock().unwrap().lookup(&dst_mac);
 
-        log::trace!("fabric: -> UNICAST lookup dst_mac={} result={:?} src_port={}", format_mac(&dst_mac), dst_port_id, src_port_id);
+        log::debug!("fabric: -> UNICAST lookup dst_mac={} result={:?} src_port={}", format_mac(&dst_mac), dst_port_id, src_port_id);
 
         if let Some(dst_id) = dst_port_id {
             if dst_id != src_port_id {
@@ -202,7 +203,7 @@ async fn dispatch_frame<P: FramePort>(
                             );
                         }
                     } else {
-                        log::trace!("fabric: -> forwarding to port {}", dst_id);
+                        log::debug!("fabric: -> forwarding {} -> port {} (no SNAT) len={}", src_port_id, dst_id, frame.len());
                         if let Err(e) = dst_port.send_frame(frame).await {
                             log::warn!(
                                 "fabric: send {} -> {} error: {}",
@@ -212,7 +213,7 @@ async fn dispatch_frame<P: FramePort>(
                     }
                 }
             } else {
-                log::trace!("fabric: -> LOOPBACK avoidance (src_port == dst_port = {})", dst_id);
+                log::debug!("fabric: -> LOOPBACK avoidance (src_port == dst_port = {})", dst_id);
             }
         } else {
             // Unknown unicast: consult service table, then route table.
@@ -253,6 +254,7 @@ pub(super) async fn port_read_loop<P: FramePort>(
         }
 
         let frame = &buf[..n];
+        log::debug!("fabric: port {} received {} bytes (vnet_flags=0x{:02x})", port_id, n, frame[0]);
         dispatch_frame(frame, FrameSource::Port { port_id, port: &port }, &ctx).await;
     }
 }
@@ -324,13 +326,28 @@ pub(super) async fn dispatch_action<P: FramePort>(
                         }
                     }
 
-                    if let Err(e) = dst_port.send_frame(&rewritten).await {
-                        log::warn!("fabric: replay send error: {}", e);
-                    } else {
+                    // Log vnet header and frame details for debugging
+                    if rewritten.len() >= VNET_HDR_SZ {
+                        let vnet_flags = rewritten[0];
+                        let vnet_gso_type = rewritten[1];
+                        let csum_start = u16::from_le_bytes([rewritten[6], rewritten[7]]);
+                        let csum_offset = u16::from_le_bytes([rewritten[8], rewritten[9]]);
                         log::debug!(
-                            "fabric: ReplayPacket sent to backend MAC {} (DNAT {} -> {})",
-                            format_mac(&pod_mac), service_ip, backend_ip
+                            "fabric: ReplayPacket vnet_hdr: flags=0x{:02x} gso_type={} csum_start={} csum_offset={} frame_len={}",
+                            vnet_flags, vnet_gso_type, csum_start, csum_offset, rewritten.len()
                         );
+                    }
+
+                    match dst_port.send_frame(&rewritten).await {
+                        Err(e) => {
+                            log::warn!("fabric: replay send error: {}", e);
+                        }
+                        Ok(n) => {
+                            log::debug!(
+                                "fabric: ReplayPacket sent {} bytes to backend MAC {} (DNAT {} -> {})",
+                                n, format_mac(&pod_mac), service_ip, backend_ip
+                            );
+                        }
                     }
                 } else {
                     log::warn!(
@@ -362,6 +379,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
         }
         Action::PacketDecision { .. } => {
             // Decision already handled by activator internally.
+            log::debug!("fabric: activator action for '{}': PacketDecision", service_id);
         }
         _ => {
             log::debug!("fabric: unhandled activator action in forwarding path");
@@ -475,6 +493,15 @@ async fn handle_unknown_unicast<P: FramePort>(
                         // DNAT: rewrite dst IP from service_ip to pod_ip.
                         rewrite_ipv4_dst(&mut rewritten, service_ip, pod_ip);
 
+                        // Log vnet header for debugging
+                        if rewritten.len() >= VNET_HDR_SZ {
+                            let vnet_flags = rewritten[0];
+                            log::debug!(
+                                "fabric: Forward vnet_flags=0x{:02x} frame_len={}",
+                                vnet_flags, rewritten.len()
+                            );
+                        }
+
                         // Insert reverse NAT entry for return traffic.
                         if let Some(ff_rw) = FabricFrame::new(&rewritten) {
                             if let Some(src_ip) = ff_rw.ipv4_src() {
@@ -498,8 +525,9 @@ async fn handle_unknown_unicast<P: FramePort>(
                             }
                         }
 
-                        if let Err(e) = dst_port.send_frame(&rewritten).await {
-                            log::warn!("fabric: service forward error: {}", e);
+                        match dst_port.send_frame(&rewritten).await {
+                            Err(e) => log::warn!("fabric: service forward error: {}", e),
+                            Ok(n) => log::debug!("fabric: Forward sent {} bytes to port", n),
                         }
                     } else {
                         log::warn!(
@@ -595,24 +623,10 @@ async fn try_service_arp_reply<P: FramePort>(
     service_table: &Mutex<super::ServiceTable>,
     src_port: &SharedPort<P>,
 ) {
-    // Frame was already validated as FabricFrame by dispatch_frame.
-    let ff = FabricFrame::new(frame).unwrap();
-    let eth_frame = ff.eth_payload();
-    // Minimum ARP frame: 14 (eth header) + 28 (ARP for IPv4) = 42.
-    if eth_frame.len() < 42 {
-        return;
-    }
-    if ff.ethertype() != 0x0806 {
-        return;
-    }
-    // ARP operation at offset 20-21 (relative to eth_frame start at 14+6=20).
-    let arp = &eth_frame[14..];
-    let op = u16::from_be_bytes([arp[6], arp[7]]);
-    if op != 1 {
-        return; // Not a request.
-    }
-    // Target protocol address at ARP offset 24..28.
-    let target_ip = Ipv4Addr::new(arp[24], arp[25], arp[26], arp[27]);
+    let (target_ip, sender_mac, sender_ip) = match parse_arp_request(frame) {
+        Some(parsed) => parsed,
+        None => return,
+    };
 
     let service_mac = {
         let st = service_table.lock().unwrap();
@@ -624,27 +638,7 @@ async fn try_service_arp_reply<P: FramePort>(
         None => return,
     };
 
-    // Build ARP reply.
-    let sender_mac = ff.src_mac();
-    let sender_ip: [u8; 4] = arp[14..18].try_into().unwrap();
-
-    let mut reply = vec![0u8; VNET_HDR_SZ]; // vnet header (zeroed)
-    // Ethernet header: dst=sender_mac, src=service_mac, ethertype=0x0806.
-    reply.extend_from_slice(&sender_mac);
-    reply.extend_from_slice(&service_mac);
-    reply.extend_from_slice(&0x0806u16.to_be_bytes());
-    // ARP payload.
-    let mut arp_reply = [0u8; 28];
-    arp_reply[0..2].copy_from_slice(&[0x00, 0x01]); // hardware type: Ethernet
-    arp_reply[2..4].copy_from_slice(&[0x08, 0x00]); // protocol type: IPv4
-    arp_reply[4] = 6; // hardware size
-    arp_reply[5] = 4; // protocol size
-    arp_reply[6..8].copy_from_slice(&[0x00, 0x02]); // operation: reply
-    arp_reply[8..14].copy_from_slice(&service_mac); // sender hardware address
-    arp_reply[14..18].copy_from_slice(&target_ip.octets()); // sender protocol address
-    arp_reply[18..24].copy_from_slice(&sender_mac); // target hardware address
-    arp_reply[24..28].copy_from_slice(&sender_ip); // target protocol address
-    reply.extend_from_slice(&arp_reply);
+    let reply = build_arp_reply(&sender_mac, sender_ip, &service_mac, target_ip);
 
     if let Err(e) = src_port.send_frame(&reply).await {
         log::warn!("fabric: service ARP reply send error: {}", e);

@@ -4,6 +4,7 @@ pub(crate) mod gateway;
 pub mod image_provider;
 pub(crate) mod io_session;
 pub(crate) mod managed_vm;
+pub(crate) mod packet;
 pub(crate) mod tap;
 pub(crate) mod task_handle;
 pub mod vmm;
