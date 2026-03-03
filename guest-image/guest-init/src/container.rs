@@ -276,6 +276,27 @@ impl ContainerManager {
         self.containers.get(id).and_then(|c| c.stderr_fd.as_ref().map(|p| p.as_raw_fd()))
     }
 
+    /// Send a signal to all running containers. Logs errors but does not fail.
+    pub fn signal_all_running(&self, signal: i32) {
+        for container in self.containers.values() {
+            if let Some(pid) = container.pid {
+                let ret = unsafe { libc::kill(pid, signal) };
+                if ret != 0 {
+                    log::warn!(
+                        "kill({}, {}) for container {}: {}",
+                        pid, signal, container.id,
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Returns true if any container has a running process.
+    pub fn has_running_containers(&self) -> bool {
+        self.containers.values().any(|c| c.pid.is_some())
+    }
+
     /// Send a signal to a running container.
     pub fn signal_container(&self, id: &str, signal: i32) -> anyhow::Result<()> {
         let container = self

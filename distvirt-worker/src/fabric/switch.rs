@@ -307,8 +307,14 @@ fn update_ip_header_csum(frame: &mut [u8], ip_start: usize, old_octets: &[u8; 4]
 /// Virtio-net header flags: VIRTIO_NET_HDR_F_NEEDS_CSUM
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
-/// Adjust the transport-layer partial checksum when an IP address changes,
-/// if the vnet header indicates `NEEDS_CSUM`.
+/// Adjust the transport-layer checksum when an IP address changes.
+///
+/// Handles two cases:
+/// 1. **NEEDS_CSUM set**: the checksum field contains a raw pseudo-header
+///    partial *sum* (not complemented). Updated with direct one's-complement
+///    addition (`partial - old + new`).
+/// 2. **NEEDS_CSUM not set**: the checksum field contains a completed
+///    (complemented) checksum. Updated with the RFC 1624 incremental formula.
 ///
 /// The vnet header layout (10 bytes):
 ///   [0] flags, [1] gso_type, [2..4] hdr_len, [4..6] gso_size,
@@ -318,30 +324,76 @@ fn update_transport_csum_for_ip_change(frame: &mut [u8], old_octets: &[u8; 4], n
         return;
     }
     let flags = frame[0];
-    if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM == 0 {
-        return;
+
+    if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+        // Partial checksum path: use csum_start/csum_offset from vnet header.
+        let csum_start = u16::from_le_bytes([frame[6], frame[7]]) as usize;
+        let csum_offset = u16::from_le_bytes([frame[8], frame[9]]) as usize;
+
+        let abs_csum_pos = VNET_HDR_SZ + csum_start + csum_offset;
+        if frame.len() < abs_csum_pos + 2 {
+            return;
+        }
+
+        let old_partial = u16::from_be_bytes([frame[abs_csum_pos], frame[abs_csum_pos + 1]]);
+
+        let old_hi = u16::from_be_bytes([old_octets[0], old_octets[1]]);
+        let old_lo = u16::from_be_bytes([old_octets[2], old_octets[3]]);
+        let new_hi = u16::from_be_bytes([new_octets[0], new_octets[1]]);
+        let new_lo = u16::from_be_bytes([new_octets[2], new_octets[3]]);
+
+        let partial = incremental_partial_update(old_partial, old_hi, new_hi);
+        let partial = incremental_partial_update(partial, old_lo, new_lo);
+
+        frame[abs_csum_pos..abs_csum_pos + 2].copy_from_slice(&partial.to_be_bytes());
+    } else {
+        // Completed checksum path: find transport checksum by IP protocol.
+        let eth_start = VNET_HDR_SZ;
+        let ip_start = eth_start + ETH_HEADER_LEN;
+        if frame.len() < ip_start + 20 {
+            return;
+        }
+        let ethertype = u16::from_be_bytes([frame[eth_start + 12], frame[eth_start + 13]]);
+        if ethertype != 0x0800 {
+            return;
+        }
+        let ihl = (frame[ip_start] & 0x0f) as usize * 4;
+        let protocol = frame[ip_start + 9];
+        let transport_start = ip_start + ihl;
+
+        // TCP checksum at offset 16, UDP checksum at offset 6.
+        let csum_offset = match protocol {
+            6 => 16,  // TCP
+            17 => 6,  // UDP
+            _ => return,
+        };
+        let abs_csum_pos = transport_start + csum_offset;
+        if frame.len() < abs_csum_pos + 2 {
+            return;
+        }
+
+        let old_csum = u16::from_be_bytes([frame[abs_csum_pos], frame[abs_csum_pos + 1]]);
+
+        let old_hi = u16::from_be_bytes([old_octets[0], old_octets[1]]);
+        let old_lo = u16::from_be_bytes([old_octets[2], old_octets[3]]);
+        let new_hi = u16::from_be_bytes([new_octets[0], new_octets[1]]);
+        let new_lo = u16::from_be_bytes([new_octets[2], new_octets[3]]);
+
+        let csum = incremental_csum_update(old_csum, old_hi, new_hi);
+        let csum = incremental_csum_update(csum, old_lo, new_lo);
+
+        frame[abs_csum_pos..abs_csum_pos + 2].copy_from_slice(&csum.to_be_bytes());
     }
+}
 
-    let csum_start = u16::from_le_bytes([frame[6], frame[7]]) as usize;
-    let csum_offset = u16::from_le_bytes([frame[8], frame[9]]) as usize;
-
-    // csum_start/csum_offset are relative to the ethernet frame (after vnet header)
-    let abs_csum_pos = VNET_HDR_SZ + csum_start + csum_offset;
-    if frame.len() < abs_csum_pos + 2 {
-        return;
+/// Incremental update for a raw partial sum (not a complemented checksum).
+/// Computes `old_partial - old_word + new_word` in one's-complement arithmetic.
+fn incremental_partial_update(old_partial: u16, old_word: u16, new_word: u16) -> u16 {
+    let mut sum: u32 = (old_partial as u32) + (!old_word as u16 as u32) + (new_word as u32);
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
     }
-
-    let old_csum = u16::from_be_bytes([frame[abs_csum_pos], frame[abs_csum_pos + 1]]);
-
-    let old_hi = u16::from_be_bytes([old_octets[0], old_octets[1]]);
-    let old_lo = u16::from_be_bytes([old_octets[2], old_octets[3]]);
-    let new_hi = u16::from_be_bytes([new_octets[0], new_octets[1]]);
-    let new_lo = u16::from_be_bytes([new_octets[2], new_octets[3]]);
-
-    let csum = incremental_csum_update(old_csum, old_hi, new_hi);
-    let csum = incremental_csum_update(csum, old_lo, new_lo);
-
-    frame[abs_csum_pos..abs_csum_pos + 2].copy_from_slice(&csum.to_be_bytes());
+    sum as u16
 }
 
 /// Format a MAC address for logging.
@@ -588,5 +640,461 @@ mod tests {
         let new_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
         rewrite_dst_mac(&mut frame, &new_mac);
         assert_eq!(&frame[VNET_HDR_SZ..VNET_HDR_SZ + 6], &new_mac);
+    }
+
+    // --- rewrite checksum oracle tests using etherparse ---
+
+    /// Verify that summing all 16-bit words of an IP header folds to 0xFFFF.
+    fn verify_ip_header_checksum(ip_hdr: &[u8]) -> bool {
+        let ihl = (ip_hdr[0] & 0x0f) as usize * 4;
+        let hdr = &ip_hdr[..ihl];
+        let mut sum: u32 = 0;
+        for i in (0..hdr.len()).step_by(2) {
+            sum += u16::from_be_bytes([hdr[i], hdr[i + 1]]) as u32;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16 == 0xffff
+    }
+
+    /// Build a TCP fabric frame (vnet header + ethernet) using etherparse.
+    /// The vnet header has zeroed flags (no NEEDS_CSUM).
+    fn build_tcp_fabric_frame(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let src_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let dst_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
+            .ipv4(src_ip, dst_ip, 64)
+            .tcp(src_port, dst_port, 1000, 65535);
+        let mut eth_frame = Vec::new();
+        builder.write(&mut eth_frame, payload).unwrap();
+        with_vnet_header(&eth_frame)
+    }
+
+    /// Build a TCP fabric frame with NEEDS_CSUM set and pseudo-header partial
+    /// in the TCP checksum field (simulating guest kernel offload).
+    fn build_tcp_fabric_frame_needs_csum(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use etherparse::PacketBuilder;
+        let src_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let dst_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
+            .ipv4(src_ip, dst_ip, 64)
+            .tcp(src_port, dst_port, 1000, 65535);
+        let mut eth_frame = Vec::new();
+        builder.write(&mut eth_frame, payload).unwrap();
+
+        let ihl = (eth_frame[14] & 0x0f) as usize * 4;
+        let tcp_start = ETH_HEADER_LEN + ihl;
+
+        let mut frame = Vec::with_capacity(VNET_HDR_SZ + eth_frame.len());
+        // vnet header with NEEDS_CSUM
+        frame.push(1u8); // flags = NEEDS_CSUM
+        frame.push(0);   // gso_type
+        frame.extend_from_slice(&[0, 0]); // hdr_len
+        frame.extend_from_slice(&[0, 0]); // gso_size
+        frame.extend_from_slice(&(tcp_start as u16).to_le_bytes()); // csum_start
+        frame.extend_from_slice(&16u16.to_le_bytes()); // csum_offset
+        frame.extend_from_slice(&eth_frame);
+
+        // Replace TCP checksum with pseudo-header partial
+        let ip_total_len = u16::from_be_bytes([eth_frame[16], eth_frame[17]]);
+        let tcp_len = ip_total_len - (ihl as u16);
+        let pseudo = tcp_pseudo_header_csum(src_ip, dst_ip, tcp_len);
+        let tcp_csum_abs = VNET_HDR_SZ + tcp_start + 16;
+        frame[tcp_csum_abs] = (pseudo >> 8) as u8;
+        frame[tcp_csum_abs + 1] = (pseudo & 0xff) as u8;
+
+        frame
+    }
+
+    /// Compute TCP pseudo-header checksum.
+    fn tcp_pseudo_header_csum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_len: u16) -> u16 {
+        let mut sum: u32 = 0;
+        sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+        sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
+        sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+        sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+        sum += 6u32; // TCP protocol
+        sum += tcp_len as u32;
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16
+    }
+
+    /// Verify TCP checksum by summing pseudo-header + all TCP bytes (including
+    /// checksum field). A correct checksum folds to 0xFFFF.
+    fn verify_tcp_checksum(frame: &[u8]) -> bool {
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        let ihl = (frame[ip_start] & 0x0f) as usize * 4;
+        let tcp_start = ip_start + ihl;
+        let src_ip = &frame[ip_start + 12..ip_start + 16];
+        let dst_ip = &frame[ip_start + 16..ip_start + 20];
+        let tcp_data = &frame[tcp_start..];
+        let tcp_len = tcp_data.len() as u16;
+
+        let mut sum: u32 = 0;
+        // Pseudo-header
+        sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+        sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
+        sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+        sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+        sum += 6u32; // TCP
+        sum += tcp_len as u32;
+
+        // All TCP bytes including the checksum field
+        let mut i = 0;
+        while i + 1 < tcp_data.len() {
+            sum += u16::from_be_bytes([tcp_data[i], tcp_data[i + 1]]) as u32;
+            i += 2;
+        }
+        if i < tcp_data.len() {
+            sum += (tcp_data[i] as u32) << 8;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16 == 0xffff
+    }
+
+    #[test]
+    fn test_rewrite_ipv4_dst_ip_checksum_valid() {
+        let src_ip = [10, 0, 0, 1];
+        let old_dst = [10, 0, 0, 2];
+        let new_dst = [10, 0, 0, 99];
+        let mut frame = build_tcp_fabric_frame(src_ip, old_dst, 12345, 80, &[]);
+
+        rewrite_ipv4_dst(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_dst),
+            std::net::Ipv4Addr::from(new_dst),
+        );
+
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&frame[ip_start..]),
+            "IP header checksum invalid after rewrite_ipv4_dst"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ipv4_src_ip_checksum_valid() {
+        let old_src = [10, 0, 0, 1];
+        let new_src = [10, 0, 0, 50];
+        let dst_ip = [10, 0, 0, 2];
+        let mut frame = build_tcp_fabric_frame(old_src, dst_ip, 12345, 80, &[]);
+
+        rewrite_ipv4_src(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_src),
+            std::net::Ipv4Addr::from(new_src),
+        );
+
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&frame[ip_start..]),
+            "IP header checksum invalid after rewrite_ipv4_src"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ipv4_dst_transport_csum_valid() {
+        use crate::adapter::ethernet::complete_checksum;
+
+        let src_ip = [172, 16, 0, 5];
+        let old_dst = [172, 16, 0, 10];
+        let new_dst = [172, 16, 0, 99];
+        let mut frame = build_tcp_fabric_frame_needs_csum(
+            src_ip, old_dst, 9000, 443, b"hello",
+        );
+
+        rewrite_ipv4_dst(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_dst),
+            std::net::Ipv4Addr::from(new_dst),
+        );
+        complete_checksum(&mut frame);
+
+        // Verify IP header checksum
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&frame[ip_start..]),
+            "IP header checksum invalid after rewrite + complete_checksum"
+        );
+
+        // Verify TCP checksum
+        assert!(
+            verify_tcp_checksum(&frame),
+            "TCP checksum invalid after rewrite + complete_checksum"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_both_src_dst_checksums_valid() {
+        use crate::adapter::ethernet::complete_checksum;
+
+        let old_src = [172, 16, 0, 5];
+        let old_dst = [172, 16, 0, 10];
+        let new_src = [10, 0, 0, 1];
+        let new_dst = [10, 0, 0, 2];
+        let mut frame = build_tcp_fabric_frame_needs_csum(
+            old_src, old_dst, 5555, 8080, b"test data",
+        );
+
+        rewrite_ipv4_src(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_src),
+            std::net::Ipv4Addr::from(new_src),
+        );
+        rewrite_ipv4_dst(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_dst),
+            std::net::Ipv4Addr::from(new_dst),
+        );
+        complete_checksum(&mut frame);
+
+        // Verify IP header checksum
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&frame[ip_start..]),
+            "IP header checksum invalid after both rewrites"
+        );
+
+        // Verify TCP checksum
+        assert!(
+            verify_tcp_checksum(&frame),
+            "TCP checksum invalid after both rewrites + complete_checksum"
+        );
+    }
+
+    // --- Tests for TCP checksum with completed checksums (no NEEDS_CSUM) ---
+    // These verify that rewrite functions update TCP checksums even when
+    // NEEDS_CSUM is not set (i.e. the guest computed a full checksum).
+
+    #[test]
+    fn test_rewrite_ipv4_dst_no_needs_csum_tcp_checksum_valid() {
+        let src_ip = [10, 0, 0, 3];
+        let old_dst = [10, 0, 0, 99];
+        let new_dst = [10, 0, 0, 2];
+        let mut frame = build_tcp_fabric_frame(src_ip, old_dst, 45678, 80, b"hello-buffered");
+
+        // Sanity: etherparse builds a valid TCP checksum
+        assert!(
+            verify_tcp_checksum(&frame),
+            "TCP checksum should be valid before rewrite"
+        );
+
+        rewrite_ipv4_dst(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_dst),
+            std::net::Ipv4Addr::from(new_dst),
+        );
+
+        // IP header checksum must still be valid
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&frame[ip_start..]),
+            "IP header checksum invalid after DNAT without NEEDS_CSUM"
+        );
+
+        // TCP checksum must still be valid (pseudo-header includes dst IP)
+        assert!(
+            verify_tcp_checksum(&frame),
+            "TCP checksum invalid after DNAT without NEEDS_CSUM — \
+             rewrite_ipv4_dst must update TCP checksum for completed checksums"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ipv4_src_no_needs_csum_tcp_checksum_valid() {
+        let old_src = [10, 0, 0, 2];
+        let new_src = [10, 0, 0, 99];
+        let dst_ip = [10, 0, 0, 3];
+        let mut frame = build_tcp_fabric_frame(old_src, dst_ip, 80, 45678, b"response");
+
+        assert!(
+            verify_tcp_checksum(&frame),
+            "TCP checksum should be valid before rewrite"
+        );
+
+        rewrite_ipv4_src(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_src),
+            std::net::Ipv4Addr::from(new_src),
+        );
+
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&frame[ip_start..]),
+            "IP header checksum invalid after SNAT without NEEDS_CSUM"
+        );
+
+        // TCP checksum must still be valid (pseudo-header includes src IP)
+        assert!(
+            verify_tcp_checksum(&frame),
+            "TCP checksum invalid after SNAT without NEEDS_CSUM — \
+             rewrite_ipv4_src must update TCP checksum for completed checksums"
+        );
+    }
+
+    /// Simulate the exact DNAT + SNAT round-trip from the E2E test:
+    /// Client (10.0.0.3) -> Service VIP (10.0.0.99) gets DNAT'd to backend (10.0.0.2),
+    /// then backend reply gets SNAT'd back from 10.0.0.2 to 10.0.0.99.
+    #[test]
+    fn test_dnat_snat_round_trip_no_needs_csum() {
+        let client_ip = [10, 0, 0, 3];
+        let service_ip = [10, 0, 0, 99];
+        let backend_ip = [10, 0, 0, 2];
+
+        // Client SYN: src=client, dst=service VIP
+        let mut syn_frame = build_tcp_fabric_frame(
+            client_ip, service_ip, 45678, 80, &[],
+        );
+        assert!(verify_tcp_checksum(&syn_frame), "SYN checksum should be valid initially");
+
+        // DNAT: rewrite dst from service VIP to backend
+        rewrite_ipv4_dst(
+            &mut syn_frame,
+            std::net::Ipv4Addr::from(service_ip),
+            std::net::Ipv4Addr::from(backend_ip),
+        );
+
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&syn_frame[ip_start..]),
+            "SYN IP checksum invalid after DNAT"
+        );
+        assert!(
+            verify_tcp_checksum(&syn_frame),
+            "SYN TCP checksum invalid after DNAT"
+        );
+
+        // Backend SYN-ACK: src=backend, dst=client
+        let mut synack_frame = build_tcp_fabric_frame(
+            backend_ip, client_ip, 80, 45678, &[],
+        );
+        assert!(verify_tcp_checksum(&synack_frame), "SYN-ACK checksum should be valid initially");
+
+        // SNAT: rewrite src from backend to service VIP
+        rewrite_ipv4_src(
+            &mut synack_frame,
+            std::net::Ipv4Addr::from(backend_ip),
+            std::net::Ipv4Addr::from(service_ip),
+        );
+
+        assert!(
+            verify_ip_header_checksum(&synack_frame[ip_start..]),
+            "SYN-ACK IP checksum invalid after SNAT"
+        );
+        assert!(
+            verify_tcp_checksum(&synack_frame),
+            "SYN-ACK TCP checksum invalid after SNAT"
+        );
+    }
+
+    /// Same DNAT+SNAT round-trip but with NEEDS_CSUM (virtio-net offload).
+    #[test]
+    fn test_dnat_snat_round_trip_needs_csum() {
+        use crate::adapter::ethernet::complete_checksum;
+
+        let client_ip = [10, 0, 0, 3];
+        let service_ip = [10, 0, 0, 99];
+        let backend_ip = [10, 0, 0, 2];
+
+        // Client SYN with NEEDS_CSUM
+        let mut syn_frame = build_tcp_fabric_frame_needs_csum(
+            client_ip, service_ip, 45678, 80, &[],
+        );
+
+        // DNAT
+        rewrite_ipv4_dst(
+            &mut syn_frame,
+            std::net::Ipv4Addr::from(service_ip),
+            std::net::Ipv4Addr::from(backend_ip),
+        );
+
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        assert!(
+            verify_ip_header_checksum(&syn_frame[ip_start..]),
+            "SYN IP checksum invalid after DNAT (NEEDS_CSUM)"
+        );
+
+        // Complete the checksum (simulating what the TAP/guest would do)
+        complete_checksum(&mut syn_frame);
+        assert!(
+            verify_tcp_checksum(&syn_frame),
+            "SYN TCP checksum invalid after DNAT + complete_checksum"
+        );
+
+        // Backend SYN-ACK with NEEDS_CSUM
+        let mut synack_frame = build_tcp_fabric_frame_needs_csum(
+            backend_ip, client_ip, 80, 45678, &[],
+        );
+
+        // SNAT
+        rewrite_ipv4_src(
+            &mut synack_frame,
+            std::net::Ipv4Addr::from(backend_ip),
+            std::net::Ipv4Addr::from(service_ip),
+        );
+
+        assert!(
+            verify_ip_header_checksum(&synack_frame[ip_start..]),
+            "SYN-ACK IP checksum invalid after SNAT (NEEDS_CSUM)"
+        );
+
+        complete_checksum(&mut synack_frame);
+        assert!(
+            verify_tcp_checksum(&synack_frame),
+            "SYN-ACK TCP checksum invalid after SNAT + complete_checksum"
+        );
+    }
+
+    /// Verify the partial checksum in the vnet header is correct after DNAT,
+    /// without calling complete_checksum. This checks that the incremental
+    /// partial update produces the right pseudo-header partial sum.
+    #[test]
+    fn test_dnat_partial_checksum_correct() {
+        let src_ip = [10, 0, 0, 3];
+        let old_dst = [10, 0, 0, 99];
+        let new_dst = [10, 0, 0, 2];
+        let mut frame = build_tcp_fabric_frame_needs_csum(
+            src_ip, old_dst, 45678, 80, b"payload",
+        );
+
+        rewrite_ipv4_dst(
+            &mut frame,
+            std::net::Ipv4Addr::from(old_dst),
+            std::net::Ipv4Addr::from(new_dst),
+        );
+
+        // Extract the partial checksum from the TCP header
+        let ip_start = VNET_HDR_SZ + ETH_HEADER_LEN;
+        let ihl = (frame[ip_start] & 0x0f) as usize * 4;
+        let tcp_start = ip_start + ihl;
+        let actual_partial = u16::from_be_bytes([frame[tcp_start + 16], frame[tcp_start + 17]]);
+
+        // Compute expected pseudo-header partial for new IPs
+        let ip_total_len = u16::from_be_bytes([frame[ip_start + 2], frame[ip_start + 3]]);
+        let tcp_len = ip_total_len - (ihl as u16);
+        let expected_partial = tcp_pseudo_header_csum(src_ip, new_dst, tcp_len);
+
+        assert_eq!(
+            actual_partial, expected_partial,
+            "partial checksum after DNAT should match pseudo-header for new dst IP"
+        );
     }
 }

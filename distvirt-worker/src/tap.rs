@@ -248,6 +248,31 @@ pub fn open_packet_socket(tap_name: &str) -> anyhow::Result<TapDevice> {
         );
     }
 
+    // Ignore outgoing frames on the recv path. Without this, frames sent via
+    // this socket (e.g. DNAT'd packets forwarded to a backend) are echoed back
+    // as PACKET_OUTGOING and re-enter the fabric's dispatch loop. This corrupts
+    // the MAC table: the echoed frame's source MAC (belonging to a different
+    // port) gets learned on this port, causing return traffic to be dropped by
+    // loopback avoidance.
+    const PACKET_IGNORE_OUTGOING: libc::c_int = 23;
+    let val: libc::c_int = 1;
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_PACKET,
+            PACKET_IGNORE_OUTGOING,
+            &val as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        log::warn!(
+            "setsockopt PACKET_IGNORE_OUTGOING on {}: {} (kernel may be too old, falling back to no filtering)",
+            tap_name,
+            std::io::Error::last_os_error()
+        );
+    }
+
     log::info!(
         "opened AF_PACKET socket on {} (ifindex={}) with PACKET_VNET_HDR",
         tap_name,

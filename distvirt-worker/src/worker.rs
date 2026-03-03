@@ -1202,7 +1202,7 @@ async fn pod_monitor<I: VmInstance>(
             match result {
                 Ok((_container_id, exit_code)) => {
                     // Gracefully shut down the VM.
-                    match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.shutdown()).await {
+                    match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
                             log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
@@ -1261,7 +1261,7 @@ async fn pod_monitor<I: VmInstance>(
         // Cancellation: graceful shutdown requested.
         _ = cancel.cancelled() => {
             log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
-            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.shutdown()).await {
+            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
                 Ok(Ok(())) => {
                     log::info!("pod '{}': graceful shutdown complete", pod_id);
                 }

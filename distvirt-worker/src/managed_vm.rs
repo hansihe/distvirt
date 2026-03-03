@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context};
 
 use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
@@ -24,6 +26,7 @@ pub(crate) struct ImageOverrides {
 pub(crate) struct ManagedVm<I> {
     instance: I,
     session: GuestSession,
+    started_containers: Vec<String>,
 }
 
 impl<I: VmInstance> ManagedVm<I> {
@@ -48,7 +51,7 @@ impl<I: VmInstance> ManagedVm<I> {
             other => bail!("expected Ready, got {:?}", other),
         }
 
-        Ok((ManagedVm { instance, session }, yamux_driver))
+        Ok((ManagedVm { instance, session, started_containers: Vec::new() }, yamux_driver))
     }
 
     /// Configure the guest's network interface.
@@ -137,6 +140,7 @@ impl<I: VmInstance> ManagedVm<I> {
         match msg {
             GuestMessage::ContainerStarted { id, pid } => {
                 log::info!("container {} started with pid {}", id, pid);
+                self.started_containers.push(id);
                 Ok(pid)
             }
             GuestMessage::Error { message } => bail!("StartContainer failed: {}", message),
@@ -179,6 +183,7 @@ impl<I: VmInstance> ManagedVm<I> {
         match msg {
             GuestMessage::ContainerExited { id, code } => {
                 log::info!("container {} exited with code {}", id, code);
+                self.started_containers.retain(|c| c != &id);
                 Ok((id, code))
             }
             GuestMessage::Error { message } => bail!("container error: {}", message),
@@ -194,6 +199,49 @@ impl<I: VmInstance> ManagedVm<I> {
             .await
             .context("accept output stream")?;
         Ok((container_id, IoSession::new(stream)))
+    }
+
+    /// Gracefully shut down containers, then the VM.
+    ///
+    /// Sends SIGTERM to each started container, waits for ContainerExited
+    /// events up to `timeout`, then sends Shutdown to the guest.
+    pub async fn graceful_shutdown(&mut self, timeout: Duration) -> anyhow::Result<()> {
+        // Signal all started containers with SIGTERM (best-effort).
+        for id in self.started_containers.clone() {
+            let _ = self.session.send(&HostMessage::SignalContainer {
+                id,
+                signal: libc::SIGTERM,
+            }).await;
+            // Drain the ContainerSignaled ack (best-effort).
+            let _ = tokio::time::timeout(Duration::from_millis(500), self.session.recv::<GuestMessage>()).await;
+        }
+
+        // Wait for ContainerExited events until all containers are accounted for or timeout.
+        let mut remaining = self.started_containers.len();
+        if remaining > 0 {
+            let deadline = tokio::time::Instant::now() + timeout;
+            while remaining > 0 {
+                match tokio::time::timeout_at(deadline, self.session.recv::<GuestMessage>()).await {
+                    Ok(Ok(GuestMessage::ContainerExited { id, code })) => {
+                        log::info!("container {} exited with code {} during graceful shutdown", id, code);
+                        remaining -= 1;
+                    }
+                    Ok(Ok(other)) => {
+                        log::debug!("ignoring message during graceful shutdown: {:?}", other);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("recv error during graceful shutdown: {:#}", e);
+                        break;
+                    }
+                    Err(_) => {
+                        log::warn!("{} container(s) did not exit within timeout", remaining);
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.shutdown().await
     }
 
     /// Shut down the guest and wait for the VM to exit.

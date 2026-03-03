@@ -541,6 +541,72 @@ fn run() -> anyhow::Result<()> {
             }
         }
 
+        // Graceful shutdown: SIGTERM all containers, wait up to 5s, then SIGKILL.
+        if containers.has_running_containers() {
+            log::info!("sending SIGTERM to all running containers");
+            containers.signal_all_running(libc::SIGTERM);
+
+            let deadline = async_io::Timer::after(std::time::Duration::from_secs(5));
+            futures_lite::pin!(deadline);
+
+            loop {
+                if !containers.has_running_containers() {
+                    log::info!("all containers exited after SIGTERM");
+                    break;
+                }
+
+                let wait_result = future::or(
+                    async {
+                        sigfd.readable().await.ok();
+                        true // signal ready
+                    },
+                    async {
+                        (&mut deadline).await;
+                        false // timeout
+                    },
+                ).await;
+
+                if !wait_result {
+                    log::warn!("graceful shutdown timeout expired");
+                    break;
+                }
+
+                util::drain_signalfd(&sigfd);
+                let exits = containers.reap_children();
+                for exit in exits {
+                    drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id).await;
+                    stdin_streams.remove(&exit.id);
+                    containers.remove(&exit.id);
+                    let _ = control.send(&GuestMessage::ContainerExited {
+                        id: exit.id,
+                        code: exit.code,
+                    }).await;
+                }
+            }
+
+            if containers.has_running_containers() {
+                log::warn!("sending SIGKILL to remaining containers");
+                containers.signal_all_running(libc::SIGKILL);
+
+                // Brief wait to reap killed containers.
+                async_io::Timer::after(std::time::Duration::from_millis(100)).await;
+                util::drain_signalfd(&sigfd);
+                let exits = containers.reap_children();
+                for exit in exits {
+                    drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id).await;
+                    stdin_streams.remove(&exit.id);
+                    containers.remove(&exit.id);
+                    let _ = control.send(&GuestMessage::ContainerExited {
+                        id: exit.id,
+                        code: exit.code,
+                    }).await;
+                }
+            }
+        }
+
+        // Brief sleep to let virtio-net flush outgoing packets.
+        async_io::Timer::after(std::time::Duration::from_millis(200)).await;
+
         Ok(())
     }))
 }

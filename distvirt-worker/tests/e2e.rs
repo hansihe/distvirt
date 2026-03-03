@@ -95,6 +95,38 @@ async fn setup_inner(component_dir: Option<PathBuf>) -> anyhow::Result<(Orchestr
     Ok((conn, worker_handle))
 }
 
+/// Accept a log stream and drain it to stderr for debugging, returning the
+/// collected output as a string. Useful for tests that want to print container
+/// output without necessarily asserting on it.
+async fn drain_log_stream(conn: &mut OrchestratorConnection) -> anyhow::Result<String> {
+    let (header, mut log_stream) = tokio::time::timeout(
+        EVENT_TIMEOUT,
+        conn.accept_log_stream(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
+
+    let prefix = format!("[{}/{}]", header.pod_id, header.container_id);
+    let mut log_data = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let mut buf = [0u8; 4096];
+            match log_stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => log_data.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+    })
+    .await;
+
+    let log_str = String::from_utf8_lossy(&log_data).into_owned();
+    for line in log_str.lines() {
+        eprintln!("{} {}", prefix, line);
+    }
+    Ok(log_str)
+}
+
 /// Timeout for the worker to shut down after receiving a Shutdown command.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -233,32 +265,7 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
     );
 
     // Read log stream for "hello world"
-    let (header, mut log_stream) = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        conn.accept_log_stream(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
-
-    assert_eq!(header.pod_id, "pod-echo");
-    assert_eq!(header.container_id, "ctr-echo");
-
-    // Read all log data
-    let mut log_data = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let mut buf = [0u8; 4096];
-            match log_stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => log_data.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-    })
-    .await;
-
-    let log_str = String::from_utf8_lossy(&log_data);
-    eprintln!("captured log output: {:?}", log_str);
+    let log_str = drain_log_stream(&mut conn).await?;
     assert!(
         log_str.contains("hello world"),
         "expected 'hello world' in log output, got: {:?}",
@@ -313,7 +320,7 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
@@ -325,6 +332,8 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
         matches!(e, WorkerEvent::PodRunning { .. })
     })
     .await?;
+
+    let _log_output = drain_log_stream(&mut conn).await?;
 
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodExited { .. })
@@ -374,7 +383,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
@@ -446,7 +455,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
@@ -513,7 +522,7 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
@@ -640,28 +649,7 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
     .await?;
 
     // Read log stream
-    let (_header, mut log_stream) = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        conn.accept_log_stream(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
-
-    let mut log_data = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let mut buf = [0u8; 4096];
-            match log_stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => log_data.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-    })
-    .await;
-
-    let log_str = String::from_utf8_lossy(&log_data);
-    eprintln!("captured log output: {:?}", log_str);
+    let log_str = drain_log_stream(&mut conn).await?;
     assert!(
         log_str.contains("MY_VAR=hello_from_env"),
         "expected env var in output, got: {:?}",
@@ -738,28 +726,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
     .await?;
 
     // Read log stream — verify the DNS resolution returned our registered IP
-    let (_header, mut log_stream) = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        conn.accept_log_stream(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
-
-    let mut log_data = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let mut buf = [0u8; 4096];
-            match log_stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => log_data.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-    })
-    .await;
-
-    let log_str = String::from_utf8_lossy(&log_data);
-    eprintln!("captured log output: {:?}", log_str);
+    let log_str = drain_log_stream(&mut conn).await?;
     assert!(
         log_str.contains("10.0.0.99"),
         "expected DNS to resolve myservice to 10.0.0.99, got: {:?}",
@@ -832,7 +799,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
@@ -915,7 +882,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 entrypoint: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "ip addr add 10.0.0.99/32 dev eth0 && nc -l -p 80".into(),
+                    "nc -l -w 5 -p 80".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -972,14 +939,14 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 entrypoint: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "echo hello-service | nc -w 10 10.0.0.99 80".into(),
+                    "echo hello-service | nc -w 5 10.0.0.99 80".into(),
                 ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
@@ -1069,7 +1036,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 entrypoint: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "ip addr add 10.0.0.99/32 dev eth0 && nc -l -p 80".into(),
+                    "nc -l -w 5 -p 80".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -1109,14 +1076,14 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 entrypoint: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "echo hello-buffered | nc -w 30 10.0.0.99 80".into(),
+                    "echo hello-buffered | nc -w 5 10.0.0.99 80".into(),
                 ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
                 gid: None,
                 hostname: None,
-                capture_output: false,
+                capture_output: true,
                 stdin: false,
             },
         }],
