@@ -20,6 +20,7 @@ use distvirt_guest_protocol::{
     GuestMessage, HostMessage, StreamHeader, VSOCK_CONTROL_PORT,
     STREAM_STDOUT, STREAM_STDERR, encode_output_chunk,
 };
+use std::os::unix::io::OwnedFd;
 use util::ReadPipeResult;
 
 fn mount_essential_filesystems() {
@@ -109,6 +110,7 @@ async fn handle_message(
     containers: &mut ContainerManager,
     conn: &mut yamux::Connection<Async<std::fs::File>>,
     output_streams: &mut HashMap<String, yamux::Stream>,
+    stdin_streams: &mut HashMap<String, OwnedFd>,
 ) -> anyhow::Result<bool> {
     match msg {
         HostMessage::AddContainer {
@@ -129,8 +131,8 @@ async fn handle_message(
                 }
             }
         }
-        HostMessage::StartContainer { id, entrypoint, args, env, working_dir, uid, gid, hostname, capture_output } => {
-            log::info!("StartContainer: id={}, entrypoint={}, capture_output={}", id, entrypoint, capture_output);
+        HostMessage::StartContainer { id, entrypoint, args, env, working_dir, uid, gid, hostname, capture_output, stdin } => {
+            log::info!("StartContainer: id={}, entrypoint={}, capture_output={}, stdin={}", id, entrypoint, capture_output, stdin);
 
             // If capture_output, open a yamux output stream before forking.
             if capture_output {
@@ -145,8 +147,14 @@ async fn handle_message(
                 output_streams.insert(id.clone(), stream);
             }
 
-            match containers.start(&id, &entrypoint, &args, &env, working_dir.as_deref(), uid, gid, hostname.as_deref(), capture_output) {
+            match containers.start(&id, &entrypoint, &args, &env, working_dir.as_deref(), uid, gid, hostname.as_deref(), capture_output, stdin) {
                 Ok(pid) => {
+                    // If stdin was requested, move the stdin pipe write-end into the stdin_streams map.
+                    if stdin {
+                        if let Some(fd) = containers.take_stdin_fd(&id) {
+                            stdin_streams.insert(id.clone(), fd);
+                        }
+                    }
                     control.send(&GuestMessage::ContainerStarted { id, pid }).await?;
                 }
                 Err(e) => {
@@ -166,6 +174,20 @@ async fn handle_message(
                 }
                 Err(e) => {
                     log::error!("ConfigureNetwork failed: {:#}", e);
+                    control.send(&GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    }).await?;
+                }
+            }
+        }
+        HostMessage::SignalContainer { id, signal } => {
+            log::info!("SignalContainer: id={}, signal={}", id, signal);
+            match containers.signal_container(&id, signal) {
+                Ok(()) => {
+                    control.send(&GuestMessage::ContainerSignaled { id }).await?;
+                }
+                Err(e) => {
+                    log::error!("SignalContainer failed: {:#}", e);
                     control.send(&GuestMessage::Error {
                         message: format!("{:#}", e),
                     }).await?;
@@ -276,6 +298,40 @@ async fn drain_container_pipes_final(
     }
 }
 
+/// Relay data from a yamux inbound stream to a container's stdin pipe.
+///
+/// Reads from the yamux stream and writes to the pipe fd. When the yamux
+/// stream reaches EOF, the pipe write-end is dropped so the container sees
+/// EOF on stdin.
+async fn relay_stdin(mut yamux_stream: yamux::Stream, stdin_write_fd: OwnedFd) {
+    use std::os::unix::io::AsRawFd;
+    let fd = stdin_write_fd.as_raw_fd();
+    let mut buf = [0u8; 8192];
+    loop {
+        let result = std::future::poll_fn(|cx| {
+            Pin::new(&mut yamux_stream).poll_read(cx, &mut buf)
+        }).await;
+        match result {
+            Ok(0) => break, // EOF from host
+            Ok(n) => {
+                // Write to pipe — blocking write is OK, pipe buffer is 64KB and chunks are small.
+                let written = unsafe {
+                    libc::write(fd, buf.as_ptr() as *const libc::c_void, n)
+                };
+                if written < 0 {
+                    log::warn!("write to stdin pipe: {}", std::io::Error::last_os_error());
+                    break;
+                }
+            }
+            Err(e) => {
+                log::warn!("read from yamux stdin stream: {}", e);
+                break;
+            }
+        }
+    }
+    // Drop stdin_write_fd → container sees EOF on stdin.
+}
+
 /// Which event source became ready.
 enum Ready {
     Signal,
@@ -351,6 +407,7 @@ fn run() -> anyhow::Result<()> {
 
         let mut containers = ContainerManager::new();
         let mut output_streams: HashMap<String, yamux::Stream> = HashMap::new();
+        let mut stdin_streams: HashMap<String, OwnedFd> = HashMap::new();
 
         let sigfd = Async::new_nonblocking(sigfd).context("wrap signalfd in Async")?;
 
@@ -370,17 +427,35 @@ fn run() -> anyhow::Result<()> {
                 };
                 let yamux_drive = async {
                     match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
-                        Some(Ok(_stream)) => {
-                            log::warn!("unexpected inbound yamux stream, dropping");
+                        Some(Ok(mut stream)) => {
+                            // Read the stream header to determine the stream type.
+                            match vsock::recv_msg::<StreamHeader>(&mut stream).await {
+                                Ok(StreamHeader::ContainerInput { container_id }) => {
+                                    log::info!("received inbound stdin stream for container {}", container_id);
+                                    if let Some(stdin_fd) = stdin_streams.remove(&container_id) {
+                                        ex.spawn(relay_stdin(stream, stdin_fd)).detach();
+                                    } else {
+                                        log::warn!("no stdin pipe for container {}, dropping stream", container_id);
+                                    }
+                                }
+                                Ok(other) => {
+                                    log::warn!("unexpected inbound stream header: {:?}, dropping", other);
+                                }
+                                Err(e) => {
+                                    log::warn!("failed to read inbound stream header: {:#}", e);
+                                }
+                            }
                         }
                         Some(Err(e)) => {
                             log::error!("yamux connection error: {}", e);
+                            return Ready::YamuxEvent;
                         }
                         None => {
                             log::info!("yamux connection closed");
+                            return Ready::YamuxEvent;
                         }
                     }
-                    Ready::YamuxEvent
+                    Ready::PipeReady // not a fatal event, continue the loop
                 };
                 let ctrl = std::future::poll_fn(|cx| {
                     control.poll_recv::<HostMessage>(cx).map(Ready::ControlMsg)
@@ -419,6 +494,8 @@ fn run() -> anyhow::Result<()> {
                     let mut control_broken = false;
                     for exit in exits {
                         drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id).await;
+                        // Close stdin pipe so relay task (if any) sees EOF and exits.
+                        stdin_streams.remove(&exit.id);
                         containers.remove(&exit.id);
 
                         if let Err(e) = control.send(&GuestMessage::ContainerExited {
@@ -436,7 +513,7 @@ fn run() -> anyhow::Result<()> {
                 }
                 Ready::ControlMsg(Ok(msg)) => {
                     log::info!("received: {:?}", msg);
-                    match handle_message(msg, &mut control, &mut containers, &mut conn, &mut output_streams).await {
+                    match handle_message(msg, &mut control, &mut containers, &mut conn, &mut output_streams, &mut stdin_streams).await {
                         Ok(true) => break,
                         Ok(false) => {}
                         Err(e) => {

@@ -515,6 +515,43 @@ mod tests {
         assert!(matches!(result, Some((ServiceAction::Drop, _))));
     }
 
+    /// Regression test for Bug 1: `update_backend` clears buffered frames.
+    ///
+    /// The orchestrator calls `update_backend` followed by `mark_ready`.
+    /// Frames buffered *before* the backend is set should survive
+    /// `update_backend` and be returned by `mark_ready`.
+    ///
+    /// **Expected to fail** until the bug is fixed: `update_backend` calls
+    /// `buffer.clear()` unconditionally, so the 3 buffered frames are lost.
+    #[test]
+    fn update_backend_preserves_buffered_frames() {
+        let mut table = ServiceTable::new();
+        table.create("svc1".into(), SVC_IP, SVC_MAC, default_policy(), None, None);
+
+        // Buffer 3 frames while there is no backend yet.
+        for _ in 0..3 {
+            let result = table.lookup_and_buffer(SVC_IP, FRAME);
+            assert!(matches!(result, Some((ServiceAction::Buffered, _))));
+        }
+
+        // Set the backend — this should NOT clear the buffer.
+        table.update_backend("svc1", Some((POD_IP, POD_MAC)));
+
+        // Mark ready — should return the 3 buffered frames.
+        let result = table.mark_ready("svc1");
+        match result.unwrap() {
+            MarkReadyResult::Passthrough { frames, backend_mac, .. } => {
+                assert_eq!(backend_mac, POD_MAC);
+                assert_eq!(
+                    frames.len(),
+                    3,
+                    "update_backend should not clear frames buffered before backend was set"
+                );
+            }
+            _ => panic!("expected Passthrough result"),
+        }
+    }
+
     #[test]
     fn get_mac_returns_service_mac() {
         let mut table = ServiceTable::new();

@@ -80,6 +80,8 @@ struct ContainerConfig {
   captureOutput @9 :Bool;
   # Whether to capture stdout/stderr and stream it to the orchestrator
   # via a log stream. See LogStreamHeader.
+  stdin @10 :Bool;
+  # Whether to enable stdin forwarding for this container.
 }
 
 # Specification for a container within a pod.

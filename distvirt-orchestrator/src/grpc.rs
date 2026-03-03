@@ -131,6 +131,7 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
             gid: None,
             hostname: None,
             capture_output: true,
+            stdin: false,
         },
     })
 }

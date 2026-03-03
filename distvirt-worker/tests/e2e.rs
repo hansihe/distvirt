@@ -214,6 +214,7 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: true,
+                stdin: false,
             },
         }],
     })
@@ -313,6 +314,7 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -373,6 +375,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -444,6 +447,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -510,6 +514,7 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -567,6 +572,7 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -622,6 +628,7 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: true,
+                stdin: false,
             },
         }],
     })
@@ -719,6 +726,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: true,
+                stdin: false,
             },
         }],
     })
@@ -825,6 +833,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -914,6 +923,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: true,
+                stdin: false,
             },
         }],
     })
@@ -970,6 +980,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })
@@ -1066,6 +1077,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: true,
+                stdin: false,
             },
         }],
     })
@@ -1105,6 +1117,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }],
     })

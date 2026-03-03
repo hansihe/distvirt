@@ -92,6 +92,7 @@ fn test_spec() -> NamespaceSpec {
                     gid: None,
                     hostname: None,
                     capture_output: false,
+                    stdin: false,
                 },
             }],
             network: PodNetworkConfig {

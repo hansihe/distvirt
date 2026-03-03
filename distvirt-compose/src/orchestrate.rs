@@ -58,6 +58,7 @@ fn build_container_config(spec: &ServiceSpec) -> ContainerConfig {
         gid: None,
         hostname: spec.hostname.clone(),
         capture_output: true,
+        stdin: false,
     }
 }
 

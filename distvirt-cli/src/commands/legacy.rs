@@ -213,6 +213,7 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
                 gid,
                 hostname,
                 capture_output: false,
+                stdin: false,
             };
 
             let container_spec = ContainerSpec {

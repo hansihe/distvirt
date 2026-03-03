@@ -120,6 +120,7 @@ pub fn write_container_config(
         None => builder.set_hostname(""),
     }
     builder.set_capture_output(val.capture_output);
+    builder.set_stdin(val.stdin);
 }
 
 pub fn read_container_config(
@@ -162,6 +163,7 @@ pub fn read_container_config(
             Some(hostname.to_string())
         },
         capture_output: reader.get_capture_output(),
+        stdin: reader.get_stdin(),
     })
 }
 

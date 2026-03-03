@@ -39,6 +39,8 @@ struct Container {
     pub stdout_fd: Option<Async<PipeFd>>,
     /// Read end of stderr pipe (when capture_output is enabled).
     pub stderr_fd: Option<Async<PipeFd>>,
+    /// Write end of stdin pipe (when stdin forwarding is enabled).
+    pub stdin_fd: Option<OwnedFd>,
 }
 
 pub struct ContainerManager {
@@ -105,6 +107,7 @@ impl ContainerManager {
                 pid: None,
                 stdout_fd: None,
                 stderr_fd: None,
+                stdin_fd: None,
             },
         );
         Ok(())
@@ -122,6 +125,7 @@ impl ContainerManager {
         gid: Option<u32>,
         hostname: Option<&str>,
         capture_output: bool,
+        stdin: bool,
     ) -> anyhow::Result<u32> {
         let container = self
             .containers
@@ -144,6 +148,13 @@ impl ContainerManager {
         } else {
             None
         };
+        // Create stdin pipe if stdin forwarding is requested.
+        // (read_end, write_end) — child reads from read_end, parent writes to write_end.
+        let stdin_pipe = if stdin {
+            Some(util::create_pipe().context("create stdin pipe")?)
+        } else {
+            None
+        };
 
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -157,6 +168,7 @@ impl ContainerManager {
             // We must not run OwnedFd destructors in the child (we're about to exec).
             let stdout_write_fd = stdout_pipe.as_ref().map(|(_, w)| w.as_raw_fd());
             let stderr_write_fd = stderr_pipe.as_ref().map(|(_, w)| w.as_raw_fd());
+            let stdin_read_fd = stdin_pipe.as_ref().map(|(r, _)| r.as_raw_fd());
             child_exec(
                 &container.mount_point,
                 entrypoint,
@@ -168,6 +180,7 @@ impl ContainerManager {
                 hostname,
                 stdout_write_fd,
                 stderr_write_fd,
+                stdin_read_fd,
             );
         }
 
@@ -183,6 +196,11 @@ impl ContainerManager {
                 Async::new(PipeFd::new(stderr_read))
                     .context("wrap stderr pipe in Async")?
             );
+        }
+
+        // Parent — keep write end of stdin pipe, drop read end.
+        if let Some((_stdin_read, stdin_write)) = stdin_pipe {
+            container.stdin_fd = Some(stdin_write);
         }
 
         container.pid = Some(pid);
@@ -243,6 +261,11 @@ impl ContainerManager {
         self.containers.get_mut(id).and_then(|c| c.stderr_fd.take())
     }
 
+    /// Take ownership of the stdin pipe write-end for a container.
+    pub fn take_stdin_fd(&mut self, id: &str) -> Option<OwnedFd> {
+        self.containers.get_mut(id).and_then(|c| c.stdin_fd.take())
+    }
+
     /// Get the raw fd for a container's stdout pipe (without taking ownership).
     pub fn stdout_raw_fd(&self, id: &str) -> Option<i32> {
         self.containers.get(id).and_then(|c| c.stdout_fd.as_ref().map(|p| p.as_raw_fd()))
@@ -251,6 +274,27 @@ impl ContainerManager {
     /// Get the raw fd for a container's stderr pipe (without taking ownership).
     pub fn stderr_raw_fd(&self, id: &str) -> Option<i32> {
         self.containers.get(id).and_then(|c| c.stderr_fd.as_ref().map(|p| p.as_raw_fd()))
+    }
+
+    /// Send a signal to a running container.
+    pub fn signal_container(&self, id: &str, signal: i32) -> anyhow::Result<()> {
+        let container = self
+            .containers
+            .get(id)
+            .with_context(|| format!("container {} not found", id))?;
+        let pid = container
+            .pid
+            .with_context(|| format!("container {} is not running", id))?;
+        let ret = unsafe { libc::kill(pid, signal) };
+        if ret != 0 {
+            bail!(
+                "kill({}, {}): {}",
+                pid,
+                signal,
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
     }
 
     /// Remove a container from the map and best-effort unmount its filesystem.
@@ -304,10 +348,11 @@ fn child_exec(
     hostname: Option<&str>,
     stdout_write_fd: Option<RawFd>,
     stderr_write_fd: Option<RawFd>,
+    stdin_read_fd: Option<RawFd>,
 ) -> ! {
     let result = child_exec_inner(
         mount_point, entrypoint, args, env, working_dir, uid, gid, hostname,
-        stdout_write_fd, stderr_write_fd,
+        stdout_write_fd, stderr_write_fd, stdin_read_fd,
     );
     if let Err(e) = result {
         eprintln!("container child exec failed: {:#}", e);
@@ -326,6 +371,7 @@ fn child_exec_inner(
     hostname: Option<&str>,
     stdout_write_fd: Option<RawFd>,
     stderr_write_fd: Option<RawFd>,
+    stdin_read_fd: Option<RawFd>,
 ) -> anyhow::Result<()> {
     // New session so the container process is a session leader.
     if unsafe { libc::setsid() } < 0 {
@@ -359,12 +405,22 @@ fn child_exec_inner(
     util::mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, None)?;
     util::mount("tmpfs", "/tmp", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None)?;
 
-    // Set up /dev/console as stdin and controlling terminal for both modes.
-    // This ensures the container has a proper session even in capture mode.
+    // Set up controlling terminal from /dev/console (separate from stdin).
     let console = CString::new("/dev/console").unwrap();
     let console_fd = unsafe { libc::open(console.as_ptr(), libc::O_RDWR) };
     if console_fd >= 0 {
         unsafe { libc::ioctl(console_fd, libc::TIOCSCTTY as _, 0) };
+    }
+
+    // Set up stdin: pipe from host if requested, otherwise console or /dev/null.
+    if let Some(fd) = stdin_read_fd {
+        unsafe {
+            libc::dup2(fd, 0);
+            if fd > 2 {
+                libc::close(fd);
+            }
+        }
+    } else if console_fd >= 0 {
         unsafe {
             libc::dup2(console_fd, 0); // stdin = console
         }

@@ -1893,6 +1893,7 @@ mod tests {
                 gid: None,
                 hostname: None,
                 capture_output: false,
+                stdin: false,
             },
         }]
     }

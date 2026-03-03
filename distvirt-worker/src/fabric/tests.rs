@@ -906,6 +906,72 @@ async fn activator_service_arp_reply() {
 
 // --- NAT tests ---
 
+/// Regression test for Bug 2: Forward silently drops when backend MAC is not
+/// in the mac_table.
+///
+/// When a service is ready and `lookup_and_buffer` returns `ServiceAction::Forward`,
+/// the forwarding code resolves the backend MAC via `resolve_mac(&pod_mac)`.
+/// If the backend never sent a frame, its MAC was never learned, and the frame
+/// is silently dropped.
+///
+/// **Expected to fail** until the bug is fixed: the frame never arrives at port 1
+/// because `resolve_mac` returns `None`.
+#[tokio::test]
+async fn service_forward_without_learned_backend_mac() {
+    let mut fabric: Fabric<TestPort> = Fabric::new();
+
+    // Create a service with backend, mark ready (no activator — pure L3 passthrough).
+    {
+        let tables = fabric.tables();
+        let mut st = tables.service_table.lock().unwrap();
+        st.create(
+            "svc-fwd".into(),
+            SVC_IP,
+            SVC_MAC,
+            distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 64,
+                timeout_ms: 30000,
+                activator: None,
+            },
+            None,
+            None,
+        );
+        st.update_backend("svc-fwd", Some((POD_IP, POD_MAC)));
+        st.mark_ready("svc-fwd");
+    }
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id1, _task1) = fabric.add_port_raw(port1);
+
+    // Intentionally do NOT learn POD_MAC on port 1.
+    // (In the real world, a passive backend like `nc -l` never sends a frame.)
+
+    // Send TCP SYN from client (port 0) to service VIP.
+    let syn_frame = make_tcp_frame(
+        SVC_MAC, MAC_A,
+        [10, 0, 0, 1], SVC_IP.octets(),
+        12345, 80,
+        0x02, // SYN
+    );
+    handle0.inject_tx.send(syn_frame).await.unwrap();
+
+    // The frame should arrive at port 1 (backend), even though the backend
+    // MAC was never learned via a frame from port 1.
+    let received = try_recv(&handle1).await;
+    assert!(
+        received.is_some(),
+        "frame should be forwarded to backend port even when backend MAC was never learned"
+    );
+    let received = received.unwrap();
+
+    // Verify DNAT was applied.
+    let ff = FabricFrame::new(&received).unwrap();
+    assert_eq!(ff.dst_mac(), POD_MAC, "dst MAC should be rewritten to backend MAC");
+    assert_eq!(ff.ipv4_dst(), Some(POD_IP), "dst IP should be DNAT'd to backend IP");
+}
+
 const CLIENT_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 0, 1);
 const CLIENT_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
 

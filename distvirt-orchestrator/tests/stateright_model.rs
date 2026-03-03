@@ -638,6 +638,7 @@ fn test_container_spec() -> ContainerSpec {
             gid: None,
             hostname: None,
             capture_output: false,
+            stdin: false,
         },
     }
 }

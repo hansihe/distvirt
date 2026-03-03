@@ -65,6 +65,7 @@ pub struct ContainerConfig {
     pub gid: Option<u32>,
     pub hostname: Option<String>,
     pub capture_output: bool,
+    pub stdin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

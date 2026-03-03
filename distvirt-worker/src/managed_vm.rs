@@ -124,6 +124,7 @@ impl<I: VmInstance> ManagedVm<I> {
                 gid: config.gid,
                 hostname: config.hostname.clone(),
                 capture_output: config.capture_output,
+                stdin: config.stdin,
             })
             .await
             .context("send StartContainer")?;
@@ -140,6 +141,31 @@ impl<I: VmInstance> ManagedVm<I> {
             }
             GuestMessage::Error { message } => bail!("StartContainer failed: {}", message),
             other => bail!("expected ContainerStarted, got {:?}", other),
+        }
+    }
+
+    /// Send a signal to a running container inside the guest.
+    pub async fn signal_container(&mut self, id: &str, signal: i32) -> anyhow::Result<()> {
+        self.session
+            .send(&HostMessage::SignalContainer {
+                id: id.to_string(),
+                signal,
+            })
+            .await
+            .context("send SignalContainer")?;
+
+        let msg: GuestMessage = self
+            .session
+            .recv()
+            .await
+            .context("receive ContainerSignaled")?;
+        match msg {
+            GuestMessage::ContainerSignaled { id } => {
+                log::info!("container {} signaled", id);
+                Ok(())
+            }
+            GuestMessage::Error { message } => bail!("SignalContainer failed: {}", message),
+            other => bail!("expected ContainerSignaled, got {:?}", other),
         }
     }
 
@@ -233,5 +259,6 @@ pub(crate) fn merge_config(
         gid: overrides.gid.or(img_gid),
         hostname: overrides.hostname.clone(),
         capture_output: false,
+        stdin: false,
     })
 }

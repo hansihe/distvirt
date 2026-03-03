@@ -154,6 +154,17 @@ impl GuestSession {
         serde_json::from_slice(&buf).context("deserialize message")
     }
 
+    /// Open a new yamux stream for forwarding stdin to a container.
+    ///
+    /// Opens an outbound yamux stream, sends `StreamHeader::ContainerInput`,
+    /// and returns the raw stream for the caller to write stdin data to.
+    ///
+    /// Stub: not yet integrated into the pod lifecycle. Requires changes to
+    /// the yamux driver to support opening outbound streams from the host side.
+    pub async fn open_input_stream(&mut self, _container_id: &str) -> anyhow::Result<YamuxStream> {
+        bail!("open_input_stream not yet integrated into yamux driver")
+    }
+
     /// Accept the next output stream opened by the guest.
     ///
     /// Reads the `StreamHeader::ContainerOutput` header and returns

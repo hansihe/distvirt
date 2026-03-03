@@ -28,12 +28,18 @@ pub enum HostMessage {
         hostname: Option<String>,
         #[serde(default)]
         capture_output: bool,
+        #[serde(default)]
+        stdin: bool,
     },
     ConfigureNetwork {
         interface: String,
         ip: String,
         netmask: String,
         gateway: String,
+    },
+    SignalContainer {
+        id: String,
+        signal: i32,
     },
     Shutdown,
 }
@@ -46,6 +52,7 @@ pub enum GuestMessage {
     ContainerAdded { id: String },
     ContainerStarted { id: String, pid: u32 },
     ContainerExited { id: String, code: i32 },
+    ContainerSignaled { id: String },
     NetworkConfigured,
     Error { message: String },
 }
@@ -56,9 +63,11 @@ pub enum GuestMessage {
 pub enum StreamHeader {
     Control,
     ContainerOutput { container_id: String },
+    ContainerInput { container_id: String },
 }
 
 /// Stream identifiers for output chunk framing.
+pub const STREAM_STDIN: u8 = 0;
 pub const STREAM_STDOUT: u8 = 1;
 pub const STREAM_STDERR: u8 = 2;
 

@@ -9,10 +9,11 @@ for correct multi-container behaviour within a single VM/pod.
 
 ## High Priority
 
-- [ ] **Add KillContainer / signal support**
-  No `KillContainer` or `SignalContainer` message exists. The host has no way
-  to gracefully stop a container — only the entire VM can be shut down. Need a
-  new host message that sends a signal to a container's PID.
+- [x] **Add KillContainer / signal support**
+  `HostMessage::SignalContainer { id, signal }` sends an arbitrary signal to a
+  container's PID. Guest-init replies `ContainerSignaled` on success.
+  Worker-side `ManagedVm::signal_container()` stub exists but is not yet
+  integrated into the pod lifecycle.
 
 - [ ] **Add mount namespace (`unshare(CLONE_NEWNS)`)**
   Containers share the mount namespace. Mounts done inside one container are
@@ -47,10 +48,12 @@ for correct multi-container behaviour within a single VM/pod.
   Without a PID namespace, containers can see and signal each other's
   processes via `/proc`. Important for multi-container pods.
 
-- [ ] **Add stdin forwarding**
-  Stdin is hardcoded to `/dev/console` or `/dev/null`. No mechanism to send
-  stdin data from the host to a specific container over yamux. Interactive
-  workloads are impossible.
+- [x] **Add stdin forwarding**
+  When `StartContainer { stdin: true }`, guest-init creates a pipe for the
+  container's stdin and accepts inbound yamux streams with
+  `StreamHeader::ContainerInput` to relay data into the pipe. Worker-side
+  `GuestSession::open_input_stream()` stub exists but is not yet integrated
+  into the pod lifecycle.
 
 ## Low Priority
 
@@ -70,6 +73,8 @@ for correct multi-container behaviour within a single VM/pod.
 - uid/gid switching — correct order (`setgid` before `setuid`)
 - Session creation — `setsid()` before exec
 - Output capture — stdout/stderr pipes with async forwarding over yamux
+- Stdin forwarding — optional pipe-based stdin with yamux inbound stream relay
+- Signal delivery — per-container signal support via `SignalContainer` message
 - Child reaping — SIGCHLD via signalfd + `waitpid(-1, WNOHANG)`, no zombies
 - FD hygiene — `O_CLOEXEC` on pipes/sockets, `OwnedFd` RAII
 - Mount flags — `MS_NOSUID | MS_NODEV | MS_NOEXEC` on proc/sys
