@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use super::ethernet::{
-    BROADCAST_MAC, build_arp_reply, fabric_frame_ethertype, fabric_frame_to_ip,
+    BROADCAST_MAC, build_arp_reply, complete_checksum, fabric_frame_ethertype, fabric_frame_to_ip,
     ip_packet_dst, ip_to_fabric_frame, parse_arp_request,
 };
 use crate::fabric::ChannelPort;
@@ -59,6 +59,9 @@ struct WireGuardState {
     peers_by_key: HashMap<[u8; 32], Arc<PeerState>>,
     peers_by_addr: HashMap<SocketAddr, Arc<PeerState>>,
     namespace_channels: HashMap<String, NamespaceChannel>,
+    /// IP → MAC mappings for local pods, keyed by (namespace_id, pod_ip).
+    /// Used to resolve destination MACs when injecting frames into the fabric.
+    pod_macs: HashMap<(String, Ipv4Addr), [u8; 6]>,
     rate_limiter: Arc<RateLimiter>,
     /// Counter for Tunn index allocation.
     next_index: u32,
@@ -99,6 +102,7 @@ impl WireGuardAdapter {
             peers_by_key: HashMap::new(),
             peers_by_addr: HashMap::new(),
             namespace_channels: HashMap::new(),
+            pod_macs: HashMap::new(),
             rate_limiter,
             next_index: 0,
         }));
@@ -188,6 +192,23 @@ impl WireGuardAdapter {
         Ok(())
     }
 
+    /// Register a local pod's IP→MAC mapping so the adapter can resolve
+    /// destination MACs when injecting frames into the fabric.
+    pub async fn register_pod_mac(&self, namespace_id: &str, ip: Ipv4Addr, mac: [u8; 6]) {
+        let mut state = self.state.write().await;
+        state.pod_macs.insert((namespace_id.to_string(), ip), mac);
+        log::info!(
+            "wireguard: registered pod mac ns={} ip={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            namespace_id, ip, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        );
+    }
+
+    /// Unregister a local pod's IP→MAC mapping.
+    pub async fn unregister_pod_mac(&self, namespace_id: &str, ip: Ipv4Addr) {
+        let mut state = self.state.write().await;
+        state.pod_macs.remove(&(namespace_id.to_string(), ip));
+    }
+
     /// UDP receive loop: read datagrams and feed them through boringtun.
     async fn udp_recv_loop(
         state: Arc<RwLock<WireGuardState>>,
@@ -206,6 +227,7 @@ impl WireGuardAdapter {
             };
 
             let datagram = &recv_buf[..n];
+            log::trace!("wireguard: received {} byte UDP packet from {}", n, src_addr);
 
             // Try to find peer by source address (fast path).
             let peer = {
@@ -214,9 +236,11 @@ impl WireGuardAdapter {
             };
 
             if let Some(peer) = peer {
+                log::trace!("wireguard: matched known peer ip={}", peer.peer_ip);
                 Self::handle_peer_packet(&state, &socket, &peer, src_addr, datagram, &mut dec_buf)
                     .await;
             } else {
+                log::trace!("wireguard: unknown source, trying all peers");
                 // Slow path: try all peers (handshake from new endpoint).
                 Self::handle_unknown_source(&state, &socket, src_addr, datagram, &mut dec_buf)
                     .await;
@@ -286,12 +310,15 @@ impl WireGuardAdapter {
         result: TunnResult<'_>,
     ) {
         match result {
-            TunnResult::Done => {}
+            TunnResult::Done => {
+                log::trace!("wireguard: decapsulate result: Done (from {})", src_addr);
+            }
             TunnResult::Err(e) => {
                 log::debug!("wireguard: decapsulate error from {}: {:?}", src_addr, e);
             }
             TunnResult::WriteToNetwork(data) => {
                 // Response packet (handshake reply, cookie, etc.) — send back.
+                log::debug!("wireguard: sending {} byte response to {} (handshake/cookie)", data.len(), src_addr);
                 let data = data.to_vec();
                 if let Err(e) = socket.send_to(&data, src_addr).await {
                     log::warn!("wireguard: failed to send response to {}: {}", src_addr, e);
@@ -318,8 +345,47 @@ impl WireGuardAdapter {
             }
             TunnResult::WriteToTunnelV4(ip_packet, _addr) => {
                 // Decrypted IP packet — inject into the fabric.
-                let frame = ip_to_fabric_frame(ip_packet, &peer.peer_mac, &BROADCAST_MAC);
+                let dst_ip = ip_packet_dst(ip_packet);
                 let s = state.read().await;
+
+                // Resolve destination MAC from pod_macs table.
+                // Use unicast MAC if known, otherwise fall back to broadcast.
+                let dst_mac = dst_ip
+                    .and_then(|ip| s.pod_macs.get(&(peer.namespace_id.clone(), ip)).copied())
+                    .unwrap_or(BROADCAST_MAC);
+
+                log::trace!(
+                    "wireguard: decrypted {} byte IP packet from peer ip={}, dst_ip={:?}, dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, injecting into fabric ns={}",
+                    ip_packet.len(), peer.peer_ip, dst_ip,
+                    dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5],
+                    peer.namespace_id,
+                );
+
+                // Log TCP details for incoming packets too.
+                if ip_packet.len() >= 40 && ip_packet[9] == 6 {
+                    let ihl = (ip_packet[0] & 0x0f) as usize * 4;
+                    if ip_packet.len() >= ihl + 14 {
+                        let tcp_flags = ip_packet[ihl + 13];
+                        let src_port = u16::from_be_bytes([ip_packet[ihl], ip_packet[ihl + 1]]);
+                        let dst_port = u16::from_be_bytes([ip_packet[ihl + 2], ip_packet[ihl + 3]]);
+                        let flag_str = format!("{}{}{}{}",
+                            if tcp_flags & 0x02 != 0 { "SYN " } else { "" },
+                            if tcp_flags & 0x10 != 0 { "ACK " } else { "" },
+                            if tcp_flags & 0x04 != 0 { "RST " } else { "" },
+                            if tcp_flags & 0x01 != 0 { "FIN " } else { "" },
+                        );
+                        log::debug!(
+                            "wireguard: ingress TCP: {}.{}.*.*:{} -> {}.{}.*.*:{} flags=[{}]",
+                            ip_packet[12], ip_packet[13],
+                            src_port,
+                            ip_packet[16], ip_packet[17],
+                            dst_port,
+                            flag_str.trim(),
+                        );
+                    }
+                }
+
+                let frame = ip_to_fabric_frame(ip_packet, &peer.peer_mac, &dst_mac);
                 if let Some(ns_ch) = s.namespace_channels.get(&peer.namespace_id) {
                     if let Err(e) = ns_ch.adapter_tx.try_send(frame) {
                         log::warn!(
@@ -426,10 +492,23 @@ impl WireGuardAdapter {
     ) {
         let mut enc_buf = vec![0u8; MAX_PACKET_SIZE];
 
-        while let Some(frame) = adapter_rx.recv().await {
+        while let Some(mut frame) = adapter_rx.recv().await {
+            // Complete any deferred checksum offload before extracting the IP packet.
+            complete_checksum(&mut frame);
+            let ethertype_val = fabric_frame_ethertype(&frame);
+            log::trace!(
+                "wireguard: egress loop received {} byte frame from fabric ns={}, ethertype={:?}{}",
+                frame.len(), namespace_id, ethertype_val.map(|e| format!("0x{:04x}", e)),
+                if frame.len() >= 24 {
+                    format!(", dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, src_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
+                        frame[16], frame[17], frame[18], frame[19], frame[20], frame[21])
+                } else { String::new() }
+            );
             // Check for ARP requests first.
-            if let Some(ethertype) = fabric_frame_ethertype(&frame) {
+            if let Some(ethertype) = ethertype_val {
                 if ethertype == 0x0806 {
+                    log::trace!("wireguard: egress: ARP frame (ethertype 0x0806)");
                     if let Some((target_ip, sender_mac, sender_ip)) = parse_arp_request(&frame) {
                         // Check if the target IP matches any peer in this namespace.
                         let peer_mac = {
@@ -465,13 +544,54 @@ impl WireGuardAdapter {
             // IPv4 frame: extract IP packet and send to the appropriate peer.
             let ip_packet = match fabric_frame_to_ip(&frame) {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    log::trace!("wireguard: egress: frame is not IPv4, skipping");
+                    continue;
+                }
             };
+
+            // Log vnet header + IP/TCP details for debugging.
+            if ip_packet.len() >= 20 {
+                let vnet_flags = frame[0];
+                let ip_proto = ip_packet[9];
+                let ip_total_len = u16::from_be_bytes([ip_packet[2], ip_packet[3]]);
+                let src_ip = &ip_packet[12..16];
+                let dst_ip_bytes = &ip_packet[16..20];
+                if ip_proto == 6 && ip_packet.len() >= 40 {
+                    // TCP: extract flags (byte 13 of TCP header, which starts at IHL*4)
+                    let ihl = (ip_packet[0] & 0x0f) as usize * 4;
+                    if ip_packet.len() >= ihl + 14 {
+                        let tcp_flags = ip_packet[ihl + 13];
+                        let src_port = u16::from_be_bytes([ip_packet[ihl], ip_packet[ihl + 1]]);
+                        let dst_port = u16::from_be_bytes([ip_packet[ihl + 2], ip_packet[ihl + 3]]);
+                        let tcp_csum = u16::from_be_bytes([ip_packet[ihl + 16], ip_packet[ihl + 17]]);
+                        let flag_str = format!("{}{}{}{}{}{}",
+                            if tcp_flags & 0x02 != 0 { "SYN " } else { "" },
+                            if tcp_flags & 0x10 != 0 { "ACK " } else { "" },
+                            if tcp_flags & 0x04 != 0 { "RST " } else { "" },
+                            if tcp_flags & 0x01 != 0 { "FIN " } else { "" },
+                            if tcp_flags & 0x08 != 0 { "PSH " } else { "" },
+                            if tcp_flags & 0x20 != 0 { "URG " } else { "" },
+                        );
+                        log::debug!(
+                            "wireguard: egress TCP: vnet_flags=0x{:02x} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags=[{}] ip_len={} tcp_csum=0x{:04x}",
+                            vnet_flags,
+                            src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port,
+                            dst_ip_bytes[0], dst_ip_bytes[1], dst_ip_bytes[2], dst_ip_bytes[3], dst_port,
+                            flag_str.trim(), ip_total_len, tcp_csum,
+                        );
+                    }
+                }
+            }
 
             let dst_ip = match ip_packet_dst(ip_packet) {
                 Some(ip) => ip,
-                None => continue,
+                None => {
+                    log::trace!("wireguard: egress: could not extract dst IP from packet");
+                    continue;
+                }
             };
+            log::trace!("wireguard: egress: IPv4 packet dst_ip={}", dst_ip);
 
             // Find the peer by destination IP in this namespace.
             let peer = {
@@ -488,7 +608,10 @@ impl WireGuardAdapter {
 
             let peer = match peer {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    log::debug!("wireguard: egress: no peer found for dst_ip={} in ns={}", dst_ip, namespace_id);
+                    continue;
+                }
             };
 
             let endpoint = {
@@ -498,7 +621,10 @@ impl WireGuardAdapter {
 
             let endpoint = match endpoint {
                 Some(a) => a,
-                None => continue, // Peer hasn't connected yet.
+                None => {
+                    log::debug!("wireguard: egress: peer ip={} has no endpoint yet", peer.peer_ip);
+                    continue;
+                }
             };
 
             let result = {
@@ -508,15 +634,18 @@ impl WireGuardAdapter {
 
             match result {
                 TunnResult::WriteToNetwork(data) => {
+                    log::trace!("wireguard: egress: sending {} byte encrypted packet to {}", data.len(), endpoint);
                     let data = data.to_vec();
                     if let Err(e) = socket.send_to(&data, endpoint).await {
                         log::warn!("wireguard: egress send error: {}", e);
                     }
                 }
                 TunnResult::Err(e) => {
-                    log::debug!("wireguard: encapsulate error: {:?}", e);
+                    log::debug!("wireguard: egress: encapsulate error: {:?}", e);
                 }
-                _ => {}
+                other => {
+                    log::debug!("wireguard: egress: unexpected encapsulate result: {:?}", std::mem::discriminant(&other));
+                }
             }
         }
     }

@@ -101,16 +101,29 @@ async fn dispatch_frame<P: FramePort>(
         FrameSource::Gateway => PortId::MAX,
     };
 
-    if let FrameSource::Port { port_id, .. } = &source {
-        log::trace!(
-            "fabric: port {} frame {} -> {} ethertype=0x{:04x} len={}",
-            port_id,
-            format_mac(&src_mac),
-            format_mac(&dst_mac),
-            ff.ethertype(),
-            frame.len(),
-        );
+    let source_label = match &source {
+        FrameSource::Port { port_id, .. } => format!("port {}", port_id),
+        FrameSource::Gateway => "gateway".to_string(),
+    };
 
+    log::trace!(
+        "fabric: dispatch_frame from {} | {} -> {} ethertype=0x{:04x} len={}{}",
+        source_label,
+        format_mac(&src_mac),
+        format_mac(&dst_mac),
+        ff.ethertype(),
+        frame.len(),
+        if ff.ethertype() == 0x0800 {
+            let eth = ff.eth_payload();
+            let src_ip = extract_ipv4_src(eth);
+            let dst_ip = extract_ipv4_dst(eth);
+            format!(" | IPv4 {:?} -> {:?}", src_ip, dst_ip)
+        } else {
+            String::new()
+        }
+    );
+
+    if let FrameSource::Port { port_id, .. } = &source {
         // Learn source MAC.
         let mut table = ctx.inner.mac_table.lock().unwrap();
         table.learn(src_mac, *port_id);
@@ -119,6 +132,8 @@ async fn dispatch_frame<P: FramePort>(
     // Forward or flood.
     if is_broadcast(&dst_mac) || dst_mac[0] & 0x01 != 0 {
         // Broadcast/multicast: flood to all other ports.
+        let num_ports = ctx.inner.ports.lock().unwrap().len();
+        log::trace!("fabric: -> BROADCAST/MULTICAST flood (num_ports={})", num_ports);
         flood_frame(frame, src_port_id, &ctx.inner.ports).await;
         // Port sources also forward broadcasts to the gateway and check service ARP.
         if let FrameSource::Port { port, .. } = &source {
@@ -128,6 +143,7 @@ async fn dispatch_frame<P: FramePort>(
             try_service_arp_reply(frame, &ctx.inner.service_table, port).await;
         }
     } else if matches!(&source, FrameSource::Port { .. }) && dst_mac == GATEWAY_MAC {
+        log::trace!("fabric: -> GATEWAY (dst_mac matches GATEWAY_MAC)");
         // Gateway-destined frame from a port: send to gateway via channel.
         if let Some(ref gw_tx) = ctx.gateway_tx {
             let _ = gw_tx.try_send(frame.to_vec());
@@ -136,6 +152,8 @@ async fn dispatch_frame<P: FramePort>(
         // Unicast lookup with loopback avoidance.
         // Gateway source uses PortId::MAX which never matches any real port.
         let dst_port_id = ctx.inner.mac_table.lock().unwrap().lookup(&dst_mac);
+
+        log::trace!("fabric: -> UNICAST lookup dst_mac={} result={:?} src_port={}", format_mac(&dst_mac), dst_port_id, src_port_id);
 
         if let Some(dst_id) = dst_port_id {
             if dst_id != src_port_id {
@@ -180,6 +198,7 @@ async fn dispatch_frame<P: FramePort>(
                             );
                         }
                     } else {
+                        log::trace!("fabric: -> forwarding to port {}", dst_id);
                         if let Err(e) = dst_port.send_frame(frame).await {
                             log::warn!(
                                 "fabric: send {} -> {} error: {}",
@@ -188,6 +207,8 @@ async fn dispatch_frame<P: FramePort>(
                         }
                     }
                 }
+            } else {
+                log::trace!("fabric: -> LOOPBACK avoidance (src_port == dst_port = {})", dst_id);
             }
         } else {
             // Unknown unicast: consult service table, then route table.

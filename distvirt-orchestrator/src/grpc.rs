@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -129,7 +130,7 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
             uid: None,
             gid: None,
             hostname: None,
-            capture_output: false,
+            capture_output: true,
         },
     })
 }
@@ -556,8 +557,8 @@ impl DistvirtClient for DistvirtClientService {
                         pod_id: p.pod_id.0,
                         workload_id: p.workload_id.0,
                         worker_id: p.worker_id.0,
-                        ip: String::new(),
-                        mac: String::new(),
+                        ip: p.ip,
+                        mac: p.mac,
                         state: match p.state {
                             PodStatus::Launching => proto::PodState::Launching as i32,
                             PodStatus::Running => proto::PodState::Running as i32,
@@ -589,9 +590,32 @@ impl DistvirtClient for DistvirtClientService {
 
     async fn stream_logs(
         &self,
-        _request: Request<proto::StreamLogsRequest>,
+        request: Request<proto::StreamLogsRequest>,
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
-        Err(Status::unimplemented("StreamLogs not yet implemented"))
+        let req = request.into_inner();
+        let namespace_id = NamespaceId(req.namespace_id);
+        let workload_id = req.workload_id.map(WorkloadId);
+
+        let mut log_rx = self.handle.subscribe_logs(namespace_id, workload_id);
+
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            while let Some(chunk) = log_rx.recv().await {
+                let proto_chunk = proto::LogChunk {
+                    workload_id: chunk.workload_id.0,
+                    data: chunk.data,
+                    timestamp_unix_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64,
+                };
+                if tx.send(Ok(proto_chunk)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn connect_network(

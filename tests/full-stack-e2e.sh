@@ -103,8 +103,14 @@ wait_for_port() {
     done
 }
 
+CONNECT_PID=""
+
 cleanup() {
     log "cleaning up..."
+    if [[ -n "$CONNECT_PID" ]] && kill -0 "$CONNECT_PID" 2>/dev/null; then
+        kill "$CONNECT_PID" 2>/dev/null || true
+        wait "$CONNECT_PID" 2>/dev/null || true
+    fi
     if [[ -n "$WORKER_PID" ]] && kill -0 "$WORKER_PID" 2>/dev/null; then
         kill "$WORKER_PID" 2>/dev/null || true
         wait "$WORKER_PID" 2>/dev/null || true
@@ -161,7 +167,7 @@ log "orchestrator ready (pid $ORCH_PID)"
 # --- Start worker ---
 
 log "starting worker..."
-RUST_LOG="${RUST_LOG:-info}" "$WORKER_BIN" \
+RUST_LOG="${RUST_LOG:-info,distvirt_worker::adapter=trace,distvirt_worker::fabric::forwarding=trace}" "$WORKER_BIN" \
     --kernel "$KERNEL" \
     --rootfs-image "$ROOTFS" \
     --containerd-socket "$CONTAINERD_SOCKET" \
@@ -216,11 +222,85 @@ while true; do
     if (( SECONDS >= DEADLINE )); then
         echo "Last status output:"
         echo "$STATUS"
+        echo "--- pod logs ---"
+        timeout 5 "$DV" logs "$NS" --server "$SERVER" 2>&1 | tail -100 || true
+        echo "--- namespace events ---"
+        timeout 5 "$DV" events "$NS" --server "$SERVER" 2>&1 | tail -50 || true
         fail "workloads did not reach running state within 120s"
     fi
     sleep 3
 done
 log "workloads running"
+
+# --- Dump pod logs for debugging ---
+
+log "fetching pod logs..."
+timeout 5 "$DV" logs "$NS" --server "$SERVER" 2>&1 | head -50 || true
+echo ""
+
+# --- Connect and verify network reachability ---
+
+log "getting pod IP..."
+POD_JSON=$("$DV" get pods --namespace "$NS" --server "$SERVER" -o json 2>/dev/null) || true
+POD_IP=$(echo "$POD_JSON" | python3 -c "
+import sys, json
+pods = json.load(sys.stdin)
+ip = pods[0]['ip']
+if not ip:
+    print('ERROR: pod IP is empty', file=sys.stderr)
+    sys.exit(1)
+print(ip)
+" 2>&1) || true
+[[ -n "$POD_IP" && "$POD_IP" != ERROR* ]] || fail "could not determine pod IP from: $POD_JSON"
+log "pod IP: $POD_IP"
+
+log "starting dv connect..."
+CONNECT_LOG="$TMPDIR_BASE/connect.log"
+RUST_LOG="${RUST_LOG:-info,dv::commands::connect=trace}" "$DV" connect "$NS" --server "$SERVER" > "$CONNECT_LOG" 2>&1 &
+CONNECT_PID=$!
+
+# Wait for TUN device and route to be set up.
+# dv connect sets up a subnet route (e.g. 172.16.0.0/24), not a per-pod route,
+# so we check for the subnet rather than the specific pod IP.
+POD_SUBNET=$(echo "$POD_IP" | sed 's/\.[0-9]*$/.0\/24/')
+DEADLINE=$((SECONDS + 30))
+while ! ip route | grep -q "$POD_SUBNET"; do
+    if ! kill -0 "$CONNECT_PID" 2>/dev/null; then
+        echo "dv connect output:"
+        cat "$CONNECT_LOG"
+        fail "dv connect exited unexpectedly"
+    fi
+    if (( SECONDS >= DEADLINE )); then
+        echo "dv connect output:"
+        cat "$CONNECT_LOG"
+        fail "dv connect did not set up routes within 30s"
+    fi
+    sleep 1
+done
+log "tunnel established"
+
+# Give WireGuard handshake a moment to complete.
+sleep 2
+
+log "testing connectivity to pod at $POD_IP:8080..."
+HTTP_RESP=$(curl -s --connect-timeout 10 --max-time 15 "http://${POD_IP}:8080/" 2>&1) || true
+if echo "$HTTP_RESP" | grep -q "ok"; then
+    log "connectivity test PASSED"
+else
+    echo "HTTP response: $HTTP_RESP"
+    echo "--- pod logs ---"
+    timeout 5 "$DV" logs "$NS" --server "$SERVER" 2>&1 | tail -100 || true
+    echo "--- dv connect output ---"
+    cat "$CONNECT_LOG"
+    fail "could not reach pod via dv connect tunnel"
+fi
+
+# Tear down the tunnel.
+log "disconnecting..."
+kill "$CONNECT_PID" 2>/dev/null || true
+wait "$CONNECT_PID" 2>/dev/null || true
+CONNECT_PID=""
+log "disconnected"
 
 # --- Inspect ---
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-shell = ["dep:tokio", "dep:anyhow", "dep:x25519-dalek", "dep:rand"]
+shell = ["dep:tokio", "dep:anyhow", "dep:x25519-dalek", "dep:rand", "dep:futures-lite"]
 grpc = ["shell", "dep:tonic", "dep:prost", "dep:tokio-stream", "dep:distvirt-client-protocol"]
 bin = ["grpc", "dep:toml", "dep:env_logger", "dep:clap"]
 
@@ -20,6 +20,7 @@ tokio-stream = { version = "0.1", optional = true }
 distvirt-client-protocol = { path = "../distvirt-client-protocol", optional = true }
 x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"], optional = true }
 rand = { version = "0.8", optional = true }
+futures-lite = { version = "2.6.1", optional = true }
 toml = { version = "0.8", optional = true }
 env_logger = { version = "0.11", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }

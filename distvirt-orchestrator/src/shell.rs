@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures_lite::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -8,6 +9,22 @@ use distvirt_worker_protocol::{OrchestratorConnection, OrchestratorWriter};
 
 use crate::orchestrator::Orchestrator;
 use crate::types::*;
+
+/// Maximum number of log chunks buffered per workload.
+const LOG_BUFFER_CAP: usize = 500;
+
+#[derive(Clone)]
+pub struct LogChunkData {
+    pub namespace_id: NamespaceId,
+    pub workload_id: WorkloadId,
+    pub data: Vec<u8>,
+}
+
+struct LogSubscriber {
+    namespace_id: NamespaceId,
+    workload_id: Option<WorkloadId>, // None = all workloads in namespace
+    tx: mpsc::Sender<LogChunkData>,
+}
 
 pub struct OrchestratorShell {
     orchestrator: Orchestrator,
@@ -19,6 +36,8 @@ pub struct OrchestratorShell {
     timer_ns: HashMap<TimerKey, NamespaceId>,
     next_worker_id: u64,
     wg_listen_port: u16,
+    log_subscribers: Vec<LogSubscriber>,
+    log_buffers: HashMap<(NamespaceId, WorkloadId), VecDeque<LogChunkData>>,
 }
 
 struct WorkerHandle {
@@ -56,6 +75,21 @@ enum ShellMsg {
     WorkerConnection {
         conn: OrchestratorConnection,
     },
+    LogData {
+        namespace_id: NamespaceId,
+        workload_id: WorkloadId,
+        data: Vec<u8>,
+    },
+    SubscribeLogs {
+        namespace_id: NamespaceId,
+        workload_id: Option<WorkloadId>,
+        log_tx: mpsc::Sender<LogChunkData>,
+    },
+    ResolvePod {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        reply: oneshot::Sender<Option<WorkloadId>>,
+    },
 }
 
 /// Cloneable handle for sending commands to the shell from gRPC handlers.
@@ -87,6 +121,22 @@ impl ShellHandle {
     /// Submit a new worker connection to be handled by the shell's run loop.
     pub fn submit_worker_connection(&self, conn: OrchestratorConnection) {
         let _ = self.msg_tx.send(ShellMsg::WorkerConnection { conn });
+    }
+
+    /// Subscribe to log output for a namespace (optionally filtered to a workload).
+    /// Returns a receiver that yields log chunks (buffered history first, then live).
+    pub fn subscribe_logs(
+        &self,
+        namespace_id: NamespaceId,
+        workload_id: Option<WorkloadId>,
+    ) -> mpsc::Receiver<LogChunkData> {
+        let (tx, rx) = mpsc::channel(256);
+        let _ = self.msg_tx.send(ShellMsg::SubscribeLogs {
+            namespace_id,
+            workload_id,
+            log_tx: tx,
+        });
+        rx
     }
 
     /// Send a command and wait for the response.
@@ -122,6 +172,8 @@ impl OrchestratorShell {
             timer_ns: HashMap::new(),
             next_worker_id: 1,
             wg_listen_port,
+            log_subscribers: Vec::new(),
+            log_buffers: HashMap::new(),
         }
     }
 
@@ -189,7 +241,7 @@ impl OrchestratorShell {
 
         // Split the connection so the reader task only reads (no cancellation-safety issues)
         // and the shell sends commands directly via the write half.
-        let (mut reader, writer, _log_streams) = conn.into_split();
+        let (mut reader, writer, mut log_streams) = conn.into_split();
 
         let reader_task = tokio::spawn(async move {
             loop {
@@ -212,6 +264,73 @@ impl OrchestratorShell {
                         break;
                     }
                 }
+            }
+        });
+
+        // Spawn a task that accepts incoming log streams from this worker.
+        let log_tx = self.msg_tx.clone();
+        tokio::spawn(async move {
+            while let Some(mut stream) = log_streams.recv().await {
+                // Read the log stream header to learn which pod this is for.
+                let header = match distvirt_worker_protocol::codec::recv_log_header(&mut stream).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        log::warn!("failed to read log stream header: {}", e);
+                        continue;
+                    }
+                };
+
+                // Resolve pod_id → workload_id via the shell.
+                let (reply_tx, reply_rx) = oneshot::channel();
+                if log_tx
+                    .send(ShellMsg::ResolvePod {
+                        namespace_id: header.namespace_id.clone(),
+                        pod_id: header.pod_id.clone(),
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+
+                let workload_id = match reply_rx.await {
+                    Ok(Some(wid)) => wid,
+                    Ok(None) => {
+                        log::warn!(
+                            "log stream for unknown pod {}/{}, ignoring",
+                            header.namespace_id.0,
+                            header.pod_id.0
+                        );
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+
+                // Spawn a per-stream reader that forwards bytes as LogData messages.
+                let ns_id = header.namespace_id.clone();
+                let wl_id = workload_id.clone();
+                let stream_tx = log_tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    loop {
+                        match stream.read(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if stream_tx
+                                    .send(ShellMsg::LogData {
+                                        namespace_id: ns_id.clone(),
+                                        workload_id: wl_id.clone(),
+                                        data: buf[..n].to_vec(),
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
             }
         });
 
@@ -321,6 +440,90 @@ impl OrchestratorShell {
                 }
                 return;
             }
+            ShellMsg::LogData {
+                namespace_id,
+                workload_id,
+                data,
+            } => {
+                let chunk = LogChunkData {
+                    namespace_id: namespace_id.clone(),
+                    workload_id: workload_id.clone(),
+                    data,
+                };
+
+                // Buffer the chunk.
+                let buf = self
+                    .log_buffers
+                    .entry((namespace_id.clone(), workload_id.clone()))
+                    .or_insert_with(VecDeque::new);
+                buf.push_back(chunk.clone());
+                if buf.len() > LOG_BUFFER_CAP {
+                    buf.pop_front();
+                }
+
+                // Distribute to matching live subscribers, removing closed ones.
+                self.log_subscribers.retain(|sub| {
+                    if sub.namespace_id != namespace_id {
+                        return true;
+                    }
+                    if let Some(ref wl) = sub.workload_id {
+                        if *wl != workload_id {
+                            return true;
+                        }
+                    }
+                    // Skip full channels, remove closed ones.
+                    match sub.tx.try_send(chunk.clone()) {
+                        Ok(()) => true,
+                        Err(mpsc::error::TrySendError::Full(_)) => true,
+                        Err(mpsc::error::TrySendError::Closed(_)) => false,
+                    }
+                });
+                return;
+            }
+            ShellMsg::SubscribeLogs {
+                namespace_id,
+                workload_id,
+                log_tx,
+            } => {
+                // Replay buffered history to the new subscriber.
+                for ((ns, wl), buf) in &self.log_buffers {
+                    if *ns != namespace_id {
+                        continue;
+                    }
+                    if let Some(ref filter_wl) = workload_id {
+                        if *wl != *filter_wl {
+                            continue;
+                        }
+                    }
+                    for chunk in buf {
+                        if log_tx.try_send(chunk.clone()).is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                // Add to live subscriber list.
+                self.log_subscribers.push(LogSubscriber {
+                    namespace_id,
+                    workload_id,
+                    tx: log_tx,
+                });
+                return;
+            }
+            ShellMsg::ResolvePod {
+                namespace_id,
+                pod_id,
+                reply,
+            } => {
+                let workload_id = self
+                    .orchestrator
+                    .namespaces
+                    .get(&namespace_id)
+                    .and_then(|ns| ns.pods.get(&pod_id))
+                    .map(|info| info.workload_id.clone());
+                let _ = reply.send(workload_id);
+                return;
+            }
             _ => {}
         }
 
@@ -347,7 +550,10 @@ impl OrchestratorShell {
             ShellMsg::ClientConnected { .. }
             | ShellMsg::ClientDisconnected { .. }
             | ShellMsg::ClientCommand { .. }
-            | ShellMsg::WorkerConnection { .. } => unreachable!(),
+            | ShellMsg::WorkerConnection { .. }
+            | ShellMsg::LogData { .. }
+            | ShellMsg::SubscribeLogs { .. }
+            | ShellMsg::ResolvePod { .. } => unreachable!(),
         };
 
         if let Some(input) = input {

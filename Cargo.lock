@@ -1177,6 +1177,7 @@ dependencies = [
  "distvirt-client-protocol",
  "distvirt-worker-protocol",
  "env_logger",
+ "futures-lite",
  "log",
  "proptest",
  "prost",

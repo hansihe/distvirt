@@ -28,6 +28,66 @@ pub fn ip_to_fabric_frame(ip_packet: &[u8], src_mac: &[u8; 6], dst_mac: &[u8; 6]
     frame
 }
 
+/// Complete virtio checksum offload if the vnet header has NEEDS_CSUM set.
+///
+/// The guest kernel may defer TCP/UDP checksum computation to the host via the
+/// virtio-net header's `NEEDS_CSUM` flag. This function reads the flag and, if
+/// set, computes the internet checksum over the specified range and writes it
+/// into the frame. Must be called before stripping the vnet header for
+/// transmission outside the fabric (e.g. WireGuard).
+pub fn complete_checksum(frame: &mut [u8]) {
+    if frame.len() < VNET_HDR_SZ + ETH_HDR_LEN {
+        return;
+    }
+    const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+    let flags = frame[0];
+    if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM == 0 {
+        return;
+    }
+    // csum_start and csum_offset are relative to the ethernet frame (after vnet header).
+    let csum_start = u16::from_le_bytes([frame[6], frame[7]]) as usize;
+    let csum_offset = u16::from_le_bytes([frame[8], frame[9]]) as usize;
+
+    // Absolute positions in the buffer.
+    let abs_start = VNET_HDR_SZ + csum_start;
+    let abs_csum = abs_start + csum_offset;
+
+    if abs_csum + 2 > frame.len() || abs_start > frame.len() {
+        return; // malformed
+    }
+
+    log::debug!(
+        "complete_checksum: flags=0x{:02x} csum_start={} csum_offset={} abs_start={} abs_csum={}",
+        flags, csum_start, csum_offset, abs_start, abs_csum,
+    );
+
+    // Do NOT zero the checksum field — the guest kernel places the TCP/UDP
+    // pseudo-header partial checksum there. The host must include it in the
+    // sum (matching Linux skb_checksum_help() behaviour).
+
+    // Compute internet checksum over [abs_start..end].
+    let data = &frame[abs_start..];
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let checksum = !(sum as u16);
+
+    frame[abs_csum] = (checksum >> 8) as u8;
+    frame[abs_csum + 1] = (checksum & 0xFF) as u8;
+
+    // Clear the NEEDS_CSUM flag.
+    frame[0] = flags & !VIRTIO_NET_HDR_F_NEEDS_CSUM;
+}
+
 /// Extract the raw IP packet from a fabric frame, stripping vnet_hdr + ethernet header.
 ///
 /// Returns `None` if the frame is too short or not IPv4 (ethertype 0x0800).

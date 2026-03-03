@@ -412,8 +412,15 @@ fn child_exec_inner(
         }
     }
 
+    // Resolve entrypoint via PATH if it's not an absolute/relative path.
+    let resolved_entrypoint = if entrypoint.contains('/') {
+        entrypoint.to_string()
+    } else {
+        resolve_in_path(entrypoint, env).unwrap_or_else(|| entrypoint.to_string())
+    };
+
     // Build argv for execve.
-    let entrypoint_c = CString::new(entrypoint)?;
+    let entrypoint_c = CString::new(resolved_entrypoint.as_str())?;
     let args_c: Vec<CString> = std::iter::once(CString::new(entrypoint)?)
         .chain(args.iter().map(|a| CString::new(a.as_str()).context("invalid argument")).collect::<Result<Vec<_>, _>>()?)
         .collect();
@@ -426,6 +433,24 @@ fn child_exec_inner(
     envp.push(ptr::null());
 
     unsafe { libc::execve(entrypoint_c.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-    bail!("execve: {}", std::io::Error::last_os_error());
+    bail!("execve {}: {}", resolved_entrypoint, std::io::Error::last_os_error());
+}
+
+/// Resolve a bare command name by searching PATH from the provided env list.
+///
+/// Looks for `PATH=...` in `env`, splits on ':', and checks each directory
+/// for an executable file with the given name. Returns the first match.
+fn resolve_in_path(name: &str, env: &[String]) -> Option<String> {
+    let path_val = env.iter().find_map(|e| e.strip_prefix("PATH="))?;
+    for dir in path_val.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = format!("{}/{}", dir, name);
+        if std::path::Path::new(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 

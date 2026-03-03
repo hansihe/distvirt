@@ -119,6 +119,8 @@ pub struct PodStatusReport {
     pub pod_id: PodId,
     pub workload_id: WorkloadId,
     pub worker_id: WorkerId,
+    pub ip: String,
+    pub mac: String,
     pub state: PodStatus,
 }
 

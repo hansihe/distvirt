@@ -2,4 +2,4 @@ name: e2e-test
 services:
   echo:
     image: docker.io/library/alpine:latest
-    command: ["sh", "-c", "while true; do echo 'alive'; sleep 5; done"]
+    command: ["/bin/sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 3\\r\\n\\r\\nok\\n' | nc -l -p 8080; done"]

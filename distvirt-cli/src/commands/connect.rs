@@ -88,7 +88,7 @@ pub async fn connect(
     // 5. Configure IP + routes via `ip` commands.
     run_cmd("ip", &["addr", "add", &format!("{}/32", client_ip), "dev", &tun_name])?;
     run_cmd("ip", &["link", "set", &tun_name, "up"])?;
-    run_cmd("ip", &["route", "add", subnet, "dev", &tun_name])?;
+    run_cmd("ip", &["route", "replace", subnet, "dev", &tun_name])?;
 
     // 6. Create boringtun tunnel.
     let server_public = PublicKey::from(server_public_key_bytes);
@@ -216,6 +216,7 @@ async fn run_tunnel(
             loop {
                 let n = tun.read_packet(&mut tun_buf).await?;
                 let ip_packet = &tun_buf[..n];
+                log::trace!("connect: read {} byte IP packet from TUN", n);
 
                 let result = {
                     let mut t = tunn.lock().await;
@@ -224,10 +225,11 @@ async fn run_tunnel(
 
                 match result {
                     TunnResult::WriteToNetwork(data) => {
+                        log::trace!("connect: sending {} byte encrypted to {}", data.len(), endpoint);
                         udp.send_to(data, endpoint).await?;
                     }
                     TunnResult::Err(e) => {
-                        log::debug!("encapsulate error: {:?}", e);
+                        log::debug!("connect: encapsulate error: {:?}", e);
                     }
                     _ => {}
                 }
@@ -249,15 +251,24 @@ async fn run_tunnel(
                 let (n, src) = udp.recv_from(&mut recv_buf).await?;
                 let datagram = &recv_buf[..n];
 
+                log::trace!("connect: received {} byte UDP from {}", n, src);
                 let result = {
                     let mut t = tunn.lock().await;
                     t.decapsulate(Some(src.ip()), datagram, &mut dec_buf)
                 };
 
+                log::trace!("connect: decapsulate result: {}", match &result {
+                    TunnResult::Done => "Done".to_string(),
+                    TunnResult::Err(e) => format!("Err({:?})", e),
+                    TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
+                    TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
+                    TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
+                });
+
                 match result {
                     TunnResult::Done => {}
                     TunnResult::Err(e) => {
-                        log::debug!("decapsulate error: {:?}", e);
+                        log::debug!("connect: decapsulate error: {:?}", e);
                     }
                     TunnResult::WriteToNetwork(data) => {
                         let data = data.to_vec();
@@ -280,6 +291,7 @@ async fn run_tunnel(
                         }
                     }
                     TunnResult::WriteToTunnelV4(ip_packet, _) => {
+                        log::trace!("connect: writing {} byte IP packet to TUN", ip_packet.len());
                         tun.write_packet(ip_packet).await?;
                     }
                     TunnResult::WriteToTunnelV6(_, _) => {

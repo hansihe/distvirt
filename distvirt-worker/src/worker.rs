@@ -64,6 +64,7 @@ struct NamespaceState {
     tables: Arc<FabricContextInner<FabricPort>>,
     _gateway_task: TaskHandle<()>,
     _event_bridge_task: TaskHandle<()>,
+    _adapter_tasks: Vec<TaskHandle<()>>,
     _adapter_ports: Vec<AdapterPortHandle>,
     registry: DnsRegistry,
     pods: HashMap<PodId, PodState>,
@@ -459,6 +460,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             tables,
             _gateway_task: gateway_task,
             _event_bridge_task: event_bridge_task,
+            _adapter_tasks: adapter_tasks,
             _adapter_ports: adapter_handles,
             registry,
             pods: HashMap::new(),
@@ -775,6 +777,12 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
+
+        // Register the pod's IP→MAC mapping with the WireGuard adapter so it
+        // can resolve destination MACs when injecting frames into the fabric.
+        if let Some(wg) = self.adapter_manager.wireguard() {
+            wg.register_pod_mac(namespace_id.as_ref(), network.ip, network.mac).await;
+        }
 
         let pod_cancel = ns.token.child_token();
         let event_tx = self.bg_event_tx.clone();
@@ -1360,6 +1368,7 @@ mod tests {
             tables,
             _gateway_task: gateway_task,
             _event_bridge_task: event_bridge_task,
+            _adapter_tasks: Vec::new(),
             _adapter_ports: Vec::new(),
             registry,
             pods: HashMap::new(),
@@ -2093,6 +2102,7 @@ mod tests {
                 tables,
                 _gateway_task: TaskHandle::spawn(std::future::pending::<()>()),
                 _event_bridge_task: TaskHandle::spawn(std::future::pending::<()>()),
+                _adapter_tasks: Vec::new(),
                 _adapter_ports: Vec::new(),
                 registry: Arc::new(RwLock::new(HashMap::new())),
                 pods: HashMap::new(),
