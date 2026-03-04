@@ -110,30 +110,63 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
     Ok(WorkloadSpec {
         containers,
         network: pod_network,
+        suspend_on_idle: wl.suspend_on_idle,
     })
 }
 
 fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec, Status> {
     let config = c.config.unwrap_or_default();
+
+    let (uid, gid) = if config.user.is_empty() {
+        (None, None)
+    } else {
+        parse_user_field(&config.user)?
+    };
+
     Ok(ContainerSpec {
         container_id: c.name,
         image_ref: c.image,
         config: ContainerConfig {
-            entrypoint: config.entrypoint.join(" "),
+            entrypoint: config.entrypoint,
             args: config.args,
             env: config
                 .env
                 .into_iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect(),
-            working_dir: None,
-            uid: None,
-            gid: None,
-            hostname: None,
+            working_dir: if config.working_dir.is_empty() {
+                None
+            } else {
+                Some(config.working_dir)
+            },
+            uid,
+            gid,
+            hostname: if config.hostname.is_empty() {
+                None
+            } else {
+                Some(config.hostname)
+            },
             capture_output: true,
             stdin: false,
         },
     })
+}
+
+fn parse_user_field(user: &str) -> Result<(Option<u32>, Option<u32>), Status> {
+    if let Some((uid_str, gid_str)) = user.split_once(':') {
+        let uid: u32 = uid_str
+            .parse()
+            .map_err(|_| Status::invalid_argument(format!("non-numeric uid: '{}'", uid_str)))?;
+        let gid: u32 = gid_str
+            .parse()
+            .map_err(|_| Status::invalid_argument(format!("non-numeric gid: '{}'", gid_str)))?;
+        Ok((Some(uid), Some(gid)))
+    } else {
+        let uid: u32 = user
+            .parse()
+            .map_err(|_| Status::invalid_argument(format!("non-numeric user: '{}'", user)))?;
+        Ok((Some(uid), None))
+    }
 }
 
 fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, Status> {
@@ -251,6 +284,8 @@ fn convert_status_report(report: NamespaceStatusReport) -> proto::NamespaceStatu
                 )),
                 activation_enabled: svc.activation_enabled,
                 spliced: false,
+                ip: svc.ip,
+                mac: svc.mac,
             },
         );
     }
@@ -470,6 +505,29 @@ impl DistvirtClient for DistvirtClientService {
         }
     }
 
+    async fn deactivate_workload(
+        &self,
+        request: Request<proto::DeactivateWorkloadRequest>,
+    ) -> Result<Response<proto::DeactivateWorkloadResponse>, Status> {
+        let req = request.into_inner();
+        let event = self
+            .unary_command(ClientCommand::DeactivateWorkload {
+                namespace_id: NamespaceId(req.namespace_id),
+                workload_id: WorkloadId(req.workload_id),
+            })
+            .await?;
+        match event {
+            ClientEvent::DeactivateWorkloadResult { deactivated, reason } => {
+                Ok(Response::new(proto::DeactivateWorkloadResponse {
+                    deactivated,
+                    reason,
+                }))
+            }
+            ClientEvent::Error { message } => Err(event_to_error_status(message)),
+            _ => Err(Status::internal("unexpected response from orchestrator")),
+        }
+    }
+
     async fn clone_namespace(
         &self,
         request: Request<proto::CloneNamespaceRequest>,
@@ -562,6 +620,9 @@ impl DistvirtClient for DistvirtClientService {
                         state: match p.state {
                             PodStatus::Launching => proto::PodState::Launching as i32,
                             PodStatus::Running => proto::PodState::Running as i32,
+                            PodStatus::Suspending => proto::PodState::Suspending as i32,
+                            PodStatus::Suspended => proto::PodState::Suspended as i32,
+                            PodStatus::Resuming => proto::PodState::Resuming as i32,
                         },
                     })
                     .collect();
@@ -682,12 +743,12 @@ impl DistvirtClient for DistvirtClientService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let req = request.into_inner();
         let namespace_id = NamespaceId(req.namespace_id);
-        let workload_id = req.workload_id.map(WorkloadId);
-        let service_id = req.service_id.map(ServiceId);
+        let workload_ids = req.workload_ids.into_iter().map(WorkloadId).collect();
+        let service_ids = req.service_ids.into_iter().map(ServiceId).collect();
 
         let mut event_rx =
             self.handle
-                .subscribe_events(namespace_id, workload_id, service_id);
+                .subscribe_events(namespace_id, workload_ids, service_ids);
 
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
@@ -736,13 +797,34 @@ fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
                         worker_id: worker_id.0,
                     })
                 }
-                SmWorkloadEvent::PodStopped { reason } => {
+                SmWorkloadEvent::PodStopped { exit_code } => {
                     proto::workload_event::Event::PodStopped(proto::WorkloadPodStopped {
-                        reason,
+                        exit_code,
                     })
                 }
                 SmWorkloadEvent::PodFailed { reason } => {
                     proto::workload_event::Event::PodFailed(proto::WorkloadPodFailed { reason })
+                }
+                SmWorkloadEvent::PodSuspending { pod_id, worker_id } => {
+                    proto::workload_event::Event::PodSuspending(proto::WorkloadPodSuspending {
+                        pod_id: pod_id.0,
+                        worker_id: worker_id.0,
+                    })
+                }
+                SmWorkloadEvent::PodSuspended { worker_id, snapshot_id } => {
+                    proto::workload_event::Event::PodSuspended(proto::WorkloadPodSuspended {
+                        worker_id: worker_id.0,
+                        snapshot_id: snapshot_id.0,
+                    })
+                }
+                SmWorkloadEvent::PodSuspendFailed { reason } => {
+                    proto::workload_event::Event::PodSuspendFailed(proto::WorkloadPodSuspendFailed { reason })
+                }
+                SmWorkloadEvent::PodResuming { pod_id, worker_id } => {
+                    proto::workload_event::Event::PodResuming(proto::WorkloadPodResuming {
+                        pod_id: pod_id.0,
+                        worker_id: worker_id.0,
+                    })
                 }
             };
             proto::NamespaceEvent {
@@ -762,7 +844,12 @@ fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
         } => {
             let inner = match svc_event {
                 SmServiceEvent::Activated { trigger } => {
-                    proto::service_event::Event::Activated(proto::ServiceActivated { trigger })
+                    let proto_trigger = match trigger {
+                        ServiceActivationTrigger::Traffic => proto::ServiceActivationTrigger::Traffic,
+                    };
+                    proto::service_event::Event::Activated(proto::ServiceActivated {
+                        trigger: proto_trigger.into(),
+                    })
                 }
                 SmServiceEvent::BackendReady => {
                     proto::service_event::Event::BackendReady(proto::ServiceBackendReady {})
@@ -775,8 +862,11 @@ fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
                     )
                 }
                 SmServiceEvent::IdleTimerCancelled { reason } => {
+                    let proto_reason = match reason {
+                        IdleTimerCancelReason::NewTraffic => proto::IdleTimerCancelReason::NewTraffic,
+                    };
                     proto::service_event::Event::IdleTimerCancelled(
-                        proto::ServiceIdleTimerCancelled { reason },
+                        proto::ServiceIdleTimerCancelled { reason: proto_reason.into() },
                     )
                 }
                 SmServiceEvent::IdleTimeoutFired => {
@@ -785,8 +875,12 @@ fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
                     )
                 }
                 SmServiceEvent::Deactivated { reason } => {
+                    let proto_reason = match reason {
+                        ServiceDeactivationReason::IdleTimeout => proto::ServiceDeactivationReason::IdleTimeout,
+                        ServiceDeactivationReason::ForceDeactivate => proto::ServiceDeactivationReason::IdleTimeout,
+                    };
                     proto::service_event::Event::Deactivated(proto::ServiceDeactivated {
-                        reason,
+                        reason: proto_reason.into(),
                     })
                 }
             };

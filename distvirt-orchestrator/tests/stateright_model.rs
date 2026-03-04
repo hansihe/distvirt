@@ -150,7 +150,8 @@ impl NamespaceSnapshot {
 
         let mut workloads = HashMap::new();
         for (wl_id, wl_snap) in &self.workloads {
-            let mut wl = distvirt_orchestrator::workload::WorkloadStateMachine::new(wl_id.clone());
+            let suspend_on_idle = self.spec.workloads.get(wl_id).map_or(false, |w| w.suspend_on_idle);
+            let mut wl = distvirt_orchestrator::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle);
             wl.state = wl_snap.state.clone();
             wl.demand_count = wl_snap.demand_count;
             workloads.insert(wl_id.clone(), wl);
@@ -374,6 +375,61 @@ impl Model for NamespaceModel {
                                 });
                             }
                         }
+                        WorkloadState::Suspending {
+                            pod_id,
+                            worker_id: suspend_wid,
+                            snapshot_id,
+                            ..
+                        } => {
+                            if wid.0 == suspend_wid.0 {
+                                actions.push(ModelAction::WorkerEvent {
+                                    worker_id: wid.clone(),
+                                    event: WorkerEvent::PodSuspended {
+                                        pod_id: pod_id.clone(),
+                                        snapshot_id: snapshot_id.clone(),
+                                    },
+                                });
+                                actions.push(ModelAction::WorkerEvent {
+                                    worker_id: wid.clone(),
+                                    event: WorkerEvent::PodSuspendFailed {
+                                        pod_id: pod_id.clone(),
+                                        error: "model check failure".into(),
+                                    },
+                                });
+                                actions.push(ModelAction::WorkerEvent {
+                                    worker_id: wid.clone(),
+                                    event: WorkerEvent::PodFailed {
+                                        pod_id: pod_id.clone(),
+                                        error: "model check failure".into(),
+                                    },
+                                });
+                            }
+                        }
+                        WorkloadState::Suspended { .. } => {
+                            // No pod events in suspended state — resume is
+                            // triggered by demand, not worker events.
+                        }
+                        WorkloadState::Resuming {
+                            pod_id,
+                            worker_id: resume_wid,
+                            ..
+                        } => {
+                            if wid.0 == resume_wid.0 {
+                                actions.push(ModelAction::WorkerEvent {
+                                    worker_id: wid.clone(),
+                                    event: WorkerEvent::PodRunning {
+                                        pod_id: pod_id.clone(),
+                                    },
+                                });
+                                actions.push(ModelAction::WorkerEvent {
+                                    worker_id: wid.clone(),
+                                    event: WorkerEvent::PodFailed {
+                                        pod_id: pod_id.clone(),
+                                        error: "model check failure".into(),
+                                    },
+                                });
+                            }
+                        }
                         WorkloadState::WaitingForCapacity | WorkloadState::Dormant => {}
                     }
                 }
@@ -485,6 +541,30 @@ impl Model for NamespaceModel {
             }
         }
 
+        // Process resume_requests: simulate outer-layer resume scheduling.
+        for req in &output.resume_requests {
+            let pod_id = next_free_pod_id(&sm);
+
+            let resume_out = sm.step(NamespaceInput::ResumePod {
+                workload_id: req.workload_id.clone(),
+                worker_id: req.worker_id.clone(),
+                pod_id,
+                snapshot_id: req.snapshot_id.clone(),
+            });
+
+            commands_valid = commands_valid
+                && resume_out
+                    .worker_commands
+                    .iter()
+                    .all(|(wid, _)| sm.workers.contains_key(wid));
+            for (timer_key, _duration) in &resume_out.timers_set {
+                pending_timers.insert(timer_key.clone());
+            }
+            for timer_key in &resume_out.timers_cancel {
+                pending_timers.remove(timer_key);
+            }
+        }
+
         Some(ModelState {
             namespace: NamespaceSnapshot::from_state_machine(&sm),
             pending_timers,
@@ -501,7 +581,14 @@ impl Model for NamespaceModel {
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
                         WorkloadState::Launching { worker_id, .. }
-                        | WorkloadState::Running { worker_id, .. } => {
+                        | WorkloadState::Running { worker_id, .. }
+                        | WorkloadState::Suspending { worker_id, .. }
+                        | WorkloadState::Resuming { worker_id, .. } => {
+                            if !ns.workers.contains_key(worker_id) {
+                                return false;
+                            }
+                        }
+                        WorkloadState::Suspended { worker_id, .. } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
                             }
@@ -511,13 +598,15 @@ impl Model for NamespaceModel {
                 }
                 true
             }),
-            // Safety: Launching/Running workloads reference valid pods.
+            // Safety: Launching/Running/Suspending/Resuming workloads reference valid pods.
             Property::<Self>::always("workloads have valid pods", |_model, state| {
                 let ns = &state.namespace;
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
                         WorkloadState::Launching { pod_id, .. }
-                        | WorkloadState::Running { pod_id, .. } => {
+                        | WorkloadState::Running { pod_id, .. }
+                        | WorkloadState::Suspending { pod_id, .. }
+                        | WorkloadState::Resuming { pod_id, .. } => {
                             if !ns.pods.contains_key(pod_id) {
                                 return false;
                             }
@@ -551,7 +640,10 @@ impl Model for NamespaceModel {
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
                         WorkloadState::Launching { worker_id, .. }
-                        | WorkloadState::Running { worker_id, .. } => {
+                        | WorkloadState::Running { worker_id, .. }
+                        | WorkloadState::Suspending { worker_id, .. }
+                        | WorkloadState::Suspended { worker_id, .. }
+                        | WorkloadState::Resuming { worker_id, .. } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
                             }
@@ -632,7 +724,7 @@ fn test_container_spec() -> ContainerSpec {
         container_id: "main".into(),
         image_ref: "test:latest".into(),
         config: ContainerConfig {
-            entrypoint: "/bin/sh".into(),
+            entrypoint: vec!["/bin/sh".into()],
             args: vec![],
             env: vec![],
             working_dir: None,
@@ -652,6 +744,7 @@ fn single_service_spec() -> NamespaceSpec {
         WorkloadSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
+            suspend_on_idle: false,
         },
     );
     let mut services = HashMap::new();
@@ -681,12 +774,14 @@ fn two_service_spec() -> NamespaceSpec {
         WorkloadSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
+            suspend_on_idle: false,
         },
     );
     workloads.insert(
         WorkloadId("svc-2".into()),
         WorkloadSpec {
             containers: vec![test_container_spec()],
+            suspend_on_idle: false,
             network: PodNetworkConfig {
                 ip: Ipv4Addr::new(172, 16, 0, 11),
                 mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],

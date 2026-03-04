@@ -227,8 +227,20 @@ async fn handle_message(
             for id in &captured_ids {
                 drain_container_pipes(containers, output_streams, id).await;
             }
+            // Install a plug qdisc to buffer outbound packets in the kernel.
+            // Buffered packets become part of the snapshotted VM memory so
+            // nothing is lost, and no new frames enter the TAP buffer between
+            // SuspendReady and the vCPU freeze.
+            if let Err(e) = net::plug_qdisc("eth0") {
+                log::warn!("failed to install plug qdisc: {:#}", e);
+            }
             control.send(&GuestMessage::SuspendReady).await?;
-            log::info!("sent SuspendReady, waiting for vCPU freeze");
+            log::info!("sent SuspendReady, closing connection for suspend");
+            // Close the connection now so that after snapshot restore the guest
+            // is already back in the accept() loop, ready for the new host
+            // connection. The host doesn't read from this connection after
+            // receiving SuspendReady.
+            return Ok(Some(LoopExit::Disconnected));
         }
         HostMessage::Shutdown => {
             log::info!("shutdown requested");
@@ -451,6 +463,13 @@ fn run() -> anyhow::Result<()> {
                 future::or(drive, init).await?;
             }
 
+            // On resume, release packets buffered by the plug qdisc before suspend.
+            if containers.has_running_containers() {
+                if let Err(e) = net::unplug_qdisc("eth0") {
+                    log::warn!("failed to unplug qdisc on resume: {:#}", e);
+                }
+            }
+
             let mut control = ControlReader::new(control_stream);
 
             // Per-connection state — yamux streams die with the connection.
@@ -530,7 +549,15 @@ fn run() -> anyhow::Result<()> {
                         let exits = containers.reap_children();
                         let mut control_broken = false;
                         for exit in exits {
-                            drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id).await;
+                            // Drive yamux connection while draining to prevent deadlock.
+                            // Without this, write_all() can block waiting for window updates
+                            // that conn.poll_next_inbound() would process.
+                            let drain = drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id);
+                            let drive_yamux = std::future::poll_fn(|cx| {
+                                let _ = conn.poll_next_inbound(cx);
+                                Poll::Pending
+                            });
+                            future::or(drain, drive_yamux).await;
                             stdin_streams.remove(&exit.id);
                             containers.remove(&exit.id);
 

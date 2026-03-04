@@ -807,7 +807,7 @@ mod tests {
             container_id: "main".to_string(),
             image_ref: "test-image:latest".to_string(),
             config: ContainerConfig {
-                entrypoint: "/bin/echo".to_string(),
+                entrypoint: vec!["/bin/echo".to_string()],
                 args: vec!["hello".to_string()],
                 env: vec![],
                 working_dir: None,

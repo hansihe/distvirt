@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_lite::io::AsyncReadExt;
@@ -34,8 +34,8 @@ pub struct EventData {
 
 struct EventSubscriber {
     namespace_id: NamespaceId,
-    workload_id: Option<WorkloadId>,
-    service_id: Option<ServiceId>,
+    workload_ids: HashSet<WorkloadId>,
+    service_ids: HashSet<ServiceId>,
     tx: mpsc::Sender<EventData>,
 }
 
@@ -106,8 +106,8 @@ enum ShellMsg {
     },
     SubscribeEvents {
         namespace_id: NamespaceId,
-        workload_id: Option<WorkloadId>,
-        service_id: Option<ServiceId>,
+        workload_ids: HashSet<WorkloadId>,
+        service_ids: HashSet<ServiceId>,
         event_tx: mpsc::Sender<EventData>,
     },
 }
@@ -159,19 +159,19 @@ impl ShellHandle {
         rx
     }
 
-    /// Subscribe to namespace events (optionally filtered to a workload or service).
+    /// Subscribe to namespace events (optionally filtered to workloads or services).
     /// Returns a receiver that yields events as they occur.
     pub fn subscribe_events(
         &self,
         namespace_id: NamespaceId,
-        workload_id: Option<WorkloadId>,
-        service_id: Option<ServiceId>,
+        workload_ids: HashSet<WorkloadId>,
+        service_ids: HashSet<ServiceId>,
     ) -> mpsc::Receiver<EventData> {
         let (tx, rx) = mpsc::channel(256);
         let _ = self.msg_tx.send(ShellMsg::SubscribeEvents {
             namespace_id,
-            workload_id,
-            service_id,
+            workload_ids,
+            service_ids,
             event_tx: tx,
         });
         rx
@@ -565,14 +565,14 @@ impl OrchestratorShell {
             }
             ShellMsg::SubscribeEvents {
                 namespace_id,
-                workload_id,
-                service_id,
+                workload_ids,
+                service_ids,
                 event_tx,
             } => {
                 self.event_subscribers.push(EventSubscriber {
                     namespace_id,
-                    workload_id,
-                    service_id,
+                    workload_ids,
+                    service_ids,
                     tx: event_tx,
                 });
                 return;
@@ -705,6 +705,29 @@ impl OrchestratorShell {
                     },
                 })
             }
+            ProtoEvent::PodSuspended {
+                namespace_id,
+                pod_id,
+                snapshot_id,
+                ..
+            } => Some(OrchestratorInput::NamespaceInput {
+                namespace_id,
+                input: NamespaceInput::WorkerEvent {
+                    worker_id,
+                    event: WorkerEvent::PodSuspended { pod_id, snapshot_id },
+                },
+            }),
+            ProtoEvent::PodSuspendFailed {
+                namespace_id,
+                pod_id,
+                error,
+            } => Some(OrchestratorInput::NamespaceInput {
+                namespace_id,
+                input: NamespaceInput::WorkerEvent {
+                    worker_id,
+                    event: WorkerEvent::PodSuspendFailed { pod_id, error },
+                },
+            }),
             // Wire-only variants — not routed to orchestrator SM.
             ProtoEvent::ShuttingDown => None,
             ProtoEvent::PodLogStreamError { .. } => None,
@@ -796,15 +819,15 @@ impl OrchestratorShell {
                     if sub.namespace_id != *ns_id {
                         return true;
                     }
-                    // Apply workload filter.
-                    if let Some(ref filter_wl) = sub.workload_id {
-                        if event_wl_id.map_or(true, |wl| wl != filter_wl) {
+                    // Apply workload filter (empty = no filter).
+                    if !sub.workload_ids.is_empty() {
+                        if event_wl_id.map_or(true, |wl| !sub.workload_ids.contains(wl)) {
                             return true; // Keep subscriber, just doesn't match this event.
                         }
                     }
-                    // Apply service filter.
-                    if let Some(ref filter_svc) = sub.service_id {
-                        if event_svc_id.map_or(true, |svc| svc != filter_svc) {
+                    // Apply service filter (empty = no filter).
+                    if !sub.service_ids.is_empty() {
+                        if event_svc_id.map_or(true, |svc| !sub.service_ids.contains(svc)) {
                             return true;
                         }
                     }

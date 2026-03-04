@@ -1,5 +1,29 @@
 # Snapshots, Suspend/Resume & Live Migration
 
+## Current State
+
+**Implemented:**
+- Pod suspend/resume lifecycle (Suspending → Suspended → Resuming → Running)
+- Firecracker `snapshot()` and `restore()` VMM trait methods
+- Worker commands: `SuspendPod`, `ResumePod`, `DeleteSnapshot`
+- Worker events: `PodSuspended`, `PodSuspendFailed`, `PodRunning` (on resume)
+- Orchestrator workload states: `Suspending`, `Suspended`, `Resuming` (with timeout timers)
+- Guest-side suspend handshake (`PrepareSuspend` / `SuspendReady` via guest-init vsock)
+- Fabric buffering infrastructure: service entity buffering, route table placeholder buffering, frame flush on resume
+- `ServiceActivation` events triggering demand-up from suspended state
+- `suspend_on_idle` workload policy for automatic scale-to-zero
+- Snapshot artifacts stored as directory on worker local filesystem (snapshot.bin, mem.bin, container.ext4, metadata.json)
+
+**Not yet implemented:**
+- Storage pool abstraction (PoolId, pool types, capabilities, pool-aware commands)
+- Worker `compatibility_hash` for snapshot validation
+- Live migration (TransferSnapshot, Migrating state, MigrationPhase)
+- Namespace-level snapshots (S3 upload/download, namespace manifest)
+- Snapshot registry / eviction management
+- TAP frame drain after VM pause (post-pause frames from TAP fd)
+
+---
+
 ## Overview
 
 Three related capabilities built on Firecracker's native VM snapshot/restore:
@@ -22,6 +46,16 @@ A pod snapshot consists of:
 | Writable disk state | Container drive (ext4 with guest writes) | Varies — small for stateless workloads |
 | Pod metadata | Orchestrator | Negligible (pod config, network assignment, container config) |
 
+Snapshot artifacts are stored as a directory:
+
+```
+<snapshot_dir>/
+  metadata.json   # SnapshotMetadata (kernel_path, rootfs_source_path)
+  snapshot.bin    # Firecracker device state
+  mem.bin         # VM memory dump
+  container.ext4  # Container drive with runtime writes
+```
+
 ### Namespace Snapshot
 
 A namespace snapshot bundles:
@@ -35,7 +69,11 @@ Namespace snapshots are **consistent** — all pods are suspended at the same lo
 
 ## Storage
 
-### Storage Pool Model
+### Current Implementation
+
+Snapshots are stored on the worker's local filesystem in a temporary directory. The orchestrator tracks which worker holds a given snapshot via `Suspended { worker_id, snapshot_id }`. There is no pool abstraction yet — resume must happen on the same worker that performed the suspend.
+
+### Target: Storage Pool Model
 
 Storage is modeled as **pools** — named storage locations with known capabilities, locality, and capacity. The orchestrator reasons about pools to plan snapshot placement and transfer paths.
 
@@ -78,30 +116,35 @@ V1 implements a single local pool per worker (and optionally one S3 remote pool)
 ### Suspend Path
 
 ```
-1. Orchestrator decides to suspend workload W (idle timeout, scale-to-zero policy)
+1. Orchestrator decides to suspend workload W (idle timeout via suspend_on_idle policy)
 2. Orchestrator: UpdateServiceBackend(service_id, None)
    → Service entity enters buffering mode, new traffic buffered
 3. Orchestrator: SuspendPod(namespace_id, pod_id, snapshot_id)
-   → Worker receives command
-4. Worker: Firecracker CreateSnapshot API (pauses vCPUs, serializes state)
-5. Worker: Drain remaining frames from TAP fd (post-pause)
-6. Worker: Store snapshot to local storage (memory dump + disk state)
-7. Worker: Tear down VM process, release resources (memory, fds, TAP)
-8. Worker: PodSuspended { namespace_id, pod_id, snapshot_id }
-9. Orchestrator: Remove pod route entries, keep placeholder with buffer policy
-10. Orchestrator: Workload transitions to Suspended state
+   → Worker receives command, starts suspend_timeout timer
+4. Worker: Send PrepareSuspend to guest via vsock
+5. Guest-init: Flush application state, respond with SuspendReady
+6. Worker: Firecracker CreateSnapshot API (pauses vCPUs, serializes state)
+7. Worker: Store snapshot to local storage (memory dump + device state + disk)
+8. Worker: Tear down VM process, release resources (memory, fds, TAP)
+9. Worker: PodSuspended { namespace_id, pod_id, snapshot_id, snapshot_size_bytes }
+10. Orchestrator: Remove pod route entries, keep placeholder with buffer policy
+11. Orchestrator: Workload transitions to Suspended { worker_id, snapshot_id }
 ```
+
+**Timeout handling**: If the worker doesn't respond with `PodSuspended` within the suspend timeout, the orchestrator treats the suspend as failed and can retry or fall back. The `PodSuspendFailed` event covers explicit failures (e.g. Firecracker snapshot API error).
+
+**TODO**: Drain remaining frames from TAP fd after vCPU pause (step between 6 and 7). Frames already in the TAP buffer after pause should be read and forwarded into the fabric to avoid frame loss.
 
 ### Resume Path (Traffic-Triggered)
 
 ```
 1. Traffic arrives at service IP → ServiceActivation event (existing mechanism)
 2. Orchestrator decides: restore from snapshot vs cold start
-   - Check snapshot registry: is there a valid local snapshot on a suitable worker?
+   - Is the workload in Suspended state with a valid snapshot on a known worker?
    - If yes → ResumeFromSnapshot path
    - If no → standard LaunchPod cold start
 3. Orchestrator: ResumePod(namespace_id, pod_id, snapshot_id, network)
-   → Worker receives command
+   → Worker receives command, starts resume_timeout timer
 4. Worker: Firecracker LoadSnapshot API (~5-10ms)
 5. Worker: Attach new TAP device, connect to fabric
 6. Worker: PodRunning { namespace_id, pod_id }
@@ -110,6 +153,8 @@ V1 implements a single local pool per worker (and optionally one S3 remote pool)
 ```
 
 ### Snapshot Registry
+
+> **Not yet implemented.** Currently the orchestrator tracks snapshots implicitly via `Suspended { worker_id, snapshot_id }`. The registry described below is the target for when we need eviction, invalidation, and multi-pool awareness.
 
 The orchestrator maintains a registry of available snapshots:
 
@@ -138,6 +183,8 @@ SnapshotEntry {
 
 ## Live Migration
 
+> **Not yet implemented.** The suspend/resume primitives and fabric buffering infrastructure that migration builds on are in place. The missing pieces are snapshot transfer between workers, the `Migrating` workload state, and orchestrator migration coordination logic.
+
 ### Goals
 
 - **Transparent**: The guest and its network peers should not observe the migration (beyond a brief latency spike during the pause window).
@@ -158,9 +205,10 @@ SnapshotEntry {
 
 3. SUSPEND PHASE
    a. Orchestrator: SuspendPod(namespace_id, pod_id, snapshot_id) on worker A
-   b. Worker A: Firecracker CreateSnapshot (vCPUs paused)
-   c. Worker A: Drain remaining frames from TAP fd
-   d. Worker A: PodSuspended event
+   b. Worker A: PrepareSuspend handshake with guest
+   c. Worker A: Firecracker CreateSnapshot (vCPUs paused)
+   d. Worker A: Drain remaining frames from TAP fd
+   e. Worker A: PodSuspended event
 
 4. TRANSFER PHASE
    a. Orchestrator: TransferSnapshot(snapshot_id, target_worker_id) on worker A
@@ -177,13 +225,14 @@ SnapshotEntry {
    a. Orchestrator: Update route table — replace placeholder with worker B route
    b. Orchestrator: UpdateServiceBackend(service_id, new backend on worker B)
    c. Orchestrator: ServiceReady → flush buffered frames to resumed guest
-   d. Orchestrator: Cleanup source snapshot on worker A
+   d. Orchestrator: Cleanup source snapshot on worker A (DeleteSnapshot)
 ```
 
 ### Failure Handling
 
 | Failure point | Recovery |
 |--------------|----------|
+| Suspend fails on worker A | Abort migration, resume normal operation, restore routes |
 | Transfer fails | Abort migration, resume pod on worker A, restore routes |
 | Resume fails on worker B | Abort migration, resume pod on worker A (snapshot still valid), restore routes |
 | Worker A dies during suspend | Pod is lost. Orchestrator cold-starts on worker B (or another). Same as any worker failure. |
@@ -221,6 +270,8 @@ This reduces the pause window to the time needed to transfer the final dirty pag
 ---
 
 ## Namespace Snapshots (S3)
+
+> **Not yet implemented.**
 
 ### Create Namespace Snapshot
 
@@ -263,105 +314,155 @@ Clone = restore a namespace snapshot under a new namespace ID.
 
 ---
 
-## Protocol Changes
+## Protocol
 
-### Worker Handshake Extensions
+### Worker Handshake
 
-Workers include snapshot-related information in the initial handshake:
+Current handshake (`WorkerCapabilities`):
 
+```rust
+pub struct WorkerCapabilities {
+    pub has_kvm: bool,
+    pub has_containerd: bool,
+    pub available_adapters: Vec<String>,
+    pub max_pods: u32,
+    pub available_memory_mb: u64,
+    pub public_endpoint: String,
+}
 ```
-WorkerHandshake {
+
+**Target extensions** (not yet implemented):
+
+```rust
+pub struct WorkerCapabilities {
     // ... existing fields ...
-    compatibility_hash: u64,       // Hash of kernel + Firecracker version + VM config
-    storage_pools: [PoolInfo],     // Available storage pools on this worker
+    pub compatibility_hash: u64,       // Hash of kernel + Firecracker version + VM config
+    pub storage_pools: Vec<PoolInfo>,  // Available storage pools on this worker
 }
 
-PoolInfo {
-    pool_id: PoolId,
-    pool_type: Local | Shared | Remote,
-    capabilities: Set<Boot | Snapshot | Transfer>,
-    total_bytes: u64,
-    available_bytes: u64,
+pub struct PoolInfo {
+    pub pool_id: PoolId,
+    pub pool_type: PoolType,           // Local | Shared | Remote
+    pub capabilities: HashSet<PoolCapability>, // Boot | Snapshot | Transfer
+    pub total_bytes: u64,
+    pub available_bytes: u64,
 }
 ```
 
 The orchestrator uses `compatibility_hash` to determine which workers can accept a given snapshot. Mismatches are rejected — no best-effort restore attempts.
 
-### New Worker Commands
+### Worker Commands
 
-```
+Current snapshot-related commands:
+
+```rust
 SuspendPod {
-    namespace_id: String,
-    pod_id: u64,
-    snapshot_id: String,
-    destination_pool_id: PoolId,   // Which pool to store the snapshot in
+    namespace_id: NamespaceId,
+    pod_id: PodId,
+    snapshot_id: SnapshotId,
 }
 
 ResumePod {
-    namespace_id: String,
-    pod_id: u64,
-    snapshot_id: String,
-    source_pool_id: PoolId,        // Which pool to load the snapshot from
-    network: PodNetwork,           // May differ from original (migration)
+    namespace_id: NamespaceId,
+    pod_id: PodId,
+    snapshot_id: SnapshotId,
+    network: PodNetworkConfig,       // May differ from original (migration)
+}
+
+DeleteSnapshot {
+    snapshot_id: SnapshotId,
+}
+```
+
+**Target extensions** (not yet implemented — needed for migration and pool-aware storage):
+
+```rust
+SuspendPod {
+    // ... existing fields ...
+    destination_pool_id: PoolId,     // Which pool to store the snapshot in
+}
+
+ResumePod {
+    // ... existing fields ...
+    source_pool_id: PoolId,          // Which pool to load the snapshot from
 }
 
 TransferSnapshot {
-    snapshot_id: String,
+    snapshot_id: SnapshotId,
     source_pool_id: PoolId,
-    destination_pool_id: PoolId,   // Could be local on another worker, shared, or remote
-    target_worker_id: String,      // For worker-to-worker streaming transfers
+    destination_pool_id: PoolId,     // Could be local on another worker, shared, or remote
+    target_worker_id: WorkerId,      // For worker-to-worker streaming transfers
 }
 ```
 
-### New Worker Events
+### Worker Events
 
-```
+Current snapshot-related events:
+
+```rust
 PodSuspended {
-    namespace_id: String,
-    pod_id: u64,
-    snapshot_id: String,
-    pool_id: PoolId,
+    namespace_id: NamespaceId,
+    pod_id: PodId,
+    snapshot_id: SnapshotId,
     snapshot_size_bytes: u64,
 }
 
+PodSuspendFailed {
+    namespace_id: NamespaceId,
+    pod_id: PodId,
+    error: String,
+}
+```
+
+**Target extensions** (not yet implemented):
+
+```rust
+PodSuspended {
+    // ... existing fields ...
+    pool_id: PoolId,
+}
+
 SnapshotTransferred {
-    snapshot_id: String,
+    snapshot_id: SnapshotId,
     destination_pool_id: PoolId,
 }
 
 SnapshotEvicted {
-    snapshot_id: String,
+    snapshot_id: SnapshotId,
     pool_id: PoolId,
     reason: String,            // "orchestrator_eviction", "space_pressure", "invalidated"
 }
 ```
 
-### VMM Trait Extensions
+### VMM Traits
 
 ```rust
-pub trait VmInstance: Send + 'static {
-    // ... existing methods ...
+pub trait Vmm: Send + Sync {
+    type Instance: VmInstance;
+    fn launch(&self, config: &VmConfig)
+        -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
+    fn restore(&self, snapshot: &SnapshotArtifacts, net: Option<&NetConfig>)
+        -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
+}
 
-    /// Create a snapshot of the VM (pauses vCPUs).
-    /// Returns the path to the snapshot artifacts.
+pub trait VmInstance: Send + 'static {
+    fn connect_vsock(&self, port: u32) -> impl Future<Output = anyhow::Result<UnixStream>> + Send;
+    fn tap(&self) -> Option<&TapDevice>;
+    fn take_tap(&mut self) -> Option<TapDevice>;
+    fn wait(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn kill(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn snapshot(&mut self, snapshot_dir: &Path)
         -> impl Future<Output = anyhow::Result<SnapshotArtifacts>> + Send;
 }
 
-pub trait Vmm: Send + Sync {
-    // ... existing methods ...
-
-    /// Restore a VM from a snapshot.
-    fn restore(&self, config: &VmConfig, snapshot: &SnapshotArtifacts)
-        -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
+pub struct SnapshotMetadata {
+    pub kernel_path: PathBuf,        // Needed by Firecracker restore
+    pub rootfs_source_path: PathBuf, // Re-copied into tmpdir on restore
 }
 
 pub struct SnapshotArtifacts {
-    pub memory_file: PathBuf,    // VM memory dump
-    pub snapshot_file: PathBuf,  // Device state (Firecracker snapshot file)
-    pub disk_file: PathBuf,      // Writable container drive
-    pub mem_size_bytes: u64,
-    pub disk_size_bytes: u64,
+    pub snapshot_dir: PathBuf,       // Directory containing all snapshot files
+    pub metadata: SnapshotMetadata,
 }
 ```
 
@@ -369,35 +470,52 @@ pub struct SnapshotArtifacts {
 
 **Future optimization**: Use an overlay filesystem inside the guest — base image mounted read-only, overlayfs on top for writes. Snapshots only need to capture the overlay, and the base image becomes shareable/cacheable across pods. This naturally separates "container image" (immutable, stored in pools) from "guest writes" (small, per-instance). This also opens the door to smarter base image distribution via the pool model.
 
-### Orchestrator State Extensions
+### Orchestrator State
 
-New workload state:
+Current workload states:
 
 ```rust
 pub enum WorkloadState {
     Dormant,
     WaitingForCapacity,
-    Launching { .. },
-    Running { .. },
-    Suspending {                   // NEW
+    Launching {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        launch_timeout: TimerKey,
+    },
+    Running {
+        pod_id: PodId,
+        worker_id: WorkerId,
+    },
+    Suspending {
         pod_id: PodId,
         worker_id: WorkerId,
         snapshot_id: SnapshotId,
+        suspend_timeout: TimerKey,
     },
-    Suspended {                    // NEW
+    Suspended {
+        worker_id: WorkerId,
         snapshot_id: SnapshotId,
-        snapshot_location: SnapshotLocation,
     },
-    Migrating {                    // NEW
+    Resuming {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        snapshot_id: SnapshotId,
+        resume_timeout: TimerKey,
+    },
+}
+```
+
+**Target extensions** (not yet implemented):
+
+```rust
+pub enum WorkloadState {
+    // ... existing variants ...
+    Migrating {
         source_worker: WorkerId,
         target_worker: WorkerId,
         snapshot_id: SnapshotId,
         phase: MigrationPhase,
-    },
-    Resuming {                     // NEW
-        pod_id: PodId,
-        worker_id: WorkerId,
-        snapshot_id: SnapshotId,
     },
 }
 
@@ -406,27 +524,29 @@ pub enum MigrationPhase {
     Transferring,
     Resuming,
 }
-
-pub enum SnapshotLocation {
-    Pool { pool_id: PoolId },
-}
 ```
+
+Note: the current `Suspended` variant tracks `worker_id` directly. When the pool abstraction is added, this will change to reference a `PoolId` / `SnapshotLocation` instead, decoupling snapshot storage from the worker that created it.
 
 ---
 
 ## Design Decisions
 
-1. **Snapshot compatibility** — Workers include a `compatibility_hash` (kernel + Firecracker version + VM config) in the handshake. The orchestrator rejects snapshot restore on workers with mismatched hashes. No best-effort attempts — mismatch falls back to cold start.
+1. **Snapshot compatibility** — Workers will include a `compatibility_hash` (kernel + Firecracker version + VM config) in the handshake. The orchestrator rejects snapshot restore on workers with mismatched hashes. No best-effort attempts — mismatch falls back to cold start.
 
-2. **Cloning uses same IP space** — Namespaces are isolated L2 domains, so cloned namespaces reuse the same IP space. Clone is fully transparent to the guest.
+2. **Guest-side suspend handshake** — Before taking a snapshot, the worker sends `PrepareSuspend` to guest-init via vsock. The guest flushes application state and responds with `SuspendReady`. This ensures a clean snapshot point. The guest-init protocol is implemented.
 
-3. **V1 disk handling: full snapshot with compression** — Snapshot the entire writable disk. For stateless workloads the delta is small and compresses well. Future optimization: guest-internal overlayfs separating base image (read-only, shareable) from guest writes (small overlay).
+3. **Cloning uses same IP space** — Namespaces are isolated L2 domains, so cloned namespaces reuse the same IP space. Clone is fully transparent to the guest.
 
-4. **Storage is orchestrator-managed** — Workers report pool inventory and capacity. Orchestrator makes all placement, eviction, and transfer decisions. This enables global policy (rebalancing, cost-aware placement) and supports future pool types (shared storage, EBS multi-attach).
+4. **V1 disk handling: full snapshot with compression** — Snapshot the entire writable disk. For stateless workloads the delta is small and compresses well. Future optimization: guest-internal overlayfs separating base image (read-only, shareable) from guest writes (small overlay).
 
-5. **Incremental migration deferred** — The protocol is designed to support it (transfer commands can express incremental operations), but v1 implements only full-snapshot migration. Pre-copy with dirty page tracking is a future optimization for reducing pause windows.
+5. **Storage is orchestrator-managed** — Workers report pool inventory and capacity. Orchestrator makes all placement, eviction, and transfer decisions. This enables global policy (rebalancing, cost-aware placement) and supports future pool types (shared storage, EBS multi-attach).
 
-6. **Concurrent operations during namespace snapshot** — Wait for all pods to reach a stable VMM state (Firecracker process snapshotable) before beginning the namespace snapshot. "Stable" means the VMM is running, not the guest application — the guest could still be booting.
+6. **Incremental migration deferred** — The protocol is designed to support it (transfer commands can express incremental operations), but v1 implements only full-snapshot migration. Pre-copy with dirty page tracking is a future optimization for reducing pause windows.
+
+7. **Concurrent operations during namespace snapshot** — Wait for all pods to reach a stable VMM state (Firecracker process snapshotable) before beginning the namespace snapshot. "Stable" means the VMM is running, not the guest application — the guest could still be booting.
+
+8. **Timeout-based failure detection** — All suspend/resume operations have timeout timers in the orchestrator. If a worker doesn't respond within the timeout, the orchestrator treats it as a failure and can retry or fall back to cold start.
 
 ## Open Questions
 
@@ -435,3 +555,5 @@ pub enum SnapshotLocation {
 2. **Pool capability discovery** — How rich should the pool capability model be? V1 is simple (Boot, Snapshot, Transfer), but future backends may need finer-grained capabilities (e.g. "supports incremental writes", "supports concurrent readers"). Extend as needed.
 
 3. **Shared pool semantics** — EBS multi-attach and similar shared storage has specific consistency semantics (e.g. no concurrent writers without coordination). How do we model this in the pool capability system? Defer until we have a concrete shared storage backend to target.
+
+4. **TAP drain timing** — The post-pause TAP drain (reading frames from the TAP fd after vCPUs are frozen) is not yet implemented. Need to determine if this is a practical concern — the guest-side `PrepareSuspend` handshake may be sufficient to ensure the guest has quiesced network activity before the snapshot.

@@ -231,6 +231,40 @@ pub fn extract_transport_ports(frame: &[u8]) -> Option<(u16, u16)> {
     Some((src_port, dst_port))
 }
 
+/// Extract TCP flags from an Ethernet frame (without vnet header).
+/// Returns the flags byte (offset 13 in TCP header): FIN=0x01, SYN=0x02, RST=0x04, PSH=0x08, ACK=0x10, URG=0x20.
+pub fn extract_tcp_flags(frame: &[u8]) -> Option<u8> {
+    if frame.len() < ETH_HDR_LEN + 20 {
+        return None;
+    }
+    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+    if ethertype != ETHERTYPE_IPV4 {
+        return None;
+    }
+    let protocol = frame[23];
+    if protocol != IP_PROTO_TCP {
+        return None;
+    }
+    let ihl = (frame[14] & 0x0f) as usize * 4;
+    let tcp_start = ETH_HDR_LEN + ihl;
+    if frame.len() < tcp_start + 14 {
+        return None;
+    }
+    Some(frame[tcp_start + 13])
+}
+
+/// Format TCP flags byte as human-readable string (e.g. "[SYN ACK]").
+pub fn format_tcp_flags(flags: u8) -> String {
+    let mut parts = Vec::new();
+    if flags & 0x02 != 0 { parts.push("SYN"); }
+    if flags & 0x10 != 0 { parts.push("ACK"); }
+    if flags & 0x08 != 0 { parts.push("PSH"); }
+    if flags & 0x01 != 0 { parts.push("FIN"); }
+    if flags & 0x04 != 0 { parts.push("RST"); }
+    if flags & 0x20 != 0 { parts.push("URG"); }
+    format!("[{}]", parts.join(" "))
+}
+
 /// Format a MAC address for logging.
 pub fn format_mac(bytes: &[u8; 6]) -> String {
     format!(

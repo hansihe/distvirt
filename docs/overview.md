@@ -20,7 +20,7 @@ Workspace members (from `Cargo.toml`):
 | `distvirt-activator` | Protocol activator runtime (WASM component support) |
 | `guest-image/guest-init` | Guest agent (PID 1 in the VM, static musl binary) |
 
-The `activators/` directory (excluded from the workspace) contains standalone activator components: `tcp`, `http2`, `spin`, `test-echo`, and `activator-types`.
+The `activators/` directory (excluded from the workspace) contains standalone activator components: `tcp`, `http2`, `postgres`, `spin`, `test-echo`, and `activator-types`.
 
 ---
 
@@ -50,8 +50,8 @@ The `activators/` directory (excluded from the workspace) contains standalone ac
 
 1. **Guest agent** — PID 1 in the microVM. Mounts container disks, configures networking, forks+execs workloads, streams output, reaps zombies. Communicates with the host over virtio-vsock.
 2. **Worker** — Manages local Firecracker VMs, the per-namespace networking fabric, container image preparation, and pod lifecycle. Reports events to the orchestrator.
-3. **Orchestrator** — Pure state machine that owns all planning: IP/MAC assignment, dependency ordering, service lifecycle, activation, and worker coordination. An async shell handles I/O.
-4. **CLI** (`dv`) — Two-layer design. Layer 1: task-oriented commands (`dv up`, `dv status`, `dv logs`, `dv connect`) with smart defaults and summarization. Layer 2: uniform resource commands (`dv get`, `dv describe`, `dv create`, `dv delete`) for scripting and power users. Authenticates via API key tokens stored in `~/.config/distvirt/credentials.toml` with named contexts. See [cli-design.md](cli-design.md) for full details.
+3. **Orchestrator** — Pure state machine that owns all planning: IP/MAC assignment, dependency ordering, service lifecycle, activation, and worker coordination. An async shell handles I/O. Internally structured as an outer orchestrator (worker management, scheduling, client routing) and per-namespace sub-state machines (workload lifecycle, services, reconciliation, WireGuard peers).
+4. **CLI** (`dv`) — Two-layer design. Layer 1: task-oriented commands (`dv up`, `dv status`, `dv logs`, `dv connect`, `dv deactivate`, `dv splice`) with smart defaults and summarization. Layer 2: uniform resource commands (`dv get`, `dv describe`, `dv create`, `dv delete`) for scripting and power users. Authenticates via API key tokens stored in `~/.config/distvirt/credentials.toml` with named contexts. See [cli-design.md](cli-design.md) for full details.
 
 ---
 
@@ -62,8 +62,8 @@ The host connects to the guest agent over **virtio-vsock** (port 1024), multiple
 Wire format: 4-byte LE length prefix + **JSON** body (serde). Shared via the `distvirt-guest-protocol` crate.
 
 Key messages:
-- **Host → Guest**: `AddContainer`, `StartContainer`, `ConfigureNetwork`, `Shutdown`
-- **Guest → Host**: `Ready`, `ContainerAdded`, `ContainerStarted`, `ContainerExited`, `NetworkConfigured`, `Error`
+- **Host → Guest**: `AddContainer`, `StartContainer`, `ConfigureNetwork`, `SignalContainer`, `SetClock`, `PrepareSuspend`, `Shutdown`
+- **Guest → Host**: `Ready`, `ContainerAdded`, `ContainerStarted`, `ContainerExited`, `ContainerSignaled`, `NetworkConfigured`, `ClockSet`, `SuspendReady`, `Error`
 
 Container output uses a separate yamux stream per container with framed `[stream_id: u8][length: u32 LE][payload]` chunks (1=stdout, 2=stderr).
 
@@ -77,9 +77,9 @@ Transport: **yamux** over any async byte stream (in-process `tokio::io::duplex` 
 
 Three-step handshake: `WorkerHello` → `WorkerAccepted` → `WorkerReady`.
 
-Key commands: `CreateNamespace`, `LaunchPod`, `StopPod`, `RegistrySync`, `CreateService`, `UpdateServiceBackend`, `ServiceReady`, `FabricRouteSync`, `Shutdown`.
+Key commands: `CreateNamespace`, `DestroyNamespace`, `LaunchPod`, `StopPod`, `SuspendPod`, `ResumePod`, `RegistrySync`, `RegistryUpdate`, `CreateService`, `UpdateServiceBackend`, `ServiceReady`, `DestroyService`, `FabricRouteSync`, `FabricRouteUpdate`, `AddWireGuardPeer`, `RemoveWireGuardPeer`, `DeleteSnapshot`, `Shutdown`.
 
-Key events: `PodRunning`, `PodExited`, `PodFailed`, `ServiceActivation`, `FabricRouteMiss`, `ServiceBackendNeed`.
+Key events: `PodRunning`, `PodExited`, `PodFailed`, `PodSuspended`, `PodSuspendFailed`, `NamespaceCreated`, `NamespaceFailed`, `NamespaceDestroyed`, `ServiceActivation`, `ServiceBackendNeed`, `FabricRouteMiss`.
 
 Log streams use separate yamux streams (out-of-band) to avoid head-of-line blocking.
 
@@ -87,11 +87,11 @@ Log streams use separate yamux streams (out-of-band) to avoid head-of-line block
 
 ## Client Protocol
 
-See [client-protocol-proposal.md](client-protocol-proposal.md) for full details.
+See [client-protocol.md](client-protocol.md) for full details.
 
 **gRPC** via tonic/prost. Proto definitions at `distvirt-client-protocol/proto/distvirt/client/v1/client.proto`.
 
-Unary RPCs: `CreateNamespace`, `UpdateNamespace`, `DeleteNamespace`, `GetNamespaceStatus`, `ListNamespaces`, `Splice`, `Unsplice`, `CloneNamespace`, `ListWorkers`, `GetWorker`, `ListPods`.
+Unary RPCs: `CreateNamespace`, `UpdateNamespace`, `DeleteNamespace`, `GetNamespaceStatus`, `ListNamespaces`, `Splice`, `Unsplice`, `CloneNamespace`, `ListWorkers`, `GetWorker`, `ListPods`, `DeactivateWorkload`, `ConnectNetwork`, `DisconnectNetwork`.
 
 Server-streaming RPCs: `WatchNamespaceStatus`, `StreamLogs`, `StreamEvents`.
 
@@ -104,7 +104,7 @@ See [networking-fabric.md](networking-fabric.md) for full details.
 Per-namespace userspace **L2 Ethernet switch** with a smoltcp-based IP gateway. Each pod's TAP device is a port on the switch.
 
 - **L2 switch** — MAC learning table, standard switch forwarding (known unicast → direct, unknown → flood).
-- **Gateway** (smoltcp at 172.16.0.1) — ARP responses, DNS service discovery from local registry, internet egress via TUN device + NAT.
+- **Gateway** (smoltcp, configurable per namespace, default 172.16.0.1) — ARP responses, DNS service discovery from local registry, internet egress via TUN device + NAT.
 - **Services** — Virtual IP/MAC entities on the fabric with buffering policies and protocol activators for scale-to-zero activation.
 - **Route table** — Pod-to-pod forwarding entries (remote worker or placeholder with buffer policy). Supports multi-worker fabric segments (future).
 
@@ -120,7 +120,10 @@ Activators are protocol-aware components that run on service entities in the fab
 
 Activator types:
 - **TCP** — SYN-based activation, filters RSTs and stale keepalives, replays buffered SYNs to backend.
+- **PostgreSQL** — Protocol-aware activation for Postgres connections.
 - **HTTP/2** (future) — Full H2 proxy with per-stream activation.
+
+Service processors support L3 (WASM-based flow tracking) and L4 (smoltcp-backed TCP stream management) modes.
 
 Activators in the `activators/` directory are built as standalone components. The `distvirt-activator` crate provides the runtime.
 
@@ -128,15 +131,15 @@ Activators in the `activators/` directory are built as standalone components. Th
 
 ## Ingress Adapters
 
-> **Status:** Design proposal — not yet implemented. See [ingress-adapters.md](ingress-adapters.md) for full details.
+See [ingress-adapters.md](ingress-adapters.md) for full details.
 
 Ingress adapters bridge external traffic into the per-namespace fabric. Adapters are worker-level resources that present virtual ports (`FramePort`) into each namespace's fabric instance. Configuration and key material are delivered by the orchestrator during the worker handshake.
 
-Planned adapter strategies:
+Adapter strategies:
 
-- **WireGuard (boringtun)** — Primary. Userspace WireGuard endpoint on the worker. Peer key maps to a namespace. Decapsulated packets are injected as L2 frames. Developers connect with standard WireGuard tooling and get direct network access. The CLI integrates via `dv connect` (embedded boringtun, no external tooling required).
-- **Reverse proxy** — L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric as a network endpoint. Zero client-side setup — shareable URLs for non-technical stakeholders.
-- **OS-level routing / NAT** — Host routing table entries or iptables DNAT rules pointing namespace subnets to the fabric's TUN device. Most transparent for infrastructure integration, but requires host-level privileges.
+- **WireGuard (boringtun)** — Primary. Implemented. Userspace WireGuard endpoint on the worker. Peer key maps to a namespace. Decapsulated packets are injected as L2 frames. Worker protocol supports `AddWireGuardPeer`/`RemoveWireGuardPeer` commands. The CLI integrates via `dv connect` (embedded boringtun, ephemeral keypair per connection) and `dv disconnect`. Client protocol provides `ConnectNetwork`/`DisconnectNetwork` RPCs.
+- **Reverse proxy** (future) — L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric as a network endpoint. Zero client-side setup — shareable URLs for non-technical stakeholders.
+- **OS-level routing / NAT** (future) — Host routing table entries or iptables DNAT rules pointing namespace subnets to the fabric's TUN device. Most transparent for infrastructure integration, but requires host-level privileges.
 
 ---
 
@@ -146,8 +149,9 @@ See [cli-design.md](cli-design.md) for full details.
 
 The `dv` CLI has two layers:
 
-- **Layer 1 — Task-oriented**: `dv up` (deploy from compose file), `dv down` (tear down namespace), `dv status` (smart overview that scales from namespace to workload detail), `dv logs` (stream workload output), `dv events` (activity stream showing activation cascades), `dv connect` (WireGuard tunnel into namespace via embedded boringtun), `dv clone` (clone namespace with scale-to-zero).
+- **Layer 1 — Task-oriented**: `dv up` (deploy from compose file), `dv down` (tear down namespace), `dv status` (smart overview that scales from namespace to workload detail), `dv logs` (stream workload output), `dv events` (activity stream showing activation cascades), `dv connect` / `dv disconnect` (WireGuard tunnel into namespace via embedded boringtun), `dv clone` (clone namespace with scale-to-zero), `dv deactivate` (hint to deactivate a workload), `dv splice` (take over workload identity for local dev).
 - **Layer 2 — Uniform resource**: `dv get <type>`, `dv describe <type> <name>`, `dv create`, `dv delete`. Resource types: service, workload, worker, pod, adapter. All support `-o json`.
+- **Auth commands**: `dv login` (save server + token), `dv context` (use/list/delete/show named contexts).
 
 Addressing: `<namespace>`, `<namespace>/<workload>`, `<namespace>/<resource-type>/<name>`. Namespaces are always explicit.
 
@@ -176,9 +180,9 @@ Trait-based container image preparation. Two implementations:
 
 ## VMM Abstraction
 
-Two-trait design separating factory (`Vmm`) from instance (`VmInstance`), fully async.
+Two-trait design separating factory (`Vmm`) from instance (`VmInstance`), fully async. Vmm provides `launch()` and `restore()` (from snapshot). VmInstance provides `connect_vsock()`, `tap()`, `wait()`, `kill()`, `snapshot()`.
 
-**Firecracker implementation**: Spawns `firecracker` process, configures via REST API over Unix socket (raw HTTP, no library). Sets up: boot source, rootfs drive (read-only), container drive (writable), virtio-net with vhost-net backend, vsock. Vsock connection via Firecracker's UDS-based proxy (`CONNECT <port>\n` handshake).
+**Firecracker implementation**: Spawns `firecracker` process, configures via REST API over Unix socket (raw HTTP, no library). Sets up: boot source, rootfs drive (read-only), container drive (writable), virtio-net with vhost-net backend, vsock. Vsock connection via Firecracker's UDS-based proxy (`CONNECT <port>\n` handshake). Supports snapshot creation (pause vCPUs + snapshot state) and restore from `SnapshotArtifacts`.
 
 ---
 
@@ -212,19 +216,17 @@ Two-trait design separating factory (`Vmm`) from instance (`VmInstance`), fully 
 
 ---
 
-## Planned: Snapshots, Suspend/Resume & Live Migration
+## Snapshots, Suspend/Resume & Live Migration
 
-> **Status:** Designed but not yet implemented. See [snapshots-migration.md](snapshots-migration.md) for full details.
+> **Status:** Suspend/resume is implemented end-to-end: VMM snapshot/restore, worker commands (`SuspendPod`, `ResumePod`, `DeleteSnapshot`), orchestrator workload states (`Suspending`, `Suspended`, `Resuming`), guest handshake (`PrepareSuspend`/`SuspendReady`), `ServiceActivation`-triggered demand-up, and `suspend_on_idle` policy. Live migration and namespace snapshots are not yet implemented. See [snapshots-migration.md](snapshots-migration.md) for full design.
 
 Three capabilities built on Firecracker's native VM snapshot/restore:
 
 - **Suspend/resume** — Scale-to-zero with fast restore (~5-10ms) instead of cold start (VM boot ~100ms+ plus application startup, which can take seconds to tens of seconds until ready). Orchestrator suspends idle workloads, stores snapshots to local storage, resumes from snapshot on traffic activation. Integrates with existing service entity buffering.
-- **Live migration** — Transparently move a running pod between workers (for draining, rebalancing). Suspend on source → transfer snapshot → resume on target. Fabric buffering makes migration invisible to the guest and its peers. Failure at any point safely falls back to source.
-- **Namespace snapshots** — Full namespace checkpoint to S3. All pods suspended at a consistent point, uploaded in parallel. Enables `dv clone` (restore under new namespace ID with same IP space) and disaster recovery.
+- **Live migration** (future) — Transparently move a running pod between workers (for draining, rebalancing). Suspend on source → transfer snapshot → resume on target. Fabric buffering makes migration invisible to the guest and its peers. Failure at any point safely falls back to source.
+- **Namespace snapshots** (future) — Full namespace checkpoint to S3. All pods suspended at a consistent point, uploaded in parallel. Enables `dv clone` (restore under new namespace ID with same IP space) and disaster recovery.
 
 Storage is modeled as **pools** (local, shared, remote) with capabilities (Boot, Snapshot, Transfer). Workers advertise pools at connect time; orchestrator manages all placement, eviction, and transfer decisions. V1: single local pool per worker + optional S3 remote pool.
-
-New protocol additions: `SuspendPod`, `ResumePod`, `TransferSnapshot` commands; `PodSuspended`, `SnapshotTransferred`, `SnapshotEvicted` events. New VMM trait methods: `snapshot()` and `restore()`. New workload states: `Suspending`, `Suspended`, `Migrating`, `Resuming`.
 
 ---
 
@@ -234,7 +236,6 @@ New protocol additions: `SuspendPod`, `ResumePod`, `TransferSnapshot` commands; 
 - **Multi-worker distribution** — TCP/TLS transport between orchestrator and remote workers, tunnel ports connecting fabric segments, cross-worker scheduling.
 - **Multi-container pods** — Multiple virtio-blk devices per VM, hot-plugging, independent container lifecycle.
 - **Config-from-file optimization** — Guest reads initial config from disk instead of waiting for vsock handshake, reducing boot latency.
-- **Protocol extensions** — Signal forwarding, exec support, capabilities (drop/add per OCI spec), read-only rootfs.
+- **Protocol extensions** — Exec support, capabilities (drop/add per OCI spec), read-only rootfs.
 - **Incremental migration (pre-copy)** — Firecracker dirty page tracking for minimal pause windows during live migration. Protocol supports it; deferred past v1.
 - **Snapshot pre-warming** — Speculatively distribute snapshots to workers where traffic is likely. Policy TBD.
-- **`dv splice`** — Take over a workload's identity in the namespace for local development. Builds on `dv connect` tunnel infrastructure, design TBD.

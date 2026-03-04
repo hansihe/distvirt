@@ -205,7 +205,7 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
             }
 
             let container_config = ContainerConfig {
-                entrypoint: entrypoint.unwrap_or_default(),
+                entrypoint: entrypoint.map(|e| vec![e]).unwrap_or_default(),
                 args,
                 env,
                 working_dir: workdir,

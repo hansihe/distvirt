@@ -20,7 +20,7 @@ if [[ "${DISTVIRT_E2E_RUNNING:-}" != "1" ]]; then
 
     log "building binaries (as $(whoami))..."
     "$CARGO" build --manifest-path "$REPO_ROOT/Cargo.toml" \
-        -p distvirt-orchestrator --features bin \
+        -p distvirt-orchestrator \
         -p distvirt-worker \
         -p distvirt-cli
 

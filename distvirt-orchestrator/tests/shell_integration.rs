@@ -84,7 +84,7 @@ fn test_spec() -> NamespaceSpec {
                 container_id: "main".to_string(),
                 image_ref: "docker.io/library/alpine:latest".to_string(),
                 config: ContainerConfig {
-                    entrypoint: "/bin/echo".to_string(),
+                    entrypoint: vec!["/bin/echo".to_string()],
                     args: vec!["hello".to_string()],
                     env: vec![],
                     working_dir: None,
@@ -101,6 +101,7 @@ fn test_spec() -> NamespaceSpec {
                 gateway: Ipv4Addr::new(172, 16, 0, 1),
                 netmask: "255.255.255.0".to_string(),
             },
+            suspend_on_idle: false,
         },
     );
 

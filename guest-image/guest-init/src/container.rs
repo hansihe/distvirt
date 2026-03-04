@@ -156,6 +156,13 @@ impl ContainerManager {
             None
         };
 
+        // Create a new PID namespace so the container process becomes PID 1.
+        // unshare(CLONE_NEWPID) affects the *next* fork — the child will be PID 1
+        // in the new namespace, while the parent still sees the real PID.
+        if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
+            bail!("unshare(CLONE_NEWPID): {}", std::io::Error::last_os_error());
+        }
+
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             // OwnedFds drop automatically here.
@@ -408,7 +415,13 @@ fn child_exec_inner(
         bail!("setsid: {}", std::io::Error::last_os_error());
     }
 
-    // Set hostname before chroot (needs root, do before setuid).
+    // Isolate mount and UTS namespaces so mounts and hostname changes are
+    // scoped to this container and don't affect other containers or guest-init.
+    if unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWUTS) } != 0 {
+        bail!("unshare(CLONE_NEWNS|CLONE_NEWUTS): {}", std::io::Error::last_os_error());
+    }
+
+    // Set hostname (now scoped to this container's UTS namespace).
     if let Some(name) = hostname {
         let name_c = CString::new(name)?;
         if unsafe { libc::sethostname(name_c.as_ptr(), name.len()) } != 0 {

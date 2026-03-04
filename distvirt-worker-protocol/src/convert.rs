@@ -84,7 +84,12 @@ pub fn write_container_config(
     builder: &mut schema::container_config::Builder<'_>,
     val: &ContainerConfig,
 ) {
-    builder.set_entrypoint(&val.entrypoint);
+    {
+        let mut ep = builder.reborrow().init_entrypoint(val.entrypoint.len() as u32);
+        for (i, e) in val.entrypoint.iter().enumerate() {
+            ep.set(i as u32, e);
+        }
+    }
     {
         let mut args = builder.reborrow().init_args(val.args.len() as u32);
         for (i, a) in val.args.iter().enumerate() {
@@ -139,7 +144,14 @@ pub fn read_container_config(
     let wd = reader.get_working_dir()?.to_str()?;
     let hostname = reader.get_hostname()?.to_str()?;
     Ok(ContainerConfig {
-        entrypoint: reader.get_entrypoint()?.to_string()?,
+        entrypoint: {
+            let ep = reader.get_entrypoint()?;
+            let mut ep_vec = Vec::with_capacity(ep.len() as usize);
+            for i in 0..ep.len() {
+                ep_vec.push(ep.get(i)?.to_string()?);
+            }
+            ep_vec
+        },
         args: args_vec,
         env: env_vec,
         working_dir: if wd.is_empty() {

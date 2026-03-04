@@ -61,8 +61,8 @@ struct PodNetworkConfig {
 # overrides. Explicit values here take precedence; unset fields fall through
 # to image defaults.
 struct ContainerConfig {
-  entrypoint @0 :Text;
-  # Main executable path.
+  entrypoint @0 :List(Text);
+  # Entrypoint command (e.g. ["/bin/sh", "-c"]). Merged with image entrypoint/cmd by the worker.
   args @1 :List(Text);
   # Arguments to the entrypoint.
   env @2 :List(Text);

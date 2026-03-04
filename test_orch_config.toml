@@ -1,0 +1,8 @@
+[grpc]
+listen = "127.0.0.1:60001"
+
+[workers]
+listen = "127.0.0.1:60002"
+
+[wireguard]
+listen_port = 60003

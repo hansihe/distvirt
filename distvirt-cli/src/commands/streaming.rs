@@ -28,13 +28,15 @@ pub async fn logs(
 pub async fn events(
     mut client: Client,
     namespace_id: &str,
+    workloads: &[String],
+    services: &[String],
     _follow: bool,
 ) -> anyhow::Result<()> {
     let mut stream = client
         .stream_events(StreamEventsRequest {
             namespace_id: namespace_id.to_string(),
-            workload_id: None,
-            service_id: None,
+            workload_ids: workloads.to_vec(),
+            service_ids: services.to_vec(),
         })
         .await
         .map_err(client::handle_grpc_error)?

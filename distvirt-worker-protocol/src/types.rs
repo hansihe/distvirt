@@ -58,7 +58,7 @@ pub struct PodNetworkConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContainerConfig {
-    pub entrypoint: String,
+    pub entrypoint: Vec<String>,
     pub args: Vec<String>,
     pub env: Vec<String>,
     pub working_dir: Option<String>,

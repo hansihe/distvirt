@@ -688,4 +688,4 @@ These are out of scope but the protocol is designed to accommodate them:
 - **Exec**: `ExecInPod { pod_id, container_id, command }` — run a command in a running container.
 - **Tunnel Management**: `ConnectFabric { namespace, peer_worker, tunnel_config }` — orchestrator tells workers to establish tunnel ports between each other.
 - **Autoscaling / Scale-to-Zero**: orchestrator-level concerns built on the service model — the orchestrator reacts to `ServiceActivation` events by scheduling pods, and manages service backend assignment. No additional worker protocol changes needed.
-- **Protocol Activators**: TCP activation is in the protocol via `ActivatorConfig::Tcp` on `ServicePolicy`. HTTP/2 stream-aware activation (`ActivatorConfig::Http2`) is defined but not yet implemented.
+- **Protocol Activators**: TCP activation (`ActivatorConfig::Tcp`) and HTTP/2 stream-aware activation (`ActivatorConfig::Http2`) are both implemented and functional via WASM components on service entities.

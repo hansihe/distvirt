@@ -15,6 +15,9 @@ service DistvirtClient {
     rpc Splice(SpliceRequest) returns (SpliceResponse);
     rpc Unsplice(UnspliceRequest) returns (UnspliceResponse);
 
+    // Workload lifecycle hints
+    rpc DeactivateWorkload(DeactivateWorkloadRequest) returns (DeactivateWorkloadResponse);
+
     // Cloning
     rpc CloneNamespace(CloneNamespaceRequest) returns (CloneNamespaceResponse);
 
@@ -44,6 +47,7 @@ message NamespaceSpec {
 message WorkloadSpec {
     PodNetworkConfig network = 1;
     repeated ContainerSpec containers = 2;
+    bool suspend_on_idle = 3;
 }
 
 message ContainerSpec {
@@ -89,6 +93,9 @@ message ContainerConfig {
     map<string, string> env = 3;
     uint64 memory_mb = 4;
     uint32 vcpus = 5;
+    string working_dir = 6;
+    string user = 7;
+    string hostname = 8;
 }
 
 message ServiceNetworkConfig {
@@ -103,7 +110,13 @@ message NetworkConfig {
 message ExposeSpec {
     uint32 container_port = 1;
     uint32 host_port = 2;
-    string protocol = 3;
+    ExposeProtocol protocol = 3;
+}
+
+enum ExposeProtocol {
+    EXPOSE_PROTOCOL_UNSPECIFIED = 0;
+    EXPOSE_PROTOCOL_TCP = 1;
+    EXPOSE_PROTOCOL_UDP = 2;
 }
 
 message ServicePolicy {
@@ -189,6 +202,8 @@ message ServiceStatusReport {
     ServiceState state = 2;
     bool activation_enabled = 3;
     bool spliced = 4;
+    string ip = 5;
+    string mac = 6;
 }
 
 message ServiceState {
@@ -231,6 +246,18 @@ message UnspliceRequest {
     string workload_id = 2;
 }
 message UnspliceResponse {}
+
+// --- Deactivate Workload ---
+
+message DeactivateWorkloadRequest {
+    string namespace_id = 1;
+    string workload_id = 2;
+}
+
+message DeactivateWorkloadResponse {
+    bool deactivated = 1;       // true if workload was deactivated
+    string reason = 2;          // human-readable explanation when not deactivated
+}
 
 // --- Connect / Disconnect (Developer Network Access) ---
 
@@ -316,14 +343,17 @@ enum PodState {
     POD_STATE_UNSPECIFIED = 0;
     POD_STATE_LAUNCHING = 1;
     POD_STATE_RUNNING = 2;
+    POD_STATE_SUSPENDING = 3;
+    POD_STATE_SUSPENDED = 4;
+    POD_STATE_RESUMING = 5;
 }
 
 // --- Events ---
 
 message StreamEventsRequest {
     string namespace_id = 1;
-    optional string workload_id = 2;
-    optional string service_id = 3;
+    repeated string workload_ids = 2;
+    repeated string service_ids = 3;
 }
 
 message NamespaceEvent {
@@ -344,6 +374,10 @@ message WorkloadEvent {
         WorkloadPodFailed pod_failed = 6;
         WorkloadSpliced spliced = 7;
         WorkloadUnspliced unspliced = 8;
+        WorkloadPodSuspending pod_suspending = 9;
+        WorkloadPodSuspended pod_suspended = 10;
+        WorkloadPodSuspendFailed pod_suspend_failed = 11;
+        WorkloadPodResuming pod_resuming = 12;
     }
 }
 
@@ -362,11 +396,30 @@ message WorkloadPodRunning {
 }
 
 message WorkloadPodStopped {
-    string reason = 1;
+    int32 exit_code = 1;
 }
 
 message WorkloadPodFailed {
     string reason = 1;
+}
+
+message WorkloadPodSuspending {
+    string pod_id = 1;
+    string worker_id = 2;
+}
+
+message WorkloadPodSuspended {
+    string worker_id = 1;
+    string snapshot_id = 2;
+}
+
+message WorkloadPodSuspendFailed {
+    string reason = 1;
+}
+
+message WorkloadPodResuming {
+    string pod_id = 1;
+    string worker_id = 2;
 }
 
 message WorkloadSpliced {
@@ -389,7 +442,12 @@ message ServiceEvent {
 }
 
 message ServiceActivated {
-    string trigger = 1;
+    ServiceActivationTrigger trigger = 1;
+}
+
+enum ServiceActivationTrigger {
+    SERVICE_ACTIVATION_TRIGGER_UNSPECIFIED = 0;
+    SERVICE_ACTIVATION_TRIGGER_TRAFFIC = 1;
 }
 
 message ServiceBackendReady {}
@@ -399,13 +457,23 @@ message ServiceIdleTimerStarted {
 }
 
 message ServiceIdleTimerCancelled {
-    string reason = 1;
+    IdleTimerCancelReason reason = 1;
+}
+
+enum IdleTimerCancelReason {
+    IDLE_TIMER_CANCEL_REASON_UNSPECIFIED = 0;
+    IDLE_TIMER_CANCEL_REASON_NEW_TRAFFIC = 1;
 }
 
 message ServiceIdleTimeoutFired {}
 
 message ServiceDeactivated {
-    string reason = 1;
+    ServiceDeactivationReason reason = 1;
+}
+
+enum ServiceDeactivationReason {
+    SERVICE_DEACTIVATION_REASON_UNSPECIFIED = 0;
+    SERVICE_DEACTIVATION_REASON_IDLE_TIMEOUT = 1;
 }
 
 // --- Streaming (Logs, Status Watch) ---

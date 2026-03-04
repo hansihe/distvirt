@@ -3,38 +3,30 @@ name = "distvirt-orchestrator"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-shell = ["dep:tokio", "dep:anyhow", "dep:x25519-dalek", "dep:rand", "dep:futures-lite"]
-grpc = ["shell", "dep:tonic", "dep:prost", "dep:tokio-stream", "dep:distvirt-client-protocol"]
-bin = ["grpc", "dep:toml", "dep:env_logger", "dep:clap"]
-
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread"], optional = true }
-anyhow = { version = "1", optional = true }
-tonic = { version = "0.12", optional = true }
-prost = { version = "0.13", optional = true }
-tokio-stream = { version = "0.1", optional = true }
-distvirt-client-protocol = { path = "../distvirt-client-protocol", optional = true }
-x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"], optional = true }
-rand = { version = "0.8", optional = true }
-futures-lite = { version = "2.6.1", optional = true }
-toml = { version = "0.8", optional = true }
-env_logger = { version = "0.11", optional = true }
-clap = { version = "4", features = ["derive"], optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread"] }
+anyhow = "1"
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = "0.1"
+distvirt-client-protocol = { path = "../distvirt-client-protocol" }
+x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
+rand = "0.8"
+futures-lite = "2.6.1"
+toml = "0.8"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1"
 stateright = "0.31"
-tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 [[bin]]
 name = "distvirt-orchestrator"
 path = "src/main.rs"
-required-features = ["bin"]
 
 [[test]]
 name = "shell_integration"
-required-features = ["shell"]

@@ -195,6 +195,26 @@ Without `-f`, shows recent history. With `-f`, live stream.
 
 Filters: `--workload <name>`, `--service <name>`.
 
+### `dv deactivate`
+
+Hint the orchestrator to deactivate a workload immediately, skipping the idle timeout. Only takes effect if the workload has no active demand — if any service on the workload has recent activation signals, the hint is ignored and the workload stays running.
+
+This is useful during development to test scale-to-zero behavior without waiting for idle timeouts to expire.
+
+```
+dv deactivate <namespace>/<workload>
+```
+
+```
+$ dv deactivate myapp/api
+Workload api deactivated — pod stopping, services returning to idle.
+
+$ dv deactivate myapp/api
+Workload api has active demand (service grpc: backend_need=active) — not deactivating.
+```
+
+The orchestrator performs the same deactivation sequence as a normal idle timeout: stops the pod, clears service backends, workload goes dormant. If new traffic arrives at any of the workload's services, normal activation fires and the workload comes back up.
+
 ### `dv connect`
 
 Connect your local machine to a namespace's network via WireGuard. Runs in the foreground, holds the tunnel open. After connecting, all services in the namespace are reachable by IP and DNS name.
@@ -282,7 +302,7 @@ All support `-o json` for machine-readable output.
 ### Examples
 
 ```
-dv get services -n myapp
+dv get services -n myapp              # list services with IPs, MACs, state
 dv get workloads -n myapp
 dv get workers
 dv get pods -n myapp

@@ -154,7 +154,7 @@ fn test_container_spec() -> ContainerSpec {
         container_id: "main".into(),
         image_ref: "test-image:latest".into(),
         config: ContainerConfig {
-            entrypoint: "/bin/sh".into(),
+            entrypoint: vec!["/bin/sh".into()],
             args: vec![],
             env: vec![],
             working_dir: None,
@@ -174,6 +174,7 @@ fn single_service_spec() -> NamespaceSpec {
         WorkloadSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
+            suspend_on_idle: false,
         },
     );
     let mut services = HashMap::new();
@@ -201,12 +202,14 @@ fn multi_service_spec() -> NamespaceSpec {
         WorkloadSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
+            suspend_on_idle: false,
         },
     );
     workloads.insert(
         WorkloadId("svc2".into()),
         WorkloadSpec {
             containers: vec![test_container_spec()],
+            suspend_on_idle: false,
             network: PodNetworkConfig {
                 ip: Ipv4Addr::new(172, 16, 0, 11),
                 mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
@@ -252,6 +255,7 @@ fn activation_only_spec() -> NamespaceSpec {
         WorkloadSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
+            suspend_on_idle: false,
         },
     );
     let mut services = HashMap::new();

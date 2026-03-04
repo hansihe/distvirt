@@ -109,6 +109,38 @@ pub async fn status(mut client: Client, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn deactivate(mut client: Client, target: &str) -> anyhow::Result<()> {
+    let (namespace_id, workload_id) = parse_target(target);
+    let workload_id = workload_id
+        .ok_or_else(|| anyhow::anyhow!("target must be namespace/workload (e.g. myapp/api)"))?;
+
+    let resp = client
+        .deactivate_workload(DeactivateWorkloadRequest {
+            namespace_id: namespace_id.to_string(),
+            workload_id: workload_id.to_string(),
+        })
+        .await
+        .map_err(client::handle_grpc_error)?;
+
+    let resp = resp.into_inner();
+    if resp.deactivated {
+        eprintln!(
+            "Workload {} deactivated — pod stopping, services returning to idle.",
+            workload_id
+        );
+    } else {
+        eprintln!(
+            "Workload {} has active demand — not deactivating.",
+            workload_id
+        );
+        if !resp.reason.is_empty() {
+            eprintln!("  Reason: {}", resp.reason);
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn clone_namespace(
     mut client: Client,
     source: &str,
@@ -175,12 +207,16 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
                 env,
                 memory_mb: 0,
                 vcpus: 0,
+                working_dir: svc.working_dir.clone().unwrap_or_default(),
+                user: svc.user.clone().unwrap_or_default(),
+                hostname: svc.hostname.clone().unwrap_or_default(),
             }),
         };
 
         let workload = WorkloadSpec {
             network: Some(PodNetworkConfig { ip, mac }),
             containers: vec![container],
+            suspend_on_idle: false,
         };
 
         let expose: Vec<ExposeSpec> = svc
@@ -190,8 +226,8 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
                 container_port: p.container_port as u32,
                 host_port: p.host_port as u32,
                 protocol: match p.protocol {
-                    distvirt_compose::PortProtocol::Tcp => "tcp".to_string(),
-                    distvirt_compose::PortProtocol::Udp => "udp".to_string(),
+                    distvirt_compose::PortProtocol::Tcp => ExposeProtocol::Tcp.into(),
+                    distvirt_compose::PortProtocol::Udp => ExposeProtocol::Udp.into(),
                 },
             })
             .collect();

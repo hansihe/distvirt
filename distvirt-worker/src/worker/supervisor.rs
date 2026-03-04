@@ -14,7 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::fabric::{Fabric, FabricPort};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
-use crate::managed_vm::{ImageOverrides, ManagedVm, merge_config};
+use crate::managed_vm::ManagedVm;
+use crate::oci;
 use crate::task_handle::TaskHandle;
 use crate::vmm::{NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
 
@@ -274,24 +275,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         }
     };
 
-    let capture_output = container.config.capture_output;
     let config = if let Some(ref oci_config) = artifact.oci_config {
-        let overrides = ImageOverrides {
-            entrypoint: if container.config.entrypoint.is_empty() {
-                None
-            } else {
-                Some(container.config.entrypoint.clone())
-            },
-            args: container.config.args.clone(),
-            env: container.config.env.clone(),
-            working_dir: container.config.working_dir.clone(),
-            uid: container.config.uid,
-            gid: container.config.gid,
-            hostname: container.config.hostname.clone(),
-        };
-        let mut cfg = merge_config(oci_config, &overrides)?;
-        cfg.capture_output = capture_output;
-        cfg
+        oci::merge_config(oci_config, &container.config)?
     } else {
         container.config
     };
@@ -732,7 +717,7 @@ mod tests {
             container_id: "main".to_string(),
             image_ref: "test-image:latest".to_string(),
             config: ContainerConfig {
-                entrypoint: "/bin/echo".to_string(),
+                entrypoint: vec!["/bin/echo".to_string()],
                 args: vec!["hello".to_string()],
                 env: vec![],
                 working_dir: None,

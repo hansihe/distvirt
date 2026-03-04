@@ -1,6 +1,6 @@
 # Ingress Adapters
 
-> **Status:** This document is a design proposal. No ingress adapter implementation exists yet in the codebase.
+> **Status:** The core adapter framework and WireGuard adapter are implemented. Reverse proxy and OS-level routing adapters are not yet implemented (protocol stubs exist).
 
 Ingress adapters provide external access into the networking fabric. The fabric is an isolated per-namespace L2 network — adapters bridge traffic from outside into it, allowing developers and external systems to reach services and pods within a namespace.
 
@@ -47,7 +47,7 @@ Key material (WireGuard private keys, TLS certs) derives from the cluster identi
 
 ## Adapter Strategies
 
-### WireGuard (boringtun) — Primary
+### WireGuard (boringtun) — Primary [Implemented]
 
 A userspace WireGuard endpoint running at the worker level. Developers connect with standard WireGuard tooling and get direct network access to their staging namespace.
 
@@ -75,7 +75,9 @@ A userspace WireGuard endpoint running at the worker level. Developers connect w
 
 **Integration**: The adapter owns the UDP socket and WireGuard state (private key delivered by the orchestrator during handshake, derived from cluster identity). Per-namespace, it creates a virtual port on the fabric. Incoming packets from a peer are decapsulated, an Ethernet header is constructed (using the peer's assigned IP for ARP/MAC resolution), and the frame is injected into the fabric. Return traffic from the fabric is encapsulated and sent back through the WireGuard tunnel. Since all workers share the same WireGuard identity, namespace migration between workers is transparent to clients.
 
-### Reverse Proxy — For Shareable Access
+### Reverse Proxy — For Shareable Access [Not Implemented]
+
+> Protocol stubs exist in the worker protocol schema (`AdapterConfig::ReverseProxy`), but no implementation yet.
 
 An L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric. Useful for sharing staging environments with non-technical stakeholders — "here's a URL for the staging frontend."
 
@@ -101,7 +103,9 @@ An L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric. 
 
 **Integration**: Unlike WireGuard (which injects raw frames), the reverse proxy adapter participates in the fabric as a network endpoint. It resolves service IPs via the DNS registry, sends traffic through the normal fabric path, and benefits from service entity features (readiness gating, activation) automatically.
 
-### OS-Level Routing / NAT
+### OS-Level Routing / NAT [Not Implemented]
+
+> Protocol stubs exist in the worker protocol schema (`AdapterConfig::OsRouting`), but no implementation yet.
 
 Makes namespace subnets routable from the host network. The most transparent option for infrastructure integration.
 

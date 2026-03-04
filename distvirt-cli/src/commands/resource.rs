@@ -55,8 +55,29 @@ pub async fn get(
                 }
             }
         }
+        "services" => {
+            let ns = namespace.ok_or_else(|| {
+                anyhow::anyhow!("--namespace is required for listing services")
+            })?;
+            let resp = client
+                .get_namespace_status(GetNamespaceStatusRequest {
+                    namespace_id: ns.to_string(),
+                })
+                .await
+                .map_err(client::handle_grpc_error)?;
+            let report = resp
+                .into_inner()
+                .status
+                .ok_or_else(|| anyhow::anyhow!("server returned empty status"))?;
+            match output {
+                OutputFormat::Text => format::print_service_table(&report.services),
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&format::services_to_json(&report.services))?);
+                }
+            }
+        }
         other => {
-            anyhow::bail!("unknown resource type: '{}'. Try: namespaces, workers, pods", other);
+            anyhow::bail!("unknown resource type: '{}'. Try: namespaces, workers, pods, services", other);
         }
     }
     Ok(())

@@ -147,7 +147,7 @@ Each unary RPC gets a single response. Errors use standard gRPC status codes (NO
 
 ### Server-Streaming RPCs
 
-> **Note:** `WatchNamespaceStatus`, `StreamLogs`, and `StreamEvents` are defined in the proto and have gRPC handler stubs, but currently return "not yet implemented" status in the server code.
+> **Note:** `StreamLogs` and `StreamEvents` are implemented. `WatchNamespaceStatus` is defined in the proto but not yet wired to the event streaming system.
 
 - **WatchNamespaceStatus**: Pushes a `NamespaceStatusEvent` whenever any workload or service state changes within the namespace. The first message is always the current full status (so the client doesn't need a separate `GetNamespaceStatus` call). Subsequent messages are full snapshots (see Status Watch Design below).
 - **StreamLogs**: Pushes log chunks as they arrive. The client specifies an optional `workload_id` filter.

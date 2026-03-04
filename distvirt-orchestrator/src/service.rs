@@ -19,6 +19,7 @@ pub enum ServiceInput {
     ServiceActivation,
     ServiceBackendNeed { need: BackendNeed },
     TimerFired { timer_key: TimerKey },
+    ForceDeactivate,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +166,29 @@ impl ServiceStateMachine {
                         && *backend_need == BackendNeed::None
                         && self.has_activation
                     {
+                        outputs.push(ServiceOutput::DemandDown);
+                        outputs.push(ServiceOutput::BroadcastWorkerCommand(
+                            WorkerCommand::UpdateServiceBackend {
+                                namespace_id: namespace_id.clone(),
+                                service_id: self.service_id.clone(),
+                                backend: None,
+                            },
+                        ));
+                        self.state = ServiceState::Idle;
+                    }
+                }
+            }
+            ServiceInput::ForceDeactivate => {
+                if let ServiceState::Active {
+                    ref backend_need,
+                    ref idle_timer,
+                    ..
+                } = self.state
+                {
+                    if *backend_need == BackendNeed::None && self.has_activation {
+                        if let Some(tk) = idle_timer.clone() {
+                            outputs.push(ServiceOutput::TimerCancel(tk));
+                        }
                         outputs.push(ServiceOutput::DemandDown);
                         outputs.push(ServiceOutput::BroadcastWorkerCommand(
                             WorkerCommand::UpdateServiceBackend {

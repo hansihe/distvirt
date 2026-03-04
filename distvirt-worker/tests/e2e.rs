@@ -238,7 +238,7 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
             container_id: "ctr-echo".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/echo".into(),
+                entrypoint: vec!["/bin/echo".into()],
                 args: vec!["hello".into(), "world".into()],
                 env: vec![],
                 working_dir: None,
@@ -313,7 +313,7 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
             container_id: "ctr-exit".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec!["-c".into(), "exit 42".into()],
                 env: vec![],
                 working_dir: None,
@@ -376,7 +376,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
             container_id: "ctr-stop".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sleep".into(),
+                entrypoint: vec!["/bin/sleep".into()],
                 args: vec!["3600".into()],
                 env: vec![],
                 working_dir: None,
@@ -448,7 +448,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
             container_id: "ctr-destroy".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sleep".into(),
+                entrypoint: vec!["/bin/sleep".into()],
                 args: vec!["3600".into()],
                 env: vec![],
                 working_dir: None,
@@ -515,7 +515,7 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
             container_id: "ctr-force".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sleep".into(),
+                entrypoint: vec!["/bin/sleep".into()],
                 args: vec!["3600".into()],
                 env: vec![],
                 working_dir: None,
@@ -573,7 +573,7 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
             container_id: "ctr-fail".into(),
             image_ref: "docker.io/library/this-image-does-not-exist:99.99.99".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/true".into(),
+                entrypoint: vec!["/bin/true".into()],
                 args: vec![],
                 env: vec![],
                 working_dir: None,
@@ -629,7 +629,7 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
             container_id: "ctr-env".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec!["-c".into(), "echo MY_VAR=$MY_VAR && pwd".into()],
                 env: vec!["MY_VAR=hello_from_env".into()],
                 working_dir: Some("/tmp".into()),
@@ -706,7 +706,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
             container_id: "ctr-dns".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec!["-c".into(), "nslookup myservice 2>&1 || true".into()],
                 env: vec![],
                 working_dir: None,
@@ -792,7 +792,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
             container_id: "ctr-tcp-act".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec!["-c".into(), "nc -w 1 10.0.0.99 80 || true".into()],
                 env: vec![],
                 working_dir: None,
@@ -879,7 +879,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
             container_id: "ctr-backend".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec![
                     "-c".into(),
                     "nc -l -w 5 -p 80".into(),
@@ -936,7 +936,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
             container_id: "ctr-client".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec![
                     "-c".into(),
                     "echo hello-service | nc -w 5 10.0.0.99 80".into(),
@@ -1033,7 +1033,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
             container_id: "ctr-backend".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec![
                     "-c".into(),
                     "nc -l -w 5 -p 80".into(),
@@ -1073,7 +1073,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
             container_id: "ctr-client".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec![
                     "-c".into(),
                     "echo hello-buffered | nc -w 5 10.0.0.99 80".into(),
@@ -1222,7 +1222,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
             container_id: "ctr-suspend".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sleep".into(),
+                entrypoint: vec!["/bin/sleep".into()],
                 args: vec!["3600".into()],
                 env: vec![],
                 working_dir: None,
@@ -1366,7 +1366,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
-            timeout_ms: 30000,
+            timeout_ms: 5000,
             activator: None,
         },
     })
@@ -1381,10 +1381,10 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             container_id: "ctr-server".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
+                entrypoint: vec!["/bin/sh".into()],
                 args: vec![
                     "-c".into(),
-                    "while true; do echo pong | nc -l -p 80 -w 10; done".into(),
+                    "while true; do echo pong | nc -l -p 80; done".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -1429,8 +1429,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             container_id: "ctr-client-pre".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
-                args: vec!["-c".into(), "nc -w 5 10.0.0.99 80".into()],
+                entrypoint: vec!["/bin/sh".into()],
+                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -1523,8 +1523,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             container_id: "ctr-client-post".into(),
             image_ref: "docker.io/library/alpine:latest".into(),
             config: ContainerConfig {
-                entrypoint: "/bin/sh".into(),
-                args: vec!["-c".into(), "nc -w 5 10.0.0.99 80".into()],
+                entrypoint: vec!["/bin/sh".into()],
+                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -1570,6 +1570,285 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     conn.send_command(&WorkerCommand::DeleteSnapshot {
         snapshot_id: "snap-net".into(),
+    })
+    .await?;
+
+    shutdown_worker(&mut conn, worker_handle).await?;
+
+    Ok(())
+}
+
+/// Test the full activation-on-demand flow with suspend/resume:
+/// a client sends traffic while the server pod is suspended, the TCP activator
+/// buffers the SYN and signals BackendNeed, the orchestrator resumes the pod,
+/// and the buffered traffic is flushed so the client gets its response.
+///
+/// Flow:
+/// 1. Launch server pod, set up service with TCP activator, verify connectivity
+/// 2. Suspend the server pod
+/// 3. Clear the service backend (no backend available)
+/// 4. Launch a client pod that sends traffic to the service VIP
+/// 5. TCP activator buffers the SYN and emits ServiceBackendNeed::Traffic
+/// 6. Resume the server pod from the snapshot
+/// 7. Re-point service backend at resumed pod, mark ready (flushes buffered SYN)
+/// 8. Verify the client receives the server's response
+#[tokio::test]
+async fn test_suspend_resume_activation() -> anyhow::Result<()> {
+    if !should_run() {
+        return Ok(());
+    }
+
+    let (mut conn, worker_handle) = setup_with_activators().await?;
+
+    // Create namespace
+    conn.send_command(&WorkerCommand::CreateNamespace {
+        namespace_id: "ns-act-resume".into(),
+        network: test_network_config(),
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::NamespaceCreated { .. })
+    })
+    .await?;
+
+    // Create service with TCP activator at 10.0.0.99
+    conn.send_command(&WorkerCommand::CreateService {
+        namespace_id: "ns-act-resume".into(),
+        service_id: "svc-act".into(),
+        ip: Ipv4Addr::new(10, 0, 0, 99),
+        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
+        policy: ServicePolicy {
+            buffer_frames: 64,
+            timeout_ms: 10000,
+            activator: Some(ActivatorConfig::Tcp {
+                ports: None,
+                tcp_only: true,
+                max_flows: 1024,
+            }),
+        },
+    })
+    .await?;
+
+    // Launch server pod with a persistent TCP listener
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-act-resume".into(),
+        pod_id: "pod-server".into(),
+        network: test_pod_network_config(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-server".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: vec!["/bin/sh".into()],
+                args: vec![
+                    "-c".into(),
+                    "while true; do echo pong | nc -l -p 80; done".into(),
+                ],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: false,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server")
+    })
+    .await?;
+
+    // Point service at server pod and mark ready
+    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+        namespace_id: "ns-act-resume".into(),
+        service_id: "svc-act".into(),
+        backend: Some(ServiceBackend {
+            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        }),
+    })
+    .await?;
+
+    conn.send_command(&WorkerCommand::ServiceReady {
+        namespace_id: "ns-act-resume".into(),
+        service_id: "svc-act".into(),
+    })
+    .await?;
+
+    // Pre-suspend sanity check: verify connectivity
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-act-resume".into(),
+        pod_id: "pod-pre-check".into(),
+        network: test_pod_network_config_2(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-pre-check".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: vec!["/bin/sh".into()],
+                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80".into()],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: true,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-pre-check")
+    })
+    .await?;
+
+    let log_str = drain_log_stream(&mut conn).await?;
+    assert!(
+        log_str.contains("pong"),
+        "expected 'pong' in pre-suspend check, got: {:?}",
+        log_str
+    );
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-pre-check")
+    })
+    .await?;
+    eprintln!("e2e: pre-suspend connectivity verified");
+
+    // --- Suspend the server pod ---
+    conn.send_command(&WorkerCommand::SuspendPod {
+        namespace_id: "ns-act-resume".into(),
+        pod_id: "pod-server".into(),
+        snapshot_id: "snap-act".into(),
+    })
+    .await?;
+
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(
+            e,
+            WorkerEvent::PodSuspended { .. } | WorkerEvent::PodSuspendFailed { .. }
+        )
+    })
+    .await?;
+
+    if let WorkerEvent::PodSuspendFailed { error, .. } = &event {
+        anyhow::bail!("suspend failed: {}", error);
+    }
+    eprintln!("e2e: server pod suspended");
+
+    // Clear the service backend — pod is suspended, no backend available.
+    // The activator will now buffer incoming traffic and signal BackendNeed.
+    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+        namespace_id: "ns-act-resume".into(),
+        service_id: "svc-act".into(),
+        backend: None,
+    })
+    .await?;
+
+    // Launch client that connects to the service VIP while no backend exists.
+    conn.send_command(&WorkerCommand::LaunchPod {
+        namespace_id: "ns-act-resume".into(),
+        pod_id: "pod-client".into(),
+        network: test_pod_network_config_2(),
+        containers: vec![ContainerSpec {
+            container_id: "ctr-client".into(),
+            image_ref: "docker.io/library/alpine:latest".into(),
+            config: ContainerConfig {
+                entrypoint: vec!["/bin/sh".into()],
+                args: vec!["-c".into(), "nc -w 3 10.0.0.99 80".into()],
+                env: vec![],
+                working_dir: None,
+                uid: None,
+                gid: None,
+                hostname: None,
+                capture_output: true,
+                stdin: false,
+            },
+        }],
+    })
+    .await?;
+
+    // Wait for the TCP activator to detect the SYN and signal activation
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ServiceBackendNeed { need: BackendNeed::Traffic, .. })
+    })
+    .await?;
+
+    assert!(
+        matches!(&event, WorkerEvent::ServiceBackendNeed { namespace_id, service_id, need: BackendNeed::Traffic }
+            if namespace_id == "ns-act-resume" && service_id == "svc-act"),
+        "unexpected event: {:?}",
+        event
+    );
+    eprintln!("e2e: activator signaled BackendNeed::Traffic, resuming server pod");
+
+    // Resume the server pod from the snapshot
+    conn.send_command(&WorkerCommand::ResumePod {
+        namespace_id: "ns-act-resume".into(),
+        pod_id: "pod-server-resumed".into(),
+        snapshot_id: "snap-act".into(),
+        network: test_pod_network_config(),
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server-resumed")
+    })
+    .await?;
+    eprintln!("e2e: server pod resumed");
+
+    // Point service at resumed pod and mark ready — flushes the buffered SYN
+    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+        namespace_id: "ns-act-resume".into(),
+        service_id: "svc-act".into(),
+        backend: Some(ServiceBackend {
+            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        }),
+    })
+    .await?;
+
+    conn.send_command(&WorkerCommand::ServiceReady {
+        namespace_id: "ns-act-resume".into(),
+        service_id: "svc-act".into(),
+    })
+    .await?;
+
+    // The buffered SYN is flushed, the TCP handshake completes, and the server
+    // responds with "pong". Verify the client received it.
+    let log_str = drain_log_stream(&mut conn).await?;
+    assert!(
+        log_str.contains("pong"),
+        "expected 'pong' in post-activation client output, got: {:?}",
+        log_str
+    );
+    eprintln!("e2e: client received response after activation + resume");
+
+    // Wait for client to exit
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client")
+    })
+    .await?;
+
+    // Clean up
+    conn.send_command(&WorkerCommand::StopPod {
+        namespace_id: "ns-act-resume".into(),
+        pod_id: "pod-server-resumed".into(),
+        graceful: true,
+    })
+    .await?;
+
+    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-server-resumed")
+    })
+    .await?;
+
+    conn.send_command(&WorkerCommand::DeleteSnapshot {
+        snapshot_id: "snap-act".into(),
     })
     .await?;
 

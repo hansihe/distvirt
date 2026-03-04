@@ -8,7 +8,7 @@ use distvirt_activator::types::Action;
 use super::route::RouteAction;
 use super::service::ServiceAction;
 use super::nat::{NatEntry, NatFlowKey};
-use crate::packet::{ETHERTYPE_IPV4, FabricFrame, VNET_HDR_SZ, build_arp_reply, extract_ip_protocol, extract_ipv4_dst, extract_ipv4_src, extract_transport_ports, format_mac, is_broadcast, is_multicast, parse_arp_request, rewrite_dst_mac, rewrite_ipv4_dst, rewrite_ipv4_src, rewrite_src_mac, with_vnet_header};
+use crate::packet::{ETHERTYPE_IPV4, FabricFrame, IP_PROTO_TCP, VNET_HDR_SZ, build_arp_reply, extract_ip_protocol, extract_ipv4_dst, extract_ipv4_src, extract_tcp_flags, extract_transport_ports, format_mac, format_tcp_flags, is_broadcast, is_multicast, parse_arp_request, rewrite_dst_mac, rewrite_ipv4_dst, rewrite_ipv4_src, rewrite_src_mac, with_vnet_header};
 use super::switch::{GATEWAY_MAC, MacTable};
 use super::port::{FramePort, PortId};
 use super::{FabricEvent, SharedPort, convert_backend_need, handle_log_action};
@@ -107,10 +107,17 @@ async fn dispatch_frame<P: FramePort>(
         let eth = ff.eth_payload();
         let src_ip = extract_ipv4_src(eth);
         let dst_ip = extract_ipv4_dst(eth);
+        let tcp_info = if extract_ip_protocol(eth) == Some(IP_PROTO_TCP) {
+            let flags = extract_tcp_flags(eth).map(format_tcp_flags).unwrap_or_default();
+            let ports = extract_transport_ports(eth).map(|(s, d)| format!(" {}→{}", s, d)).unwrap_or_default();
+            format!(" TCP{}{}", ports, flags)
+        } else {
+            String::new()
+        };
         log::debug!(
-            "fabric: dispatch_frame from {} | {} -> {} IPv4 {:?} -> {:?} len={}",
+            "fabric: dispatch_frame from {} | {} -> {} IPv4 {:?} -> {:?}{} len={}",
             source_label, format_mac(&src_mac), format_mac(&dst_mac),
-            src_ip, dst_ip, frame.len()
+            src_ip, dst_ip, tcp_info, frame.len()
         );
     } else {
         log::debug!(

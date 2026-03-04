@@ -5,22 +5,10 @@ use anyhow::{bail, Context};
 use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 use distvirt_worker_protocol::ContainerConfig;
 
-use crate::image_provider::containerd::{parse_user_numeric, ImageConfig};
 use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, SnapshotArtifacts, VmInstance};
 use crate::task_handle::TaskHandle;
 use crate::vsock_client::GuestSession;
-
-/// Overrides that can be specified on the CLI to override image config.
-pub(crate) struct ImageOverrides {
-    pub entrypoint: Option<String>,
-    pub args: Vec<String>,
-    pub env: Vec<String>,
-    pub working_dir: Option<String>,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
-    pub hostname: Option<String>,
-}
 
 /// A launched VM with an established yamux session.
 ///
@@ -159,8 +147,12 @@ impl<I: VmInstance> ManagedVm<I> {
         self.session
             .send(&HostMessage::StartContainer {
                 id: id.to_string(),
-                entrypoint: config.entrypoint.clone(),
-                args: config.args.clone(),
+                entrypoint: config.entrypoint.first().cloned().unwrap_or_default(),
+                args: {
+                    let mut a = config.entrypoint.get(1..).unwrap_or_default().to_vec();
+                    a.extend(config.args.iter().cloned());
+                    a
+                },
                 env: config.env.clone(),
                 working_dir: config.working_dir.clone(),
                 uid: config.uid,
@@ -339,55 +331,4 @@ impl<I: VmInstance> ManagedVm<I> {
     pub async fn force_kill(&mut self) -> anyhow::Result<()> {
         self.instance.kill().await.context("kill VM")
     }
-}
-
-/// Merge image config with CLI overrides following OCI entrypoint/cmd resolution rules.
-pub(crate) fn merge_config(
-    image: &ImageConfig,
-    overrides: &ImageOverrides,
-) -> anyhow::Result<ContainerConfig> {
-    let (entrypoint, args) = if let Some(ref ep) = overrides.entrypoint {
-        (ep.clone(), overrides.args.clone())
-    } else if !image.entrypoint.is_empty() {
-        let args = if !overrides.args.is_empty() {
-            overrides.args.clone()
-        } else {
-            image.cmd.clone()
-        };
-        (image.entrypoint[0].clone(), {
-            let mut a: Vec<String> = image.entrypoint[1..].to_vec();
-            a.extend(args);
-            a
-        })
-    } else if !overrides.args.is_empty() {
-        // No entrypoint override and no image entrypoint, but override args provided.
-        // Treat override args as the full command (compose `command:` replaces CMD).
-        (overrides.args[0].clone(), overrides.args[1..].to_vec())
-    } else if !image.cmd.is_empty() {
-        (image.cmd[0].clone(), image.cmd[1..].to_vec())
-    } else {
-        bail!("image has no entrypoint or cmd, and none was specified on the command line");
-    };
-
-    let mut env = image.env.clone();
-    env.extend(overrides.env.iter().cloned());
-
-    let (img_uid, img_gid) = image
-        .user
-        .as_deref()
-        .map(parse_user_numeric)
-        .transpose()?
-        .unwrap_or((None, None));
-
-    Ok(ContainerConfig {
-        entrypoint,
-        args,
-        env,
-        working_dir: overrides.working_dir.clone().or_else(|| image.working_dir.clone()),
-        uid: overrides.uid.or(img_uid),
-        gid: overrides.gid.or(img_gid),
-        hostname: overrides.hostname.clone(),
-        capture_output: false,
-        stdin: false,
-    })
 }

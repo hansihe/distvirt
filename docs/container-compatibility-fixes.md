@@ -15,13 +15,13 @@ for correct multi-container behaviour within a single VM/pod.
   Worker-side `ManagedVm::signal_container()` stub exists but is not yet
   integrated into the pod lifecycle.
 
-- [ ] **Add mount namespace (`unshare(CLONE_NEWNS)`)**
+- [x] **Add mount namespace (`unshare(CLONE_NEWNS)`)**
   Containers share the mount namespace. Mounts done inside one container are
   visible to guest-init and other containers. `/proc` and `/sys` inside chroot
   also lack proper masking — a container can read sensitive info about other
   processes.
 
-- [ ] **Fix `sethostname()` affecting entire VM**
+- [x] **Fix `sethostname()` affecting entire VM**
   `container.rs:337-340` — `sethostname()` is called without a UTS namespace,
   so every container start changes the hostname for all containers in the VM.
   Either add `unshare(CLONE_NEWUTS)` or remove the call.
@@ -44,7 +44,7 @@ for correct multi-container behaviour within a single VM/pod.
   running as root (uid 0) has full capabilities — can `mount()`, `mknod()`,
   load kernel modules, etc. Should drop to a minimal capability set.
 
-- [ ] **Add PID namespace (`unshare(CLONE_NEWPID)`)**
+- [x] **Add PID namespace (`unshare(CLONE_NEWPID)`)**
   Without a PID namespace, containers can see and signal each other's
   processes via `/proc`. Important for multi-container pods.
 

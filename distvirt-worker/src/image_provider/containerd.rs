@@ -19,36 +19,7 @@ use oci_spec::image::ImageConfiguration;
 use tonic::transport::Channel;
 use tonic::Request;
 
-/// Parsed OCI image configuration relevant for container execution.
-#[derive(Clone)]
-pub struct ImageConfig {
-    pub entrypoint: Vec<String>,
-    pub cmd: Vec<String>,
-    pub env: Vec<String>,
-    pub working_dir: Option<String>,
-    pub user: Option<String>,
-}
-
-/// Parse a numeric user string like "1000" or "1000:1000" into (uid, gid).
-pub fn parse_user_numeric(user: &str) -> anyhow::Result<(Option<u32>, Option<u32>)> {
-    if user.is_empty() {
-        return Ok((None, None));
-    }
-    if let Some((uid_str, gid_str)) = user.split_once(':') {
-        let uid: u32 = uid_str
-            .parse()
-            .with_context(|| format!("non-numeric uid: {}", uid_str))?;
-        let gid: u32 = gid_str
-            .parse()
-            .with_context(|| format!("non-numeric gid: {}", gid_str))?;
-        Ok((Some(uid), Some(gid)))
-    } else {
-        let uid: u32 = user
-            .parse()
-            .with_context(|| format!("non-numeric user: {}", user))?;
-        Ok((Some(uid), None))
-    }
-}
+pub use crate::oci::ImageConfig;
 
 /// A prepared OCI image with rootfs mounted and config parsed.
 /// Cleans up the snapshot view and mount on drop.

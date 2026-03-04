@@ -13,37 +13,12 @@ use crate::types::{Deployment, ServiceSpec};
 
 /// Build a [`ContainerConfig`] from a compose [`ServiceSpec`].
 ///
-/// Follows Docker semantics for entrypoint/command:
-/// - `entrypoint` alone: used as the full command line
-/// - `command` alone: used as the full command line (image entrypoint would
-///   normally prepend, but that's resolved at the worker/image level)
-/// - both: entrypoint is the executable, command supplies the arguments
+/// Passes through entrypoint and command as overrides for the worker's OCI
+/// merge logic. No splitting is done here — the worker resolves entrypoint/cmd
+/// against the image config.
 fn build_container_config(spec: &ServiceSpec) -> ContainerConfig {
-    let (entrypoint, args) = match (&spec.entrypoint, &spec.command) {
-        (Some(ep), Some(cmd)) => {
-            // Both specified: entrypoint[0] is the binary, rest of entrypoint + command are args.
-            let binary = ep.first().cloned().unwrap_or_default();
-            let mut args: Vec<String> = ep.get(1..).unwrap_or_default().to_vec();
-            args.extend(cmd.iter().cloned());
-            (binary, args)
-        }
-        (Some(ep), None) => {
-            // Only entrypoint: first element is binary, rest are args.
-            let binary = ep.first().cloned().unwrap_or_default();
-            let args = ep.get(1..).unwrap_or_default().to_vec();
-            (binary, args)
-        }
-        (None, Some(cmd)) => {
-            // Only command: first element is binary, rest are args.
-            let binary = cmd.first().cloned().unwrap_or_default();
-            let args = cmd.get(1..).unwrap_or_default().to_vec();
-            (binary, args)
-        }
-        (None, None) => {
-            // Neither specified: rely on image defaults (empty here).
-            (String::new(), Vec::new())
-        }
-    };
+    let entrypoint = spec.entrypoint.clone().unwrap_or_default();
+    let args = spec.command.clone().unwrap_or_default();
 
     ContainerConfig {
         entrypoint,
