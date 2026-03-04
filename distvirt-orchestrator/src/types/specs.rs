@@ -27,7 +27,6 @@ pub struct WorkloadSpec {
 pub struct ServiceSpec {
     pub workload_id: WorkloadId,
     pub ip: Ipv4Addr,
-    pub mac: [u8; 6],
     pub policy: ServicePolicy,
     pub activation: Option<ActivationSpec>,
 }

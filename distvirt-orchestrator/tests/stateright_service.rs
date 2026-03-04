@@ -47,7 +47,6 @@ enum SvcModelAction {
 fn mock_backend() -> ServiceBackend {
     ServiceBackend {
         pod_ip: Ipv4Addr::new(172, 16, 0, 10),
-        pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x10],
     }
 }
 

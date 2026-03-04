@@ -1,10 +1,10 @@
 # Protocol Activators
 
-Protocol activators provide protocol-aware activation and traffic management for service entities on the networking fabric. They replace the default "buffer everything, activate on any frame" behavior with protocol-specific logic — detecting meaningful traffic (TCP SYN, HTTP/2 request), filtering noise (RSTs, keepalives), and optionally acting as a full protocol-aware proxy (H2 connection management, stream multiplexing).
+Protocol activators provide protocol-aware activation and traffic management for service entities on the networking fabric. They replace the default "buffer everything, activate on any packet" behavior with protocol-specific logic — detecting meaningful traffic (TCP SYN, HTTP/2 request), filtering noise (RSTs, keepalives), and optionally acting as a full protocol-aware proxy (H2 connection management, stream multiplexing).
 
 ## Motivation
 
-The current service entity treats all frames equally. Any frame to a not-ready service triggers an activation event and gets buffered. This works but is coarse:
+The current service entity treats all packets equally. Any packet to a not-ready service triggers an activation event and gets buffered. This works but is coarse:
 
 - **Wasted activations**: A TCP RST or stale keepalive probe triggers the same activation as a real client request.
 - **No connection awareness**: Frames are buffered in a flat queue with no per-flow tracking. Replay works but the activator can't make protocol-informed decisions about what to buffer.
@@ -21,7 +21,7 @@ Protocol activators are implemented as **WebAssembly components** loaded at runt
 
 A TCP activator is simple — check TCP flags, track flows. This could live in Rust in the fabric. But an H2 activator requires H2 frame parsing, connection maintenance (SETTINGS exchange, PING/ACK, WINDOW_UPDATE), and proxying of active connections. That's proxy-level code. And beyond H2, there's gRPC (H2 + protobuf framing), WebSocket, MQTT, and whatever comes next. Each protocol is a self-contained proxy implementation.
 
-Embedding all of this in the fabric is a massive overextension of what the fabric should be — a dumb L2 switch with minimal awareness of what's flowing through it. WASM components solve this:
+Embedding all of this in the fabric is a massive overextension of what the fabric should be — a dumb packet forwarder with minimal awareness of what's flowing through it. WASM components solve this:
 
 - **Complexity containment**: Each activator is a self-contained component with its own development, testing, and compilation lifecycle. The H2 activator can be as complex as it needs to be without touching the fabric codebase.
 - **Independent development**: Protocol activators can be written, tested, and released independently. A new gRPC activator doesn't require changes to the fabric or worker.
@@ -30,7 +30,7 @@ Embedding all of this in the fabric is a massive overextension of what the fabri
 
 ### Performance is acceptable
 
-Activators are in the frame path for the lifetime of connections they handle. All traffic to a service with an activator flows through the activator — there is no bypass/splice path (see [Future: Stream Splicing](#future-stream-splicing)).
+Activators are in the packet path for the lifetime of connections they handle. All traffic to a service with an activator flows through the activator — there is no bypass/splice path (see [Future: Stream Splicing](#future-stream-splicing)).
 
 This system targets staging environments where network throughput is not the primary optimization target. The latency budget during "pod is booting" is measured in seconds, not microseconds. WASM overhead is negligible in that context.
 
@@ -42,10 +42,10 @@ The fabric provides **layered transport abstractions** to activators, handling L
 
 | Layer | Fabric provides | Activator sees |
 |-------|----------------|----------------|
-| **L3 (packet)** | Parsed Ethernet/IP/TCP/UDP headers | Packet metadata + payload + raw frame, per-flow correlation |
+| **L3 (packet)** | Parsed IP/TCP/UDP headers | Packet metadata + payload + raw packet, per-flow correlation |
 | **L4 (stream)** | Full TCP connection management | Byte streams with flow lifecycle events |
 
-The fabric uses [etherparse](https://github.com/JulianSchmid/etherparse) (no_std, zero-alloc) for L3 packet parsing on all incoming frames. For L4, the fabric manages TCP state (SYN/ACK handshake, sequence numbers, windowing, retransmits) using [smoltcp](https://github.com/smoltcp-rs/smoltcp) (no_std, full TCP stack), presenting activators with reassembled byte streams.
+The fabric uses [etherparse](https://github.com/JulianSchmid/etherparse) (no_std, zero-alloc) for L3 packet parsing on all incoming packets. For L4, the fabric manages TCP state (SYN/ACK handshake, sequence numbers, windowing, retransmits) using [smoltcp](https://github.com/smoltcp-rs/smoltcp) (no_std, full TCP stack), presenting activators with reassembled byte streams.
 
 An activator declares its downstream mode (L3 or L4) at instantiation. The upstream side has no declared mode — the activator simply uses whichever actions it needs (packet replay for L3, `upstream-connect` for L4).
 
@@ -74,7 +74,7 @@ Activators are not just filters — they are **proxies** with two independent si
 
 Simple activators (TCP) use L3 downstream and replay buffered packets upstream — they're filters, not proxies. Complex activators (H2) use L4 on both sides — the fabric manages TCP connections to both clients and the backend, and the activator bridges them at the application protocol level.
 
-This means the H2 activator never parses a TCP header or constructs an Ethernet frame. It receives H2 byte streams from clients, parses H2 frames, and sends H2 bytes upstream. All packet construction, TCP state, and connection management is handled by the fabric in native code.
+This means the H2 activator never parses a TCP header or constructs an IP packet. It receives H2 byte streams from clients, parses H2 frames, and sends H2 bytes upstream. All packet construction, TCP state, and connection management is handled by the fabric in native code.
 
 ## Signaling: Backend Need
 
@@ -132,7 +132,7 @@ The WASM interface uses a **batched event/action model**. The fabric collects pe
 
 The full interface definition is in [`distvirt-activator/wit/activator.wit`](../distvirt-activator/wit/activator.wit). Key elements:
 
-- **Types**: `packet-flow` (u64, L3 flow correlation), `stream-handle` (u64, L4 TCP connection), `packet-info` (parsed packet with metadata + raw frame), `backend-need` (none/traffic/active)
+- **Types**: `packet-flow` (u64, L3 flow correlation), `stream-handle` (u64, L4 TCP connection), `packet-info` (parsed packet with metadata + raw packet), `backend-need` (none/traffic/active)
 - **Events** (fabric → activator): `backend-available`, `tick`, `packet`, `stream-open`/`stream-data`/`stream-close`, `upstream-connect-result`/`upstream-data`/`upstream-close`
 - **Actions** (activator → fabric): `set-backend-need`, `log`, `packet-decision`/`packet-reply`/`replay-packet`, `downstream-send`/`downstream-close`/`pause-downstream`/`resume-downstream`, `upstream-connect(port)`/`upstream-send`/`upstream-close`/`pause-upstream`/`resume-upstream`
 - **Entry point**: `process-events: func(events: list<event>) -> list<action>` — single synchronous batch exchange
@@ -145,11 +145,11 @@ Activators control data delivery rate through `pause-downstream` / `resume-downs
 
 ### Integration with ServiceEntity
 
-The `ServiceEntity` holds a `ServiceProcessor` that determines how frames are handled:
+The `ServiceEntity` holds a `ServiceProcessor` that determines how packets are handled:
 
 ```rust
 enum ServiceProcessor {
-    /// No activator — buffer all frames, activate on first frame.
+    /// No activator — buffer all packets, activate on first packet.
     Passthrough,
     /// L3 packet-level processing via WASM activator.
     L3 {
@@ -164,11 +164,11 @@ enum ServiceProcessor {
 }
 ```
 
-When a `ServiceProcessor` is present (L3 or L4), incoming frames are parsed by the fabric and routed through the processor before any buffering/forwarding decision. When `Passthrough`, the existing behavior (buffer everything, activate on first frame) is preserved — no WASM overhead.
+When a `ServiceProcessor` is present (L3 or L4), incoming packets are parsed by the fabric and routed through the processor before any buffering/forwarding decision. When `Passthrough`, the existing behavior (buffer everything, activate on first packet) is preserved — no WASM overhead.
 
-**L3 path**: `FlowTracker` assigns stable `packet-flow` IDs by 5-tuple `(src_ip, dst_ip, protocol, src_port, dst_port)`. The frame is parsed via etherparse, wrapped in a `PacketInfo`, and delivered as a `Packet` event. The activator's `PacketDecision` determines buffering.
+**L3 path**: `FlowTracker` assigns stable `packet-flow` IDs by 5-tuple `(src_ip, dst_ip, protocol, src_port, dst_port)`. The packet is parsed via etherparse, wrapped in a `PacketInfo`, and delivered as a `Packet` event. The activator's `PacketDecision` determines buffering.
 
-**L4 path**: The frame (with vnet header stripped) is fed to `StreamManager`, which manages smoltcp's TCP stack. The stream manager generates events (StreamOpen, StreamData, etc.) which are batched and passed to the activator. A bounded event loop (4 rounds max) separates L4 actions (executed by the stream manager — sends, connects, pause/resume) from non-L4 actions (returned to the fabric — replay, backend need, log).
+**L4 path**: The IP packet is fed to `StreamManager`, which manages smoltcp's TCP stack. The stream manager generates events (StreamOpen, StreamData, etc.) which are batched and passed to the activator. A bounded event loop (4 rounds max) separates L4 actions (executed by the stream manager — sends, connects, pause/resume) from non-L4 actions (returned to the fabric — replay, backend need, log).
 
 **Replay with NAT**: When an activator emits `ReplayPacket`, the fabric applies DNAT (rewrites dst IP from service IP to backend pod IP) and inserts a reverse NAT entry so return traffic is correctly SNATted back. This is handled transparently by `dispatch_action` in `forwarding.rs`.
 
@@ -186,11 +186,11 @@ This provides concurrency without requiring the activator itself to be thread-sa
 
 ### Passthrough (default, native Rust)
 
-The current behavior, staying in Rust. No WASM involved. Buffer all frames up to capacity, activate on first frame (debounced). This is the fallback for services with no protocol declaration.
+The current behavior, staying in Rust. No WASM involved. Buffer all packets up to capacity, activate on first packet (debounced). This is the fallback for services with no protocol declaration.
 
 ### TCP Activator (`activators/tcp/`)
 
-**Mode**: L3 downstream. No upstream connection management — uses `replay-packet` actions to replay buffered frames.
+**Mode**: L3 downstream. No upstream connection management — uses `replay-packet` actions to replay buffered packets.
 
 **Behavior**:
 
@@ -206,9 +206,9 @@ The current behavior, staying in Rust. No WASM involved. Buffer all frames up to
 
 **State**: Per-flow entries keyed by `(src_ip, src_port, dst_port)` with first-seen timestamps. No TCP sequence number tracking — just enough to distinguish "new connection attempt" from "ongoing traffic." Capped at `max_flows` (configurable, default 1024).
 
-**Buffering**: The activator owns all buffering. For efficiency, the TCP activator only buffers one SYN per source flow — additional packets for the same flow are accepted (`buffered`) but not stored. The `raw-frame` field in `packet-info` provides the original frame bytes for storage without reconstruction.
+**Buffering**: The activator owns all buffering. For efficiency, the TCP activator only buffers one SYN per source flow — additional packets for the same flow are accepted (`buffered`) but not stored. The `raw-packet` field in `packet-info` provides the original packet bytes for storage without reconstruction.
 
-**Replay**: On `backend-available(true)`, the activator emits `replay-packet` actions containing the buffered raw frames. The fabric replays them toward the backend with DNAT (service IP → backend pod IP) and MAC rewriting. The backend's TCP stack sees the SYN, completes the handshake, and the connection proceeds normally. Client TCP retransmits cover timing gaps.
+**Replay**: On `backend-available(true)`, the activator emits `replay-packet` actions containing the buffered raw packets. The fabric replays them toward the backend with DNAT (service IP → backend pod IP). The backend's TCP stack sees the SYN, completes the handshake, and the connection proceeds normally. Client TCP retransmits cover timing gaps.
 
 **No synthetic replies**: The TCP activator doesn't generate reply packets. It lets the client's TCP retry mechanism handle the delay.
 
@@ -273,7 +273,7 @@ The current behavior, staying in Rust. No WASM involved. Buffer all frames up to
 | Directory | Purpose |
 |-----------|---------|
 | `activator-types/` | Portable types (no_std, WASM-compatible) shared between guest and host. `Event`, `Action`, `BackendNeed` enums, `Activator` trait for native testing, `test_helpers.rs` with packet/frame builders |
-| `tcp/` | TCP activator: SYN-based flow tracking, RST dropping, frame buffering + replay, 1024-flow cap |
+| `tcp/` | TCP activator: SYN-based flow tracking, RST dropping, packet buffering + replay, 1024-flow cap |
 | `http2/` | H2 activator: full proxy with frame parsing, connection state machine, stream multiplexing |
 | `postgres/` | PostgreSQL activator (prototype): wire protocol parsing, idle detection, `SELECT 1` health-check interception |
 | `test-echo/` | Deterministic test fixture exercising all event/action variants |
@@ -286,7 +286,7 @@ All activator crates are `cargo-component` crates targeting `wasm32-wasip1`, pro
 
 | File | Activator role |
 |------|----------------|
-| `service_activator.rs` | `ServiceProcessor` enum (Passthrough/L3/L4), frame processing, bounded L4 event loop |
+| `service_activator.rs` | `ServiceProcessor` enum (Passthrough/L3/L4), packet processing, bounded L4 event loop |
 | `service.rs` | `ServiceEntity` holds `ServiceProcessor`, delegates to it in `lookup_and_buffer` and `mark_ready` |
 | `forwarding.rs` | `dispatch_action` executes `ReplayPacket` (with DNAT + NAT entry), `SetBackendNeed`, `Log` |
 | `mod.rs` | `Fabric.dispatch_actions()` and `send_l4_frames()` entry points |
@@ -317,7 +317,7 @@ WASM instances are configured with a **fuel budget** of 1,000,000 per `process-e
 
 The fabric provides L3 and L4 transport in native Rust code, shared across all activators:
 
-- **L3**: [etherparse](https://github.com/JulianSchmid/etherparse) for packet parsing and construction. Zero-allocation, `no_std`. Every incoming frame is parsed before reaching an activator. `FlowTracker` in `packet_parse.rs` assigns stable u64 flow IDs by 5-tuple for `packet-flow` handles.
+- **L3**: [etherparse](https://github.com/JulianSchmid/etherparse) for packet parsing and construction. Zero-allocation, `no_std`. Every incoming packet is parsed before reaching an activator. `FlowTracker` in `packet_parse.rs` assigns stable u64 flow IDs by 5-tuple for `packet-flow` handles.
 - **L4**: [smoltcp](https://github.com/smoltcp-rs/smoltcp) for TCP connection management. `no_std`, full TCP state machine. The fabric acts as a real TCP endpoint — handles SYN/ACK, windowing, retransmits — and presents byte streams to activators. `StreamManager` uses a `FabricDevice` (queue-based phy device) and manages listening socket pools, upstream connections, and per-stream pause state. ARP resolution for backend IPs is handled via synthetic ARP reply injection into smoltcp's RX queue. Note: smoltcp targets embedded environments and may lack some TCP extensions (SACK, timestamps, ECN) that real-world clients use. Acceptable for staging environments; worth monitoring for edge cases.
 
 This means L4 activators (H2) never see TCP headers or construct packets. The fabric handles all of that natively.
@@ -341,7 +341,7 @@ enum ActivatorConfig {
     Tcp {
         /// Ports to apply SYN-based activation to (None = all ports)
         ports: Option<Vec<u16>>,
-        /// Drop non-TCP frames
+        /// Drop non-TCP packets
         tcp_only: bool,
         /// Max tracked flows
         max_flows: u32,
@@ -371,7 +371,7 @@ This is a natural extension of the batched action model — just another action 
 - **L4 stream management** — `StreamManager` in `distvirt-activator/src/stream_manager.rs`. smoltcp-backed TCP stack with `FabricDevice`, listening socket pool, upstream connection support, backpressure via pause/resume.
 - **Fabric integration** — `ServiceProcessor` (Passthrough/L3/L4) in `service_activator.rs`. L3/L4 branches in `lookup_and_buffer`, action dispatch in `forwarding.rs` (ReplayPacket with DNAT + NAT entry, SetBackendNeed, Log). `ServiceAction::L4Result` for stream manager output.
 - **Worker integration** — `Worker` holds `ActivatorRuntime`, `handle_create_service` instantiates components based on `ActivatorConfig`, `ServiceBackendNeed` events bridged to orchestrator.
-- **TCP activator** — `activators/tcp/`. SYN-based flow tracking, RST dropping, frame buffering + replay, 1024-flow cap.
+- **TCP activator** — `activators/tcp/`. SYN-based flow tracking, RST dropping, packet buffering + replay, 1024-flow cap.
 - **HTTP/2 activator** — `activators/http2/`. Full H2 proxy with frame parsing, SETTINGS/PING handling, connection state machine, stream multiplexing, per-stream backend need signaling.
 - **PostgreSQL activator** (prototype) — `activators/postgres/`. Wire protocol parsing, startup buffering, idle detection, `SELECT 1` health-check interception. Not yet wired into `ActivatorConfig`.
 - **Test infrastructure** — `test-echo` (deterministic fixture), `spin` (fuel exhaustion test), 26 integration tests in `distvirt-activator/tests/wasm_integration.rs`. Build via `./activators/build.sh`.

@@ -745,7 +745,7 @@ mod tests {
             error_msg: "image not found".to_string(),
         });
         let vmm = Arc::new(StubVmm);
-        let fabric = Arc::new(Fabric::<FabricPort>::new());
+        let fabric = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16));
         let cancel = CancellationToken::new();
 
         let log_opener = make_log_opener();
@@ -811,7 +811,7 @@ mod tests {
             vm_socket: tokio::sync::Mutex::new(Some(worker_socket)),
         });
         let image_provider = Arc::new(MockImageProvider);
-        let fabric = Arc::new(Fabric::<FabricPort>::new());
+        let fabric = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16));
         let cancel = CancellationToken::new();
 
         let log_opener = make_log_opener();
@@ -874,7 +874,7 @@ mod tests {
 
         let vmm = Arc::new(StubVmm);
         let image_provider = Arc::new(HangingImageProvider);
-        let fabric = Arc::new(Fabric::<FabricPort>::new());
+        let fabric = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16));
         let cancel = CancellationToken::new();
 
         let log_opener = make_log_opener();

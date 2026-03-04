@@ -173,23 +173,14 @@ impl Orchestrator {
                             } else {
                                 PodStatus::Launching
                             };
-                            let (ip, mac) = ns.spec.workloads.get(&info.workload_id)
-                                .map(|wl| {
-                                    let mac_bytes = wl.network.mac;
-                                    let mac_str = format!(
-                                        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                                        mac_bytes[0], mac_bytes[1], mac_bytes[2],
-                                        mac_bytes[3], mac_bytes[4], mac_bytes[5],
-                                    );
-                                    (wl.network.ip.to_string(), mac_str)
-                                })
+                            let ip = ns.spec.workloads.get(&info.workload_id)
+                                .map(|wl| wl.network.ip.to_string())
                                 .unwrap_or_default();
                             PodStatusReport {
                                 pod_id: pod_id.clone(),
                                 workload_id: info.workload_id.clone(),
                                 worker_id: info.worker_id.clone(),
                                 ip,
-                                mac,
                                 state,
                             }
                         })

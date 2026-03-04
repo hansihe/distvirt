@@ -8,10 +8,10 @@ This is a control plane protocol — all operations are management commands and 
 
 The protocol has two primary entities:
 
-- **Workloads**: the spec for a schedulable unit. A workload describes what a pod should look like (image, containers, config). When scheduled, it becomes a **pod** — a microVM with its own IP/MAC on the fabric. A pod can host multiple containers.
-- **Services**: network entities with their own IP/MAC on the fabric, with a programmable activation layer. Each service points at a workload via `workload_id`. For L3 traffic, the service NATs to the backing pod's IP. The activation mechanism is what enables scale-to-zero — the service entity exists on the fabric and can intercept traffic even when no pod is running.
+- **Workloads**: the spec for a schedulable unit. A workload describes what a pod should look like (image, containers, config). When scheduled, it becomes a **pod** — a microVM with its own IP on the fabric. A pod can host multiple containers.
+- **Services**: network entities with their own IP on the fabric, with a programmable activation layer. Each service points at a workload via `workload_id`. For L3 traffic, the service NATs to the backing pod's IP. The activation mechanism is what enables scale-to-zero — the service entity exists on the fabric and can intercept traffic even when no pod is running.
 
-Both workloads and services are top-level in the spec and status. At runtime, both pods (the workload's runtime instance) and services have their own IP/MAC on the fabric. The service→workload binding is mutable: retargeting a service from one workload to another is a valid operation (e.g. blue/green, canary, splice). The CLI reassembles the workload-grouped view (`dv status` shows services nested under workloads) from the flat data.
+Both workloads and services are top-level in the spec and status. At runtime, both pods (the workload's runtime instance) and services have their own IP on the fabric. The service→workload binding is mutable: retargeting a service from one workload to another is a valid operation (e.g. blue/green, canary, splice). The CLI reassembles the workload-grouped view (`dv status` shows services nested under workloads) from the flat data.
 
 ### Why gRPC
 
@@ -163,7 +163,7 @@ All streaming RPCs are cancellable — the client can cancel the stream at any t
 
 The `NamespaceSpec` is the declarative description of what should exist. Clients construct this (from compose files, k8s manifests, or directly) and send it to the orchestrator.
 
-Workloads and services are both **top-level** in the spec. Both have network identity on the fabric (IP/MAC). A workload describes what to run; when scheduled, it becomes a pod (a microVM). A service is a network entity that NATs to its backing pod. Each service references a workload via `workload_id`. This binding is mutable — changing a service's `workload_id` retargets it to a different workload's pod.
+Workloads and services are both **top-level** in the spec. Both have network identity on the fabric (IP). A workload describes what to run; when scheduled, it becomes a pod (a microVM). A service is a network entity that NATs to its backing pod. Each service references a workload via `workload_id`. This binding is mutable — changing a service's `workload_id` retargets it to a different workload's pod.
 
 A common simple case (one service per workload, same name) is what compose frontends produce. But the model supports many-to-one: multiple services backed by the same workload, and retargeting.
 
@@ -175,7 +175,7 @@ message NamespaceSpec {
 }
 
 message WorkloadSpec {
-    PodNetworkConfig network = 1;       // pod IP, MAC — assigned by orchestrator
+    PodNetworkConfig network = 1;       // pod IP — assigned by orchestrator
     repeated ContainerSpec containers = 2;
 }
 
@@ -187,12 +187,11 @@ message ContainerSpec {
 
 message PodNetworkConfig {
     string ip = 1;      // assigned by orchestrator
-    string mac = 2;     // assigned by orchestrator
 }
 
 message ServiceSpec {
     string workload_id = 1;             // which workload backs this service
-    ServiceNetworkConfig network = 2;   // ip, mac — assigned by orchestrator
+    ServiceNetworkConfig network = 2;   // ip — assigned by orchestrator
     ActivationSpec activation = 3;      // absent = always-on
     repeated ExposeSpec expose = 4;
 }
@@ -226,7 +225,6 @@ message ContainerConfig {
 
 message ServiceNetworkConfig {
     string ip = 1;      // assigned by orchestrator
-    string mac = 2;     // assigned by orchestrator
 }
 
 message NetworkConfig {
@@ -450,8 +448,7 @@ message PodInfo {
     string workload_id = 2;
     string worker_id = 3;
     string ip = 4;
-    string mac = 5;
-    PodState state = 6;
+    PodState state = 5;
 }
 
 enum PodState {

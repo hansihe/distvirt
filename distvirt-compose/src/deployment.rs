@@ -25,12 +25,8 @@ pub struct PlannedService {
     pub name: String,
     /// Virtual service IP (used for DNS resolution and service entity).
     pub service_ip: Ipv4Addr,
-    /// Virtual service MAC.
-    pub service_mac: [u8; 6],
     /// Pod IP (assigned to the actual VM network interface).
     pub pod_ip: Ipv4Addr,
-    /// Pod MAC.
-    pub pod_mac: [u8; 6],
 }
 
 /// Produce an execution plan from a deployment.
@@ -56,19 +52,15 @@ pub fn plan(deployment: &Deployment) -> anyhow::Result<ExecutionPlan> {
             // Service IPs: .2, .3, .4, ... .N+1
             let svc_octet = (i + 2) as u8;
             let service_ip = Ipv4Addr::new(172, 16, 0, svc_octet);
-            let service_mac = [0x06, 0x00, 0xAC, 0x10, 0x00, svc_octet];
 
             // Pod IPs: .N+2, .N+3, ... .2N+1
             let pod_octet = (n + i + 2) as u8;
             let pod_ip = Ipv4Addr::new(172, 16, 0, pod_octet);
-            let pod_mac = [0x06, 0x00, 0xAC, 0x10, 0x00, pod_octet];
 
             PlannedService {
                 name,
                 service_ip,
-                service_mac,
                 pod_ip,
-                pod_mac,
             }
         })
         .collect();
@@ -184,9 +176,7 @@ mod tests {
         assert_eq!(p.services.len(), 1);
         assert_eq!(p.services[0].name, "web");
         assert_eq!(p.services[0].service_ip, Ipv4Addr::new(172, 16, 0, 2));
-        assert_eq!(p.services[0].service_mac, [0x06, 0x00, 0xAC, 0x10, 0x00, 0x02]);
         assert_eq!(p.services[0].pod_ip, Ipv4Addr::new(172, 16, 0, 3));
-        assert_eq!(p.services[0].pod_mac, [0x06, 0x00, 0xAC, 0x10, 0x00, 0x03]);
     }
 
     #[test]

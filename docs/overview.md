@@ -50,7 +50,7 @@ The `activators/` directory (excluded from the workspace) contains standalone ac
 
 1. **Guest agent** — PID 1 in the microVM. Mounts container disks, configures networking, forks+execs workloads, streams output, reaps zombies. Communicates with the host over virtio-vsock.
 2. **Worker** — Manages local Firecracker VMs, the per-namespace networking fabric, container image preparation, and pod lifecycle. Reports events to the orchestrator.
-3. **Orchestrator** — Pure state machine that owns all planning: IP/MAC assignment, dependency ordering, service lifecycle, activation, and worker coordination. An async shell handles I/O. Internally structured as an outer orchestrator (worker management, scheduling, client routing) and per-namespace sub-state machines (workload lifecycle, services, reconciliation, WireGuard peers).
+3. **Orchestrator** — Pure state machine that owns all planning: IP assignment, dependency ordering, service lifecycle, activation, and worker coordination. An async shell handles I/O. Internally structured as an outer orchestrator (worker management, scheduling, client routing) and per-namespace sub-state machines (workload lifecycle, services, reconciliation, WireGuard peers).
 4. **CLI** (`dv`) — Two-layer design. Layer 1: task-oriented commands (`dv up`, `dv status`, `dv logs`, `dv connect`, `dv deactivate`, `dv splice`) with smart defaults and summarization. Layer 2: uniform resource commands (`dv get`, `dv describe`, `dv create`, `dv delete`) for scripting and power users. Authenticates via API key tokens stored in `~/.config/distvirt/credentials.toml` with named contexts. See [cli-design.md](cli-design.md) for full details.
 
 ---
@@ -101,14 +101,14 @@ Server-streaming RPCs: `WatchNamespaceStatus`, `StreamLogs`, `StreamEvents`.
 
 See [networking-fabric.md](networking-fabric.md) for full details.
 
-Per-namespace userspace **L2 Ethernet switch** with a smoltcp-based IP gateway. Each pod's TAP device is a port on the switch.
+Per-namespace userspace **L3 IP router** with a smoltcp-based gateway. Each pod's TAP device is a port on the router.
 
-- **L2 switch** — MAC learning table, standard switch forwarding (known unicast → direct, unknown → flood).
-- **Gateway** (smoltcp, configurable per namespace, default 172.16.0.1) — ARP responses, DNS service discovery from local registry, internet egress via TUN device + NAT.
-- **Services** — Virtual IP/MAC entities on the fabric with buffering policies and protocol activators for scale-to-zero activation.
+- **IP fabric** — static IP-to-port table, IP-based packet forwarding (no MAC learning or flooding).
+- **Gateway** (smoltcp, configurable per namespace, default 172.16.0.1) — DNS service discovery from local registry, internet egress via TUN device + NAT.
+- **Services** — Virtual IP entities on the fabric with buffering policies and protocol activators for scale-to-zero activation.
 - **Route table** — Pod-to-pod forwarding entries (remote worker or placeholder with buffer policy). Supports multi-worker fabric segments (future).
 
-Traffic resolution order: local TAP port → service entity → route table → flood.
+Traffic resolution order: local port (IP table) → service entity → route table → drop.
 
 ---
 
@@ -137,7 +137,7 @@ Ingress adapters bridge external traffic into the per-namespace fabric. Adapters
 
 Adapter strategies:
 
-- **WireGuard (boringtun)** — Primary. Implemented. Userspace WireGuard endpoint on the worker. Peer key maps to a namespace. Decapsulated packets are injected as L2 frames. Worker protocol supports `AddWireGuardPeer`/`RemoveWireGuardPeer` commands. The CLI integrates via `dv connect` (embedded boringtun, ephemeral keypair per connection) and `dv disconnect`. Client protocol provides `ConnectNetwork`/`DisconnectNetwork` RPCs.
+- **WireGuard (boringtun)** — Primary. Implemented. Userspace WireGuard endpoint on the worker. Peer key maps to a namespace. Decapsulated IP packets are injected into the fabric. Worker protocol supports `AddWireGuardPeer`/`RemoveWireGuardPeer` commands. The CLI integrates via `dv connect` (embedded boringtun, ephemeral keypair per connection) and `dv disconnect`. Client protocol provides `ConnectNetwork`/`DisconnectNetwork` RPCs.
 - **Reverse proxy** (future) — L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric as a network endpoint. Zero client-side setup — shareable URLs for non-technical stakeholders.
 - **OS-level routing / NAT** (future) — Host routing table entries or iptables DNAT rules pointing namespace subnets to the fabric's TUN device. Most transparent for infrastructure integration, but requires host-level privileges.
 
@@ -207,7 +207,7 @@ Two-trait design separating factory (`Vmm`) from instance (`VmInstance`), fully 
 - **Host↔guest multiplexing**: yamux — separates control stream from output streams
 - **Worker↔orchestrator wire format**: Cap'n Proto over yamux
 - **Client↔orchestrator protocol**: gRPC via tonic
-- **Networking**: Host TAP devices with userspace L2 switch, smoltcp gateway, TUN for egress
+- **Networking**: Host TAP devices with userspace L3 IP fabric, smoltcp gateway, TUN for egress
 - **OCI image handling**: containerd for pull/cache/snapshot
 - **Orchestrator architecture**: Pure state machine + async shell; two-layer (outer + per-namespace sub-SMs)
 - **CLI design**: Two-layer (`dv up`/`dv status` task layer + `dv get`/`dv describe` resource layer), workload-centric, explicit namespaces

@@ -17,7 +17,7 @@ pub(super) fn test_network_config() -> NetworkConfig {
 pub(super) fn test_pod_network_config() -> PodNetworkConfig {
     PodNetworkConfig {
         ip: Ipv4Addr::new(172, 16, 0, 10),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x10],
+        mac: [0; 6],
         gateway: Ipv4Addr::new(172, 16, 0, 1),
         netmask: "255.255.255.0".into(),
     }
@@ -65,7 +65,6 @@ pub(super) fn test_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: WorkloadId("svc1".into()),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
             policy: test_service_policy(),
             activation: None,
         },
@@ -93,7 +92,6 @@ pub(super) fn test_spec_with_activation() -> NamespaceSpec {
         ServiceSpec {
             workload_id: WorkloadId("svc1".into()),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
             policy: test_service_policy(),
             activation: Some(ActivationSpec {
                 idle_timeout: std::time::Duration::from_secs(30),

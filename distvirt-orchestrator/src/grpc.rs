@@ -90,13 +90,14 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         .ip
         .parse()
         .map_err(|_| Status::invalid_argument(format!("invalid workload IP: '{}'", network.ip)))?;
-    let mac = parse_mac(&network.mac)?;
-
     // Gateway and netmask are populated from the namespace's NetworkConfig
     // during pod launch in NamespaceStateMachine::handle_launch_pod.
+    // Generate a locally-administered unicast MAC from the IP so the guest
+    // network stack gets a valid hardware address.
+    let ip_octets = ip.octets();
     let pod_network = PodNetworkConfig {
         ip,
-        mac,
+        mac: [0x02, 0x00, ip_octets[0], ip_octets[1], ip_octets[2], ip_octets[3]],
         gateway: Ipv4Addr::new(0, 0, 0, 0),
         netmask: String::new(),
     };
@@ -177,8 +178,6 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
         .ip
         .parse()
         .map_err(|_| Status::invalid_argument(format!("invalid service IP: '{}'", network.ip)))?;
-    let mac = parse_mac(&network.mac)?;
-
     // Build the ServicePolicy from activation config.
     let policy = if let Some(ref act) = svc.activation {
         let activator = act.activator.as_ref().and_then(|a| {
@@ -220,27 +219,9 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
     Ok(ServiceSpec {
         workload_id: WorkloadId(svc.workload_id),
         ip,
-        mac,
         policy,
         activation,
     })
-}
-
-fn parse_mac(mac_str: &str) -> Result<[u8; 6], Status> {
-    let parts: Vec<&str> = mac_str.split(':').collect();
-    if parts.len() != 6 {
-        return Err(Status::invalid_argument(format!(
-            "invalid MAC address: '{}'",
-            mac_str
-        )));
-    }
-    let mut mac = [0u8; 6];
-    for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16).map_err(|_| {
-            Status::invalid_argument(format!("invalid MAC address byte: '{}'", part))
-        })?;
-    }
-    Ok(mac)
 }
 
 // --- Internal -> Proto conversions ---
@@ -285,7 +266,7 @@ fn convert_status_report(report: NamespaceStatusReport) -> proto::NamespaceStatu
                 activation_enabled: svc.activation_enabled,
                 spliced: false,
                 ip: svc.ip,
-                mac: svc.mac,
+                mac: String::new(),
             },
         );
     }
@@ -616,7 +597,7 @@ impl DistvirtClient for DistvirtClientService {
                         workload_id: p.workload_id.0,
                         worker_id: p.worker_id.0,
                         ip: p.ip,
-                        mac: p.mac,
+                        mac: String::new(),
                         state: match p.state {
                             PodStatus::Launching => proto::PodState::Launching as i32,
                             PodStatus::Running => proto::PodState::Running as i32,

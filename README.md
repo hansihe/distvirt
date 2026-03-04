@@ -34,10 +34,10 @@ VMs give you something containers can't: **suspend and resume**. Snapshot a runn
 
 ### Networking Fabric
 
-Each namespace gets an isolated userspace L2 network. Pods see a normal network interface with an IP, a gateway, and working DNS.
+Each namespace gets an isolated userspace L3 network. Pods see a normal network interface with an IP, a gateway, and working DNS.
 
-- **L2 switch** — MAC-learning frame router connecting all pods via TAP devices
-- **smoltcp gateway** — userspace IP stack handling ARP, DNS (service discovery + upstream forwarding), and internet egress via TUN
+- **IP fabric** — packet router connecting all pods via TAP devices, with a static IP-to-port table
+- **smoltcp gateway** — userspace IP stack handling DNS (service discovery + upstream forwarding) and internet egress via TUN
 - **Service entities** — virtual IPs on the fabric with buffering and readiness gating. Traffic to a service IP is held until the backing pod is ready, then flushed.
 
 ### Protocol-Aware Activation
@@ -71,12 +71,12 @@ The `dv` CLI has two layers:
 ### Working today
 
 - **End-to-end local mode** — `dv up` parses a compose file, plans execution, launches Firecracker VMs with networking, DNS service discovery, and log streaming
-- **Networking fabric** — L2 switch, smoltcp gateway, service entities with readiness gating and frame buffering
+- **Networking fabric** — L3 IP fabric, smoltcp gateway, service entities with readiness gating and packet buffering
 - **Protocol activators** — TCP, HTTP/2, and PostgreSQL activators running as WASM components on service entities
 - **WireGuard ingress** — `dv connect` tunnels into a namespace via embedded boringtun
 - **Container image preparation** — OCI image pull/mount via containerd, ext4 rootfs generation
 - **gRPC client protocol** — namespace CRUD, pod listing, workload deactivation, network connect/disconnect, log/event streaming
-- **Orchestrator state machine** — workload lifecycle, service management, IP/MAC assignment, dependency ordering
+- **Orchestrator state machine** — workload lifecycle, service management, IP assignment, dependency ordering
 - **Suspend/resume** — VMM snapshot/restore, orchestrator lifecycle management, guest protocol coordination
 - **Guest agent** — container setup, output streaming, signal forwarding, network configuration
 

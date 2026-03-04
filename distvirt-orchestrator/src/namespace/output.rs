@@ -86,7 +86,6 @@ impl NamespaceStateMachine {
                     let backend = self.spec.workloads.get(workload_id).map(|wl_spec| {
                         ServiceBackend {
                             pod_ip: wl_spec.network.ip,
-                            pod_mac: wl_spec.network.mac,
                         }
                     });
                     let backend = match backend {

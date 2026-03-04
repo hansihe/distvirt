@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::udp;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
 use tokio::sync::mpsc;
 
@@ -14,8 +14,7 @@ pub(crate) mod tun;
 
 pub use dns::DnsRegistry;
 
-use crate::packet::{ETH_HDR_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, FabricFrame, with_vnet_header};
-use super::switch::GATEWAY_MAC;
+use crate::packet::{FabricPacket, with_fabric_header};
 use dns::DnsForwarder;
 use tun::TunEgress;
 
@@ -28,8 +27,6 @@ fn prefix_len_to_netmask(prefix_len: u8) -> [u8; 4] {
         mask.to_be_bytes()
     }
 }
-
-const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
 /// Channel buffer size for gateway communication.
 const CHANNEL_BUF: usize = 256;
@@ -90,12 +87,8 @@ impl Device for ChannelDevice {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = 1514;
-        // Frames arrive from AF_PACKET on a TAP with virtio-net checksum
-        // offloading, so checksums may be partial/invalid. Use Checksum::Tx
-        // so smoltcp computes valid checksums on transmit but skips
-        // verification on receive.
+        caps.medium = Medium::Ip;
+        caps.max_transmission_unit = 1500;
         caps.checksum.ipv4 = Checksum::Tx;
         caps.checksum.udp = Checksum::Tx;
         caps.checksum.tcp = Checksum::Tx;
@@ -106,8 +99,14 @@ impl Device for ChannelDevice {
 
 // --- FabricGateway: smoltcp IP stack + TUN egress + DNS forwarding ---
 
-/// Combined gateway that handles ARP (via smoltcp), DNS forwarding (via
-/// `DnsForwarder`), and internet egress (via `TunEgress`).
+/// Combined gateway that handles DNS forwarding (via `DnsForwarder`) and
+/// internet egress (via `TunEgress`).
+///
+/// Receives L3 fabric packets `[vnet][IP]`. For packets to the gateway IP
+/// (DNS), feeds raw IP to smoltcp. For internet egress, passes directly to
+/// TUN (same format).
+///
+/// smoltcp runs on `Medium::Ip`, operating directly on L3 packets.
 pub struct FabricGateway {
     // smoltcp userspace IP stack — coordination hub
     iface: Interface,
@@ -126,14 +125,17 @@ pub struct FabricGateway {
 
     // Pod subnet gateway IP (for routing DNS queries from pods)
     pod_gateway_ip: [u8; 4],
+    /// Subnet mask for filtering TUN ingress (only inject packets destined for the pod subnet).
+    pod_subnet_mask: u32,
+    pod_subnet_bits: u32,
 }
 
 impl FabricGateway {
     /// Create a new fabric gateway with smoltcp interface, TUN device, and DNS forwarder.
     ///
     /// Returns the gateway and channel endpoints for the fabric:
-    /// - `egress_tx`: send frames destined for the gateway here
-    /// - `ingress_rx`: receive frames from the gateway to inject into the fabric
+    /// - `egress_tx`: send packets destined for the gateway here
+    /// - `ingress_rx`: receive packets from the gateway to inject into the fabric
     pub fn new(registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create TUN egress sub-component.
         let tun = TunEgress::new(pod_gateway_ip, prefix_len_to_netmask(pod_prefix_len))?;
@@ -141,10 +143,10 @@ impl FabricGateway {
         // Create DNS forwarder sub-component.
         let dns = DnsForwarder::new(registry)?;
 
-        // Create smoltcp interface with gateway MAC and IP.
+        // Create smoltcp interface with gateway IP.
         let boot_time = Instant::now();
         let mut device = ChannelDevice::new();
-        let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(GATEWAY_MAC)));
+        let config = Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut device, SmolInstant::from_millis(0));
         iface.update_ip_addrs(|addrs| {
             addrs
@@ -179,6 +181,9 @@ impl FabricGateway {
             pod_prefix_len,
         );
 
+        let pod_subnet_mask = if pod_prefix_len >= 32 { u32::MAX } else { !0u32 << (32 - pod_prefix_len) };
+        let pod_subnet_bits = u32::from_be_bytes(pod_gateway_ip) & pod_subnet_mask;
+
         Ok((
             FabricGateway {
                 iface,
@@ -191,6 +196,8 @@ impl FabricGateway {
                 egress_rx,
                 ingress_tx,
                 pod_gateway_ip,
+                pod_subnet_mask,
+                pod_subnet_bits,
             },
             egress_tx,
             ingress_rx,
@@ -201,15 +208,14 @@ impl FabricGateway {
         SmolInstant::from_millis(self.boot_time.elapsed().as_millis() as i64)
     }
 
-    /// Poll smoltcp and drain any generated frames to the fabric.
-    /// smoltcp generates raw ethernet frames with valid checksums, so we prepend
-    /// a zeroed vnet header (no offload flags needed).
+    /// Poll smoltcp and drain any generated IP packets to the fabric.
     fn poll_and_drain(&mut self) {
         let ts = self.smoltcp_now();
         self.iface.poll(ts, &mut self.device, &mut self.sockets);
-        while let Some(eth_frame) = self.device.tx_queue.pop_front() {
-            let frame = with_vnet_header(&eth_frame);
-            if let Err(e) = self.ingress_tx.try_send(frame) {
+
+        while let Some(ip_packet) = self.device.tx_queue.pop_front() {
+            let fabric_packet = with_fabric_header(0, 0, &ip_packet);
+            if let Err(e) = self.ingress_tx.try_send(fabric_packet) {
                 log::warn!("gateway: ingress channel send error: {}", e);
             }
         }
@@ -218,7 +224,6 @@ impl FabricGateway {
     /// Run the gateway main loop.
     pub async fn run(mut self) {
         let mut tun_buf = vec![0u8; 65536];
-        let mut sweep_interval = tokio::time::interval(Duration::from_secs(5));
 
         loop {
             let ts = self.smoltcp_now();
@@ -232,9 +237,9 @@ impl FabricGateway {
             };
 
             tokio::select! {
-                // Frame from fabric (gateway-destined unicast or broadcast copy)
-                frame = self.egress_rx.recv() => {
-                    let frame = match frame {
+                // Packet from fabric (gateway-destined)
+                packet = self.egress_rx.recv() => {
+                    let packet = match packet {
                         Some(f) => f,
                         None => {
                             log::info!("gateway: egress channel closed, shutting down");
@@ -242,42 +247,31 @@ impl FabricGateway {
                         }
                     };
 
-                    let ff = match FabricFrame::new(&frame) {
+                    let fp = match FabricPacket::new(&packet) {
                         Some(f) => f,
                         None => continue,
                     };
-                    let eth_frame = ff.eth_payload();
-                    let ethertype = ff.ethertype();
 
-                    // Determine if this frame should go to smoltcp or TUN.
-                    let to_smoltcp = if ethertype == ETHERTYPE_ARP {
-                        // All ARP frames go to smoltcp (it handles ARP for the gateway IP).
-                        true
-                    } else if ethertype == ETHERTYPE_IPV4
-                        && eth_frame.len() >= ETH_HDR_LEN + 20
-                    {
-                        // IPv4 frames destined for the gateway IP go to smoltcp (DNS etc).
-                        let dst_ip: [u8; 4] = eth_frame[ETH_HDR_LEN + 16..ETH_HDR_LEN + 20]
-                            .try_into()
-                            .unwrap();
+                    // Determine if this packet should go to smoltcp (gateway IP) or TUN.
+                    let ip_pkt = fp.ip_packet();
+                    let to_smoltcp = if ip_pkt.len() >= 20 {
+                        let dst_ip: [u8; 4] = ip_pkt[16..20].try_into().unwrap();
                         dst_ip == self.pod_gateway_ip
                     } else {
                         false
                     };
 
                     if to_smoltcp {
-                        // smoltcp expects raw ethernet frames without vnet header.
-                        self.device.rx_queue.push_back(eth_frame.to_vec());
+                        // Feed raw IP packet directly to smoltcp.
+                        self.device.rx_queue.push_back(ip_pkt.to_vec());
                         self.poll_and_drain();
                         let dns_sock = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
                         if self.dns.process_queries(dns_sock) {
                             self.poll_and_drain();
                         }
-                    } else if ethertype == ETHERTYPE_IPV4
-                        && eth_frame.len() >= ETH_HDR_LEN + 20
-                    {
-                        // Internet egress via TUN sub-component.
-                        self.tun.write_egress(&ff).await;
+                    } else {
+                        // Internet egress via TUN — fabric format matches TUN format.
+                        self.tun.write_egress(&packet).await;
                     }
                 }
 
@@ -296,6 +290,20 @@ impl FabricGateway {
                     };
 
                     if let Some(frame) = self.tun.build_ingress_frame(&tun_buf, n) {
+                        // Only inject packets destined for the pod subnet into the fabric.
+                        // The kernel sends its own traffic on the TUN (IGMP, mDNS, DHCP, etc.)
+                        // which is irrelevant to pods.
+                        let ip_pkt = &frame[crate::packet::FABRIC_HDR_SZ..];
+                        if ip_pkt.len() >= 20 {
+                            let dst = u32::from_be_bytes([ip_pkt[16], ip_pkt[17], ip_pkt[18], ip_pkt[19]]);
+                            if dst & self.pod_subnet_mask != self.pod_subnet_bits {
+                                log::trace!(
+                                    "gateway: TUN ingress dropped (dst {} not in pod subnet)",
+                                    std::net::Ipv4Addr::from(dst)
+                                );
+                                continue;
+                            }
+                        }
                         if let Err(e) = self.ingress_tx.send(frame).await {
                             log::warn!("gateway: ingress channel send error: {}", e);
                             break;
@@ -313,15 +321,11 @@ impl FabricGateway {
                     }
                 }
 
-                // smoltcp timer (ARP cache, retransmissions)
+                // smoltcp timer (retransmissions)
                 _ = tokio::time::sleep_until(poll_deadline) => {
                     self.poll_and_drain();
                 }
 
-                // Periodic sweep of stale entries
-                _ = sweep_interval.tick() => {
-                    self.tun.sweep_stale();
-                }
             }
         }
 
@@ -332,79 +336,3 @@ impl FabricGateway {
     }
 }
 
-/// Adjust the `csum_start` field of a virtio-net header by `delta` bytes.
-/// Only modifies the header if VIRTIO_NET_HDR_F_NEEDS_CSUM is set.
-/// `csum_start` is at bytes 6-7 (little-endian u16).
-pub(super) fn adjust_vnet_csum_start(vnet_hdr: &mut [u8; 10], delta: i16) {
-    if vnet_hdr[0] & VIRTIO_NET_HDR_F_NEEDS_CSUM == 0 {
-        return;
-    }
-    let csum_start = u16::from_le_bytes([vnet_hdr[6], vnet_hdr[7]]);
-    let adjusted = (csum_start as i16).wrapping_add(delta) as u16;
-    vnet_hdr[6..8].copy_from_slice(&adjusted.to_le_bytes());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    // --- adjust_vnet_csum_start tests ---
-
-    #[test]
-    fn adjust_vnet_csum_start_with_needs_csum_negative_delta() {
-        // Simulate fabric→TUN path: subtract ETH_HDR_LEN (14) from csum_start
-        let mut hdr = [0u8; 10];
-        hdr[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM; // flags = NEEDS_CSUM
-        let csum_start: u16 = 24; // e.g., offset to TCP header in fabric frame
-        hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
-
-        adjust_vnet_csum_start(&mut hdr, -(ETH_HDR_LEN as i16));
-        let result = u16::from_le_bytes([hdr[6], hdr[7]]);
-        assert_eq!(result, 10); // 24 - 14 = 10
-    }
-
-    #[test]
-    fn adjust_vnet_csum_start_with_needs_csum_positive_delta() {
-        // Simulate TUN→fabric path: add ETH_HDR_LEN (14) to csum_start
-        let mut hdr = [0u8; 10];
-        hdr[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM;
-        let csum_start: u16 = 10;
-        hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
-
-        adjust_vnet_csum_start(&mut hdr, ETH_HDR_LEN as i16);
-        let result = u16::from_le_bytes([hdr[6], hdr[7]]);
-        assert_eq!(result, 24); // 10 + 14 = 24
-    }
-
-    #[test]
-    fn adjust_vnet_csum_start_without_needs_csum_unchanged() {
-        let mut hdr = [0u8; 10];
-        hdr[0] = 0; // no NEEDS_CSUM flag
-        let csum_start: u16 = 42;
-        hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
-
-        adjust_vnet_csum_start(&mut hdr, 100);
-        let result = u16::from_le_bytes([hdr[6], hdr[7]]);
-        assert_eq!(result, 42); // unchanged
-    }
-
-    #[test]
-    fn ip_mac_table_timeout_removes_stale_entries() {
-        let mut table: HashMap<[u8; 4], ([u8; 6], Instant)> = HashMap::new();
-        let old = Instant::now() - Duration::from_secs(600);
-        let recent = Instant::now();
-
-        table.insert([10, 0, 0, 1], ([0x02; 6], old));
-        table.insert([10, 0, 0, 2], ([0x03; 6], recent));
-
-        let timeout = Duration::from_secs(300);
-        let now = Instant::now();
-        table.retain(|_ip, (_, inserted)| {
-            now.duration_since(*inserted) <= timeout
-        });
-
-        assert!(table.get(&[10, 0, 0, 1]).is_none(), "old entry should be removed");
-        assert!(table.get(&[10, 0, 0, 2]).is_some(), "recent entry should remain");
-    }
-}

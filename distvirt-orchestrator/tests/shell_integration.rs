@@ -97,7 +97,7 @@ fn test_spec() -> NamespaceSpec {
             }],
             network: PodNetworkConfig {
                 ip: Ipv4Addr::new(172, 16, 0, 10),
-                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x10],
+                mac: [0; 6],
                 gateway: Ipv4Addr::new(172, 16, 0, 1),
                 netmask: "255.255.255.0".to_string(),
             },
@@ -111,7 +111,6 @@ fn test_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
             policy: ServicePolicy {
                 buffer_frames: 100,
                 timeout_ms: 5000,

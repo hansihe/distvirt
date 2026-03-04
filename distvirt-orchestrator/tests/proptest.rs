@@ -135,7 +135,7 @@ fn test_network_config() -> NetworkConfig {
 fn test_pod_network_config() -> PodNetworkConfig {
     PodNetworkConfig {
         ip: Ipv4Addr::new(172, 16, 0, 10),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x10],
+        mac: [0; 6],
         gateway: Ipv4Addr::new(172, 16, 0, 1),
         netmask: "255.255.255.0".into(),
     }
@@ -183,7 +183,7 @@ fn single_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: WorkloadId("svc1".into()),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
+
             policy: test_service_policy(),
             activation: None,
         },
@@ -212,7 +212,7 @@ fn multi_service_spec() -> NamespaceSpec {
             suspend_on_idle: false,
             network: PodNetworkConfig {
                 ip: Ipv4Addr::new(172, 16, 0, 11),
-                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+                mac: [0; 6],
                 gateway: Ipv4Addr::new(172, 16, 0, 1),
                 netmask: "255.255.255.0".into(),
             },
@@ -224,7 +224,6 @@ fn multi_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: WorkloadId("svc1".into()),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
             policy: test_service_policy(),
             activation: None,
         },
@@ -234,7 +233,6 @@ fn multi_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: WorkloadId("svc2".into()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x01],
             policy: test_service_policy(),
             activation: Some(ActivationSpec {
                 idle_timeout: Duration::from_secs(30),
@@ -264,7 +262,7 @@ fn activation_only_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: WorkloadId("svc1".into()),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            mac: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00],
+
             policy: test_service_policy(),
             activation: Some(ActivationSpec {
                 idle_timeout: Duration::from_secs(30),

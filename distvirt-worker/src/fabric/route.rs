@@ -164,7 +164,6 @@ mod tests {
     fn placeholder_entry(ip: Ipv4Addr, buffer_frames: u32, timeout_ms: u32) -> FabricRouteEntry {
         FabricRouteEntry {
             ip,
-            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
                     buffer_frames,
@@ -177,7 +176,6 @@ mod tests {
     fn remote_entry(ip: Ipv4Addr, worker_id: &str) -> FabricRouteEntry {
         FabricRouteEntry {
             ip,
-            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
             destination: RouteDestination::RemoteWorker {
                 worker_id: worker_id.to_string().into(),
             },

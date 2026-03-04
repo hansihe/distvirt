@@ -316,7 +316,7 @@ struct NamespaceSpec {
 
 struct WorkloadSpec {
     containers: Vec<ContainerSpec>,
-    network: PodNetworkConfig,             // pod IP, MAC (assigned by orchestrator)
+    network: PodNetworkConfig,             // pod IP (assigned by orchestrator)
     /// If true, suspend the pod instead of stopping it when demand drops to zero.
     /// Enables fast resume from snapshot on re-activation.
     suspend_on_idle: bool,
@@ -331,7 +331,6 @@ struct ContainerSpec {
 struct ServiceSpec {
     workload_id: WorkloadId,               // which workload backs this service
     ip: Ipv4Addr,                          // service IP (assigned by orchestrator)
-    mac: [u8; 6],                          // service MAC (assigned by orchestrator)
     policy: ServicePolicy,
     activation: Option<ActivationSpec>,    // None = always-on
     // expose: Vec<ExposeSpec>,            // future
@@ -799,7 +798,7 @@ The coordinator routes inputs to the appropriate sub-SM and forwards internal si
 
 ### Registry Sync
 
-Rather than emitting individual service update commands per service, the namespace broadcasts a full **RegistrySync** — the complete set of service entries (IP, MAC, backend info) — to all active workers in the namespace. This is emitted on key state transitions:
+Rather than emitting individual service update commands per service, the namespace broadcasts a full **RegistrySync** — the complete set of service entries (IP, backend info) — to all active workers in the namespace. This is emitted on key state transitions:
 
 - Namespace becomes Active (initial reconciliation)
 - A service backend changes (pod ready, backend cleared)
@@ -897,7 +896,6 @@ struct PodStatusReport {
     workload_id: WorkloadId,
     worker_id: WorkerId,
     ip: String,
-    mac: String,
     state: PodStatus,  // Launching, Running, Suspending, Suspended, Resuming
 }
 ```
@@ -940,7 +938,7 @@ Splice operates at the **workload level**, not the service level. The pod belong
    - Updates fabric routes between workers.
    - Launches the pod on the local worker instead.
    - On `PodRunning` → emits `BecameReady` with the new worker_id.
-4. From the perspective of other services, nothing changed — same service IP/MAC, traffic just routes through the tunnel now.
+4. From the perspective of other services, nothing changed — same service IP, traffic just routes through the tunnel now.
 
 ### Requirements
 

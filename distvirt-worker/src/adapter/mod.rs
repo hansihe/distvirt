@@ -1,4 +1,3 @@
-pub mod ethernet;
 pub mod wireguard;
 
 use std::sync::Arc;

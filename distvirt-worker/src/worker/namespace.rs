@@ -86,7 +86,7 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         network: distvirt_worker_protocol::NetworkConfig,
     ) -> Result<(NamespaceState, WorkerEvent), FatalError> {
-        let fabric = Fabric::<FabricPort>::new();
+        let fabric = Fabric::<FabricPort>::new(network.gateway, network.prefix_len);
 
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
 
@@ -132,12 +132,11 @@ impl NamespaceState {
         let event_bridge_task = TaskHandle::spawn(async move {
             while let Some(event) = fabric_event_rx.recv().await {
                 match event {
-                    FabricEvent::RouteMiss { dst_ip, dst_mac } => {
+                    FabricEvent::RouteMiss { dst_ip } => {
                         if let Err(e) = bridge_event_tx
                             .try_send(WorkerEvent::FabricRouteMiss {
                                 namespace_id: bridge_ns_id.clone(),
                                 dst_ip,
-                                dst_mac,
                             })
                         {
                             log::warn!("worker: dropped FabricRouteMiss event: {}", e);
@@ -343,7 +342,6 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         service_id: &ServiceId,
         ip: std::net::Ipv4Addr,
-        mac: [u8; 6],
         policy: ServicePolicy,
         activator_runtime: Option<&ActivatorRuntime>,
     ) -> Result<(), FatalError> {
@@ -382,7 +380,6 @@ impl NamespaceState {
             (Some(ActivatorConfig::Http2 { .. }), act) => {
                 let sm = StreamManager::new(StreamManagerConfig {
                     service_ip: ip,
-                    service_mac: mac,
                     listen_ports: vec![80],
                     ..StreamManagerConfig::default()
                 });
@@ -397,7 +394,7 @@ impl NamespaceState {
         let mut st = self.tables.service_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        st.create(service_id.0.clone(), ip, mac, policy, processor);
+        st.create(service_id.0.clone(), ip, policy, processor);
 
         log::info!(
             "worker: created service '{}' with ip {} in namespace '{}'",
@@ -415,8 +412,8 @@ impl NamespaceState {
         let mut st = self.tables.service_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        let backend_tuple = backend.map(|b| (b.pod_ip, b.pod_mac));
-        st.update_backend(service_id.as_ref(), backend_tuple);
+        let backend_ip = backend.map(|b| b.pod_ip);
+        st.update_backend(service_id.as_ref(), backend_ip);
 
         log::info!(
             "worker: updated service backend '{}' in namespace '{}'",
@@ -440,12 +437,10 @@ impl NamespaceState {
         if let Some(result) = flush_data {
             use crate::fabric::{MarkReadyResult, ServiceAction};
             match &result {
-                MarkReadyResult::Passthrough { frames, actions, backend_mac, .. } => {
+                MarkReadyResult::Passthrough { frames, actions, backend_ip, .. } => {
                     log::info!(
-                        "worker: service '{}' mark_ready returned Passthrough: {} buffered frames, {} actions, backend_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                        service_id, frames.len(), actions.len(),
-                        backend_mac[0], backend_mac[1], backend_mac[2],
-                        backend_mac[3], backend_mac[4], backend_mac[5],
+                        "worker: service '{}' mark_ready returned Passthrough: {} buffered frames, {} actions, backend_ip={}",
+                        service_id, frames.len(), actions.len(), backend_ip,
                     );
                 }
                 MarkReadyResult::L4(action) => {
@@ -456,9 +451,9 @@ impl NamespaceState {
                 }
             }
             match result {
-                MarkReadyResult::Passthrough { frames, backend_mac, backend_ip, service_ip, service_mac, actions } => {
+                MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
                     if !frames.is_empty() {
-                        self.fabric.flush_service_frames(frames, backend_mac, backend_ip, service_ip, service_mac);
+                        self.fabric.flush_service_frames(frames, backend_ip, service_ip);
                     }
                     self.fabric.dispatch_actions(&actions, service_id.as_ref()).await;
                 }
@@ -522,7 +517,7 @@ mod tests {
     /// Create a minimal NamespaceState for testing (no gateway, no adapter ports).
     fn make_namespace() -> (NamespaceState, CancellationToken) {
         let worker_token = CancellationToken::new();
-        let fabric = Fabric::<FabricPort>::new();
+        let fabric = Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 24);
         let tables = fabric.tables();
         let ns_token = worker_token.child_token();
 
@@ -603,7 +598,6 @@ mod tests {
 
         let routes = vec![FabricRouteEntry {
             ip: Ipv4Addr::new(172, 16, 0, 10),
-            mac: [0x02, 0, 0, 0, 0, 0x10],
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
                     buffer_frames: 10,
@@ -631,7 +625,6 @@ mod tests {
         // Sync initial route.
         let routes = vec![FabricRouteEntry {
             ip: Ipv4Addr::new(172, 16, 0, 10),
-            mac: [0x02, 0, 0, 0, 0, 0x10],
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
                     buffer_frames: 5,
@@ -644,7 +637,6 @@ mod tests {
         // Update: add a new route, remove the old one.
         let added = vec![FabricRouteEntry {
             ip: Ipv4Addr::new(172, 16, 0, 20),
-            mac: [0x02, 0, 0, 0, 0, 0x20],
             destination: RouteDestination::RemoteWorker {
                 worker_id: "w2".to_string().into(),
             },
@@ -671,7 +663,6 @@ mod tests {
             &ns_id,
             &svc_id,
             Ipv4Addr::new(172, 16, 0, 100),
-            [0x02, 0, 0, 0, 0, 0xAA],
             default_policy(),
             None,
         )
@@ -705,7 +696,6 @@ mod tests {
             &ns_id,
             &svc_id,
             Ipv4Addr::new(172, 16, 0, 100),
-            [0x02, 0, 0, 0, 0, 0xAA],
             default_policy(),
             None,
         )
@@ -717,7 +707,6 @@ mod tests {
             &svc_id,
             Some(ServiceBackend {
                 pod_ip: Ipv4Addr::new(172, 16, 0, 10),
-                pod_mac: [0x02, 0, 0, 0, 0, 0x10],
             }),
         )
         .unwrap();
@@ -737,7 +726,6 @@ mod tests {
             &ns_id,
             &svc_id,
             Ipv4Addr::new(172, 16, 0, 100),
-            [0x02, 0, 0, 0, 0, 0xAA],
             default_policy(),
             None,
         )
@@ -748,7 +736,6 @@ mod tests {
             &svc_id,
             Some(ServiceBackend {
                 pod_ip: Ipv4Addr::new(172, 16, 0, 10),
-                pod_mac: [0x02, 0, 0, 0, 0, 0x10],
             }),
         )
         .unwrap();

@@ -1,8 +1,7 @@
 use super::*;
-use super::forwarding::flood_frame;
 use super::service_activator::ServiceProcessor;
-use crate::packet::{ETH_HDR_LEN, FabricFrame, VNET_HDR_SZ, with_vnet_header};
-use switch::GATEWAY_MAC;
+use crate::packet::{FabricPacket, FABRIC_HDR_SZ, with_fabric_header};
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// Channel-backed test double for FramePort.
@@ -57,16 +56,6 @@ impl FramePort for TestPort {
     }
 }
 
-/// Build a valid test frame: [vnet_hdr (10 bytes)][eth_hdr (14 bytes)][payload...]
-fn make_frame(dst_mac: [u8; 6], src_mac: [u8; 6], ethertype: u16, payload: &[u8]) -> Vec<u8> {
-    let mut eth = Vec::with_capacity(14 + payload.len());
-    eth.extend_from_slice(&dst_mac);
-    eth.extend_from_slice(&src_mac);
-    eth.extend_from_slice(&ethertype.to_be_bytes());
-    eth.extend_from_slice(payload);
-    with_vnet_header(&eth)
-}
-
 /// Helper: try to receive a frame with a timeout. Returns None if no frame arrives.
 async fn try_recv(handle: &TestPortHandle) -> Option<Vec<u8>> {
     let mut rx = handle.capture_rx.lock().await;
@@ -81,137 +70,136 @@ async fn assert_no_frame(handle: &TestPortHandle) {
     assert!(try_recv(handle).await.is_none(), "expected no frame but got one");
 }
 
-// Some test MAC addresses
-const MAC_A: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
-const MAC_B: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0b];
-const MAC_C: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0c];
-const BROADCAST: [u8; 6] = [0xff; 6];
-const MULTICAST: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01];
+// Test subnet
+const TEST_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 0);
+const TEST_PREFIX: u8 = 24;
+// Test IP addresses (in subnet)
+const IP_A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 10);
+const IP_B: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 11);
+const IP_C: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 12);
 
-// --- Unicast forwarding tests ---
+// External IP (outside subnet, goes to gateway)
+const EXTERNAL_IP: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
 
-#[tokio::test]
-async fn known_dst_delivers_to_correct_port() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    // Port 0 sends a frame with src=MAC_A, causing MAC_A to be learned on port 0.
-    // Then port 1 sends a frame with dst=MAC_A, which should be delivered to port 0.
-    let frame_learn = make_frame(MAC_B, MAC_A, 0x0800, &[0u8; 10]);
-    handle0.inject_tx.send(frame_learn).await.unwrap();
-
-    // Wait for learning to happen; the frame floods since MAC_B is unknown.
-    let _ = try_recv(&handle1).await;
-
-    // Now port 1 sends to MAC_A (known on port 0).
-    let frame_to_a = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
-    handle1.inject_tx.send(frame_to_a).await.unwrap();
-
-    // Port 0 should receive the frame.
-    let received = try_recv(&handle0).await;
-    assert!(received.is_some(), "port 0 should receive frame destined to MAC_A");
+fn make_test_fabric() -> Fabric<TestPort> {
+    Fabric::new(TEST_SUBNET, TEST_PREFIX)
 }
 
+// --- L3 frame helpers ---
+
+/// Build a valid L3 fabric frame: [fabric_hdr(3)][ip_hdr(20)]
+/// with specific src and dst IP.
+fn make_ipv4_frame_full(src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
+    let mut ip_hdr = [0u8; 20];
+    ip_hdr[0] = 0x45; // version=4, IHL=5
+    ip_hdr[2..4].copy_from_slice(&20u16.to_be_bytes()); // total length
+    ip_hdr[12..16].copy_from_slice(&src_ip.octets());
+    ip_hdr[16..20].copy_from_slice(&dst_ip.octets());
+    with_fabric_header(0, 0, &ip_hdr)
+}
+
+/// Convenience wrapper: build IPv4 frame with default src IP (10.0.0.1).
+fn make_ipv4_frame(dst_ip: Ipv4Addr) -> Vec<u8> {
+    make_ipv4_frame_full(Ipv4Addr::new(10, 0, 0, 1), dst_ip)
+}
+
+/// Build a valid IPv4+TCP fabric frame [fabric_hdr(3)][IP+TCP].
+/// Uses etherparse::PacketBuilder for correct headers, then overwrites TCP flags.
+fn make_tcp_frame(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    tcp_flags: u8,
+) -> Vec<u8> {
+    use etherparse::PacketBuilder;
+
+    let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
+        .tcp(src_port, dst_port, 1000, 65535);
+
+    let mut ip_packet = Vec::new();
+    builder.write(&mut ip_packet, &[]).unwrap();
+
+    // Overwrite TCP flags: ip(20) + tcp flags at byte 13
+    let tcp_start = 20;
+    ip_packet[tcp_start + 13] = tcp_flags;
+
+    with_fabric_header(0, 0, &ip_packet)
+}
+
+/// Helper: try to receive a FabricEvent with timeout.
+async fn try_recv_event(rx: &mut tokio_mpsc::Receiver<FabricEvent>) -> Option<FabricEvent> {
+    tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
+// --- L3 routing tests ---
+
 #[tokio::test]
-async fn unknown_dst_floods_to_all_other_ports() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn ipv4_frame_routes_to_correct_port_by_ip() {
+    let fabric = make_test_fabric();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (port2, handle2) = make_test_port();
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-    let (_id2, _task2) = fabric.add_port_raw(port2);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Port 0 sends a frame to unknown MAC_C.
-    let frame = make_frame(MAC_C, MAC_A, 0x0800, &[0u8; 10]);
+    // Port 0 sends IPv4 frame to IP_B → should go to port 1.
+    let frame = make_ipv4_frame(IP_B);
     handle0.inject_tx.send(frame).await.unwrap();
 
-    // Both port 1 and port 2 should receive the flooded frame.
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
-    assert!(try_recv(&handle2).await.is_some(), "port 2 should receive flooded frame");
+    let received = try_recv(&handle1).await;
+    assert!(received.is_some(), "port 1 should receive frame destined to IP_B");
+
+    // Verify it's a valid fabric packet with the right dst IP.
+    let received = received.unwrap();
+    let fp = FabricPacket::new(&received).unwrap();
+    assert_eq!(fp.ipv4_dst(), IP_B, "dst IP should be IP_B");
 }
 
 #[tokio::test]
-async fn no_loopback_to_source_port() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn unknown_in_subnet_ip_dropped() {
+    let fabric = make_test_fabric();
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
+
+    // Port 0 sends IPv4 frame to IP_C (in subnet but no port registered) → should be dropped.
+    let frame = make_ipv4_frame(IP_C);
+    handle0.inject_tx.send(frame).await.unwrap();
+
+    // Neither port should get the frame (no flooding in L3 mode).
+    assert_no_frame(&handle1).await;
+}
+
+#[tokio::test]
+async fn frame_to_own_port_ip_is_delivered() {
+    // In L3 mode, frames are routed by dst IP. A frame from port 0 to
+    // port 0's own IP is delivered back to port 0 (hairpin is valid).
+    let fabric = make_test_fabric();
     let (port0, handle0) = make_test_port();
     let (port1, _handle1) = make_test_port();
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Port 0 sends a frame; it should never come back to port 0.
-    let frame = make_frame(MAC_B, MAC_A, 0x0800, &[0u8; 10]);
+    let frame = make_ipv4_frame(IP_A);
     handle0.inject_tx.send(frame).await.unwrap();
 
-    assert_no_frame(&handle0).await;
-}
-
-// --- Broadcast/multicast tests ---
-
-#[tokio::test]
-async fn broadcast_floods_to_all_other_ports_and_gateway() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-
-    let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
-    let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-    fabric.set_gateway(gw_tx, ingress_rx);
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    let frame = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-    handle0.inject_tx.send(frame).await.unwrap();
-
-    // Port 1 should receive the flooded frame.
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should get broadcast");
-
-    // Gateway should also receive it.
-    let gw_frame = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        gw_rx.recv(),
-    )
-    .await;
-    assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get broadcast");
-}
-
-#[tokio::test]
-async fn multicast_floods_to_all_other_ports_and_gateway() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-
-    let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
-    let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-    fabric.set_gateway(gw_tx, ingress_rx);
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    let frame = make_frame(MULTICAST, MAC_A, 0x0800, &[0u8; 10]);
-    handle0.inject_tx.send(frame).await.unwrap();
-
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should get multicast");
-    let gw_frame = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        gw_rx.recv(),
-    )
-    .await;
-    assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get multicast");
+    // In L3 mode, this is delivered to port 0 since IP_A resolves there.
+    let received = try_recv(&handle0).await;
+    assert!(received.is_some(), "frame should be delivered back to port 0 (hairpin)");
 }
 
 // --- Gateway routing tests ---
 
 #[tokio::test]
-async fn gateway_mac_dst_sent_to_gateway_only() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn external_ip_sent_to_gateway() {
+    let fabric = make_test_fabric();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -219,13 +207,13 @@ async fn gateway_mac_dst_sent_to_gateway_only() {
     let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
     fabric.set_gateway(gw_tx, ingress_rx);
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    let frame = make_frame(GATEWAY_MAC, MAC_A, 0x0800, &[0u8; 10]);
+    // Port 0 sends IPv4 frame to external IP → should go to gateway.
+    let frame = make_ipv4_frame(EXTERNAL_IP);
     handle0.inject_tx.send(frame).await.unwrap();
 
-    // Gateway should receive it.
     let gw_frame = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         gw_rx.recv(),
@@ -237,71 +225,9 @@ async fn gateway_mac_dst_sent_to_gateway_only() {
     assert_no_frame(&handle1).await;
 }
 
-// --- MAC learning tests ---
-
 #[tokio::test]
-async fn mac_learning_and_forwarding() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-    let (port2, handle2) = make_test_port();
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-    let (_id2, _task2) = fabric.add_port_raw(port2);
-
-    // Port 0 sends a frame with src=MAC_A (learn MAC_A on port 0).
-    let frame1 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-    handle0.inject_tx.send(frame1).await.unwrap();
-
-    // Drain the broadcast flood.
-    let _ = try_recv(&handle1).await;
-    let _ = try_recv(&handle2).await;
-
-    // Port 1 sends a frame with dst=MAC_A → should go to port 0 only.
-    let frame2 = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
-    handle1.inject_tx.send(frame2).await.unwrap();
-
-    assert!(try_recv(&handle0).await.is_some(), "port 0 should receive frame to MAC_A");
-    assert_no_frame(&handle2).await;
-}
-
-#[tokio::test]
-async fn mac_migration() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-    let (port2, handle2) = make_test_port();
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-    let (_id2, _task2) = fabric.add_port_raw(port2);
-
-    // Learn MAC_A on port 0.
-    let frame1 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-    handle0.inject_tx.send(frame1).await.unwrap();
-    let _ = try_recv(&handle1).await;
-    let _ = try_recv(&handle2).await;
-
-    // Migrate MAC_A to port 1.
-    let frame2 = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-    handle1.inject_tx.send(frame2).await.unwrap();
-    let _ = try_recv(&handle0).await;
-    let _ = try_recv(&handle2).await;
-
-    // Port 2 sends to MAC_A → should now go to port 1.
-    let frame3 = make_frame(MAC_A, MAC_C, 0x0800, &[0u8; 10]);
-    handle2.inject_tx.send(frame3).await.unwrap();
-
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should receive frame after migration");
-    assert_no_frame(&handle0).await;
-}
-
-// --- Gateway ingress tests ---
-
-#[tokio::test]
-async fn gateway_ingress_known_unicast() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn gateway_ingress_routes_to_port_by_ip() {
+    let fabric = make_test_fabric();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
@@ -309,118 +235,36 @@ async fn gateway_ingress_known_unicast() {
     let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
     fabric.set_gateway(gw_tx, ingress_rx);
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Learn MAC_A on port 0 by sending a frame from port 0.
-    let frame_learn = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 10]);
-    handle0.inject_tx.send(frame_learn).await.unwrap();
-    let _ = try_recv(&handle1).await;
-
-    // Gateway sends a frame to MAC_A → should go to port 0 only.
-    let gw_frame = make_frame(MAC_A, GATEWAY_MAC, 0x0800, &[0u8; 10]);
+    // Gateway sends IPv4 frame to IP_A → should go to port 0 only.
+    let gw_frame = make_ipv4_frame(IP_A);
     ingress_tx.send(gw_frame).await.unwrap();
 
     assert!(try_recv(&handle0).await.is_some(), "port 0 should receive gateway ingress");
     assert_no_frame(&handle1).await;
 }
 
-#[tokio::test]
-async fn gateway_ingress_unknown_unicast_floods() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-
-    let (gw_tx, _gw_rx) = tokio_mpsc::channel(64);
-    let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-    fabric.set_gateway(gw_tx, ingress_rx);
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    // Gateway sends to unknown MAC_C → should flood to all ports.
-    let gw_frame = make_frame(MAC_C, GATEWAY_MAC, 0x0800, &[0u8; 10]);
-    ingress_tx.send(gw_frame).await.unwrap();
-
-    assert!(try_recv(&handle0).await.is_some(), "port 0 should receive flooded frame");
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
-}
-
-#[tokio::test]
-async fn gateway_ingress_broadcast_floods_to_all() {
-    let fabric: Fabric<TestPort> = Fabric::new();
-    let (port0, handle0) = make_test_port();
-    let (port1, handle1) = make_test_port();
-
-    let (gw_tx, _gw_rx) = tokio_mpsc::channel(64);
-    let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
-    fabric.set_gateway(gw_tx, ingress_rx);
-
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    let gw_frame = make_frame(BROADCAST, GATEWAY_MAC, 0x0806, &[0u8; 10]);
-    ingress_tx.send(gw_frame).await.unwrap();
-
-    assert!(try_recv(&handle0).await.is_some(), "port 0 should receive broadcast");
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should receive broadcast");
-}
-
 // --- Edge case tests ---
 
 #[tokio::test]
 async fn runt_frame_dropped() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Send a frame that is too short (< VNET_HDR_SZ + ETH_HDR_LEN).
-    let runt = vec![0u8; VNET_HDR_SZ + ETH_HDR_LEN - 1];
+    // Send a frame that is too short (< FABRIC_HDR_SZ + minimal IP header).
+    let runt = vec![0u8; FABRIC_HDR_SZ + 19];
     handle0.inject_tx.send(runt).await.unwrap();
 
     assert_no_frame(&handle1).await;
 }
 
-#[tokio::test]
-async fn flood_frame_with_empty_ports_no_panic() {
-    let ports: Arc<Mutex<HashMap<PortId, SharedPort<TestPort>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let frame = make_frame(MAC_A, MAC_B, 0x0800, &[0u8; 10]);
-    // Should not panic.
-    flood_frame::<TestPort>(&frame, 0, &ports).await;
-}
-
 // --- Route-aware forwarding tests ---
-
-/// Build a valid IPv4 test frame with specific dst IP.
-/// Layout: [vnet_hdr(10)][eth_hdr(14)][ip_hdr(20)]
-fn make_ipv4_frame(dst_mac: [u8; 6], src_mac: [u8; 6], dst_ip: Ipv4Addr) -> Vec<u8> {
-    let mut eth = Vec::with_capacity(14 + 20);
-    // Ethernet header
-    eth.extend_from_slice(&dst_mac);
-    eth.extend_from_slice(&src_mac);
-    eth.extend_from_slice(&0x0800u16.to_be_bytes());
-    // Minimal IP header (20 bytes)
-    let mut ip_hdr = [0u8; 20];
-    ip_hdr[0] = 0x45; // version=4, IHL=5
-    // src IP at offset 12..16
-    ip_hdr[12..16].copy_from_slice(&[10, 0, 0, 1]);
-    // dst IP at offset 16..20
-    ip_hdr[16..20].copy_from_slice(&dst_ip.octets());
-    eth.extend_from_slice(&ip_hdr);
-    with_vnet_header(&eth)
-}
-
-/// Helper: try to receive a FabricEvent with timeout.
-async fn try_recv_event(rx: &mut tokio_mpsc::Receiver<FabricEvent>) -> Option<FabricEvent> {
-    tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
-        .await
-        .ok()
-        .flatten()
-}
 
 #[tokio::test]
 async fn placeholder_route_buffers_instead_of_flooding() {
@@ -428,7 +272,7 @@ async fn placeholder_route_buffers_instead_of_flooding() {
         BufferPolicy, FabricRouteEntry, RouteDestination,
     };
 
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -440,7 +284,6 @@ async fn placeholder_route_buffers_instead_of_flooding() {
         let mut rt = tables.route_table.lock().unwrap();
         rt.sync(vec![FabricRouteEntry {
             ip: pod_ip,
-            mac: MAC_C,
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
                     buffer_frames: 10,
@@ -453,11 +296,11 @@ async fn placeholder_route_buffers_instead_of_flooding() {
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Port 0 sends an IPv4 frame to the placeholder IP with unknown dst MAC.
-    let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+    // Port 0 sends an IPv4 frame to the placeholder IP.
+    let frame = make_ipv4_frame(pod_ip);
     handle0.inject_tx.send(frame).await.unwrap();
 
     // Port 1 should NOT receive the frame (it was buffered, not flooded).
@@ -469,25 +312,34 @@ async fn placeholder_route_buffers_instead_of_flooding() {
 }
 
 #[tokio::test]
-async fn no_route_still_floods() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn no_route_external_ip_goes_to_gateway() {
+    let fabric = make_test_fabric();
+
+    let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
+    let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
+    fabric.set_gateway(gw_tx, ingress_rx);
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (port2, handle2) = make_test_port();
 
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-    let (_id2, _task2) = fabric.add_port_raw(port2);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Port 0 sends IPv4 frame to unknown MAC with no route entry.
-    let pod_ip = Ipv4Addr::new(172, 16, 0, 99);
-    let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+    // Port 0 sends IPv4 frame to an IP outside the fabric subnet.
+    let external_ip = Ipv4Addr::new(172, 16, 0, 99);
+    let frame = make_ipv4_frame(external_ip);
     handle0.inject_tx.send(frame).await.unwrap();
 
-    // Both other ports should receive the flooded frame.
-    assert!(try_recv(&handle1).await.is_some(), "port 1 should receive flooded frame");
-    assert!(try_recv(&handle2).await.is_some(), "port 2 should receive flooded frame");
+    // Gateway should receive it (external IP → gateway egress).
+    let gw_frame = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        gw_rx.recv(),
+    )
+    .await;
+    assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get frame");
+
+    // Other ports should NOT receive it.
+    assert_no_frame(&handle1).await;
 }
 
 #[tokio::test]
@@ -496,7 +348,7 @@ async fn buffered_frames_flushed_to_new_port() {
         BufferPolicy, FabricRouteEntry, RouteDestination,
     };
 
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
 
     let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
 
@@ -506,7 +358,6 @@ async fn buffered_frames_flushed_to_new_port() {
         let mut rt = tables.route_table.lock().unwrap();
         rt.sync(vec![FabricRouteEntry {
             ip: pod_ip,
-            mac: MAC_C,
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
                     buffer_frames: 10,
@@ -517,11 +368,11 @@ async fn buffered_frames_flushed_to_new_port() {
     }
 
     let (port0, handle0) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     // Send 3 frames to the placeholder IP.
     for _ in 0..3 {
-        let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+        let frame = make_ipv4_frame(pod_ip);
         handle0.inject_tx.send(frame).await.unwrap();
     }
 
@@ -545,7 +396,7 @@ async fn route_miss_debounced_on_rapid_frames() {
         BufferPolicy, FabricRouteEntry, RouteDestination,
     };
 
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -556,7 +407,6 @@ async fn route_miss_debounced_on_rapid_frames() {
         let mut rt = tables.route_table.lock().unwrap();
         rt.sync(vec![FabricRouteEntry {
             ip: pod_ip,
-            mac: MAC_C,
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
                     buffer_frames: 100,
@@ -567,11 +417,11 @@ async fn route_miss_debounced_on_rapid_frames() {
     }
 
     let (port0, handle0) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     // Send multiple frames rapidly.
     for _ in 0..5 {
-        let frame = make_ipv4_frame(MAC_C, MAC_A, pod_ip);
+        let frame = make_ipv4_frame(pod_ip);
         handle0.inject_tx.send(frame).await.unwrap();
     }
 
@@ -589,33 +439,6 @@ async fn route_miss_debounced_on_rapid_frames() {
 
 // --- Activator integration tests ---
 
-/// Build a valid Ethernet+IPv4+TCP frame with vnet header.
-/// Uses etherparse::PacketBuilder for correct headers, then overwrites TCP flags.
-fn make_tcp_frame(
-    dst_mac: [u8; 6],
-    src_mac: [u8; 6],
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-    tcp_flags: u8,
-) -> Vec<u8> {
-    use etherparse::PacketBuilder;
-
-    let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
-        .ipv4(src_ip, dst_ip, 64)
-        .tcp(src_port, dst_port, 1000, 65535);
-
-    let mut eth_frame = Vec::new();
-    builder.write(&mut eth_frame, &[]).unwrap();
-
-    // Overwrite TCP flags: eth(14) + ip(20) + tcp flags at byte 13
-    let tcp_start = 14 + 20;
-    eth_frame[tcp_start + 13] = tcp_flags;
-
-    with_vnet_header(&eth_frame)
-}
-
 /// Try to load the TCP activator component. Returns None if WASM components
 /// haven't been built (allows tests to skip gracefully).
 fn try_load_tcp_activator() -> Option<(distvirt_activator::ActivatorRuntime, distvirt_activator::ActivatorInstance)> {
@@ -627,36 +450,8 @@ fn try_load_tcp_activator() -> Option<(distvirt_activator::ActivatorRuntime, dis
     Some((runtime, instance))
 }
 
-/// Build an ARP request frame with vnet header.
-fn make_arp_request(
-    sender_mac: [u8; 6],
-    sender_ip: [u8; 4],
-    target_ip: [u8; 4],
-) -> Vec<u8> {
-    let mut eth = Vec::with_capacity(14 + 28);
-    // Ethernet header: broadcast dst, sender src, ARP ethertype
-    eth.extend_from_slice(&BROADCAST);
-    eth.extend_from_slice(&sender_mac);
-    eth.extend_from_slice(&0x0806u16.to_be_bytes());
-    // ARP payload (28 bytes)
-    let mut arp = [0u8; 28];
-    arp[0..2].copy_from_slice(&[0x00, 0x01]); // hardware type: Ethernet
-    arp[2..4].copy_from_slice(&[0x08, 0x00]); // protocol type: IPv4
-    arp[4] = 6; // hardware size
-    arp[5] = 4; // protocol size
-    arp[6..8].copy_from_slice(&[0x00, 0x01]); // operation: request
-    arp[8..14].copy_from_slice(&sender_mac);   // sender hardware address
-    arp[14..18].copy_from_slice(&sender_ip);    // sender protocol address
-    // target hardware address [18..24] = zeroed (unknown)
-    arp[24..28].copy_from_slice(&target_ip);    // target protocol address
-    eth.extend_from_slice(&arp);
-    with_vnet_header(&eth)
-}
-
 const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 50);
-const SVC_MAC: [u8; 6] = [0x06, 0x00, 0xAC, 0x10, 0x00, 0x32];
 const POD_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 130);
-const POD_MAC: [u8; 6] = [0x06, 0x00, 0xAC, 0x10, 0x00, 0x82];
 
 #[tokio::test]
 async fn activator_tcp_syn_emits_backend_need() {
@@ -665,7 +460,7 @@ async fn activator_tcp_syn_emits_backend_need() {
         return;
     };
 
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -676,7 +471,6 @@ async fn activator_tcp_syn_emits_backend_need() {
         st.create(
             "svc-tcp".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -695,12 +489,11 @@ async fn activator_tcp_syn_emits_backend_need() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Inject TCP SYN addressed to service MAC/IP from port 0.
+    // Inject TCP SYN addressed to service IP from port 0.
     let syn_frame = make_tcp_frame(
-        SVC_MAC, MAC_A,
         [10, 0, 0, 1], SVC_IP.octets(),
         12345, 80,
         0x02, // SYN
@@ -731,7 +524,7 @@ async fn activator_tcp_rst_dropped() {
         return;
     };
 
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
     fabric.set_event_channel(event_tx);
 
@@ -741,7 +534,6 @@ async fn activator_tcp_rst_dropped() {
         st.create(
             "svc-tcp".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -760,12 +552,11 @@ async fn activator_tcp_rst_dropped() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
     // Inject TCP RST.
     let rst_frame = make_tcp_frame(
-        SVC_MAC, MAC_A,
         [10, 0, 0, 1], SVC_IP.octets(),
         12345, 80,
         0x04, // RST
@@ -796,7 +587,7 @@ async fn activator_forwards_when_ready() {
         return;
     };
 
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
 
     // Create service with TCP activator.
     {
@@ -805,7 +596,6 @@ async fn activator_forwards_when_ready() {
         st.create(
             "svc-tcp".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -821,112 +611,38 @@ async fn activator_forwards_when_ready() {
             },
         );
         // Set backend and mark ready.
-        st.update_backend("svc-tcp", Some((POD_IP, POD_MAC)));
+        st.update_backend("svc-tcp", Some(POD_IP));
         st.mark_ready("svc-tcp");
     }
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    // Register port 1 with POD_IP/POD_MAC so fabric can route to it.
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
-    // Learn POD_MAC on port 1 (so the fabric knows where to forward).
-    let learn_frame = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
-    handle1.inject_tx.send(learn_frame).await.unwrap();
-    // Drain the broadcast flood to port 0.
-    let _ = try_recv(&handle0).await;
-
-    // Now inject TCP SYN to service IP from port 0.
+    // Inject TCP SYN to service IP from port 0.
     let syn_frame = make_tcp_frame(
-        SVC_MAC, MAC_A,
         [10, 0, 0, 1], SVC_IP.octets(),
         12345, 80,
         0x02, // SYN
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
 
-    // Should be forwarded to port 1 (backend) with dst MAC rewritten to POD_MAC.
+    // Should be forwarded to port 1 (backend) with DNAT applied.
     let received = try_recv(&handle1).await;
     assert!(received.is_some(), "frame should be forwarded to backend port");
     let received = received.unwrap();
-    // Check dst MAC was rewritten.
-    let ff = FabricFrame::new(&received).unwrap();
-    assert_eq!(ff.dst_mac(), POD_MAC, "dst MAC should be rewritten to backend MAC");
-}
-
-#[tokio::test]
-async fn activator_service_arp_reply() {
-    // ARP replies work independently of activators, but verify they work
-    // when a service has an activator attached.
-    let Some((_runtime, instance)) = try_load_tcp_activator() else {
-        eprintln!("SKIP: TCP activator WASM not built");
-        return;
-    };
-
-    let fabric: Fabric<TestPort> = Fabric::new();
-
-    {
-        let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
-            "svc-tcp".into(),
-            SVC_IP,
-            SVC_MAC,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: false,
-                    max_flows: 1024,
-                }),
-            },
-            ServiceProcessor::L3 {
-                activator: instance,
-                flow_tracker: distvirt_activator::FlowTracker::new(),
-            },
-        );
-    }
-
-    let (port0, handle0) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-
-    // Inject ARP request for service IP.
-    let arp_frame = make_arp_request(
-        MAC_A,
-        [10, 0, 0, 1],
-        SVC_IP.octets(),
-    );
-    handle0.inject_tx.send(arp_frame).await.unwrap();
-
-    // Should receive ARP reply on port 0.
-    let reply = try_recv(&handle0).await;
-    assert!(reply.is_some(), "should receive ARP reply for service IP");
-    let reply = reply.unwrap();
-
-    // Verify it's an ARP reply with service MAC.
-    let ff = FabricFrame::new(&reply).unwrap();
-    assert_eq!(ff.ethertype(), 0x0806, "should be ARP");
-    let arp = &ff.eth_payload()[14..]; // ARP payload after eth header
-    let arp_op = u16::from_be_bytes([arp[6], arp[7]]);
-    assert_eq!(arp_op, 2, "should be ARP reply");
-    let sender_mac: [u8; 6] = arp[8..14].try_into().unwrap();
-    assert_eq!(sender_mac, SVC_MAC, "ARP reply should have service MAC");
+    let fp = FabricPacket::new(&received).unwrap();
+    assert_eq!(fp.ipv4_dst(), POD_IP, "dst IP should be DNAT'd to backend IP");
 }
 
 // --- NAT tests ---
 
-/// Regression test for Bug 2: backend MAC never learned in mac_table.
-///
-/// Scenario: a service is marked ready before the backend pod's port is added.
-/// The reachability check in `lookup_and_buffer` causes the frame to be buffered
-/// instead of forwarded (since POD_MAC is not yet in the mac_table). When the
-/// backend port is added via `add_port_raw_with_ip_mac`, the MAC is pre-learned
-/// and `flush_by_backend_mac` drains the service buffer, delivering the frames
-/// with DNAT applied.
+/// Regression test: service is marked ready before the backend pod's port is added.
 #[tokio::test]
-async fn service_forward_without_learned_backend_mac() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn service_forward_without_registered_backend_port() {
+    let fabric = make_test_fabric();
 
     // Create a service with backend, mark ready (no activator — pure L3 passthrough).
     {
@@ -935,7 +651,6 @@ async fn service_forward_without_learned_backend_mac() {
         st.create(
             "svc-fwd".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -943,18 +658,16 @@ async fn service_forward_without_learned_backend_mac() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-fwd", Some((POD_IP, POD_MAC)));
+        st.update_backend("svc-fwd", Some(POD_IP));
         st.mark_ready("svc-fwd");
     }
 
-    // Add client port (port 0) — no IP/MAC pre-learning needed for the client.
+    // Add client port (port 0).
     let (port0, handle0) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     // Send TCP SYN from client (port 0) to service VIP.
-    // POD_MAC is not yet reachable, so the frame gets buffered.
     let syn_frame = make_tcp_frame(
-        SVC_MAC, MAC_A,
         [10, 0, 0, 1], SVC_IP.octets(),
         12345, 80,
         0x02, // SYN
@@ -964,34 +677,31 @@ async fn service_forward_without_learned_backend_mac() {
     // Give the fabric a moment to process the injected frame.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Now add the backend port with IP+MAC — this pre-learns POD_MAC and
-    // triggers flush_by_backend_mac, draining the service buffer.
+    // Now add the backend port with IP+MAC — triggers flush_by_backend_ip.
     let (port1, handle1) = make_test_port();
-    let (_id1, _task1) = fabric.add_port_raw_with_ip_mac(port1, POD_IP, POD_MAC);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
     // The buffered frame should now arrive at port 1 (backend) with DNAT applied.
     let received = try_recv(&handle1).await;
     assert!(
         received.is_some(),
-        "frame should be flushed to backend port when port is added with pre-learned MAC"
+        "frame should be flushed to backend port when port is added"
     );
     let received = received.unwrap();
 
     // Verify DNAT was applied.
-    let ff = FabricFrame::new(&received).unwrap();
-    assert_eq!(ff.dst_mac(), POD_MAC, "dst MAC should be rewritten to backend MAC");
-    assert_eq!(ff.ipv4_dst(), Some(POD_IP), "dst IP should be DNAT'd to backend IP");
+    let fp = FabricPacket::new(&received).unwrap();
+    assert_eq!(fp.ipv4_dst(), POD_IP, "dst IP should be DNAT'd to backend IP");
 
     // Client port should not receive anything.
     assert_no_frame(&handle0).await;
 }
 
 const CLIENT_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 0, 1);
-const CLIENT_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a];
 
 #[tokio::test]
 async fn service_nat_dnat_rewrites_dst_ip() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
 
     // Create a service with backend, mark ready.
     {
@@ -1000,7 +710,6 @@ async fn service_nat_dnat_rewrites_dst_ip() {
         st.create(
             "svc-nat".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -1008,23 +717,17 @@ async fn service_nat_dnat_rewrites_dst_ip() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
+        st.update_backend("svc-nat", Some(POD_IP));
         st.mark_ready("svc-nat");
     }
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    // Learn POD_MAC on port 1.
-    let learn_frame = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
-    handle1.inject_tx.send(learn_frame).await.unwrap();
-    let _ = try_recv(&handle0).await;
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
     // Send TCP SYN from client to service IP.
     let syn_frame = make_tcp_frame(
-        SVC_MAC, CLIENT_MAC,
         CLIENT_IP.octets(), SVC_IP.octets(),
         12345, 80,
         0x02, // SYN
@@ -1036,18 +739,16 @@ async fn service_nat_dnat_rewrites_dst_ip() {
     assert!(received.is_some(), "frame should be forwarded to backend port");
     let received = received.unwrap();
 
-    let ff = FabricFrame::new(&received).unwrap();
-    // dst MAC should be rewritten to POD_MAC.
-    assert_eq!(ff.dst_mac(), POD_MAC, "dst MAC should be rewritten to backend MAC");
+    let fp = FabricPacket::new(&received).unwrap();
     // dst IP should be rewritten from SVC_IP to POD_IP.
-    assert_eq!(ff.ipv4_dst(), Some(POD_IP), "dst IP should be DNAT'd to backend IP");
+    assert_eq!(fp.ipv4_dst(), POD_IP, "dst IP should be DNAT'd to backend IP");
     // src IP should be unchanged.
-    assert_eq!(ff.ipv4_src(), Some(CLIENT_IP), "src IP should be unchanged");
+    assert_eq!(fp.ipv4_src(), CLIENT_IP, "src IP should be unchanged");
 }
 
 #[tokio::test]
 async fn service_nat_snat_rewrites_return_traffic() {
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
 
     // Create a service with backend, mark ready.
     {
@@ -1056,7 +757,6 @@ async fn service_nat_snat_rewrites_return_traffic() {
         st.create(
             "svc-nat".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -1064,27 +764,17 @@ async fn service_nat_snat_rewrites_return_traffic() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
+        st.update_backend("svc-nat", Some(POD_IP));
         st.mark_ready("svc-nat");
     }
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    // Learn CLIENT_MAC on port 0, POD_MAC on port 1.
-    let learn0 = make_frame(BROADCAST, CLIENT_MAC, 0x0806, &[0u8; 28]);
-    handle0.inject_tx.send(learn0).await.unwrap();
-    let _ = try_recv(&handle1).await;
-
-    let learn1 = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
-    handle1.inject_tx.send(learn1).await.unwrap();
-    let _ = try_recv(&handle0).await;
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
     // Step 1: Send forward traffic (client→service) to install NAT entry.
     let syn_frame = make_tcp_frame(
-        SVC_MAC, CLIENT_MAC,
         CLIENT_IP.octets(), SVC_IP.octets(),
         12345, 80,
         0x02, // SYN
@@ -1097,7 +787,6 @@ async fn service_nat_snat_rewrites_return_traffic() {
 
     // Step 2: Send return traffic (backend→client) — should be SNAT'd.
     let syn_ack_frame = make_tcp_frame(
-        CLIENT_MAC, POD_MAC,
         POD_IP.octets(), CLIENT_IP.octets(),
         80, 12345,
         0x12, // SYN+ACK
@@ -1109,52 +798,49 @@ async fn service_nat_snat_rewrites_return_traffic() {
     assert!(received.is_some(), "return frame should arrive at client port");
     let received = received.unwrap();
 
-    let ff = FabricFrame::new(&received).unwrap();
-    // src MAC should be rewritten to SVC_MAC.
-    assert_eq!(ff.src_mac(), SVC_MAC, "src MAC should be SNAT'd to service MAC");
+    let fp = FabricPacket::new(&received).unwrap();
     // src IP should be rewritten from POD_IP to SVC_IP.
-    assert_eq!(ff.ipv4_src(), Some(SVC_IP), "src IP should be SNAT'd to service IP");
+    assert_eq!(fp.ipv4_src(), SVC_IP, "src IP should be SNAT'd to service IP");
     // dst should be unchanged.
-    assert_eq!(ff.dst_mac(), CLIENT_MAC, "dst MAC should be unchanged");
-    assert_eq!(ff.ipv4_dst(), Some(CLIENT_IP), "dst IP should be unchanged");
+    assert_eq!(fp.ipv4_dst(), CLIENT_IP, "dst IP should be unchanged");
 }
 
 #[tokio::test]
-async fn non_natted_unicast_not_affected() {
-    // Regular unicast traffic that doesn't match any NAT entry should pass through unchanged.
-    let fabric: Fabric<TestPort> = Fabric::new();
+async fn non_natted_unicast_ip_unchanged() {
+    // Regular unicast traffic that doesn't match any NAT entry should have
+    // IPs unchanged.
+    let fabric = make_test_fabric();
+
+    let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+    let dst_ip = Ipv4Addr::new(10, 0, 0, 1);
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, dst_ip);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, src_ip);
 
-    // Learn MAC_A on port 0.
-    let learn = make_frame(BROADCAST, MAC_A, 0x0806, &[0u8; 28]);
-    handle0.inject_tx.send(learn).await.unwrap();
-    let _ = try_recv(&handle1).await;
-
-    // Port 1 sends unicast to MAC_A — not NAT'd, should pass through unchanged.
+    // Port 1 sends unicast to port 0's IP — not NAT'd.
     let frame = make_tcp_frame(
-        MAC_A, MAC_B,
-        [10, 0, 0, 2], [10, 0, 0, 1],
+        src_ip.octets(), dst_ip.octets(),
         5000, 8080,
         0x02,
     );
-    handle1.inject_tx.send(frame.clone()).await.unwrap();
+    handle1.inject_tx.send(frame).await.unwrap();
 
     let received = try_recv(&handle0).await;
     assert!(received.is_some(), "frame should be forwarded");
     let received = received.unwrap();
 
-    // Frame should be byte-identical (no NAT rewrite).
-    assert_eq!(received, frame, "non-NAT'd unicast should pass through unchanged");
+    let fp = FabricPacket::new(&received).unwrap();
+    // IPs should be unchanged (no NAT).
+    assert_eq!(fp.ipv4_src(), src_ip, "src IP should be unchanged");
+    assert_eq!(fp.ipv4_dst(), dst_ip, "dst IP should be unchanged");
 }
 
 #[tokio::test]
 async fn service_nat_ip_checksum_valid() {
     // Verify that the IP header checksum is still valid after DNAT.
-    let fabric: Fabric<TestPort> = Fabric::new();
+    let fabric = make_test_fabric();
 
     {
         let tables = fabric.tables();
@@ -1162,7 +848,6 @@ async fn service_nat_ip_checksum_valid() {
         st.create(
             "svc-nat".into(),
             SVC_IP,
-            SVC_MAC,
             distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -1170,22 +855,16 @@ async fn service_nat_ip_checksum_valid() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-nat", Some((POD_IP, POD_MAC)));
+        st.update_backend("svc-nat", Some(POD_IP));
         st.mark_ready("svc-nat");
     }
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
-    let (_id0, _task0) = fabric.add_port_raw(port0);
-    let (_id1, _task1) = fabric.add_port_raw(port1);
-
-    // Learn POD_MAC on port 1.
-    let learn = make_frame(BROADCAST, POD_MAC, 0x0806, &[0u8; 28]);
-    handle1.inject_tx.send(learn).await.unwrap();
-    let _ = try_recv(&handle0).await;
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
     let syn = make_tcp_frame(
-        SVC_MAC, CLIENT_MAC,
         CLIENT_IP.octets(), SVC_IP.octets(),
         12345, 80,
         0x02,
@@ -1193,11 +872,11 @@ async fn service_nat_ip_checksum_valid() {
     handle0.inject_tx.send(syn).await.unwrap();
 
     let received = try_recv(&handle1).await.unwrap();
-    let ff = FabricFrame::new(&received).unwrap();
-    let eth = ff.eth_payload();
+    let fp = FabricPacket::new(&received).unwrap();
+    let ip = fp.ip_packet();
 
     // Verify IP header checksum: compute from scratch and compare.
-    let ip_hdr = &eth[14..34]; // 20-byte IP header
+    let ip_hdr = &ip[..20]; // 20-byte IP header
     let mut sum: u32 = 0;
     for i in (0..20).step_by(2) {
         sum += u16::from_be_bytes([ip_hdr[i], ip_hdr[i + 1]]) as u32;

@@ -96,21 +96,21 @@ The worker is responsible for:
 
 The worker is NOT responsible for:
 - Deciding what to run or where
-- IP/MAC assignment
+- IP assignment
 - Dependency ordering
 - Service discovery ownership
 - Cross-worker networking decisions
 
 ### Namespace
 
-An isolated environment with its own L2 network fabric. Different users/deployments get different namespaces. A namespace's fabric can span multiple workers — each worker runs a local fabric segment, and segments are connected via tunnel ports (future).
+An isolated environment with its own L3 network fabric. Different users/deployments get different namespaces. A namespace's fabric can span multiple workers — each worker runs a local fabric segment, and segments are connected via tunnel ports (future).
 
 The orchestrator creates and destroys namespaces on workers as needed. If a worker has no pods in a namespace, the orchestrator can tear down that worker's namespace segment.
 
 ### Pod
 
 The smallest schedulable unit. A pod is a Firecracker VM with:
-- A single IP and MAC on its namespace's fabric
+- A single IP on its namespace's fabric
 - One or more containers sharing the VM's network namespace
 - A lifecycle managed as a unit (start, stop, suspend, resume)
 
@@ -118,7 +118,7 @@ For now, pods contain a single container. The protocol supports multiple from da
 
 ### Service
 
-A service is a stable network identity with its own virtual IP and MAC on the namespace's fabric. Services are the recommended way for pods to communicate — DNS names resolve to service IPs, not pod IPs.
+A service is a stable network identity with its own virtual IP on the namespace's fabric. Services are the recommended way for pods to communicate — DNS names resolve to service IPs, not pod IPs.
 
 The key separation: a **service IP** is the stable addressable identity; a **pod IP** is an ephemeral backend. The service entity on the fabric is the boundary for buffering, activation, readiness gating, and (future) protocol enforcement. This cleanly separates pod lifecycle (VM booted, network configured) from service readiness (application listening, health check passed).
 
@@ -141,9 +141,9 @@ DNS entries typically map service names to **service IPs** (not pod IPs). The DN
 
 ### Fabric Routing Table (Pod-to-Pod)
 
-Separate from services, the fabric routing table handles **direct pod-to-pod** forwarding. This preserves the flat L2 illusion — every pod has an IP, and any pod can reach any other pod by IP, even without going through a service.
+Separate from services, the fabric routing table handles **direct pod-to-pod** forwarding. Every pod has an IP, and any pod can reach any other pod by IP, even without going through a service.
 
-The orchestrator owns the authoritative routing table: a mapping of IP/MAC to a **destination** for each namespace. Workers hold a projected copy, kept in sync the same way as the DNS registry (full sync + deltas).
+The orchestrator owns the authoritative routing table: a mapping of IP to a **destination** for each namespace. Workers hold a projected copy, kept in sync the same way as the DNS registry (full sync + deltas).
 
 Each route entry has one of two destination types:
 
@@ -168,10 +168,10 @@ In local mode (single worker), the routing table is typically empty — all pods
 
 Traffic to a destination IP is resolved in this order:
 
-1. **Local TAP port** — the pod is on this worker, forward directly via MAC table.
+1. **Local port (IP table)** — the pod is on this worker, forward directly via IP-to-port table.
 2. **Service entity** — the destination is a service IP. The service entity handles buffering, activation, and forwarding to the backing pod.
 3. **Route table** — the destination is a pod IP with a route entry (remote worker or placeholder). Basic forwarding or buffering.
-4. **Flood** — unknown destination, flood to all ports (standard L2 behavior).
+4. **Drop** — unknown destination, no match.
 
 Services are the recommended path for inter-service communication. Pod routes preserve the flat network illusion for cases where pods connect directly by IP.
 
@@ -246,7 +246,7 @@ DestroyNamespace {
 }
 ```
 
-`CreateNamespace` tells the worker to stand up a local fabric segment: create the L2 switch, create the smoltcp gateway at the specified IP, set up TUN egress. The gateway MAC is a fixed locally-administered address (`02:00:00:00:00:01`). The worker acknowledges with a `NamespaceCreated` event.
+`CreateNamespace` tells the worker to stand up a local fabric segment: create the L3 IP fabric, create the smoltcp gateway at the specified IP, set up TUN egress. The worker acknowledges with a `NamespaceCreated` event.
 
 `DestroyNamespace` tears down all pods in the namespace on this worker (cancelling them with a graceful shutdown window), then tears down the fabric segment.
 
@@ -283,12 +283,11 @@ CreateService {
   namespace_id: String,
   service_id: String,
   ip: Ipv4Addr,
-  mac: [u8; 6],
   policy: ServicePolicy,
 }
 
 ServicePolicy {
-  buffer_frames: u32,       // max frames to buffer (0 = drop immediately)
+  buffer_frames: u32,       // max packets to buffer (0 = drop immediately)
   timeout_ms: u32,          // how long to buffer before giving up
   activator: Option<ActivatorConfig>,  // protocol-aware activation (None = default passthrough)
 }
@@ -298,7 +297,7 @@ enum ActivatorConfig {
   // filters RSTs and stale keepalives, replays buffered SYNs to backend.
   Tcp {
     ports: Option<Vec<u16>>,  // destination ports to activate on (None = all)
-    tcp_only: bool,           // drop non-TCP frames if true
+    tcp_only: bool,           // drop non-TCP packets if true
     max_flows: u32,           // max tracked source IP+port combinations
   },
   // HTTP/2 stream-aware activation (future). Full H2 proxy that maintains
@@ -314,7 +313,6 @@ UpdateServiceBackend {
 
 ServiceBackend {
   pod_ip: Ipv4Addr,
-  pod_mac: [u8; 6],
 }
 
 ServiceReady {
@@ -328,13 +326,13 @@ DestroyService {
 }
 ```
 
-`CreateService` tells the worker to create a service entity on the namespace's fabric with a virtual IP/MAC. The service starts with no backend (traffic is buffered per policy, activation events fire). Services are projected to all workers participating in a namespace.
+`CreateService` tells the worker to create a service entity on the namespace's fabric with a virtual IP. The service starts with no backend (traffic is buffered per policy, activation events fire). Services are projected to all workers participating in a namespace.
 
 `UpdateServiceBackend` assigns or removes the backing pod for a service. When a backend is assigned, traffic is still buffered until `ServiceReady` is received — the pod may not be listening yet. Setting `backend: None` returns the service to the no-backend state (scale-to-zero). The backing pod can be local (has a TAP on this worker's fabric) or remote (reached via the route table).
 
-`ServiceReady` tells the worker that the service's backing pod is ready to receive traffic. Buffered frames are flushed to the backing pod. The orchestrator decides when readiness is achieved (container started, health check passed, etc.) — this is orchestrator policy, not a worker concern.
+`ServiceReady` tells the worker that the service's backing pod is ready to receive traffic. Buffered packets are flushed to the backing pod. The orchestrator decides when readiness is achieved (container started, health check passed, etc.) — this is orchestrator policy, not a worker concern.
 
-`DestroyService` removes the service entity from the fabric. Any buffered frames are dropped.
+`DestroyService` removes the service entity from the fabric. Any buffered packets are dropped.
 
 ### Fabric Routing (Pod-to-Pod)
 
@@ -352,7 +350,6 @@ FabricRouteUpdate {
 
 FabricRouteEntry {
   ip: Ipv4Addr,
-  mac: [u8; 6],
   destination: RouteDestination,
 }
 
@@ -362,7 +359,7 @@ enum RouteDestination {
 }
 
 BufferPolicy {
-  buffer_frames: u32,       // max frames to buffer (0 = drop immediately)
+  buffer_frames: u32,       // max packets to buffer (0 = drop immediately)
   timeout_ms: u32,          // how long to buffer before giving up
 }
 ```
@@ -387,7 +384,6 @@ LaunchPod {
 
 PodNetworkConfig {
   ip: Ipv4Addr,
-  mac: [u8; 6],
   gateway: Ipv4Addr,         // gateway IP for the pod's network config
   netmask: String,            // e.g. "255.255.255.0"
 }
@@ -418,7 +414,7 @@ StopPod {
 Shutdown {}
 ```
 
-`PodNetworkConfig` includes the full network configuration the pod needs to configure its guest interface. The orchestrator derives these from the namespace's `NetworkConfig` and the pod's assigned IP/MAC.
+`PodNetworkConfig` includes the full network configuration the pod needs to configure its guest interface. The orchestrator derives these from the namespace's `NetworkConfig` and the pod's assigned IP.
 
 When a `ContainerSpec` references an OCI image, the worker parses the image's config (entrypoint, cmd, env, working_dir, user) and merges it with the `ContainerConfig` overrides. Explicit overrides take precedence; empty/None fields fall through to the image defaults.
 
@@ -527,7 +523,6 @@ ServiceActivation {
 FabricRouteMiss {
   namespace_id: String,
   dst_ip: Ipv4Addr,
-  dst_mac: [u8; 6],
 }
 
 ServiceBackendNeed {
@@ -543,9 +538,9 @@ enum BackendNeed {
 }
 ```
 
-`ServiceActivation` — traffic arrived at a service that has no backend (or whose backend isn't ready). The service entity buffers frames per its policy and emits this event so the orchestrator can schedule a pod, assign it as the backend, and eventually send `ServiceReady`. Debounced per service to avoid event floods.
+`ServiceActivation` — traffic arrived at a service that has no backend (or whose backend isn't ready). The service entity buffers packets per its policy and emits this event so the orchestrator can schedule a pod, assign it as the backend, and eventually send `ServiceReady`. Debounced per service to avoid event floods.
 
-`FabricRouteMiss` — the worker's fabric received a frame for a **pod IP** (not a service IP) that it can't deliver locally. This fires for both unknown destinations (no route entry at all) and placeholders (route entry exists but destination is a `Placeholder`). For placeholders, the fabric applies the basic buffer policy before reporting the miss. The orchestrator can respond by scheduling a suspended pod, updating the route entry from placeholder to remote worker, etc. This is the pod-to-pod activation path — simpler and more limited than service activation.
+`FabricRouteMiss` — the worker's fabric received a packet for a **pod IP** (not a service IP) that it can't deliver locally. This fires for both unknown destinations (no route entry at all) and placeholders (route entry exists but destination is a `Placeholder`). For placeholders, the fabric applies the basic buffer policy before reporting the miss. The orchestrator can respond by scheduling a suspended pod, updating the route entry from placeholder to remote worker, etc. This is the pod-to-pod activation path — simpler and more limited than service activation.
 
 `ServiceBackendNeed` — a protocol activator is signaling its backend need level. Only emitted for services with an `ActivatorConfig`. The `BackendNeed` value distinguishes pulse signals (`Traffic` — something meaningful happened, start/extend a timeout) from level signals (`Active` — sessions are open, keep the backend up). Services without an activator use `ServiceActivation` instead.
 
@@ -610,7 +605,7 @@ The orchestrator is the brain. It:
 
 - **Accepts worker connections** and tracks available capacity
 - **Owns the service registry** per namespace — authoritative source of name-to-IP mappings
-- **Plans execution** — IP/MAC assignment, dependency ordering, worker placement
+- **Plans execution** — IP assignment, dependency ordering, worker placement
 - **Drives pod lifecycle** — sends LaunchPod/StopPod commands to specific workers
 - **Projects registry state** — sends RegistrySync on namespace join, RegistryUpdate on changes
 - **Handles failures** — detects worker disconnects, reschedules pods
@@ -647,7 +642,7 @@ The orchestrator runs as a long-lived server. Workers on different machines conn
 ```
          Namespace "myapp"
   ┌────────────────────────────┐
-  │  Fabric (L2 switch)        │
+  │  Fabric (L3 router)         │
   │                            │
   │  [TAP: pod-web]            │
   │  [TAP: pod-api]            │

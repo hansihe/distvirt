@@ -268,7 +268,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 namespace_id,
                 service_id,
                 ip,
-                mac,
                 policy,
             } => {
                 // Borrow separate fields to avoid conflicting mutable/immutable borrows on self.
@@ -276,7 +275,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
-                ns.create_service(&namespace_id, &service_id, ip, mac, policy, activator_runtime)
+                ns.create_service(&namespace_id, &service_id, ip, policy, activator_runtime)
             }
             WorkerCommand::UpdateServiceBackend {
                 namespace_id,
@@ -400,12 +399,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
-
-        // Register the pod's IP→MAC mapping with the WireGuard adapter so it
-        // can resolve destination MACs when injecting frames into the fabric.
-        if let Some(wg) = self.adapter_manager.wireguard() {
-            wg.register_pod_mac(namespace_id.as_ref(), network.ip, network.mac).await;
-        }
 
         let pod_cancel = ns.token.child_token();
         let event_tx = self.bg_event_tx.clone();
@@ -624,11 +617,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             metadata,
         };
 
-        // Register the pod's IP→MAC mapping with the WireGuard adapter.
-        if let Some(wg) = self.adapter_manager.wireguard() {
-            wg.register_pod_mac(namespace_id.as_ref(), network.ip, network.mac).await;
-        }
-
         let pod_cancel = ns.token.child_token();
         let event_tx = self.bg_event_tx.clone();
         let vmm = Arc::clone(&self.vmm);
@@ -763,7 +751,7 @@ mod tests {
     /// Inject a NamespaceState directly into the worker, bypassing
     /// handle_create_namespace (which requires root for TUN/gateway).
     fn inject_namespace(worker: &mut Worker<StubVmm, StubImageProvider>, ns_id: &str) {
-        let fabric = Fabric::<FabricPort>::new();
+        let fabric = Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let tables = fabric.tables();
 
         let ns_token = worker.worker_token.child_token();
@@ -1017,7 +1005,7 @@ mod tests {
 
         // Inject namespace manually.
         {
-            let fabric = Fabric::<FabricPort>::new();
+            let fabric = Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16);
             let tables = fabric.tables();
             let ns_token = w.worker_token.child_token();
             let ns = NamespaceState::new_for_test(

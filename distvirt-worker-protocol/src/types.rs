@@ -115,7 +115,6 @@ pub struct ServicePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceBackend {
     pub pod_ip: Ipv4Addr,
-    pub pod_mac: [u8; 6],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,7 +126,6 @@ pub enum RouteDestination {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FabricRouteEntry {
     pub ip: Ipv4Addr,
-    pub mac: [u8; 6],
     pub destination: RouteDestination,
 }
 
@@ -222,7 +220,6 @@ pub enum WorkerCommand {
         namespace_id: NamespaceId,
         service_id: ServiceId,
         ip: Ipv4Addr,
-        mac: [u8; 6],
         policy: ServicePolicy,
     },
     UpdateServiceBackend {
@@ -298,7 +295,6 @@ pub enum WorkerEvent {
     FabricRouteMiss {
         namespace_id: NamespaceId,
         dst_ip: Ipv4Addr,
-        dst_mac: [u8; 6],
     },
     ServiceActivation {
         namespace_id: NamespaceId,

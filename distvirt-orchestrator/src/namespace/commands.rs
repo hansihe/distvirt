@@ -388,7 +388,6 @@ impl NamespaceStateMachine {
                 namespace_id: ns_id.clone(),
                 service_id: svc_id.clone(),
                 ip: svc_spec.ip,
-                mac: svc_spec.mac,
                 policy: svc_spec.policy.clone(),
             },
         ));

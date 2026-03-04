@@ -12,13 +12,6 @@ use crate::types::*;
 use crate::wg_peers::WireGuardPeerManager;
 use crate::workload::WorkloadStateMachine;
 
-pub fn format_mac(mac: &[u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    )
-}
-
 /// Convert a CIDR prefix length (e.g. 24) to a dotted-decimal netmask string (e.g. "255.255.255.0").
 fn prefix_len_to_netmask(prefix_len: u8) -> String {
     let mask = if prefix_len == 0 {
@@ -136,8 +129,8 @@ impl NamespaceStateMachine {
                 _ => None,
             };
 
-            let (ip, mac) = self.spec.services.get(svc_id)
-                .map(|spec| (spec.ip.to_string(), format_mac(&spec.mac)))
+            let ip = self.spec.services.get(svc_id)
+                .map(|spec| spec.ip.to_string())
                 .unwrap_or_default();
 
             services.insert(
@@ -151,7 +144,6 @@ impl NamespaceStateMachine {
                     backend_need,
                     activation_enabled: svc.has_activation,
                     ip,
-                    mac,
                 },
             );
         }

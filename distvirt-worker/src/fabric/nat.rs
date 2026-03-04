@@ -16,7 +16,6 @@ pub struct NatFlowKey {
 #[derive(Debug, Clone)]
 pub struct NatEntry {
     pub service_ip: Ipv4Addr,
-    pub service_mac: [u8; 6],
     #[allow(dead_code)]
     pub backend_ip: Ipv4Addr,
     pub last_seen: Instant,
@@ -86,7 +85,6 @@ mod tests {
         };
         let entry = NatEntry {
             service_ip: Ipv4Addr::new(172, 16, 0, 50),
-            service_mac: [0x06, 0x00, 0xAC, 0x10, 0x00, 0x32],
             backend_ip: Ipv4Addr::new(172, 16, 0, 130),
             last_seen: Instant::now(),
         };
@@ -119,7 +117,6 @@ mod tests {
         };
         let entry = NatEntry {
             service_ip: Ipv4Addr::new(172, 16, 0, 50),
-            service_mac: [0x06, 0x00, 0xAC, 0x10, 0x00, 0x32],
             backend_ip: Ipv4Addr::new(172, 16, 0, 130),
             last_seen: Instant::now(),
         };

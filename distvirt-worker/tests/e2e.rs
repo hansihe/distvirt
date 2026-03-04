@@ -770,7 +770,6 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
         namespace_id: "ns-tcp-act".into(),
         service_id: "svc-tcp".into(),
         ip: Ipv4Addr::new(10, 0, 0, 99),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 30000,
@@ -861,7 +860,6 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         namespace_id: "ns-svc-fwd".into(),
         service_id: "svc-fwd".into(),
         ip: Ipv4Addr::new(10, 0, 0, 99),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 30000,
@@ -916,7 +914,6 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         service_id: "svc-fwd".into(),
         backend: Some(ServiceBackend {
             pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }),
     })
     .await?;
@@ -1011,7 +1008,6 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         namespace_id: "ns-svc-buf".into(),
         service_id: "svc-buf".into(),
         ip: Ipv4Addr::new(10, 0, 0, 99),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 30000,
@@ -1102,7 +1098,6 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         service_id: "svc-buf".into(),
         backend: Some(ServiceBackend {
             pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }),
     })
     .await?;
@@ -1171,7 +1166,6 @@ async fn test_destroy_service() -> anyhow::Result<()> {
         namespace_id: "ns-svc-destroy".into(),
         service_id: "svc-destroy".into(),
         ip: Ipv4Addr::new(10, 0, 0, 99),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 30000,
@@ -1363,7 +1357,6 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         namespace_id: "ns-susp-net".into(),
         service_id: "svc-susp".into(),
         ip: Ipv4Addr::new(10, 0, 0, 99),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 5000,
@@ -1409,7 +1402,6 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         service_id: "svc-susp".into(),
         backend: Some(ServiceBackend {
             pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }),
     })
     .await?;
@@ -1503,7 +1495,6 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         service_id: "svc-susp".into(),
         backend: Some(ServiceBackend {
             pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }),
     })
     .await?;
@@ -1617,7 +1608,6 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         namespace_id: "ns-act-resume".into(),
         service_id: "svc-act".into(),
         ip: Ipv4Addr::new(10, 0, 0, 99),
-        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
         policy: ServicePolicy {
             buffer_frames: 64,
             timeout_ms: 10000,
@@ -1667,7 +1657,6 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         service_id: "svc-act".into(),
         backend: Some(ServiceBackend {
             pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }),
     })
     .await?;
@@ -1807,7 +1796,6 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         service_id: "svc-act".into(),
         backend: Some(ServiceBackend {
             pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-            pod_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
         }),
     })
     .await?;

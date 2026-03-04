@@ -2,7 +2,7 @@
 //!
 //! One `WireGuardAdapter` per worker owns a single UDP socket. Each WireGuard
 //! peer maps to a namespace via its public key. The adapter bridges L3 (IP)
-//! packets from peers into the L2 fabric as Ethernet frames.
+//! packets from peers into the L3 fabric.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -10,15 +10,11 @@ use std::sync::Arc;
 
 use boringtun::noise::{Tunn, TunnResult, rate_limiter::RateLimiter};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use sha2::{Digest, Sha256};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::packet::{
-    BROADCAST_MAC, ETHERTYPE_ARP, build_arp_reply, complete_checksum, fabric_frame_ethertype,
-    fabric_frame_to_ip, ip_packet_dst, ip_to_fabric_frame, parse_arp_request,
-};
+use crate::packet::{FABRIC_HDR_SZ, complete_checksum, ip_packet_dst, with_fabric_header};
 use crate::fabric::ChannelPort;
 
 use super::{AdapterPortHandle, IngressAdapter};
@@ -29,21 +25,11 @@ const MAX_UDP_SIZE: usize = 65536;
 /// Maximum encapsulated packet size.
 const MAX_PACKET_SIZE: usize = 65536;
 
-/// Derive a locally-administered unicast MAC from a peer's public key.
-///
-/// Uses `[0x02, SHA-256(pubkey)[0..5]]` — the 0x02 prefix marks it as
-/// locally administered and unicast per IEEE 802.
-fn mac_from_pubkey(pubkey: &[u8; 32]) -> [u8; 6] {
-    let hash = Sha256::digest(pubkey);
-    [0x02, hash[0], hash[1], hash[2], hash[3], hash[4]]
-}
-
 /// Per-peer WireGuard state.
 struct PeerState {
     tunn: Mutex<Tunn>,
     namespace_id: String,
     peer_ip: Ipv4Addr,
-    peer_mac: [u8; 6],
     endpoint: RwLock<Option<SocketAddr>>,
 }
 
@@ -59,9 +45,6 @@ struct WireGuardState {
     peers_by_key: HashMap<[u8; 32], Arc<PeerState>>,
     peers_by_addr: HashMap<SocketAddr, Arc<PeerState>>,
     namespace_channels: HashMap<String, NamespaceChannel>,
-    /// IP → MAC mappings for local pods, keyed by (namespace_id, pod_ip).
-    /// Used to resolve destination MACs when injecting frames into the fabric.
-    pod_macs: HashMap<(String, Ipv4Addr), [u8; 6]>,
     rate_limiter: Arc<RateLimiter>,
     /// Counter for Tunn index allocation.
     next_index: u32,
@@ -70,7 +53,7 @@ struct WireGuardState {
 /// WireGuard ingress adapter.
 ///
 /// Owns a UDP socket and manages peers that bridge external WireGuard clients
-/// into the fabric's L2 network.
+/// into the fabric's L3 network.
 pub struct WireGuardAdapter {
     state: Arc<RwLock<WireGuardState>>,
     udp_socket: Arc<UdpSocket>,
@@ -102,7 +85,6 @@ impl WireGuardAdapter {
             peers_by_key: HashMap::new(),
             peers_by_addr: HashMap::new(),
             namespace_channels: HashMap::new(),
-            pod_macs: HashMap::new(),
             rate_limiter,
             next_index: 0,
         }));
@@ -151,22 +133,18 @@ impl WireGuardAdapter {
         )
         .map_err(|e| anyhow::anyhow!("failed to create WireGuard tunnel: {}", e))?;
 
-        let peer_mac = mac_from_pubkey(&public_key);
-
         let peer = Arc::new(PeerState {
             tunn: Mutex::new(tunn),
             namespace_id: namespace_id.to_string(),
             peer_ip,
-            peer_mac,
             endpoint: RwLock::new(None),
         });
 
         log::info!(
-            "wireguard: added peer pubkey={} ip={} namespace={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            "wireguard: added peer pubkey={} ip={} namespace={}",
             hex::encode(public_key),
             peer_ip,
             namespace_id,
-            peer_mac[0], peer_mac[1], peer_mac[2], peer_mac[3], peer_mac[4], peer_mac[5],
         );
 
         state.peers_by_key.insert(public_key, peer);
@@ -190,24 +168,6 @@ impl WireGuardAdapter {
             );
         }
         Ok(())
-    }
-
-    /// Register a local pod's IP→MAC mapping so the adapter can resolve
-    /// destination MACs when injecting frames into the fabric.
-    pub async fn register_pod_mac(&self, namespace_id: &str, ip: Ipv4Addr, mac: [u8; 6]) {
-        let mut state = self.state.write().await;
-        state.pod_macs.insert((namespace_id.to_string(), ip), mac);
-        log::info!(
-            "wireguard: registered pod mac ns={} ip={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            namespace_id, ip, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        );
-    }
-
-    /// Unregister a local pod's IP→MAC mapping.
-    #[allow(dead_code)]
-    pub async fn unregister_pod_mac(&self, namespace_id: &str, ip: Ipv4Addr) {
-        let mut state = self.state.write().await;
-        state.pod_macs.remove(&(namespace_id.to_string(), ip));
     }
 
     /// UDP receive loop: read datagrams and feed them through boringtun.
@@ -347,18 +307,10 @@ impl WireGuardAdapter {
             TunnResult::WriteToTunnelV4(ip_packet, _addr) => {
                 // Decrypted IP packet — inject into the fabric.
                 let dst_ip = ip_packet_dst(ip_packet);
-                let s = state.read().await;
-
-                // Resolve destination MAC from pod_macs table.
-                // Use unicast MAC if known, otherwise fall back to broadcast.
-                let dst_mac = dst_ip
-                    .and_then(|ip| s.pod_macs.get(&(peer.namespace_id.clone(), ip)).copied())
-                    .unwrap_or(BROADCAST_MAC);
 
                 log::trace!(
-                    "wireguard: decrypted {} byte IP packet from peer ip={}, dst_ip={:?}, dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, injecting into fabric ns={}",
+                    "wireguard: decrypted {} byte IP packet from peer ip={}, dst_ip={:?}, injecting into fabric ns={}",
                     ip_packet.len(), peer.peer_ip, dst_ip,
-                    dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5],
                     peer.namespace_id,
                 );
 
@@ -386,7 +338,9 @@ impl WireGuardAdapter {
                     }
                 }
 
-                let frame = ip_to_fabric_frame(ip_packet, &peer.peer_mac, &dst_mac);
+                // Prepend fabric header (no NEEDS_CSUM for decrypted packets).
+                let frame = with_fabric_header(0, 0, ip_packet);
+                let s = state.read().await;
                 if let Some(ns_ch) = s.namespace_channels.get(&peer.namespace_id) {
                     if let Err(e) = ns_ch.adapter_tx.try_send(frame) {
                         log::warn!(
@@ -496,60 +450,18 @@ impl WireGuardAdapter {
         while let Some(mut frame) = adapter_rx.recv().await {
             // Complete any deferred checksum offload before extracting the IP packet.
             complete_checksum(&mut frame);
-            let ethertype_val = fabric_frame_ethertype(&frame);
-            log::trace!(
-                "wireguard: egress loop received {} byte frame from fabric ns={}, ethertype={:?}{}",
-                frame.len(), namespace_id, ethertype_val.map(|e| format!("0x{:04x}", e)),
-                if frame.len() >= 24 {
-                    format!(", dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, src_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                        frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
-                        frame[16], frame[17], frame[18], frame[19], frame[20], frame[21])
-                } else { String::new() }
-            );
-            // Check for ARP requests first.
-            if let Some(ethertype) = ethertype_val {
-                if ethertype == ETHERTYPE_ARP {
-                    log::trace!("wireguard: egress: ARP frame (ethertype 0x0806)");
-                    if let Some((target_ip, sender_mac, sender_ip)) = parse_arp_request(&frame) {
-                        // Check if the target IP matches any peer in this namespace.
-                        let peer_mac = {
-                            let s = state.read().await;
-                            let mut found = None;
-                            for peer in s.peers_by_key.values() {
-                                if peer.namespace_id == namespace_id && peer.peer_ip == target_ip {
-                                    found = Some(peer.peer_mac);
-                                    break;
-                                }
-                            }
-                            found
-                        };
 
-                        if let Some(peer_mac) = peer_mac {
-                            let reply = build_arp_reply(
-                                &sender_mac,
-                                sender_ip,
-                                &peer_mac,
-                                target_ip,
-                            );
-                            // Send reply back into the fabric.
-                            let s = state.read().await;
-                            if let Some(ns_ch) = s.namespace_channels.get(&namespace_id) {
-                                let _ = ns_ch.adapter_tx.try_send(reply);
-                            }
-                        }
-                    }
-                    continue;
-                }
+            // Extract IP packet after vnet header.
+            if frame.len() <= FABRIC_HDR_SZ {
+                log::trace!("wireguard: egress: frame too short ({} bytes), skipping", frame.len());
+                continue;
             }
+            let ip_packet = &frame[FABRIC_HDR_SZ..];
 
-            // IPv4 frame: extract IP packet and send to the appropriate peer.
-            let ip_packet = match fabric_frame_to_ip(&frame) {
-                Some(p) => p,
-                None => {
-                    log::trace!("wireguard: egress: frame is not IPv4, skipping");
-                    continue;
-                }
-            };
+            log::trace!(
+                "wireguard: egress loop received {} byte frame from fabric ns={} (IP payload {} bytes)",
+                frame.len(), namespace_id, ip_packet.len(),
+            );
 
             // Log vnet header + IP/TCP details for debugging.
             if ip_packet.len() >= 20 {
@@ -744,14 +656,11 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{
-        VNET_HDR_SZ, ETH_HDR_LEN, fabric_frame_to_ip, ip_to_fabric_frame,
-    };
+    use crate::packet::FABRIC_HDR_SZ;
     use super::super::IngressAdapter;
     use crate::fabric::port::FramePort;
     use boringtun::noise::{Tunn, TunnResult};
     use boringtun::x25519::{PublicKey, StaticSecret};
-    use sha2::{Digest, Sha256};
     use std::net::{Ipv4Addr, SocketAddr};
     use tokio::net::UdpSocket;
     use tokio::sync::Mutex;
@@ -875,38 +784,6 @@ mod tests {
     }
 
     // ── Category 1: Unit tests (peer management) ──
-
-    #[test]
-    fn test_mac_from_pubkey_determinism() {
-        let key_a = pubkey_bytes(&CLIENT_PRIVATE_KEY);
-        let key_b = pubkey_bytes(&CLIENT2_PRIVATE_KEY);
-
-        let mac_a1 = mac_from_pubkey(&key_a);
-        let mac_a2 = mac_from_pubkey(&key_a);
-        let mac_b = mac_from_pubkey(&key_b);
-
-        // Same input → same MAC.
-        assert_eq!(mac_a1, mac_a2);
-        // Different input → different MAC.
-        assert_ne!(mac_a1, mac_b);
-        // Locally-administered unicast prefix.
-        assert_eq!(mac_a1[0], 0x02);
-        assert_eq!(mac_b[0], 0x02);
-    }
-
-    #[test]
-    fn test_mac_from_pubkey_format() {
-        let key = pubkey_bytes(&CLIENT_PRIVATE_KEY);
-        let mac = mac_from_pubkey(&key);
-        let hash = Sha256::digest(&key);
-
-        assert_eq!(mac[0], 0x02);
-        assert_eq!(mac[1], hash[0]);
-        assert_eq!(mac[2], hash[1]);
-        assert_eq!(mac[3], hash[2]);
-        assert_eq!(mac[4], hash[3]);
-        assert_eq!(mac[5], hash[4]);
-    }
 
     #[tokio::test]
     async fn test_add_peer_success() {
@@ -1091,27 +968,15 @@ mod tests {
 
         let frame = &frame_buf[..frame_len];
 
-        // Verify frame structure: vnet_hdr + eth_hdr + ip_packet.
+        // Verify frame structure: fabric_hdr + ip_packet (L3, no Ethernet header).
         assert!(
-            frame.len() >= VNET_HDR_SZ + ETH_HDR_LEN + 20,
+            frame.len() >= FABRIC_HDR_SZ + 20,
             "frame too short: {} bytes",
             frame.len()
         );
 
-        // Verify ethertype is IPv4.
-        let ethertype = u16::from_be_bytes([
-            frame[VNET_HDR_SZ + 12],
-            frame[VNET_HDR_SZ + 13],
-        ]);
-        assert_eq!(ethertype, 0x0800, "expected IPv4 ethertype");
-
-        // Verify source MAC matches peer's derived MAC.
-        let expected_mac = mac_from_pubkey(&client_pub);
-        let src_mac = &frame[VNET_HDR_SZ + 6..VNET_HDR_SZ + 12];
-        assert_eq!(src_mac, &expected_mac, "source MAC should match peer MAC");
-
-        // Verify the extracted IP payload matches what was sent.
-        let extracted_ip = fabric_frame_to_ip(frame).expect("failed to extract IP from frame");
+        // Verify the IP payload after the vnet header matches what was sent.
+        let extracted_ip = &frame[FABRIC_HDR_SZ..];
         assert_eq!(extracted_ip, &ip_packet[..]);
     }
 
@@ -1137,14 +1002,12 @@ mod tests {
         // Complete handshake first (sets the peer endpoint).
         perform_handshake(&client_tunn, &client_socket, adapter_addr).await;
 
-        // Build fabric frame destined for the peer's IP.
+        // Build fabric frame destined for the peer's IP (L3: fabric_hdr + IP).
         let ip_packet = make_ip_packet(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(10, 0, 0, 2), // peer's IP
         );
-        let src_mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
-        let dst_mac = mac_from_pubkey(&client_pub);
-        let frame = ip_to_fabric_frame(&ip_packet, &src_mac, &dst_mac);
+        let frame = with_fabric_header(0, 0, &ip_packet);
 
         // Send frame into the fabric port (fabric→adapter direction).
         fabric_port

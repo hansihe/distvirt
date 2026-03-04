@@ -1,7 +1,7 @@
-//! L4 stream management: translates between raw Ethernet frames and stream
+//! L4 stream management: translates between raw IP packets and stream
 //! events/actions using a smoltcp TCP stack.
 //!
-//! The fabric feeds frames in, gets events and outgoing frames back.
+//! The fabric feeds IP packets in, gets events and outgoing packets back.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::Ipv4Addr;
@@ -11,7 +11,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint};
 
 use crate::types::{Action, Event, Stream};
 
@@ -74,8 +74,8 @@ impl Device for FabricDevice {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = 1514;
+        caps.medium = Medium::Ip;
+        caps.max_transmission_unit = 1500;
         // Frames arrive from virtio with checksum offloading — skip verification
         // on receive but compute valid checksums on transmit.
         caps.checksum.ipv4 = Checksum::Tx;
@@ -93,8 +93,6 @@ impl Device for FabricDevice {
 pub struct StreamManagerConfig {
     /// The service virtual IP.
     pub service_ip: Ipv4Addr,
-    /// The service virtual MAC.
-    pub service_mac: [u8; 6],
     /// TCP ports to listen on.
     pub listen_ports: Vec<u16>,
     /// Size of TCP receive/send buffers per socket.
@@ -107,7 +105,6 @@ impl Default for StreamManagerConfig {
     fn default() -> Self {
         StreamManagerConfig {
             service_ip: Ipv4Addr::new(0, 0, 0, 0),
-            service_mac: [0; 6],
             listen_ports: vec![80],
             tcp_buffer_size: 65535,
             listen_pool_size: 4,
@@ -137,7 +134,7 @@ struct StreamState {
 pub struct StreamManagerOutput {
     /// Events to deliver to the activator.
     pub events: Vec<Event>,
-    /// Raw Ethernet frames to send (no vnet header).
+    /// Raw IP packets to send (no vnet header).
     pub frames: Vec<Vec<u8>>,
 }
 
@@ -158,8 +155,6 @@ pub struct StreamManager {
     base_instant: std::time::Instant,
     /// Backend IP for upstream connections.
     backend_ip: Option<Ipv4Addr>,
-    /// Backend MAC for upstream connections.
-    backend_mac: Option<[u8; 6]>,
     /// Allocated upstream local ports to avoid collisions.
     upstream_ports: HashSet<u16>,
     /// Counter for upstream port allocation.
@@ -172,8 +167,7 @@ impl StreamManager {
         let base_instant = std::time::Instant::now();
         let mut device = FabricDevice::new();
 
-        let iface_config =
-            Config::new(HardwareAddress::Ethernet(EthernetAddress(config.service_mac)));
+        let iface_config = Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(
             iface_config,
             &mut device,
@@ -215,7 +209,6 @@ impl StreamManager {
             config,
             base_instant,
             backend_ip: None,
-            backend_mac: None,
             upstream_ports: HashSet::new(),
             next_upstream_port: 49152,
         }
@@ -430,15 +423,12 @@ impl StreamManager {
         events
     }
 
-    /// Process a received Ethernet frame. Returns events and outgoing frames.
-    ///
-    /// smoltcp automatically learns neighbor MACs from incoming Ethernet frames,
-    /// so no explicit neighbor cache seeding is needed for downstream connections.
-    pub fn receive_frame(&mut self, eth_frame: &[u8]) -> StreamManagerOutput {
+    /// Process a received IP packet. Returns events and outgoing packets.
+    pub fn receive_frame(&mut self, ip_packet: &[u8]) -> StreamManagerOutput {
         let now = self.smoltcp_now();
 
-        // Feed frame to smoltcp.
-        self.device.rx_queue.push_back(eth_frame.to_vec());
+        // Feed packet to smoltcp.
+        self.device.rx_queue.push_back(ip_packet.to_vec());
         let frames = self.poll_and_drain(now);
         let events = self.scan_sockets();
 
@@ -483,8 +473,7 @@ impl StreamManager {
                 }
             }
             Action::UpstreamConnect { port } => {
-                if let (Some(backend_ip), Some(_backend_mac)) = (self.backend_ip, self.backend_mac)
-                {
+                if let Some(backend_ip) = self.backend_ip {
                     // Create a new TCP socket and connect to backend.
                     let rx_buf = tcp::SocketBuffer::new(vec![0u8; self.config.tcp_buffer_size]);
                     let tx_buf = tcp::SocketBuffer::new(vec![0u8; self.config.tcp_buffer_size]);
@@ -600,45 +589,9 @@ impl StreamManager {
     }
 
     /// Update the backend target for upstream connections.
-    ///
-    /// If both IP and MAC are provided, injects a synthetic ARP reply so
-    /// smoltcp learns the backend's MAC address in its neighbor cache.
-    pub fn update_backend(&mut self, ip: Option<Ipv4Addr>, mac: Option<[u8; 6]>) {
+    pub fn update_backend(&mut self, ip: Option<Ipv4Addr>) {
         self.backend_ip = ip;
-        self.backend_mac = mac;
-        if let (Some(ip), Some(mac)) = (ip, mac) {
-            let arp_reply = build_arp_reply(&self.config, ip, mac);
-            self.device.rx_queue.push_back(arp_reply);
-            let now = self.smoltcp_now();
-            // Process the ARP reply so smoltcp learns the neighbor; discard output.
-            self.poll_and_drain(now);
-        }
     }
-}
-
-/// Build a synthetic ARP reply frame so smoltcp learns the backend's MAC.
-///
-/// The reply looks like it came from the backend (sender = backend IP/MAC)
-/// targeted at the service (target = service IP/MAC).
-fn build_arp_reply(config: &StreamManagerConfig, backend_ip: Ipv4Addr, backend_mac: [u8; 6]) -> Vec<u8> {
-    let mut frame = vec![0u8; 42];
-    // Ethernet header: dst = service MAC, src = backend MAC, ethertype = ARP
-    frame[0..6].copy_from_slice(&config.service_mac);
-    frame[6..12].copy_from_slice(&backend_mac);
-    frame[12..14].copy_from_slice(&[0x08, 0x06]);
-    // ARP header
-    frame[14..16].copy_from_slice(&[0x00, 0x01]); // HTYPE: Ethernet
-    frame[16..18].copy_from_slice(&[0x08, 0x00]); // PTYPE: IPv4
-    frame[18] = 6; // HLEN
-    frame[19] = 4; // PLEN
-    frame[20..22].copy_from_slice(&[0x00, 0x02]); // Opcode: reply
-    // Sender = backend
-    frame[22..28].copy_from_slice(&backend_mac);
-    frame[28..32].copy_from_slice(&backend_ip.octets());
-    // Target = service
-    frame[32..38].copy_from_slice(&config.service_mac);
-    frame[38..42].copy_from_slice(&config.service_ip.octets());
-    frame
 }
 
 /// Helper to check if an action is an L4 stream action (handled by StreamManager).
@@ -661,10 +614,9 @@ pub fn is_l4_action(action: &Action) -> bool {
 mod tests {
     use super::*;
 
-    fn make_config(ip: Ipv4Addr, mac: [u8; 6], ports: Vec<u16>) -> StreamManagerConfig {
+    fn make_config(ip: Ipv4Addr, ports: Vec<u16>) -> StreamManagerConfig {
         StreamManagerConfig {
             service_ip: ip,
-            service_mac: mac,
             listen_ports: ports,
             tcp_buffer_size: 4096,
             listen_pool_size: 2,
@@ -672,108 +624,47 @@ mod tests {
     }
 
     const SVC_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
-    const SVC_MAC: [u8; 6] = [0x06, 0x00, 0x0a, 0x00, 0x00, 0x01];
     const CLIENT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 100);
-    const CLIENT_MAC: [u8; 6] = [0x02, 0x00, 0x0a, 0x00, 0x00, 0x64];
 
-    /// Compute the TCP header start offset by parsing the IHL field.
-    fn tcp_start(frame: &[u8]) -> usize {
-        let ihl = (frame[14] & 0x0f) as usize;
-        14 + ihl * 4
+    /// Compute the TCP header start offset by parsing the IHL field (IP packet, no Ethernet).
+    fn tcp_start(packet: &[u8]) -> usize {
+        let ihl = (packet[0] & 0x0f) as usize;
+        ihl * 4
     }
 
-    /// Check if a frame is an ARP request (ethertype 0x0806, opcode 1).
-    fn is_arp_request(frame: &[u8]) -> bool {
-        frame.len() >= 42
-            && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806
-            && u16::from_be_bytes([frame[20], frame[21]]) == 1
+    /// Check if a packet is an IPv4 TCP packet (raw IP, no Ethernet header).
+    fn is_tcp_packet(packet: &[u8]) -> bool {
+        packet.len() >= 40
+            && (packet[0] >> 4) == 4  // IPv4
+            && packet[9] == 6         // IP protocol TCP
     }
 
-    /// Build an ARP reply for a given ARP request frame, answering with the given MAC.
-    fn make_arp_reply(request: &[u8], reply_mac: [u8; 6]) -> Vec<u8> {
-        let mut reply = vec![0u8; 42];
-        // Ethernet header: dst = requester MAC, src = reply MAC
-        reply[0..6].copy_from_slice(&request[6..12]); // dst = request src
-        reply[6..12].copy_from_slice(&reply_mac);      // src = our MAC
-        reply[12..14].copy_from_slice(&[0x08, 0x06]);   // ethertype ARP
-        // ARP header
-        reply[14..16].copy_from_slice(&[0x00, 0x01]);   // HTYPE ethernet
-        reply[16..18].copy_from_slice(&[0x08, 0x00]);   // PTYPE IPv4
-        reply[18] = 6; // HLEN
-        reply[19] = 4; // PLEN
-        reply[20..22].copy_from_slice(&[0x00, 0x02]);   // opcode: reply
-        // Sender = us (the target of the request)
-        reply[22..28].copy_from_slice(&reply_mac);
-        reply[28..32].copy_from_slice(&request[38..42]); // sender IP = request target IP
-        // Target = requester
-        reply[32..38].copy_from_slice(&request[22..28]); // target MAC = request sender MAC
-        reply[38..42].copy_from_slice(&request[28..32]); // target IP = request sender IP
-        reply
-    }
-
-    /// Check if a frame is an IPv4 TCP frame.
-    fn is_tcp_frame(frame: &[u8]) -> bool {
-        frame.len() >= 54
-            && u16::from_be_bytes([frame[12], frame[13]]) == 0x0800
-            && frame[23] == 6  // IP protocol TCP
-    }
-
-    /// Feed a frame to the StreamManager, resolving any ARP requests that smoltcp
-    /// generates by replying with the appropriate MAC. Returns accumulated output.
-    fn feed_frame(sm: &mut StreamManager, frame: &[u8], reply_mac: [u8; 6]) -> StreamManagerOutput {
-        let mut output = sm.receive_frame(frame);
-        // Resolve ARP requests (up to 3 rounds to prevent infinite loops).
-        for _ in 0..3 {
-            let arps: Vec<Vec<u8>> = output.frames.iter()
-                .filter(|f| is_arp_request(f))
-                .map(|req| make_arp_reply(req, reply_mac))
-                .collect();
-            if arps.is_empty() {
-                break;
-            }
-            // Remove ARP frames from output.
-            output.frames.retain(|f| !is_arp_request(f));
-            for arp_reply in arps {
-                let more = sm.receive_frame(&arp_reply);
-                output.events.extend(more.events);
-                output.frames.extend(more.frames);
-            }
-        }
-        output.frames.retain(|f| !is_arp_request(f));
-        output
-    }
-
-    /// Build TCP SYN frame using etherparse.
+    /// Build TCP SYN IP packet using etherparse.
     fn make_tcp_syn(
         src_ip: Ipv4Addr,
-        src_mac: [u8; 6],
         dst_ip: Ipv4Addr,
-        dst_mac: [u8; 6],
         src_port: u16,
         dst_port: u16,
         seq: u32,
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
-            .ipv4(src_ip.octets(), dst_ip.octets(), 64)
+        let builder = PacketBuilder::ipv4(src_ip.octets(), dst_ip.octets(), 64)
             .tcp(src_port, dst_port, seq, 65535);
 
-        let mut frame = Vec::new();
-        builder.write(&mut frame, &[]).unwrap();
+        let mut packet = Vec::new();
+        builder.write(&mut packet, &[]).unwrap();
 
-        // Set SYN flag: parse IHL to find TCP start
-        let ts = tcp_start(&frame);
-        frame[ts + 13] = 0x02; // SYN only
-        frame
+        // Set SYN flag
+        let ts = tcp_start(&packet);
+        packet[ts + 13] = 0x02; // SYN only
+        packet
     }
 
-    /// Build a TCP ACK frame.
+    /// Build a TCP ACK IP packet.
     fn make_tcp_ack(
         src_ip: Ipv4Addr,
-        src_mac: [u8; 6],
         dst_ip: Ipv4Addr,
-        dst_mac: [u8; 6],
         src_port: u16,
         dst_port: u16,
         seq: u32,
@@ -781,26 +672,22 @@ mod tests {
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
-            .ipv4(src_ip.octets(), dst_ip.octets(), 64)
+        let builder = PacketBuilder::ipv4(src_ip.octets(), dst_ip.octets(), 64)
             .tcp(src_port, dst_port, seq, 65535);
 
-        let mut frame = Vec::new();
-        builder.write(&mut frame, &[]).unwrap();
+        let mut packet = Vec::new();
+        builder.write(&mut packet, &[]).unwrap();
 
-        let ts = tcp_start(&frame);
-        frame[ts + 13] = 0x10; // ACK only
-        // Set ack number
-        frame[ts + 8..ts + 12].copy_from_slice(&ack.to_be_bytes());
-        frame
+        let ts = tcp_start(&packet);
+        packet[ts + 13] = 0x10; // ACK only
+        packet[ts + 8..ts + 12].copy_from_slice(&ack.to_be_bytes());
+        packet
     }
 
-    /// Build a TCP PSH+ACK frame with data payload.
+    /// Build a TCP PSH+ACK IP packet with data payload.
     fn make_tcp_data(
         src_ip: Ipv4Addr,
-        src_mac: [u8; 6],
         dst_ip: Ipv4Addr,
-        dst_mac: [u8; 6],
         src_port: u16,
         dst_port: u16,
         seq: u32,
@@ -809,25 +696,22 @@ mod tests {
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
-            .ipv4(src_ip.octets(), dst_ip.octets(), 64)
+        let builder = PacketBuilder::ipv4(src_ip.octets(), dst_ip.octets(), 64)
             .tcp(src_port, dst_port, seq, 65535);
 
-        let mut frame = Vec::new();
-        builder.write(&mut frame, data).unwrap();
+        let mut packet = Vec::new();
+        builder.write(&mut packet, data).unwrap();
 
-        let ts = tcp_start(&frame);
-        frame[ts + 13] = 0x18; // PSH+ACK
-        frame[ts + 8..ts + 12].copy_from_slice(&ack.to_be_bytes());
-        frame
+        let ts = tcp_start(&packet);
+        packet[ts + 13] = 0x18; // PSH+ACK
+        packet[ts + 8..ts + 12].copy_from_slice(&ack.to_be_bytes());
+        packet
     }
 
-    /// Build a TCP FIN+ACK frame.
+    /// Build a TCP FIN+ACK IP packet.
     fn make_tcp_fin(
         src_ip: Ipv4Addr,
-        src_mac: [u8; 6],
         dst_ip: Ipv4Addr,
-        dst_mac: [u8; 6],
         src_port: u16,
         dst_port: u16,
         seq: u32,
@@ -835,74 +719,71 @@ mod tests {
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
-            .ipv4(src_ip.octets(), dst_ip.octets(), 64)
+        let builder = PacketBuilder::ipv4(src_ip.octets(), dst_ip.octets(), 64)
             .tcp(src_port, dst_port, seq, 65535);
 
-        let mut frame = Vec::new();
-        builder.write(&mut frame, &[]).unwrap();
+        let mut packet = Vec::new();
+        builder.write(&mut packet, &[]).unwrap();
 
-        let ts = tcp_start(&frame);
-        frame[ts + 13] = 0x11; // FIN+ACK
-        frame[ts + 8..ts + 12].copy_from_slice(&ack.to_be_bytes());
-        frame
+        let ts = tcp_start(&packet);
+        packet[ts + 13] = 0x11; // FIN+ACK
+        packet[ts + 8..ts + 12].copy_from_slice(&ack.to_be_bytes());
+        packet
     }
 
-    /// Extract seq and ack from a TCP frame (expects raw Ethernet frame).
-    fn extract_tcp_seq_ack(frame: &[u8]) -> (u32, u32) {
-        let ts = tcp_start(frame);
-        let seq = u32::from_be_bytes(frame[ts + 4..ts + 8].try_into().unwrap());
-        let ack = u32::from_be_bytes(frame[ts + 8..ts + 12].try_into().unwrap());
+    /// Extract seq and ack from a TCP IP packet.
+    fn extract_tcp_seq_ack(packet: &[u8]) -> (u32, u32) {
+        let ts = tcp_start(packet);
+        let seq = u32::from_be_bytes(packet[ts + 4..ts + 8].try_into().unwrap());
+        let ack = u32::from_be_bytes(packet[ts + 8..ts + 12].try_into().unwrap());
         (seq, ack)
     }
 
-    /// Extract TCP flags from a raw Ethernet frame.
-    fn extract_tcp_flags(frame: &[u8]) -> u8 {
-        let ts = tcp_start(frame);
-        frame[ts + 13]
+    /// Extract TCP flags from a raw IP packet.
+    fn extract_tcp_flags(packet: &[u8]) -> u8 {
+        let ts = tcp_start(packet);
+        packet[ts + 13]
     }
 
     #[test]
     fn test_tcp_syn_produces_syn_ack() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
 
-        let syn = make_tcp_syn(CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC, 12345, 80, 1000);
-        let output = feed_frame(&mut sm, &syn, CLIENT_MAC);
+        let syn = make_tcp_syn(CLIENT_IP, SVC_IP, 12345, 80, 1000);
+        let output = sm.receive_frame(&syn);
 
-        // Should get at least one outgoing TCP frame (SYN-ACK).
-        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
-        assert!(!tcp_frames.is_empty(), "SYN should produce SYN-ACK");
-        let flags = extract_tcp_flags(tcp_frames[0]);
+        // Should get at least one outgoing TCP packet (SYN-ACK).
+        let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
+        assert!(!tcp_packets.is_empty(), "SYN should produce SYN-ACK");
+        let flags = extract_tcp_flags(tcp_packets[0]);
         assert_eq!(flags & 0x12, 0x12, "response should be SYN+ACK");
     }
 
     #[test]
     fn test_tcp_handshake_produces_stream_open() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
 
         // SYN
-        let syn = make_tcp_syn(CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC, 12345, 80, 1000);
-        let output = feed_frame(&mut sm, &syn, CLIENT_MAC);
-        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
-        assert!(!tcp_frames.is_empty(), "SYN should produce SYN-ACK");
+        let syn = make_tcp_syn(CLIENT_IP, SVC_IP, 12345, 80, 1000);
+        let output = sm.receive_frame(&syn);
+        let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
+        assert!(!tcp_packets.is_empty(), "SYN should produce SYN-ACK");
 
         // Extract server seq from SYN-ACK.
-        let (server_seq, _server_ack) = extract_tcp_seq_ack(tcp_frames[0]);
+        let (server_seq, _server_ack) = extract_tcp_seq_ack(tcp_packets[0]);
 
         // ACK (completes handshake)
         let ack = make_tcp_ack(
             CLIENT_IP,
-            CLIENT_MAC,
             SVC_IP,
-            SVC_MAC,
             12345,
             80,
             1001,
             server_seq + 1,
         );
-        let output = feed_frame(&mut sm, &ack, CLIENT_MAC);
+        let output = sm.receive_frame(&ack);
 
         // Should get StreamOpen event.
         let stream_open = output
@@ -914,17 +795,17 @@ mod tests {
 
     /// Complete a TCP handshake and return (stream_id, server_seq).
     fn do_handshake(sm: &mut StreamManager) -> (Stream, u32) {
-        let syn = make_tcp_syn(CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC, 12345, 80, 1000);
-        let output = feed_frame(sm, &syn, CLIENT_MAC);
-        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
-        assert!(!tcp_frames.is_empty(), "SYN should produce SYN-ACK");
-        let (server_seq, _) = extract_tcp_seq_ack(tcp_frames[0]);
+        let syn = make_tcp_syn(CLIENT_IP, SVC_IP, 12345, 80, 1000);
+        let output = sm.receive_frame(&syn);
+        let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
+        assert!(!tcp_packets.is_empty(), "SYN should produce SYN-ACK");
+        let (server_seq, _) = extract_tcp_seq_ack(tcp_packets[0]);
 
         let ack = make_tcp_ack(
-            CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC,
+            CLIENT_IP, SVC_IP,
             12345, 80, 1001, server_seq + 1,
         );
-        let output = feed_frame(sm, &ack, CLIENT_MAC);
+        let output = sm.receive_frame(&ack);
         let stream_id = output
             .events
             .iter()
@@ -938,33 +819,33 @@ mod tests {
 
     #[test]
     fn test_tcp_data_produces_stream_data() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
-        let data_frame = make_tcp_data(
-            CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC,
+        let data_packet = make_tcp_data(
+            CLIENT_IP, SVC_IP,
             12345, 80, 1001, server_seq + 1, b"hello",
         );
-        let output = feed_frame(&mut sm, &data_frame, CLIENT_MAC);
+        let output = sm.receive_frame(&data_packet);
 
         let stream_data = output.events.iter().find(|e| {
             matches!(e, Event::StreamData { stream, data } if *stream == stream_id && data == b"hello")
         });
-        assert!(stream_data.is_some(), "data frame should produce StreamData event");
+        assert!(stream_data.is_some(), "data packet should produce StreamData event");
     }
 
     #[test]
     fn test_tcp_fin_produces_stream_close() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
         let fin = make_tcp_fin(
-            CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC,
+            CLIENT_IP, SVC_IP,
             12345, 80, 1001, server_seq + 1,
         );
-        let output = feed_frame(&mut sm, &fin, CLIENT_MAC);
+        let output = sm.receive_frame(&fin);
 
         let stream_close = output
             .events
@@ -975,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_downstream_send_produces_data_frame() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (stream_id, _) = do_handshake(&mut sm);
 
@@ -984,39 +865,39 @@ mod tests {
             data: b"world".to_vec(),
         });
 
-        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
-        assert!(!tcp_frames.is_empty(), "DownstreamSend should produce TCP frame");
-        let flags = extract_tcp_flags(tcp_frames[0]);
+        let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
+        assert!(!tcp_packets.is_empty(), "DownstreamSend should produce TCP packet");
+        let flags = extract_tcp_flags(tcp_packets[0]);
         assert!(flags & 0x08 != 0 || flags & 0x10 != 0, "should be PSH and/or ACK");
     }
 
     #[test]
     fn test_downstream_close_produces_fin() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (stream_id, _) = do_handshake(&mut sm);
 
         let output = sm.execute_action(&Action::DownstreamClose(stream_id));
 
-        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
-        assert!(!tcp_frames.is_empty(), "DownstreamClose should produce FIN");
-        let flags = extract_tcp_flags(tcp_frames[0]);
+        let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
+        assert!(!tcp_packets.is_empty(), "DownstreamClose should produce FIN");
+        let flags = extract_tcp_flags(tcp_packets[0]);
         assert!(flags & 0x01 != 0, "should have FIN flag set");
     }
 
     #[test]
     fn test_pause_stops_stream_data() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
         sm.execute_action(&Action::PauseDownstream(stream_id));
 
-        let data_frame = make_tcp_data(
-            CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC,
+        let data_packet = make_tcp_data(
+            CLIENT_IP, SVC_IP,
             12345, 80, 1001, server_seq + 1, b"ignored",
         );
-        let output = feed_frame(&mut sm, &data_frame, CLIENT_MAC);
+        let output = sm.receive_frame(&data_packet);
         let has_stream_data = output
             .events
             .iter()
@@ -1031,7 +912,6 @@ mod tests {
     fn test_partial_write_handled_gracefully() {
         let config = StreamManagerConfig {
             service_ip: SVC_IP,
-            service_mac: SVC_MAC,
             listen_ports: vec![80],
             tcp_buffer_size: 64, // Small buffer to trigger partial write
             listen_pool_size: 2,
@@ -1046,49 +926,44 @@ mod tests {
             data: big_data,
         });
 
-        // Should produce some TCP frames (partial write handled).
-        let tcp_frames: Vec<_> = output.frames.iter().filter(|f| is_tcp_frame(f)).collect();
-        assert!(!tcp_frames.is_empty(), "partial write should still produce frames");
+        // Should produce some TCP packets (partial write handled).
+        let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
+        assert!(!tcp_packets.is_empty(), "partial write should still produce packets");
     }
 
     #[test]
-    fn test_upstream_connect_sends_syn_not_arp() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+    fn test_upstream_connect_sends_syn() {
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
 
         let backend_ip = Ipv4Addr::new(10, 0, 0, 200);
-        let backend_mac: [u8; 6] = [0x02, 0x00, 0x0a, 0x00, 0x00, 0xc8];
 
-        // Seed the neighbor cache.
-        sm.update_backend(Some(backend_ip), Some(backend_mac));
+        sm.update_backend(Some(backend_ip));
 
         // Now issue an upstream connect.
         let output = sm.execute_action(&Action::UpstreamConnect { port: 8080 });
 
-        // Should produce a TCP SYN frame, not an ARP request.
-        assert!(!output.frames.is_empty(), "UpstreamConnect should produce frames");
-        let has_arp = output.frames.iter().any(|f| is_arp_request(f));
-        assert!(!has_arp, "should not produce ARP request after update_backend seeded neighbor cache");
-        let has_tcp = output.frames.iter().any(|f| is_tcp_frame(f));
-        assert!(has_tcp, "should produce TCP SYN frame");
+        // Should produce a TCP SYN packet.
+        assert!(!output.frames.is_empty(), "UpstreamConnect should produce packets");
+        let has_tcp = output.frames.iter().any(|f| is_tcp_packet(f));
+        assert!(has_tcp, "should produce TCP SYN packet");
     }
 
     #[test]
     fn test_upstream_ports_unique() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
 
         let backend_ip = Ipv4Addr::new(10, 0, 0, 200);
-        let backend_mac: [u8; 6] = [0x02, 0x00, 0x0a, 0x00, 0x00, 0xc8];
-        sm.update_backend(Some(backend_ip), Some(backend_mac));
+        sm.update_backend(Some(backend_ip));
 
         let mut src_ports = std::collections::HashSet::new();
         for _ in 0..100 {
             let output = sm.execute_action(&Action::UpstreamConnect { port: 8080 });
-            for frame in &output.frames {
-                if is_tcp_frame(frame) {
-                    let ts = tcp_start(frame);
-                    let src_port = u16::from_be_bytes([frame[ts], frame[ts + 1]]);
+            for packet in &output.frames {
+                if is_tcp_packet(packet) {
+                    let ts = tcp_start(packet);
+                    let src_port = u16::from_be_bytes([packet[ts], packet[ts + 1]]);
                     src_ports.insert(src_port);
                 }
             }
@@ -1099,31 +974,31 @@ mod tests {
 
     #[test]
     fn test_poll_delay_and_handle_timeout_drives_fin_ack() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
         // Client sends FIN.
         let fin = make_tcp_fin(
-            CLIENT_IP, CLIENT_MAC, SVC_IP, SVC_MAC,
+            CLIENT_IP, SVC_IP,
             12345, 80, 1001, server_seq + 1,
         );
-        let output = feed_frame(&mut sm, &fin, CLIENT_MAC);
+        let output = sm.receive_frame(&fin);
 
         // Should get StreamClose event.
         let has_close = output.events.iter().any(|e| matches!(e, Event::StreamClose(s) if *s == stream_id));
         assert!(has_close, "FIN should produce StreamClose");
 
         // After processing FIN, smoltcp should want a timer (for TIME_WAIT or retransmit).
-        // Calling handle_timeout should produce frames (ACK for the FIN at minimum).
+        // Calling handle_timeout should produce packets (ACK for the FIN at minimum).
         let timeout_output = sm.handle_timeout();
         let total_frames = output.frames.len() + timeout_output.frames.len();
-        assert!(total_frames > 0, "FIN processing should produce at least one outgoing frame (ACK)");
+        assert!(total_frames > 0, "FIN processing should produce at least one outgoing packet (ACK)");
     }
 
     #[test]
     fn test_poll_delay_returns_some_after_close() {
-        let config = make_config(SVC_IP, SVC_MAC, vec![80]);
+        let config = make_config(SVC_IP, vec![80]);
         let mut sm = StreamManager::new(config);
         let (_stream_id, _server_seq) = do_handshake(&mut sm);
 

@@ -1,14 +1,10 @@
-use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::time::{Duration, Instant};
 
 use tokio::io::unix::AsyncFd;
 
-use crate::packet::{ETH_HDR_LEN, ETHERTYPE_IPV4, FabricFrame, VNET_HDR_SZ};
-use crate::fabric::switch::GATEWAY_MAC;
-use super::adjust_vnet_csum_start;
+use crate::packet::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM, IP_PROTO_TCP, IP_PROTO_UDP};
 
 /// TUN device ioctl constants.
 const TUNSETIFF: libc::c_ulong = 0x400454ca;
@@ -183,13 +179,10 @@ async fn tun_write(tun: &AsyncFd<OwnedFd>, buf: &[u8]) -> io::Result<usize> {
 
 /// TUN-based internet egress/ingress component.
 ///
-/// Manages a TUN device for routing pod traffic to the host network,
-/// and an IP-to-MAC table for building return frames.
+/// Manages a TUN device for routing pod traffic to the host network.
 pub(crate) struct TunEgress {
     tun: AsyncFd<OwnedFd>,
     tun_name: String,
-    ip_mac_table: HashMap<[u8; 4], ([u8; 6], Instant)>,
-    ip_mac_timeout: Duration,
 }
 
 impl TunEgress {
@@ -228,30 +221,44 @@ impl TunEgress {
         Ok(TunEgress {
             tun: async_fd,
             tun_name,
-            ip_mac_table: HashMap::new(),
-            ip_mac_timeout: Duration::from_secs(300),
         })
     }
 
+    /// Size of the kernel virtio-net header used by TUN devices.
+    const VNET_HDR_SZ: usize = 10;
+
     /// Write an egress frame to the TUN device.
     ///
-    /// Learns the source MAC from the frame, strips the Ethernet header,
-    /// adjusts the vnet checksum offset, and writes to TUN.
-    pub async fn write_egress(&mut self, ff: &FabricFrame<'_>) {
-        let src_mac = ff.src_mac();
-        let eth_frame = ff.eth_payload();
-        let ip_packet = &eth_frame[ETH_HDR_LEN..];
-        let src_ip: [u8; 4] = ip_packet[12..16].try_into().unwrap();
-        self.ip_mac_table.insert(src_ip, (src_mac, Instant::now()));
+    /// Converts `[fabric_hdr(3)][IP]` to `[vnet_hdr(10)][IP]` for the kernel.
+    /// If NEEDS_CSUM is set, derives `csum_start` and `csum_offset` from the IP header.
+    pub async fn write_egress(&self, packet: &[u8]) {
+        if packet.len() < FABRIC_HDR_SZ + 20 {
+            return;
+        }
+        let fabric_flags = packet[0];
+        let ip_packet = &packet[FABRIC_HDR_SZ..];
 
-        // Copy vnet header and adjust csum_start for TUN (IP-level,
-        // no ethernet header), then write [vnet_hdr][ip_packet] to TUN.
-        let mut vnet_hdr = ff.vnet_hdr();
-        adjust_vnet_csum_start(&mut vnet_hdr, -(ETH_HDR_LEN as i16));
-        let mut tun_buf_out = Vec::with_capacity(VNET_HDR_SZ + ip_packet.len());
-        tun_buf_out.extend_from_slice(&vnet_hdr);
-        tun_buf_out.extend_from_slice(ip_packet);
-        if let Err(e) = tun_write(&self.tun, &tun_buf_out).await {
+        let mut vnet_hdr = [0u8; Self::VNET_HDR_SZ];
+        if fabric_flags & FLAG_NEEDS_CSUM != 0 {
+            vnet_hdr[0] = 1; // VIRTIO_NET_HDR_F_NEEDS_CSUM
+            // Derive csum_start and csum_offset from IP header.
+            let ihl = (ip_packet[0] & 0x0f) as usize * 4;
+            let protocol = ip_packet[9];
+            let csum_offset: u16 = match protocol {
+                IP_PROTO_TCP => 16,
+                IP_PROTO_UDP => 6,
+                _ => 0,
+            };
+            let csum_start = ihl as u16;
+            vnet_hdr[6..8].copy_from_slice(&csum_start.to_le_bytes());
+            vnet_hdr[8..10].copy_from_slice(&csum_offset.to_le_bytes());
+        }
+
+        let mut tun_frame = Vec::with_capacity(Self::VNET_HDR_SZ + ip_packet.len());
+        tun_frame.extend_from_slice(&vnet_hdr);
+        tun_frame.extend_from_slice(ip_packet);
+
+        if let Err(e) = tun_write(&self.tun, &tun_frame).await {
             log::warn!("gateway: TUN write error: {}", e);
         }
     }
@@ -263,58 +270,19 @@ impl TunEgress {
 
     /// Build a fabric frame from a TUN ingress packet.
     ///
-    /// Looks up the destination MAC from the ip_mac_table, adjusts the vnet
-    /// checksum offset, and constructs `[vnet_hdr][eth_hdr][ip_packet]`.
-    /// Returns `None` if no MAC mapping exists for the destination IP.
+    /// TUN reads `[vnet_hdr(10)][IP]` from the kernel.
+    /// Converts to `[fabric_hdr(3)][IP]` for the fabric.
+    /// Extracts NEEDS_CSUM flag from vnet byte 0; discards csum_start/csum_offset
+    /// (they'll be derived from the IP header when needed).
     pub fn build_ingress_frame(&self, tun_buf: &[u8], n: usize) -> Option<Vec<u8>> {
-        if n < VNET_HDR_SZ + 20 {
+        if n < Self::VNET_HDR_SZ + 20 {
             return None;
         }
-        let tun_vnet_hdr = &tun_buf[..VNET_HDR_SZ];
-        let ip_packet = &tun_buf[VNET_HDR_SZ..n];
+        let vnet_flags = tun_buf[0];
+        let needs_csum = vnet_flags & 1; // VIRTIO_NET_HDR_F_NEEDS_CSUM
+        let ip_packet = &tun_buf[Self::VNET_HDR_SZ..n];
 
-        let dst_ip: [u8; 4] = ip_packet[16..20].try_into().unwrap();
-        let dst_mac = match self.ip_mac_table.get(&dst_ip) {
-            Some((mac, _)) => *mac,
-            None => {
-                log::debug!(
-                    "gateway: ingress no MAC for {}.{}.{}.{}, dropping",
-                    dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
-                );
-                return None;
-            }
-        };
-
-        // Adjust vnet header csum_start for fabric (adds ethernet header).
-        let mut vnet_hdr: [u8; VNET_HDR_SZ] = tun_vnet_hdr.try_into().unwrap();
-        adjust_vnet_csum_start(&mut vnet_hdr, ETH_HDR_LEN as i16);
-
-        // Build fabric frame: [vnet_hdr][eth_hdr][ip_packet]
-        let mut frame = Vec::with_capacity(VNET_HDR_SZ + ETH_HDR_LEN + ip_packet.len());
-        frame.extend_from_slice(&vnet_hdr);
-        frame.extend_from_slice(&dst_mac);
-        frame.extend_from_slice(&GATEWAY_MAC);
-        frame.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
-        frame.extend_from_slice(ip_packet);
-
-        Some(frame)
-    }
-
-    /// Remove stale ip_mac entries that have exceeded the timeout.
-    pub fn sweep_stale(&mut self) {
-        let now = Instant::now();
-        let before = self.ip_mac_table.len();
-        self.ip_mac_table.retain(|_ip, (_, inserted)| {
-            now.duration_since(*inserted) <= self.ip_mac_timeout
-        });
-        let expired = before - self.ip_mac_table.len();
-        if expired > 0 {
-            log::info!(
-                "gateway: swept {} stale ip_mac entries ({} remaining)",
-                expired,
-                self.ip_mac_table.len()
-            );
-        }
+        Some(crate::packet::with_fabric_header(needs_csum, 0, ip_packet))
     }
 
     /// Get the TUN device interface name.

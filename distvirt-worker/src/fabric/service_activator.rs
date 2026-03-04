@@ -31,20 +31,20 @@ impl ServiceProcessor {
     pub fn process_frame(
         &mut self,
         service_id: &str,
-        eth_payload: &[u8],
+        ip_packet: &[u8],
         raw_frame: &[u8],
     ) -> Option<ServiceAction> {
         match self {
             ServiceProcessor::Passthrough => None,
             ServiceProcessor::L4 { activator, stream_manager } => {
-                let sm_output = stream_manager.receive_frame(eth_payload);
+                let sm_output = stream_manager.receive_frame(ip_packet);
                 Some(process_l4_output(
                     service_id, activator.as_mut(), stream_manager, sm_output,
                 ))
             }
             ServiceProcessor::L3 { activator, flow_tracker } => {
                 if let Some(packet_info) =
-                    parse_frame_to_packet_info(eth_payload, raw_frame, flow_tracker)
+                    parse_frame_to_packet_info(ip_packet, raw_frame, flow_tracker)
                 {
                     activator.push_event(Event::Packet(packet_info));
                 }
@@ -106,7 +106,6 @@ impl ServiceProcessor {
         &mut self,
         has_backend: bool,
         backend_ip: Option<Ipv4Addr>,
-        backend_mac: Option<[u8; 6]>,
     ) {
         match self {
             ServiceProcessor::Passthrough => {}
@@ -114,7 +113,7 @@ impl ServiceProcessor {
                 if let Some(act) = activator {
                     act.push_event(Event::BackendAvailable(has_backend));
                 }
-                stream_manager.update_backend(backend_ip, backend_mac);
+                stream_manager.update_backend(backend_ip);
             }
             ServiceProcessor::L3 { activator, .. } => {
                 activator.push_event(Event::BackendAvailable(has_backend));

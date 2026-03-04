@@ -9,7 +9,7 @@
 - Worker events: `PodSuspended`, `PodSuspendFailed`, `PodRunning` (on resume)
 - Orchestrator workload states: `Suspending`, `Suspended`, `Resuming` (with timeout timers)
 - Guest-side suspend handshake (`PrepareSuspend` / `SuspendReady` via guest-init vsock)
-- Fabric buffering infrastructure: service entity buffering, route table placeholder buffering, frame flush on resume
+- Fabric buffering infrastructure: service entity buffering, route table placeholder buffering, packet flush on resume
 - `ServiceActivation` events triggering demand-up from suspended state
 - `suspend_on_idle` workload policy for automatic scale-to-zero
 - Snapshot artifacts stored as directory on worker local filesystem (snapshot.bin, mem.bin, container.ext4, metadata.json)
@@ -149,7 +149,7 @@ V1 implements a single local pool per worker (and optionally one S3 remote pool)
 5. Worker: Attach new TAP device, connect to fabric
 6. Worker: PodRunning { namespace_id, pod_id }
 7. Orchestrator: UpdateServiceBackend(service_id, new backend) + ServiceReady
-8. Fabric flushes buffered frames → resumed guest
+8. Fabric flushes buffered packets → resumed guest
 ```
 
 ### Snapshot Registry
@@ -224,7 +224,7 @@ SnapshotEntry {
 6. CUTOVER PHASE
    a. Orchestrator: Update route table — replace placeholder with worker B route
    b. Orchestrator: UpdateServiceBackend(service_id, new backend on worker B)
-   c. Orchestrator: ServiceReady → flush buffered frames to resumed guest
+   c. Orchestrator: ServiceReady → flush buffered packets to resumed guest
    d. Orchestrator: Cleanup source snapshot on worker A (DeleteSnapshot)
 ```
 
@@ -245,9 +245,9 @@ The key insight is that **the fabric's existing buffering infrastructure handles
 - **Service entity buffering**: `UpdateServiceBackend(None)` puts the service into buffering mode. This is the same mechanism used for scale-to-zero activation. New traffic to the service IP is buffered until `ServiceReady` after resume.
 - **Route table buffering**: Placeholder route entries with buffer policy capture direct pod-to-pod traffic during migration.
 - **TAP drain**: After Firecracker pauses vCPUs, any frames already in the TAP buffer are read and forwarded into the fabric. This ensures no frames are lost that the guest already sent.
-- **Frame flush on resume**: Buffered frames are delivered to the resumed guest after `ServiceReady` / route update, making the migration transparent to both the migrated pod and its peers.
+- **Packet flush on resume**: Buffered packets are delivered to the resumed guest after `ServiceReady` / route update, making the migration transparent to both the migrated pod and its peers.
 
-**What the guest sees**: A brief pause (vCPUs frozen during snapshot), then execution continues. The guest's network interface may see a small gap in traffic followed by a burst of buffered frames. TCP handles this naturally via retransmission.
+**What the guest sees**: A brief pause (vCPUs frozen during snapshot), then execution continues. The guest's network interface may see a small gap in traffic followed by a burst of buffered packets. TCP handles this naturally via retransmission.
 
 **What peers see**: A brief period where traffic is buffered (latency spike), then delivered. TCP connections survive. UDP traffic may experience brief packet loss if buffers fill.
 
@@ -285,7 +285,7 @@ This reduces the pause window to the time needed to transfer the final dirty pag
    {
      namespace_id, created_at,
      pods: [{ pod_id, snapshot_key, workload_id, vm_config, network }],
-     services: [{ service_id, ip, mac, policy, workload_binding }],
+     services: [{ service_id, ip, policy, workload_binding }],
      dns_entries: { name → ip },
      ip_allocations: { ... },
    }
@@ -307,8 +307,8 @@ This reduces the pause window to the time needed to transfer the final dirty pag
 
 Clone = restore a namespace snapshot under a new namespace ID.
 
-- Fresh namespace ID, but **same IP space** — namespaces are isolated L2 domains so there is no overlap concern.
-- Pod network config (IPs, MACs, gateway) stays the same within the cloned namespace.
+- Fresh namespace ID, but **same IP space** — namespaces are isolated IP networks so there is no overlap concern.
+- Pod network config (IPs, gateway) stays the same within the cloned namespace.
 - Service IPs stay the same; DNS entries resolve identically within the namespace.
 - Clone is fully transparent to the guest — no network reconfiguration needed.
 
@@ -536,7 +536,7 @@ Note: the current `Suspended` variant tracks `worker_id` directly. When the pool
 
 2. **Guest-side suspend handshake** — Before taking a snapshot, the worker sends `PrepareSuspend` to guest-init via vsock. The guest flushes application state and responds with `SuspendReady`. This ensures a clean snapshot point. The guest-init protocol is implemented.
 
-3. **Cloning uses same IP space** — Namespaces are isolated L2 domains, so cloned namespaces reuse the same IP space. Clone is fully transparent to the guest.
+3. **Cloning uses same IP space** — Namespaces are isolated IP networks, so cloned namespaces reuse the same IP space. Clone is fully transparent to the guest.
 
 4. **V1 disk handling: full snapshot with compression** — Snapshot the entire writable disk. For stateless workloads the delta is small and compresses well. Future optimization: guest-internal overlayfs separating base image (read-only, shareable) from guest writes (small overlay).
 

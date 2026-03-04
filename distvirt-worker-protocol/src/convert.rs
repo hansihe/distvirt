@@ -322,7 +322,8 @@ pub fn write_service_backend(
     val: &ServiceBackend,
 ) {
     write_ipv4(&mut builder.reborrow().init_pod_ip(), &val.pod_ip);
-    write_mac(&mut builder.reborrow().init_pod_mac(), &val.pod_mac);
+    // Write zeroed MAC for wire compatibility.
+    write_mac(&mut builder.reborrow().init_pod_mac(), &[0; 6]);
 }
 
 pub fn read_service_backend(
@@ -330,7 +331,7 @@ pub fn read_service_backend(
 ) -> capnp::Result<ServiceBackend> {
     Ok(ServiceBackend {
         pod_ip: read_ipv4(reader.get_pod_ip()?),
-        pod_mac: read_mac(reader.get_pod_mac()?),
+        // pod_mac field ignored (kept in schema for wire compatibility).
     })
 }
 
@@ -368,7 +369,8 @@ pub fn write_fabric_route_entry(
     val: &FabricRouteEntry,
 ) {
     write_ipv4(&mut builder.reborrow().init_ip(), &val.ip);
-    write_mac(&mut builder.reborrow().init_mac(), &val.mac);
+    // Write zeroed MAC for wire compatibility.
+    write_mac(&mut builder.reborrow().init_mac(), &[0; 6]);
     write_route_destination(builder.reborrow().init_destination(), &val.destination);
 }
 
@@ -377,7 +379,7 @@ pub fn read_fabric_route_entry(
 ) -> capnp::Result<FabricRouteEntry> {
     Ok(FabricRouteEntry {
         ip: read_ipv4(reader.get_ip()?),
-        mac: read_mac(reader.get_mac()?),
+        // mac field ignored (kept in schema for wire compatibility).
         destination: read_route_destination(reader.get_destination()?)?,
     })
 }
@@ -639,14 +641,13 @@ pub fn write_worker_command(
             namespace_id,
             service_id,
             ip,
-            mac,
             policy,
         } => {
             let mut b = builder.init_create_service();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_service_id(service_id.as_ref());
             write_ipv4(&mut b.reborrow().init_ip(), ip);
-            write_mac(&mut b.reborrow().init_mac(), mac);
+            write_mac(&mut b.reborrow().init_mac(), &[0; 6]);
             write_service_policy(&mut b.reborrow().init_policy(), policy);
         }
         WorkerCommand::UpdateServiceBackend {
@@ -837,11 +838,11 @@ pub fn read_worker_command(
         }
         CreateService(r) => {
             let r = r?;
+            let _ = r.get_mac(); // ignore wire-compat MAC field
             Ok(WorkerCommand::CreateService {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 service_id: ServiceId::from(r.get_service_id()?.to_str()?),
                 ip: read_ipv4(r.get_ip()?),
-                mac: read_mac(r.get_mac()?),
                 policy: read_service_policy(r.get_policy()?)?,
             })
         }
@@ -1023,12 +1024,12 @@ pub fn write_worker_event(
         WorkerEvent::FabricRouteMiss {
             namespace_id,
             dst_ip,
-            dst_mac,
         } => {
             let mut b = builder.init_fabric_route_miss();
             b.set_namespace_id(namespace_id.as_ref());
             write_ipv4(&mut b.reborrow().init_dst_ip(), dst_ip);
-            write_mac(&mut b.reborrow().init_dst_mac(), dst_mac);
+            // dst_mac field retained in schema for wire compatibility but set to zero.
+            write_mac(&mut b.reborrow().init_dst_mac(), &[0; 6]);
         }
         WorkerEvent::PodSuspended {
             namespace_id,
@@ -1134,7 +1135,6 @@ pub fn read_worker_event(
             Ok(WorkerEvent::FabricRouteMiss {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 dst_ip: read_ipv4(r.get_dst_ip()?),
-                dst_mac: read_mac(r.get_dst_mac()?),
             })
         }
         PodSuspended(r) => {

@@ -136,7 +136,6 @@ pub async fn run_compose(
             namespace_id: namespace_id.clone(),
             service_id: ServiceId::from(planned.name.as_str()),
             ip: planned.service_ip,
-            mac: planned.service_mac,
             policy: ServicePolicy {
                 buffer_frames: 64,
                 timeout_ms: 30000,
@@ -175,7 +174,7 @@ pub async fn run_compose(
             pod_id: planned.name.clone().into(),
             network: PodNetworkConfig {
                 ip: planned.pod_ip,
-                mac: planned.pod_mac,
+                mac: [0x06, 0x00, planned.pod_ip.octets()[0], planned.pod_ip.octets()[1], planned.pod_ip.octets()[2], planned.pod_ip.octets()[3]],
                 gateway: DEFAULT_GATEWAY,
                 netmask: DEFAULT_NETMASK.to_string(),
             },
@@ -217,7 +216,6 @@ pub async fn run_compose(
                                 service_id: ServiceId::from(pod_id.as_ref()),
                                 backend: Some(ServiceBackend {
                                     pod_ip: planned.pod_ip,
-                                    pod_mac: planned.pod_mac,
                                 }),
                             })
                             .await
@@ -280,7 +278,7 @@ pub async fn run_compose(
                     } => {
                         eprintln!("{} | log stream error ({}): {}", pod_id, phase, error);
                     }
-                    WorkerEvent::FabricRouteMiss { namespace_id: _, dst_ip, dst_mac: _ } => {
+                    WorkerEvent::FabricRouteMiss { namespace_id: _, dst_ip } => {
                         log::debug!("fabric route miss for {}", dst_ip);
                     }
                     WorkerEvent::ServiceActivation { namespace_id: _, service_id, dst_ip } => {

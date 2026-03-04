@@ -48,17 +48,17 @@ impl FlowTracker {
 #[allow(dead_code)]
 const VNET_HDR_SZ: usize = 10;
 
-/// Parse an Ethernet frame (with vnet header) into a `PacketInfo`.
+/// Parse an IP packet (with vnet header) into a `PacketInfo`.
 ///
-/// Returns `None` for non-IPv4 frames or unparseable packets.
+/// Returns `None` for non-IPv4 packets or unparseable packets.
 /// `raw_frame_with_vnet` is the full frame including the vnet header, stored
 /// as-is in the `PacketInfo` for activator-owned buffering/replay.
 pub fn parse_frame_to_packet_info(
-    eth_frame: &[u8],
+    ip_packet: &[u8],
     raw_frame_with_vnet: &[u8],
     flow_tracker: &mut FlowTracker,
 ) -> Option<PacketInfo> {
-    let packet = etherparse::SlicedPacket::from_ethernet(eth_frame).ok()?;
+    let packet = etherparse::SlicedPacket::from_ip(ip_packet).ok()?;
 
     let (src_addr, dst_addr) = match packet.net {
         Some(etherparse::NetSlice::Ipv4(ref ipv4)) => {
@@ -74,9 +74,9 @@ pub fn parse_frame_to_packet_info(
         match packet.transport {
             Some(etherparse::TransportSlice::Tcp(ref tcp)) => {
                 let flags = tcp.slice()[13]; // TCP flags byte
-                let payload_len = eth_frame.len()
+                let payload_len = ip_packet.len()
                     .saturating_sub(packet.net.as_ref().map_or(0, |n| match n {
-                        etherparse::NetSlice::Ipv4(v4) => 14 + v4.header().total_len() as usize,
+                        etherparse::NetSlice::Ipv4(v4) => v4.header().total_len() as usize,
                         _ => 0,
                     }));
                 (
@@ -126,7 +126,7 @@ pub fn parse_frame_to_packet_info(
 mod tests {
     use super::*;
 
-    /// Build a minimal Ethernet + IPv4 + TCP frame.
+    /// Build a minimal IPv4 + TCP packet.
     fn build_tcp_frame(
         src_ip: [u8; 4],
         dst_ip: [u8; 4],
@@ -136,18 +136,14 @@ mod tests {
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(
-            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
-            [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb],
-        )
-        .ipv4(src_ip, dst_ip, 64)
-        .tcp(src_port, dst_port, 1000, 65535);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
+            .tcp(src_port, dst_port, 1000, 65535);
 
         let mut buf = Vec::new();
         builder.write(&mut buf, &[]).unwrap();
 
-        // Set TCP flags manually (offset: eth(14) + ip(20) + tcp flags at byte 13)
-        let tcp_start = 14 + 20;
+        // Set TCP flags manually (offset: ip(20) + tcp flags at byte 13)
+        let tcp_start = 20;
         buf[tcp_start + 13] = tcp_flags;
 
         // Recalculate TCP checksum would be needed for real use,
@@ -156,7 +152,7 @@ mod tests {
         buf
     }
 
-    /// Build a minimal Ethernet + IPv4 + UDP frame.
+    /// Build a minimal IPv4 + UDP packet.
     fn build_udp_frame(
         src_ip: [u8; 4],
         dst_ip: [u8; 4],
@@ -165,12 +161,8 @@ mod tests {
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(
-            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
-            [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb],
-        )
-        .ipv4(src_ip, dst_ip, 64)
-        .udp(src_port, dst_port);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
+            .udp(src_port, dst_port);
 
         let mut buf = Vec::new();
         builder.write(&mut buf, &[1, 2, 3]).unwrap();
@@ -179,7 +171,7 @@ mod tests {
 
     #[test]
     fn parse_tcp_syn() {
-        let eth_frame = build_tcp_frame(
+        let ip_packet = build_tcp_frame(
             [10, 0, 0, 1],
             [10, 0, 0, 2],
             12345,
@@ -187,10 +179,10 @@ mod tests {
             0x02, // SYN
         );
         let vnet_prefix = vec![0u8; VNET_HDR_SZ];
-        let raw = [&vnet_prefix[..], &eth_frame[..]].concat();
+        let raw = [&vnet_prefix[..], &ip_packet[..]].concat();
 
         let mut tracker = FlowTracker::new();
-        let info = parse_frame_to_packet_info(&eth_frame, &raw, &mut tracker).unwrap();
+        let info = parse_frame_to_packet_info(&ip_packet, &raw, &mut tracker).unwrap();
 
         assert_eq!(info.src_addr, IpAddr::from([10, 0, 0, 1]));
         assert_eq!(info.dst_addr, IpAddr::from([10, 0, 0, 2]));
@@ -283,12 +275,8 @@ mod tests {
     fn tcp_with_payload() {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ethernet2(
-            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
-            [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb],
-        )
-        .ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
-        .tcp(1234, 80, 1000, 65535);
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
+            .tcp(1234, 80, 1000, 65535);
 
         let payload = b"GET / HTTP/1.1\r\n";
         let mut buf = Vec::new();
@@ -310,13 +298,8 @@ mod tests {
 
     #[test]
     fn non_ip_returns_none() {
-        // Just an ethernet frame with non-IP ethertype
-        let frame = vec![
-            0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // dst mac
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src mac
-            0x88, 0x08, // ethertype (not IP)
-            0x00, 0x01, // payload
-        ];
+        // Garbage bytes that can't parse as a valid IP packet
+        let frame = vec![0xff, 0xfe, 0x00, 0x01, 0x02, 0x03];
 
         let mut tracker = FlowTracker::new();
         assert!(parse_frame_to_packet_info(&frame, &frame, &mut tracker).is_none());

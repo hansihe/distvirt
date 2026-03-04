@@ -2,13 +2,13 @@
 
 > **Status:** The core adapter framework and WireGuard adapter are implemented. Reverse proxy and OS-level routing adapters are not yet implemented (protocol stubs exist).
 
-Ingress adapters provide external access into the networking fabric. The fabric is an isolated per-namespace L2 network — adapters bridge traffic from outside into it, allowing developers and external systems to reach services and pods within a namespace.
+Ingress adapters provide external access into the networking fabric. The fabric is an isolated per-namespace L3 IP network — adapters bridge traffic from outside into it, allowing developers and external systems to reach services and pods within a namespace.
 
 The primary use case is **developer access to staging environments**.
 
 ## Design Principles
 
-- **Adapters are transparent**: An adapter just gets traffic into the fabric. Once inside, the existing resolution order handles it — local TAP → service entity → route table → flood. The adapter doesn't know about services vs pods.
+- **Adapters are transparent**: An adapter just gets traffic into the fabric. Once inside, the existing resolution order handles it — local port (IP table) → service entity → route table → drop. The adapter doesn't know about services vs pods.
 - **Pluggable strategies**: Different access patterns need different adapters. WireGuard for developer VPN-style access, reverse proxy for shareable URLs, OS-level routing for CI/infrastructure integration.
 - **Worker-level with per-namespace virtual ports**: Adapters own a single external-facing resource (e.g., one WireGuard UDP socket) at the worker level, and present virtual ports into each namespace's fabric instance.
 
@@ -29,7 +29,7 @@ The primary use case is **developer access to staging environments**.
    (ns1)     (ns2)       (ns3)
 ```
 
-Each virtual port is a `FramePort` from the fabric's perspective — the fabric doesn't know or care that it's backed by an ingress adapter. The adapter handles the external protocol (WireGuard, HTTP proxying, etc.) and translates to/from L2 frames.
+Each virtual port is a `FramePort` from the fabric's perspective — the fabric doesn't know or care that it's backed by an ingress adapter. The adapter handles the external protocol (WireGuard, HTTP proxying, etc.) and translates to/from fabric packets (IP packets with a 3-byte fabric header).
 
 ---
 
@@ -54,7 +54,7 @@ A userspace WireGuard endpoint running at the worker level. Developers connect w
 **How it works**:
 - Single UDP listener on the worker
 - Peer key → namespace routing (each developer's key maps to a namespace)
-- Decapsulated packets injected into the correct namespace's fabric as L2 frames
+- Decapsulated IP packets injected into the correct namespace's fabric
 - Implemented via [boringtun](https://github.com/cloudflare/boringtun) (pure Rust, userspace)
 
 **Developer experience**:
@@ -73,7 +73,7 @@ A userspace WireGuard endpoint running at the worker level. Developers connect w
 - Clients need WireGuard tooling configured (keys, endpoints)
 - Doesn't naturally integrate with existing infrastructure load balancers
 
-**Integration**: The adapter owns the UDP socket and WireGuard state (private key delivered by the orchestrator during handshake, derived from cluster identity). Per-namespace, it creates a virtual port on the fabric. Incoming packets from a peer are decapsulated, an Ethernet header is constructed (using the peer's assigned IP for ARP/MAC resolution), and the frame is injected into the fabric. Return traffic from the fabric is encapsulated and sent back through the WireGuard tunnel. Since all workers share the same WireGuard identity, namespace migration between workers is transparent to clients.
+**Integration**: The adapter owns the UDP socket and WireGuard state (private key delivered by the orchestrator during handshake, derived from cluster identity). Per-namespace, it creates a virtual port on the fabric. Incoming IP packets from a peer are decapsulated, wrapped with a fabric header, and injected into the fabric. Return traffic from the fabric is unwrapped and encapsulated back through the WireGuard tunnel. Since all workers share the same WireGuard identity, namespace migration between workers is transparent to clients.
 
 ### Reverse Proxy — For Shareable Access [Not Implemented]
 
@@ -82,7 +82,7 @@ A userspace WireGuard endpoint running at the worker level. Developers connect w
 An L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric. Useful for sharing staging environments with non-technical stakeholders — "here's a URL for the staging frontend."
 
 **How it works**:
-- The adapter is a client *inside* the fabric — it gets its own IP on the namespace subnet, sends and receives frames like a pod would
+- The adapter is a client *inside* the fabric — it gets its own IP on the namespace subnet, sends and receives packets like a pod would
 - External HTTP requests are routed to the correct namespace and service based on hostname, path, or other L7 attributes
 - The adapter resolves service names via the fabric's DNS, connects to service IPs, and proxies traffic
 
@@ -101,7 +101,7 @@ An L7 adapter that terminates HTTP/TCP at the edge and proxies into the fabric. 
 - Adds a hop and protocol termination overhead
 - Needs external DNS/routing to direct traffic to the worker
 
-**Integration**: Unlike WireGuard (which injects raw frames), the reverse proxy adapter participates in the fabric as a network endpoint. It resolves service IPs via the DNS registry, sends traffic through the normal fabric path, and benefits from service entity features (readiness gating, activation) automatically.
+**Integration**: Unlike WireGuard (which injects raw IP packets), the reverse proxy adapter participates in the fabric as a network endpoint. It resolves service IPs via the DNS registry, sends traffic through the normal fabric path, and benefits from service entity features (readiness gating, activation) automatically.
 
 ### OS-Level Routing / NAT [Not Implemented]
 

@@ -17,7 +17,7 @@ will hang until TCP keepalive fires (2 hours by default on Linux).
 ### Desired behavior
 
 When a port is removed from the fabric:
-1. Scan the NAT table for entries involving the removed port's IP/MAC
+1. Scan the NAT table for entries involving the removed port's IP
 2. For each entry, craft a TCP RST packet and send it to the peer port
 3. Remove the NAT entries
 

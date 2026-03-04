@@ -1,6 +1,6 @@
-//! Internet checksum computation: full, incremental (RFC 1624), and virtio offload completion.
+//! Internet checksum computation: full, incremental (RFC 1624), and fabric offload completion.
 
-use super::{ETH_HDR_LEN, VNET_HDR_SZ};
+use super::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM, IP_PROTO_TCP, IP_PROTO_UDP};
 
 /// Compute the internet checksum (one's-complement sum) over `data`.
 ///
@@ -44,28 +44,39 @@ pub fn incremental_partial_update(old_partial: u16, old_word: u16, new_word: u16
     sum as u16
 }
 
-/// Complete virtio checksum offload if the vnet header has NEEDS_CSUM set.
+/// Complete deferred checksum offload if the fabric header has NEEDS_CSUM set.
 ///
-/// The guest kernel may defer TCP/UDP checksum computation to the host via the
-/// virtio-net header's `NEEDS_CSUM` flag. This function reads the flag and, if
-/// set, computes the internet checksum over the specified range and writes it
-/// into the frame. Must be called before stripping the vnet header for
-/// transmission outside the fabric (e.g. WireGuard).
+/// Instead of reading csum_start/csum_offset from the header (as with virtio),
+/// we derive them from the IP packet:
+/// - `csum_start = IHL * 4` (transport header offset relative to IP start)
+/// - `csum_offset` = 16 for TCP, 6 for UDP
+///
+/// Must be called before stripping the fabric header for transmission outside
+/// the fabric (e.g. WireGuard, TUN egress).
 pub fn complete_checksum(frame: &mut [u8]) {
-    if frame.len() < VNET_HDR_SZ + ETH_HDR_LEN {
-        return;
+    if frame.len() < FABRIC_HDR_SZ + 20 {
+        return; // too short: need at least fabric header + minimal IP header
     }
-    const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
     let flags = frame[0];
-    if flags & VIRTIO_NET_HDR_F_NEEDS_CSUM == 0 {
+    if flags & FLAG_NEEDS_CSUM == 0 {
         return;
     }
-    // csum_start and csum_offset are relative to the ethernet frame (after vnet header).
-    let csum_start = u16::from_le_bytes([frame[6], frame[7]]) as usize;
-    let csum_offset = u16::from_le_bytes([frame[8], frame[9]]) as usize;
+
+    let ip_start = FABRIC_HDR_SZ;
+    let ihl = (frame[ip_start] & 0x0f) as usize * 4;
+    let protocol = frame[ip_start + 9];
+
+    let csum_offset = match protocol {
+        IP_PROTO_TCP => 16,
+        IP_PROTO_UDP => 6,
+        _ => return, // unknown protocol, can't derive checksum position
+    };
+
+    // csum_start is the transport header offset relative to IP packet start
+    let csum_start = ihl;
 
     // Absolute positions in the buffer.
-    let abs_start = VNET_HDR_SZ + csum_start;
+    let abs_start = ip_start + csum_start;
     let abs_csum = abs_start + csum_offset;
 
     if abs_csum + 2 > frame.len() || abs_start > frame.len() {
@@ -89,18 +100,19 @@ pub fn complete_checksum(frame: &mut [u8]) {
     frame[abs_csum + 1] = (checksum & 0xFF) as u8;
 
     // Clear the NEEDS_CSUM flag.
-    frame[0] = flags & !VIRTIO_NET_HDR_F_NEEDS_CSUM;
+    frame[0] = flags & !FLAG_NEEDS_CSUM;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{ETH_HDR_LEN, VNET_HDR_SZ};
+    use crate::packet::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM};
+    use crate::packet::frame::with_fabric_header;
 
     // --- complete_checksum oracle tests using etherparse ---
 
-    /// Build a TCP Ethernet frame using etherparse (correct checksums).
-    fn build_tcp_eth_frame(
+    /// Build a TCP IP packet using etherparse (correct checksums, no Ethernet header).
+    fn build_tcp_ip_packet(
         src_ip: [u8; 4],
         dst_ip: [u8; 4],
         src_port: u16,
@@ -108,14 +120,11 @@ mod tests {
         payload: &[u8],
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
-        let src_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
-        let dst_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
-        let builder = PacketBuilder::ethernet2(src_mac, dst_mac)
-            .ipv4(src_ip, dst_ip, 64)
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
             .tcp(src_port, dst_port, 1000, 65535);
-        let mut eth_frame = Vec::new();
-        builder.write(&mut eth_frame, payload).unwrap();
-        eth_frame
+        let mut ip_packet = Vec::new();
+        builder.write(&mut ip_packet, payload).unwrap();
+        ip_packet
     }
 
     /// Compute TCP pseudo-header checksum (partial sum the guest kernel would place
@@ -134,28 +143,20 @@ mod tests {
         sum as u16
     }
 
-    /// Take an etherparse-built Ethernet frame, replace the TCP checksum with
-    /// the pseudo-header partial, and prepend a vnet header with NEEDS_CSUM.
-    fn simulate_guest_needs_csum(eth_frame: &[u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(VNET_HDR_SZ + eth_frame.len());
-        frame.push(1u8); // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
-        frame.push(0);   // gso_type
-        frame.extend_from_slice(&[0, 0]); // hdr_len
-        frame.extend_from_slice(&[0, 0]); // gso_size
+    /// Build a fabric frame [fabric_hdr][IP] with NEEDS_CSUM set and the TCP checksum
+    /// replaced by the pseudo-header partial (simulating guest offload).
+    fn simulate_guest_needs_csum(ip_packet: &[u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
+        let ihl = (ip_packet[0] & 0x0f) as usize * 4;
+        let tcp_start = ihl;
 
-        let ihl = (eth_frame[14] & 0x0f) as usize * 4;
-        let tcp_start = ETH_HDR_LEN + ihl;
-        frame.extend_from_slice(&(tcp_start as u16).to_le_bytes()); // csum_start
-        frame.extend_from_slice(&16u16.to_le_bytes()); // csum_offset (TCP checksum at byte 16)
-
-        frame.extend_from_slice(eth_frame);
+        let mut frame = with_fabric_header(FLAG_NEEDS_CSUM, 0, ip_packet);
 
         // Compute TCP segment length
-        let ip_total_len = u16::from_be_bytes([eth_frame[16], eth_frame[17]]);
+        let ip_total_len = u16::from_be_bytes([ip_packet[2], ip_packet[3]]);
         let tcp_len = ip_total_len - (ihl as u16);
 
         // Replace TCP checksum field with pseudo-header partial
-        let tcp_csum_abs = VNET_HDR_SZ + tcp_start + 16;
+        let tcp_csum_abs = FABRIC_HDR_SZ + tcp_start + 16;
         let pseudo = tcp_pseudo_header_csum(src_ip, dst_ip, tcp_len);
         frame[tcp_csum_abs] = (pseudo >> 8) as u8;
         frame[tcp_csum_abs + 1] = (pseudo & 0xff) as u8;
@@ -163,28 +164,28 @@ mod tests {
         frame
     }
 
-    /// Extract the TCP checksum from a fabric frame (with vnet header).
+    /// Extract TCP checksum from a fabric frame [fabric_hdr][IP].
     fn extract_tcp_checksum(frame: &[u8]) -> u16 {
-        let ihl = (frame[VNET_HDR_SZ + ETH_HDR_LEN] & 0x0f) as usize * 4;
-        let tcp_start = VNET_HDR_SZ + ETH_HDR_LEN + ihl;
+        let ihl = (frame[FABRIC_HDR_SZ] & 0x0f) as usize * 4;
+        let tcp_start = FABRIC_HDR_SZ + ihl;
         u16::from_be_bytes([frame[tcp_start + 16], frame[tcp_start + 17]])
     }
 
-    /// Extract the TCP checksum from an Ethernet frame (no vnet header).
-    fn extract_tcp_checksum_eth(eth_frame: &[u8]) -> u16 {
-        let ihl = (eth_frame[14] & 0x0f) as usize * 4;
-        let tcp_start = ETH_HDR_LEN + ihl;
-        u16::from_be_bytes([eth_frame[tcp_start + 16], eth_frame[tcp_start + 17]])
+    /// Extract TCP checksum from a raw IP packet (no fabric header).
+    fn extract_tcp_checksum_ip(ip_packet: &[u8]) -> u16 {
+        let ihl = (ip_packet[0] & 0x0f) as usize * 4;
+        let tcp_start = ihl;
+        u16::from_be_bytes([ip_packet[tcp_start + 16], ip_packet[tcp_start + 17]])
     }
 
     #[test]
     fn test_complete_checksum_tcp_matches_etherparse() {
         let src_ip = [10, 0, 0, 1];
         let dst_ip = [10, 0, 0, 2];
-        let eth_frame = build_tcp_eth_frame(src_ip, dst_ip, 12345, 80, &[]);
-        let expected_csum = extract_tcp_checksum_eth(&eth_frame);
+        let ip_packet = build_tcp_ip_packet(src_ip, dst_ip, 12345, 80, &[]);
+        let expected_csum = extract_tcp_checksum_ip(&ip_packet);
 
-        let mut frame = simulate_guest_needs_csum(&eth_frame, src_ip, dst_ip);
+        let mut frame = simulate_guest_needs_csum(&ip_packet, src_ip, dst_ip);
         complete_checksum(&mut frame);
 
         let actual_csum = extract_tcp_checksum(&frame);
@@ -194,7 +195,7 @@ mod tests {
             actual_csum, expected_csum
         );
         // NEEDS_CSUM flag should be cleared
-        assert_eq!(frame[0] & 1, 0);
+        assert_eq!(frame[0] & FLAG_NEEDS_CSUM, 0);
     }
 
     #[test]
@@ -202,10 +203,10 @@ mod tests {
         let src_ip = [172, 16, 0, 5];
         let dst_ip = [172, 16, 0, 10];
         let payload = b"hello world";
-        let eth_frame = build_tcp_eth_frame(src_ip, dst_ip, 9000, 443, payload);
-        let expected_csum = extract_tcp_checksum_eth(&eth_frame);
+        let ip_packet = build_tcp_ip_packet(src_ip, dst_ip, 9000, 443, payload);
+        let expected_csum = extract_tcp_checksum_ip(&ip_packet);
 
-        let mut frame = simulate_guest_needs_csum(&eth_frame, src_ip, dst_ip);
+        let mut frame = simulate_guest_needs_csum(&ip_packet, src_ip, dst_ip);
         complete_checksum(&mut frame);
 
         let actual_csum = extract_tcp_checksum(&frame);
@@ -222,10 +223,10 @@ mod tests {
         let dst_ip = [192, 168, 1, 2];
         // 13 bytes — odd length exercises the padding branch
         let payload = b"hello world!!";
-        let eth_frame = build_tcp_eth_frame(src_ip, dst_ip, 5555, 8080, payload);
-        let expected_csum = extract_tcp_checksum_eth(&eth_frame);
+        let ip_packet = build_tcp_ip_packet(src_ip, dst_ip, 5555, 8080, payload);
+        let expected_csum = extract_tcp_checksum_ip(&ip_packet);
 
-        let mut frame = simulate_guest_needs_csum(&eth_frame, src_ip, dst_ip);
+        let mut frame = simulate_guest_needs_csum(&ip_packet, src_ip, dst_ip);
         complete_checksum(&mut frame);
 
         let actual_csum = extract_tcp_checksum(&frame);
@@ -240,12 +241,10 @@ mod tests {
     fn test_complete_checksum_no_flag_is_noop() {
         let src_ip = [10, 0, 0, 1];
         let dst_ip = [10, 0, 0, 2];
-        let eth_frame = build_tcp_eth_frame(src_ip, dst_ip, 12345, 80, &[]);
+        let ip_packet = build_tcp_ip_packet(src_ip, dst_ip, 12345, 80, &[]);
 
-        // Prepend zeroed vnet header (no NEEDS_CSUM flag)
-        let mut frame = Vec::with_capacity(VNET_HDR_SZ + eth_frame.len());
-        frame.extend_from_slice(&[0u8; VNET_HDR_SZ]);
-        frame.extend_from_slice(&eth_frame);
+        // Prepend zeroed fabric header (no NEEDS_CSUM flag)
+        let mut frame = with_fabric_header(0, 0, &ip_packet);
 
         let original = frame.clone();
         complete_checksum(&mut frame);
