@@ -180,10 +180,13 @@ pub async fn recv_worker_accepted<R: AsyncReadExt + Unpin>(
 /// Send a [`WorkerReady`] as a length-prefixed capnp message.
 pub async fn send_worker_ready<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
-    _ready: &WorkerReady,
+    ready: &WorkerReady,
 ) -> anyhow::Result<()> {
     let mut msg = message::Builder::new_default();
-    let _root = msg.init_root::<schema::worker_ready::Builder<'_>>();
+    convert::write_worker_ready(
+        &mut msg.init_root::<schema::worker_ready::Builder<'_>>(),
+        ready,
+    );
     send_capnp_msg(writer, &msg).await
 }
 
@@ -191,6 +194,7 @@ pub async fn send_worker_ready<W: AsyncWriteExt + Unpin>(
 pub async fn recv_worker_ready<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<WorkerReady> {
-    let _msg = recv_capnp_msg(reader).await?;
-    Ok(WorkerReady {})
+    let msg = recv_capnp_msg(reader).await?;
+    let root = msg.get_root::<schema::worker_ready::Reader<'_>>()?;
+    Ok(convert::read_worker_ready(root))
 }

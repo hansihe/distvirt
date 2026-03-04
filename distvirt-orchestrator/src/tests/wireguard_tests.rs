@@ -114,7 +114,7 @@ fn test_wg_connect_multiple_peers() {
 #[test]
 fn test_wg_connect_namespace_not_active() {
     // Namespace in Creating state (before NamespaceCreated).
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     assert_eq!(ns.status, NamespaceStatus::Creating);
 
     let out = ns.step(NamespaceInput::Connect {
@@ -252,6 +252,7 @@ fn setup_orch_with_wg() -> Orchestrator {
         worker_id: worker_id(1),
         capabilities: worker_caps_with_endpoint("1.2.3.4"),
         wg_config: Some(test_wg_config()),
+        tunnel_config: None,
     });
 
     // Create namespace (worker auto-assigned, status=Creating).
@@ -351,6 +352,7 @@ fn test_wg_connect_no_wg_config() {
         worker_id: worker_id(1),
         capabilities: worker_caps_with_endpoint("1.2.3.4"),
         wg_config: None,
+        tunnel_config: None,
     });
 
     orch.step(OrchestratorInput::ClientCommand {
@@ -396,6 +398,7 @@ fn test_wg_connect_no_public_endpoint() {
         worker_id: worker_id(1),
         capabilities: worker_caps(), // empty public_endpoint
         wg_config: Some(test_wg_config()),
+        tunnel_config: None,
     });
 
     orch.step(OrchestratorInput::ClientCommand {
@@ -440,6 +443,7 @@ fn test_deactivate_workload_active_idle() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
 
     orch.step(OrchestratorInput::ClientCommand {
@@ -545,6 +549,7 @@ fn test_deactivate_workload_with_demand_refused() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
 
     orch.step(OrchestratorInput::ClientCommand {
@@ -614,6 +619,7 @@ fn test_deactivate_workload_not_found() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
 
     orch.step(OrchestratorInput::ClientCommand {

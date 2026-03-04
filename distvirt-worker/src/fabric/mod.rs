@@ -6,10 +6,12 @@ pub(crate) mod route;
 pub(crate) mod service;
 pub(crate) mod service_activator;
 pub(crate) mod switch;
+pub(crate) mod tunnel;
 
 pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use route::RouteTable;
 pub use service::ServiceTable;
+pub use tunnel::{TunnelTransport, TunnelPortHandle};
 pub(crate) use forwarding::FabricContextInner;
 pub(crate) use service::{MarkReadyResult, ServiceAction};
 pub(crate) use service_activator::ServiceProcessor;
@@ -134,6 +136,7 @@ impl<P: FramePort> Fabric<P> {
                     subnet,
                     prefix_len,
                     gateway_ip,
+                    tunnel_ports: Mutex::new(HashMap::new()),
                 }),
             },
             next_port_id: AtomicUsize::new(0),
@@ -277,6 +280,29 @@ impl<P: FramePort> Fabric<P> {
     /// Get a shared reference to the fabric tables (ports, MAC, route, service).
     pub fn tables(&self) -> Arc<FabricContextInner<P>> {
         Arc::clone(&self.ctx.inner)
+    }
+
+    /// Register a tunnel port for a remote worker.
+    ///
+    /// Adds the port to the fabric and records the worker_id → port_id mapping
+    /// so `dispatch_frame` can forward `RemoteWorker` traffic through it.
+    pub fn add_tunnel_port(&self, worker_id: String, port: P) -> (PortId, TaskHandle<()>) {
+        let (port_id, task) = self.add_port_inner(port, None);
+        {
+            let mut tp = self.ctx.inner.tunnel_ports.lock().unwrap();
+            tp.insert(worker_id.clone(), port_id);
+        }
+        log::info!("fabric: registered tunnel port {} for worker {}", port_id, worker_id);
+        (port_id, task)
+    }
+
+    /// Remove a tunnel port for a remote worker.
+    #[allow(dead_code)]
+    pub fn remove_tunnel_port(&self, worker_id: &str) {
+        let mut tp = self.ctx.inner.tunnel_ports.lock().unwrap();
+        if let Some(port_id) = tp.remove(worker_id) {
+            log::info!("fabric: removed tunnel port {} for worker {}", port_id, worker_id);
+        }
     }
 
     /// Send raw Ethernet frames (no vnet header) out to the port that owns

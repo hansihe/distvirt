@@ -7,6 +7,7 @@ mod wireguard;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+use crate::pod_map::PodMap;
 use crate::service::ServiceStateMachine;
 use crate::types::*;
 use crate::wg_peers::WireGuardPeerManager;
@@ -26,17 +27,18 @@ pub struct NamespaceStateMachine {
     pub namespace_id: NamespaceId,
     pub spec: NamespaceSpec,
     pub status: NamespaceStatus,
+    pub segment_id: u16,
     pub workloads: HashMap<WorkloadId, WorkloadStateMachine>,
     pub services: HashMap<ServiceId, ServiceStateMachine>,
     pub service_workload: HashMap<ServiceId, WorkloadId>,
-    pub pods: HashMap<PodId, PodInfo>,
+    pub pod_map: PodMap,
     pub workers: HashMap<WorkerId, NamespaceWorkerState>,
     /// WireGuard peer IP allocation and tracking.
     pub wg_peer_manager: WireGuardPeerManager,
 }
 
 impl NamespaceStateMachine {
-    pub fn new(namespace_id: NamespaceId, spec: NamespaceSpec) -> Self {
+    pub fn new(namespace_id: NamespaceId, spec: NamespaceSpec, segment_id: u16) -> Self {
         let mut workloads = HashMap::new();
         let mut services = HashMap::new();
         let mut service_workload = HashMap::new();
@@ -75,24 +77,16 @@ impl NamespaceStateMachine {
             namespace_id,
             spec,
             status: NamespaceStatus::Creating,
+            segment_id,
             workloads,
             services,
             service_workload,
-            pods: HashMap::new(),
+            pod_map: PodMap::new(),
             workers: HashMap::new(),
             wg_peer_manager,
         }
     }
 
-    /// Remove a pod from the pods map and the owning worker's pod set.
-    /// Returns the PodInfo if the pod existed.
-    pub(crate) fn remove_pod(&mut self, pod_id: &PodId) -> Option<PodInfo> {
-        let pod_info = self.pods.remove(pod_id)?;
-        if let Some(ws) = self.workers.get_mut(&pod_info.worker_id) {
-            ws.pods.remove(pod_id);
-        }
-        Some(pod_info)
-    }
 
     pub(crate) fn active_worker_ids(&self) -> Vec<WorkerId> {
         self.workers
@@ -155,17 +149,114 @@ impl NamespaceStateMachine {
         }
     }
 
+    pub(crate) fn build_fabric_routes_for_worker(
+        &self,
+        target_worker_id: &WorkerId,
+    ) -> Vec<distvirt_worker_protocol::FabricRouteEntry> {
+        use distvirt_worker_protocol::{FabricRouteEntry, RouteDestination};
+        self.pod_map
+            .iter()
+            .filter(|(_, info)| info.worker_id != *target_worker_id)
+            .filter_map(|(_, info)| {
+                let wl_spec = self.spec.workloads.get(&info.workload_id)?;
+                Some(FabricRouteEntry {
+                    ip: wl_spec.network.ip,
+                    destination: RouteDestination::RemoteWorker {
+                        worker_id: info.worker_id.clone(),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn emit_fabric_route_sync(&self, out: &mut NamespaceOutput) {
+        use crate::broadcast::broadcast_to_active_workers;
+        let ns_id = self.namespace_id.clone();
+        broadcast_to_active_workers(&self.workers, out, |wid| {
+            let routes = self.build_fabric_routes_for_worker(wid);
+            WorkerCommand::FabricRouteSync {
+                namespace_id: ns_id.clone(),
+                routes,
+            }
+        });
+    }
+
+    pub(crate) fn emit_fabric_route_sync_to_worker(
+        &self,
+        worker_id: &WorkerId,
+        out: &mut NamespaceOutput,
+    ) {
+        use crate::broadcast::send_to_worker;
+        let routes = self.build_fabric_routes_for_worker(worker_id);
+        send_to_worker(worker_id, out, WorkerCommand::FabricRouteSync {
+            namespace_id: self.namespace_id.clone(),
+            routes,
+        });
+    }
+
+    pub(crate) fn emit_fabric_route_add(
+        &self,
+        pod_ip: Ipv4Addr,
+        pod_worker_id: &WorkerId,
+        out: &mut NamespaceOutput,
+    ) {
+        use crate::broadcast::broadcast_to_active_workers_except;
+        use distvirt_worker_protocol::{FabricRouteEntry, RouteDestination};
+        let entry = FabricRouteEntry {
+            ip: pod_ip,
+            destination: RouteDestination::RemoteWorker {
+                worker_id: pod_worker_id.clone(),
+            },
+        };
+        let ns_id = self.namespace_id.clone();
+        broadcast_to_active_workers_except(&self.workers, pod_worker_id, out, |_| {
+            WorkerCommand::FabricRouteUpdate {
+                namespace_id: ns_id.clone(),
+                added: vec![entry.clone()],
+                removed_ips: vec![],
+            }
+        });
+    }
+
+    pub(crate) fn emit_fabric_route_remove(
+        &self,
+        pod_ip: Ipv4Addr,
+        out: &mut NamespaceOutput,
+    ) {
+        use crate::broadcast::broadcast_to_active_workers;
+        let ns_id = self.namespace_id.clone();
+        broadcast_to_active_workers(&self.workers, out, |_| {
+            WorkerCommand::FabricRouteUpdate {
+                namespace_id: ns_id.clone(),
+                added: vec![],
+                removed_ips: vec![pod_ip],
+            }
+        });
+    }
+
     pub(crate) fn emit_registry_sync(&self, out: &mut NamespaceOutput) {
+        use crate::broadcast::broadcast_to_active_workers;
         let entries = self.build_registry_entries();
-        for wid in self.active_worker_ids() {
-            out.worker_commands.push((
-                wid,
-                WorkerCommand::RegistrySync {
-                    namespace_id: self.namespace_id.clone(),
-                    entries: entries.clone(),
-                },
-            ));
-        }
+        let ns_id = self.namespace_id.clone();
+        broadcast_to_active_workers(&self.workers, out, |_| {
+            WorkerCommand::RegistrySync {
+                namespace_id: ns_id.clone(),
+                entries: entries.clone(),
+            }
+        });
+    }
+
+    pub(crate) fn emit_registry_sync_to_worker(
+        &self,
+        worker_id: &WorkerId,
+        out: &mut NamespaceOutput,
+    ) {
+        use crate::broadcast::send_to_worker;
+        let entries = self.build_registry_entries();
+        send_to_worker(worker_id, out, WorkerCommand::RegistrySync {
+            namespace_id: self.namespace_id.clone(),
+            entries,
+        });
     }
 
     /// Pure state transition. No I/O.
@@ -237,8 +328,9 @@ impl NamespaceStateMachine {
                 worker_id,
                 pod_id,
                 snapshot_id,
+                pool_id,
             } => {
-                self.handle_resume_pod(&workload_id, &worker_id, &pod_id, &snapshot_id, &mut out);
+                self.handle_resume_pod(&workload_id, &worker_id, &pod_id, &snapshot_id, &pool_id, &mut out);
             }
             NamespaceInput::Connect {
                 client_id,

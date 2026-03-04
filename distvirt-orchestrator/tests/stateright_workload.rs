@@ -210,7 +210,7 @@ impl Model for WorkloadModel {
             WlModelAction::PodRunning { pod_id } => (WorkloadInput::PodRunning { pod_id }, None),
             WlModelAction::PodGone { pod_id } => (WorkloadInput::PodGone { pod_id }, None),
             WlModelAction::PodSuspended { pod_id, snapshot_id } => {
-                (WorkloadInput::PodSuspended { pod_id, snapshot_id }, None)
+                (WorkloadInput::PodSuspended { pod_id, snapshot_id, pool_id: PoolId::from("default-pool") }, None)
             }
             WlModelAction::PodSuspendFailed { pod_id } => {
                 (WorkloadInput::PodSuspendFailed { pod_id }, None)
@@ -245,7 +245,7 @@ impl Model for WorkloadModel {
 
         // Process ResumeRequest outputs: simulate outer layer injecting ResumePod.
         for out in &outputs {
-            if let WorkloadOutput::ResumeRequest { snapshot_id, worker_id } = out {
+            if let WorkloadOutput::ResumeRequest { snapshot_id, worker_id, pool_id } = out {
                 let pod_id = PodId(format!("pod-{}", next_pod_id));
                 next_pod_id += 1;
                 let resume_outputs = sm.step(
@@ -253,6 +253,7 @@ impl Model for WorkloadModel {
                         worker_id: worker_id.clone(),
                         pod_id,
                         snapshot_id: snapshot_id.clone(),
+                        pool_id: pool_id.clone(),
                     },
                     &ns,
                 );

@@ -10,7 +10,7 @@ impl Orchestrator {
         out: &mut OrchestratorOutput,
     ) {
         match command {
-            ClientCommand::CreateNamespace { namespace_id, spec } => {
+            ClientCommand::CreateNamespace { namespace_id, mut spec } => {
                 if self.namespaces.contains_key(&namespace_id) {
                     out.client_events.push((
                         client_id,
@@ -20,13 +20,22 @@ impl Orchestrator {
                     ));
                     return;
                 }
-                let ns = crate::namespace::NamespaceStateMachine::new(namespace_id.clone(), spec);
+                let segment_id = self.alloc_segment_id();
+                spec.network.segment_id = Some(segment_id);
+                let ns = crate::namespace::NamespaceStateMachine::new(
+                    namespace_id.clone(),
+                    spec,
+                    segment_id,
+                );
                 self.namespaces.insert(namespace_id.clone(), ns);
 
-                // Assign a connected worker if available.
-                if let Some(worker_id) = self.pick_worker_for_namespace() {
+                // Assign all connected workers.
+                let worker_ids: Vec<WorkerId> = self.workers.keys().cloned().collect();
+                for worker_id in worker_ids {
                     self.assign_worker_to_namespace(&namespace_id, &worker_id, out);
                 }
+                // Push registry once after all assignments (segment sets changed).
+                self.push_worker_registry(out);
 
                 out.client_events.push((client_id, ClientEvent::Ok));
             }
@@ -111,7 +120,7 @@ impl Orchestrator {
                         let active_pods: u32 = self
                             .namespaces
                             .values()
-                            .flat_map(|ns| ns.pods.values())
+                            .flat_map(|ns| ns.pod_map.iter().map(|(_, v)| v))
                             .filter(|p| p.worker_id == *worker_id)
                             .count() as u32;
                         WorkerStatusReport {
@@ -130,7 +139,7 @@ impl Orchestrator {
                     let active_pods: u32 = self
                         .namespaces
                         .values()
-                        .flat_map(|ns| ns.pods.values())
+                        .flat_map(|ns| ns.pod_map.iter().map(|(_, v)| v))
                         .filter(|p| p.worker_id == worker_id)
                         .count() as u32;
                     out.client_events.push((
@@ -156,7 +165,7 @@ impl Orchestrator {
             ClientCommand::ListPods { namespace_id } => {
                 if let Some(ns) = self.namespaces.get(&namespace_id) {
                     let pods = ns
-                        .pods
+                        .pod_map
                         .iter()
                         .map(|(pod_id, info)| {
                             let is_running = ns

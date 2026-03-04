@@ -46,6 +46,7 @@ pub(crate) struct NamespaceState {
     _adapter_ports: Vec<AdapterPortHandle>,
     pub(crate) registry: DnsRegistry,
     pub(crate) pods: HashMap<PodId, PodState>,
+    pub(crate) segment_id: Option<u16>,
     pub(crate) token: CancellationToken,
 }
 
@@ -72,6 +73,7 @@ impl NamespaceState {
             _adapter_ports: adapter_ports,
             registry,
             pods,
+            segment_id: None,
             token,
         }
     }
@@ -193,6 +195,7 @@ impl NamespaceState {
             _adapter_ports: adapter_handles,
             registry,
             pods: HashMap::new(),
+            segment_id: network.segment_id,
             token: ns_token,
         };
 
@@ -530,6 +533,7 @@ mod tests {
             _adapter_ports: Vec::new(),
             registry: Arc::new(RwLock::new(HashMap::new())),
             pods: HashMap::new(),
+            segment_id: None,
             token: ns_token,
         };
         (ns, worker_token)

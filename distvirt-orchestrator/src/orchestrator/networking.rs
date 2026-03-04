@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use distvirt_worker_protocol::WorkerPeerInfo;
 
 use crate::types::*;
 
@@ -96,10 +96,8 @@ impl Orchestrator {
         );
     }
 
-    pub(crate) fn pick_worker_for_namespace(&self) -> Option<WorkerId> {
-        self.workers.keys().next().cloned()
-    }
-
+    /// Assign a worker to a namespace. Does NOT push the worker registry —
+    /// callers should call `push_worker_registry` once after all assignments.
     pub(crate) fn assign_worker_to_namespace(
         &mut self,
         namespace_id: &NamespaceId,
@@ -111,7 +109,11 @@ impl Orchestrator {
                 worker_id.clone(),
                 NamespaceWorkerState {
                     fabric_status: FabricStatus::Creating,
-                    pods: HashSet::new(),
+                    primary_pool_id: self
+                        .workers
+                        .get(worker_id)
+                        .and_then(|ws| ws.capabilities.pools.first())
+                        .map(|p| p.pool_id.clone()),
                 },
             );
         }
@@ -128,6 +130,44 @@ impl Orchestrator {
                 WorkerCommand::CreateNamespace {
                     namespace_id: namespace_id.clone(),
                     network,
+                },
+            ));
+        }
+    }
+
+    pub(crate) fn build_worker_registry(&self) -> Vec<WorkerPeerInfo> {
+        self.workers
+            .iter()
+            .filter_map(|(wid, ws)| {
+                let tc = ws.tunnel_config.as_ref()?;
+                if ws.capabilities.public_endpoint.is_empty() {
+                    return None;
+                }
+                let endpoint = format!("{}:{}", ws.capabilities.public_endpoint, tc.listen_port);
+                let segments: Vec<u16> = ws
+                    .namespaces
+                    .iter()
+                    .filter_map(|ns_id| {
+                        self.namespaces.get(ns_id).map(|ns| ns.segment_id)
+                    })
+                    .collect();
+                Some(WorkerPeerInfo {
+                    worker_id: wid.clone(),
+                    endpoint,
+                    public_key: tc.public_key,
+                    segments,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn push_worker_registry(&self, out: &mut OrchestratorOutput) {
+        let registry = self.build_worker_registry();
+        for wid in self.workers.keys() {
+            out.worker_commands.push((
+                wid.clone(),
+                WorkerCommand::WorkerRegistrySync {
+                    workers: registry.clone(),
                 },
             ));
         }

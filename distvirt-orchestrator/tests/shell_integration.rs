@@ -64,12 +64,16 @@ async fn mock_worker_handshake(conn: &mut WorkerConnection) {
             max_pods: 10,
             available_memory_mb: 1024,
             public_endpoint: String::new(),
+            pools: vec![],
         },
     })
     .await
     .unwrap();
     let _accepted = conn.recv_accepted().await.unwrap();
-    conn.send_ready().await.unwrap();
+    conn.send_ready(&distvirt_worker_protocol::WorkerReady {
+        tunnel_listen_port: None,
+        tunnel_public_key: None,
+    }).await.unwrap();
 }
 
 fn test_spec() -> NamespaceSpec {
@@ -125,6 +129,7 @@ fn test_spec() -> NamespaceSpec {
             subnet: Ipv4Addr::new(172, 16, 0, 0),
             gateway: Ipv4Addr::new(172, 16, 0, 1),
             prefix_len: 24,
+            segment_id: None,
         },
         workloads,
         services,
@@ -147,7 +152,7 @@ async fn test_always_on_service_full_lifecycle() {
     // Connect orchestrator side and perform handshake.
     let orch_conn = OrchestratorConnection::connect(orch_half).await.unwrap();
 
-    let mut shell = OrchestratorShell::new(51820);
+    let mut shell = OrchestratorShell::new(51820, true);
     let worker_id = shell.add_worker(orch_conn).await.unwrap();
     assert_eq!(worker_id, WorkerId::from("w-1"));
 

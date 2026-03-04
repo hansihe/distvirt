@@ -7,7 +7,7 @@ pub enum OrchestratorInput {
     ClientConnected { client_id: ClientId },
     ClientDisconnected { client_id: ClientId },
     ClientCommand { client_id: ClientId, command: ClientCommand },
-    WorkerConnected { worker_id: WorkerId, capabilities: WorkerCapabilities, wg_config: Option<WorkerWgConfig> },
+    WorkerConnected { worker_id: WorkerId, capabilities: WorkerCapabilities, wg_config: Option<WorkerWgConfig>, tunnel_config: Option<WorkerTunnelConfig> },
     WorkerDisconnected { worker_id: WorkerId },
     NamespaceInput { namespace_id: NamespaceId, input: NamespaceInput },
 }

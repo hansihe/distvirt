@@ -13,6 +13,8 @@ pub struct Orchestrator {
     pub workers: HashMap<WorkerId, WorkerState>,
     pub clients: HashSet<ClientId>,
     pub next_pod_id: u64,
+    pub next_segment_id: u16,
+    pub active_segment_ids: HashSet<u16>,
 }
 
 impl Default for Orchestrator {
@@ -28,7 +30,27 @@ impl Orchestrator {
             workers: HashMap::new(),
             clients: HashSet::new(),
             next_pod_id: 0,
+            next_segment_id: 1,
+            active_segment_ids: HashSet::new(),
         }
+    }
+
+    pub fn alloc_segment_id(&mut self) -> u16 {
+        loop {
+            let id = self.next_segment_id;
+            self.next_segment_id = self.next_segment_id.wrapping_add(1);
+            if id == 0 {
+                continue;
+            }
+            if !self.active_segment_ids.contains(&id) {
+                self.active_segment_ids.insert(id);
+                return id;
+            }
+        }
+    }
+
+    pub fn free_segment_id(&mut self, id: u16) {
+        self.active_segment_ids.remove(&id);
     }
 
     pub fn step(&mut self, input: OrchestratorInput) -> OrchestratorOutput {
@@ -48,8 +70,9 @@ impl Orchestrator {
                 worker_id,
                 capabilities,
                 wg_config,
+                tunnel_config,
             } => {
-                self.handle_worker_connected(worker_id, capabilities, wg_config, &mut out);
+                self.handle_worker_connected(worker_id, capabilities, wg_config, tunnel_config, &mut out);
             }
             OrchestratorInput::WorkerDisconnected { worker_id } => {
                 self.handle_worker_disconnected(worker_id, &mut out);
@@ -62,7 +85,46 @@ impl Orchestrator {
             }
         }
 
+        #[cfg(debug_assertions)]
+        self.check_invariants();
+
         out
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_invariants(&self) {
+        // Verify worker↔namespace consistency.
+        //
+        // Direction 1: If a namespace lists a worker, that worker should
+        // reference the namespace (unless the worker has disconnected and the
+        // namespace hasn't processed WorkerLost yet).
+        for (ns_id, ns) in &self.namespaces {
+            for wid in ns.workers.keys() {
+                if let Some(ws) = self.workers.get(wid) {
+                    debug_assert!(
+                        ws.namespaces.contains(ns_id),
+                        "Namespace {:?} has worker {:?} but worker doesn't list the namespace",
+                        ns_id,
+                        wid,
+                    );
+                }
+            }
+        }
+
+        // Direction 2: If a worker references a namespace, that namespace must
+        // exist. (The namespace may have internally removed the worker via
+        // NamespaceFailed/WorkerLost without the orchestrator updating
+        // WorkerState.namespaces, so we only check existence, not membership.)
+        for (wid, ws) in &self.workers {
+            for ns_id in &ws.namespaces {
+                debug_assert!(
+                    self.namespaces.contains_key(ns_id),
+                    "Worker {:?} references namespace {:?} which doesn't exist",
+                    wid,
+                    ns_id,
+                );
+            }
+        }
     }
 
     pub(crate) fn route_namespace_input(

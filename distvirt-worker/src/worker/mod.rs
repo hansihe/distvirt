@@ -1,5 +1,6 @@
 pub(crate) mod namespace;
 pub(crate) mod supervisor;
+pub(crate) mod tunnel_manager;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,8 +10,8 @@ use anyhow::Context;
 use distvirt_activator::ActivatorRuntime;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
-    PodId, PodNetworkConfig, SnapshotId, WorkerCapabilities, WorkerCommand,
-    WorkerConnection, WorkerEvent, WorkerHello,
+    PodId, PodNetworkConfig, PoolId, SnapshotId, WorkerCapabilities, WorkerCommand,
+    WorkerConnection, WorkerEvent, WorkerHello, WorkerReady,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -19,8 +20,38 @@ use crate::adapter::AdapterManager;
 use crate::image_provider::ImageProvider;
 use namespace::{FatalError, NamespaceState};
 use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor, send_event, STOP_POD_TIMEOUT};
+use tunnel_manager::TunnelManager;
 use crate::task_handle::TaskHandle;
 use crate::vmm::Vmm;
+
+/// Query filesystem stats for a pool path, returning (capacity_bytes, available_bytes).
+/// Creates the directory if needed. Returns (0, 0) on any error.
+fn pool_disk_stats(path: &std::path::Path) -> (u64, u64) {
+    let _ = std::fs::create_dir_all(path);
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = match CString::new(path.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return (0, 0),
+        };
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                let capacity = stat.f_blocks as u64 * stat.f_frsize as u64;
+                let available = stat.f_bavail as u64 * stat.f_frsize as u64;
+                (capacity, available)
+            } else {
+                (0, 0)
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        (0, 0)
+    }
+}
 
 /// The worker: sits between the orchestrator and the raw VM/fabric primitives.
 ///
@@ -46,8 +77,10 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     adapter_manager: AdapterManager,
     /// Public endpoint where this worker is reachable by other workers.
     public_endpoint: String,
-    /// Base directory for VM snapshots.
-    snapshot_base_dir: PathBuf,
+    /// Pool registry: maps pool IDs to their root directories.
+    pools: HashMap<PoolId, PathBuf>,
+    /// Tunnel manager for inter-worker fabric forwarding.
+    tunnel_manager: Option<TunnelManager>,
 }
 
 impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
@@ -69,7 +102,9 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 }
             }
         });
-        let snapshot_base_dir = std::env::temp_dir().join(format!("distvirt-snapshots-{}", std::process::id()));
+        let default_pool_path = std::env::temp_dir().join(format!("distvirt-snapshots-{}", std::process::id()));
+        let mut pools = HashMap::new();
+        pools.insert(PoolId::from("local-default"), default_pool_path);
         Worker {
             kernel_path,
             rootfs_image_path,
@@ -82,8 +117,19 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             activator_runtime,
             adapter_manager: AdapterManager::empty(),
             public_endpoint,
-            snapshot_base_dir,
+            pools,
+            tunnel_manager: None,
         }
+    }
+
+    /// Register an additional pool before calling `run()`.
+    pub fn add_pool(&mut self, pool_id: PoolId, path: PathBuf) {
+        self.pools.insert(pool_id, path);
+    }
+
+    /// Look up a pool's root directory by ID.
+    fn pool_path(&self, pool_id: &PoolId) -> Option<&PathBuf> {
+        self.pools.get(pool_id)
     }
 
     /// Detect local capabilities for the WorkerHello handshake.
@@ -92,6 +138,21 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let containerd_socket = std::env::var("CONTAINERD_SOCKET")
             .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
         let has_containerd = std::path::Path::new(&containerd_socket).exists();
+
+        let pools: Vec<distvirt_worker_protocol::PoolInfo> = self
+            .pools
+            .iter()
+            .map(|(pool_id, path)| {
+                let (capacity_bytes, available_bytes) = pool_disk_stats(path);
+                distvirt_worker_protocol::PoolInfo {
+                    pool_id: pool_id.clone(),
+                    path: path.to_string_lossy().into_owned(),
+                    capacity_bytes,
+                    available_bytes,
+                }
+            })
+            .collect();
+
         WorkerCapabilities {
             has_kvm,
             has_containerd,
@@ -99,6 +160,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             max_pods: 10,
             available_memory_mb: 1024,
             public_endpoint: self.public_endpoint.clone(),
+            pools,
         }
     }
 
@@ -123,7 +185,26 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         log::info!("worker: accepted as worker_id={}", accepted.worker_id);
         self.adapter_manager = AdapterManager::new(&accepted.adapters).await;
 
-        conn.send_ready()
+        // Initialize tunnel manager after handshake so we know whether
+        // the orchestrator wants encrypted tunnels.
+        match TunnelManager::new("0.0.0.0:0".parse().unwrap(), accepted.tunnel_encrypted).await {
+            Ok(tm) => {
+                log::info!(
+                    "worker: tunnel manager listening on port {:?} (encrypted={})",
+                    tm.listen_port(),
+                    accepted.tunnel_encrypted,
+                );
+                self.tunnel_manager = Some(tm);
+            }
+            Err(e) => {
+                log::warn!("worker: failed to init tunnel manager: {}, tunnels disabled", e);
+            }
+        }
+
+        conn.send_ready(&WorkerReady {
+            tunnel_listen_port: self.tunnel_manager.as_ref().and_then(|tm| tm.listen_port()),
+            tunnel_public_key: self.tunnel_manager.as_ref().and_then(|tm| tm.public_key()),
+        })
             .await
             .context("handshake: send WorkerReady")?;
         log::info!("worker: handshake complete, entering command loop");
@@ -331,8 +412,9 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 namespace_id,
                 pod_id,
                 snapshot_id,
+                pool_id,
             } => {
-                self.handle_suspend_pod(&namespace_id, &pod_id, snapshot_id)
+                self.handle_suspend_pod(&namespace_id, &pod_id, snapshot_id, pool_id)
                     .await
             }
             WorkerCommand::ResumePod {
@@ -340,12 +422,20 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 pod_id,
                 snapshot_id,
                 network,
+                pool_id,
             } => {
-                self.handle_resume_pod(&namespace_id, pod_id, snapshot_id, network)
+                self.handle_resume_pod(&namespace_id, pod_id, snapshot_id, network, pool_id)
                     .await
             }
-            WorkerCommand::DeleteSnapshot { snapshot_id } => {
-                self.handle_delete_snapshot(&snapshot_id).await
+            WorkerCommand::DeleteSnapshot { snapshot_id, pool_id } => {
+                self.handle_delete_snapshot(&snapshot_id, &pool_id).await
+            }
+            WorkerCommand::WorkerRegistrySync { workers } => {
+                log::info!("received worker registry sync with {} peers", workers.len());
+                if let Some(ref mut tm) = self.tunnel_manager {
+                    tm.handle_registry_sync(workers);
+                }
+                Ok(())
             }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
@@ -366,6 +456,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         namespace_id: NamespaceId,
         network: NetworkConfig,
     ) -> Result<(), FatalError> {
+        let segment_id = network.segment_id;
+
         let (ns, event) = NamespaceState::new(
             &self.worker_token,
             &self.bg_event_tx,
@@ -373,6 +465,13 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             &namespace_id,
             network,
         )?;
+
+        // Notify tunnel manager if this namespace has a segment_id.
+        if let Some(seg) = segment_id {
+            if let Some(tm) = &mut self.tunnel_manager {
+                tm.on_namespace_created(&namespace_id, seg, &ns.fabric);
+            }
+        }
 
         self.namespaces.insert(namespace_id, ns);
 
@@ -383,6 +482,12 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
 
     async fn handle_destroy_namespace(&mut self, namespace_id: &NamespaceId) -> Result<(), FatalError> {
         if let Some(ns) = self.namespaces.remove(namespace_id) {
+            // Notify tunnel manager before dropping the namespace.
+            if let Some(seg) = ns.segment_id {
+                if let Some(tm) = &mut self.tunnel_manager {
+                    tm.on_namespace_destroyed(seg);
+                }
+            }
             ns.destroy(&self.bg_event_tx, namespace_id).await;
         }
         Ok(())
@@ -453,6 +558,10 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         }
     }
 
+    // TODO: The `graceful` flag currently has no observable effect — both paths
+    // cancel the token and await with the same STOP_POD_TIMEOUT. Consider either
+    // removing the flag or differentiating behavior (e.g. force-kill immediately
+    // when graceful=false instead of cancelling).
     async fn handle_stop_pod(
         &mut self,
         namespace_id: &NamespaceId,
@@ -526,8 +635,24 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         namespace_id: &NamespaceId,
         pod_id: &PodId,
         snapshot_id: SnapshotId,
+        pool_id: PoolId,
     ) -> Result<(), FatalError> {
-        let snapshot_dir = self.snapshot_base_dir.join(snapshot_id.as_ref());
+        let pool_base = match self.pool_path(&pool_id) {
+            Some(p) => p.clone(),
+            None => {
+                send_event(
+                    &self.bg_event_tx,
+                    WorkerEvent::PodSuspendFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error: format!("unknown pool '{}'", pool_id),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+        let snapshot_dir = pool_base.join(snapshot_id.as_ref());
 
         let suspend_tx = {
             let ns = self.get_namespace_mut(namespace_id)?;
@@ -553,6 +678,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let req = SuspendRequest {
             snapshot_id: snapshot_id.clone(),
             snapshot_dir,
+            pool_id,
             reply: reply_tx,
         };
 
@@ -592,25 +718,66 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         pod_id: PodId,
         snapshot_id: SnapshotId,
         network: PodNetworkConfig,
+        pool_id: PoolId,
     ) -> Result<(), FatalError> {
+        let pool_base = match self.pool_path(&pool_id) {
+            Some(p) => p.clone(),
+            None => {
+                send_event(
+                    &self.bg_event_tx,
+                    WorkerEvent::PodFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error: format!("unknown pool '{}'", pool_id),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })?;
 
         // Load snapshot metadata.
-        let snapshot_dir = self.snapshot_base_dir.join(snapshot_id.as_ref());
+        let snapshot_dir = pool_base.join(snapshot_id.as_ref());
         let metadata_path = snapshot_dir.join("metadata.json");
-        let metadata_bytes = tokio::fs::read(&metadata_path).await.map_err(|e| {
-            FatalError::InternalInvariant(format!(
-                "failed to read snapshot metadata at {}: {}",
-                metadata_path.display(),
-                e
-            ))
-        })?;
-        let metadata: crate::vmm::SnapshotMetadata =
-            serde_json::from_slice(&metadata_bytes).map_err(|e| {
-                FatalError::InternalInvariant(format!("invalid snapshot metadata: {}", e))
-            })?;
+        let metadata_bytes = match tokio::fs::read(&metadata_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                send_event(
+                    &self.bg_event_tx,
+                    WorkerEvent::PodFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error: format!(
+                            "failed to read snapshot metadata at {}: {}",
+                            metadata_path.display(),
+                            e
+                        ),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+        let metadata: crate::vmm::SnapshotMetadata = match serde_json::from_slice(&metadata_bytes)
+        {
+            Ok(m) => m,
+            Err(e) => {
+                send_event(
+                    &self.bg_event_tx,
+                    WorkerEvent::PodFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error: format!("invalid snapshot metadata: {}", e),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
 
         let snapshot = crate::vmm::SnapshotArtifacts {
             snapshot_dir,
@@ -657,8 +824,19 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
     async fn handle_delete_snapshot(
         &self,
         snapshot_id: &SnapshotId,
+        pool_id: &PoolId,
     ) -> Result<(), FatalError> {
-        let snapshot_dir = self.snapshot_base_dir.join(snapshot_id.as_ref());
+        let pool_base = match self.pool_path(pool_id) {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "delete_snapshot: unknown pool '{}', ignoring",
+                    pool_id
+                );
+                return Ok(());
+            }
+        };
+        let snapshot_dir = pool_base.join(snapshot_id.as_ref());
         if snapshot_dir.exists() {
             if let Err(e) = tokio::fs::remove_dir_all(&snapshot_dir).await {
                 log::error!(

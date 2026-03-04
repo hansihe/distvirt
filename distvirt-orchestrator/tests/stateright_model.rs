@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -55,7 +55,6 @@ struct SpecSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkerSnapshot {
     fabric_status: FabricStatus,
-    pods: BTreeSet<PodId>,
 }
 
 impl NamespaceSnapshot {
@@ -111,7 +110,7 @@ impl NamespaceSnapshot {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             pods: sm
-                .pods
+                .pod_map
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
@@ -123,7 +122,6 @@ impl NamespaceSnapshot {
                         k.clone(),
                         WorkerSnapshot {
                             fabric_status: v.fabric_status.clone(),
-                            pods: v.pods.iter().cloned().collect(),
                         },
                     )
                 })
@@ -180,18 +178,20 @@ impl NamespaceSnapshot {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
+        let mut pod_map = distvirt_orchestrator::pod_map::PodMap::new();
+        for (pod_id, pod_info) in &self.pods {
+            pod_map.insert(pod_id.clone(), pod_info.clone());
+        }
+
         NamespaceStateMachine {
             namespace_id: self.namespace_id.clone(),
             spec,
             status: self.status.clone(),
+            segment_id: 1,
             workloads,
             services,
             service_workload,
-            pods: self
-                .pods
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            pod_map,
             workers: self
                 .workers
                 .iter()
@@ -200,7 +200,7 @@ impl NamespaceSnapshot {
                         k.clone(),
                         NamespaceWorkerState {
                             fabric_status: v.fabric_status.clone(),
-                            pods: v.pods.iter().cloned().collect(),
+                            primary_pool_id: None,
                         },
                     )
                 })
@@ -254,7 +254,7 @@ fn worker_id(i: usize) -> WorkerId {
 fn next_free_pod_id(sm: &NamespaceStateMachine) -> PodId {
     for i in 0u64.. {
         let candidate = PodId(format!("pod-{}", i));
-        if !sm.pods.contains_key(&candidate) {
+        if !sm.pod_map.contains(&candidate) {
             return candidate;
         }
     }
@@ -269,7 +269,7 @@ impl Model for NamespaceModel {
 
     fn init_states(&self) -> Vec<Self::State> {
         let mut sm =
-            NamespaceStateMachine::new(NamespaceId("model-ns".into()), self.initial_spec.clone());
+            NamespaceStateMachine::new(NamespaceId("model-ns".into()), self.initial_spec.clone(), 1);
 
         // Pre-register workers with Creating fabric status.
         for i in 0..self.worker_count {
@@ -277,7 +277,7 @@ impl Model for NamespaceModel {
                 worker_id(i),
                 NamespaceWorkerState {
                     fabric_status: FabricStatus::Creating,
-                    pods: HashSet::new(),
+                    primary_pool_id: None,
                 },
             );
         }
@@ -387,6 +387,7 @@ impl Model for NamespaceModel {
                                     event: WorkerEvent::PodSuspended {
                                         pod_id: pod_id.clone(),
                                         snapshot_id: snapshot_id.clone(),
+                                        pool_id: PoolId::from("default-pool"),
                                     },
                                 });
                                 actions.push(ModelAction::WorkerEvent {
@@ -550,6 +551,7 @@ impl Model for NamespaceModel {
                 worker_id: req.worker_id.clone(),
                 pod_id,
                 snapshot_id: req.snapshot_id.clone(),
+                pool_id: req.pool_id.clone(),
             });
 
             commands_valid = commands_valid
@@ -699,6 +701,7 @@ fn test_network_config() -> NetworkConfig {
         subnet: Ipv4Addr::new(172, 16, 0, 0),
         gateway: Ipv4Addr::new(172, 16, 0, 1),
         prefix_len: 24,
+        segment_id: None,
     }
 }
 

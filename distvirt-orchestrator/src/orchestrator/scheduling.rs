@@ -60,6 +60,7 @@ impl Orchestrator {
                     worker_id: req.worker_id,
                     pod_id,
                     snapshot_id: req.snapshot_id,
+                    pool_id: req.pool_id,
                 });
                 // Recursively process outputs from ResumePod.
                 out.worker_commands
@@ -77,10 +78,14 @@ impl Orchestrator {
 
         // If namespace is fully destroyed, remove it and clean up worker references.
         if destroyed {
-            self.namespaces.remove(&namespace_id);
+            if let Some(ns) = self.namespaces.remove(&namespace_id) {
+                self.free_segment_id(ns.segment_id);
+            }
             for ws in self.workers.values_mut() {
                 ws.namespaces.remove(&namespace_id);
             }
+            // Push updated worker registry (segment sets changed).
+            self.push_worker_registry(out);
         }
     }
 
@@ -133,7 +138,8 @@ impl Orchestrator {
         let ns = self.namespaces.get(namespace_id)?;
         ns.workers
             .iter()
-            .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+            .filter(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+            .min_by_key(|(wid, _)| ns.pod_map.worker_pod_count(wid))
             .map(|(wid, _)| wid.clone())
     }
 }

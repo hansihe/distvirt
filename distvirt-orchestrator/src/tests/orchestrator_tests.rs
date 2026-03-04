@@ -104,6 +104,7 @@ fn test_worker_connect_disconnect() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
     assert!(orch.workers.contains_key(&worker_id(1)));
 
@@ -137,6 +138,7 @@ fn test_worker_lost_fans_out() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
     orch.step(OrchestratorInput::ClientCommand {
         client_id: client_id(1),
@@ -211,6 +213,7 @@ fn test_create_namespace_assigns_worker() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
 
     // Create a namespace.
@@ -263,6 +266,7 @@ fn test_worker_connects_assigns_to_workerless_namespace() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
 
     // Worker should be assigned to the namespace.

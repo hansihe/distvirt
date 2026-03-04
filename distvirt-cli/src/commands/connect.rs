@@ -106,8 +106,7 @@ pub async fn connect(
         Some(25), // persistent keepalive
         0,
         None,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to create WireGuard tunnel: {}", e))?;
+    );
     let tunn = Arc::new(Mutex::new(tunn));
 
     // 7. Open UDP socket.

@@ -55,10 +55,7 @@ impl NamespaceStateMachine {
                                 graceful: false,
                             },
                         ));
-                        if let Some(ws) = self.workers.get_mut(worker_id) {
-                            ws.pods.remove(pod_id);
-                        }
-                        self.pods.remove(pod_id);
+                        self.pod_map.remove(pod_id);
                     }
                     WorkloadState::Running {
                         pod_id, worker_id, ..
@@ -71,10 +68,7 @@ impl NamespaceStateMachine {
                                 graceful: true,
                             },
                         ));
-                        if let Some(ws) = self.workers.get_mut(worker_id) {
-                            ws.pods.remove(pod_id);
-                        }
-                        self.pods.remove(pod_id);
+                        self.pod_map.remove(pod_id);
                     }
                     WorkloadState::Dormant | WorkloadState::WaitingForCapacity => {}
                     WorkloadState::Suspending {
@@ -92,19 +86,18 @@ impl NamespaceStateMachine {
                                 graceful: false,
                             },
                         ));
-                        if let Some(ws) = self.workers.get_mut(worker_id) {
-                            ws.pods.remove(pod_id);
-                        }
-                        self.pods.remove(pod_id);
+                        self.pod_map.remove(pod_id);
                     }
                     WorkloadState::Suspended {
                         worker_id,
                         snapshot_id,
+                        pool_id,
                     } => {
                         out.worker_commands.push((
                             worker_id.clone(),
                             WorkerCommand::DeleteSnapshot {
                                 snapshot_id: snapshot_id.clone(),
+                                pool_id: pool_id.clone(),
                             },
                         ));
                     }
@@ -112,6 +105,7 @@ impl NamespaceStateMachine {
                         pod_id,
                         worker_id,
                         snapshot_id,
+                        pool_id,
                         resume_timeout,
                     } => {
                         out.timers_cancel.push(resume_timeout.clone());
@@ -127,12 +121,10 @@ impl NamespaceStateMachine {
                             worker_id.clone(),
                             WorkerCommand::DeleteSnapshot {
                                 snapshot_id: snapshot_id.clone(),
+                                pool_id: pool_id.clone(),
                             },
                         ));
-                        if let Some(ws) = self.workers.get_mut(worker_id) {
-                            ws.pods.remove(pod_id);
-                        }
-                        self.pods.remove(pod_id);
+                        self.pod_map.remove(pod_id);
                     }
                 }
             }
@@ -175,15 +167,14 @@ impl NamespaceStateMachine {
             self.services.remove(svc_id);
 
             // Emit DestroyService to all active workers.
-            for wid in self.active_worker_ids() {
-                out.worker_commands.push((
-                    wid,
-                    WorkerCommand::DestroyService {
-                        namespace_id: self.namespace_id.clone(),
-                        service_id: svc_id.clone(),
-                    },
-                ));
-            }
+            let ns_id = self.namespace_id.clone();
+            let svc_id_clone = svc_id.clone();
+            crate::broadcast::broadcast_to_active_workers(&self.workers, out, |_| {
+                WorkerCommand::DestroyService {
+                    namespace_id: ns_id.clone(),
+                    service_id: svc_id_clone.clone(),
+                }
+            });
         }
 
         // Warn about in-place spec changes (not yet handled beyond add/remove).
@@ -241,17 +232,20 @@ impl NamespaceStateMachine {
                 WorkloadState::Suspended {
                     worker_id,
                     snapshot_id,
+                    pool_id,
                 } => {
                     out.worker_commands.push((
                         worker_id.clone(),
                         WorkerCommand::DeleteSnapshot {
                             snapshot_id: snapshot_id.clone(),
+                            pool_id: pool_id.clone(),
                         },
                     ));
                 }
                 WorkloadState::Resuming {
                     worker_id,
                     snapshot_id,
+                    pool_id,
                     resume_timeout,
                     ..
                 } => {
@@ -260,6 +254,7 @@ impl NamespaceStateMachine {
                         worker_id.clone(),
                         WorkerCommand::DeleteSnapshot {
                             snapshot_id: snapshot_id.clone(),
+                            pool_id: pool_id.clone(),
                         },
                     ));
                 }
@@ -284,13 +279,12 @@ impl NamespaceStateMachine {
         for svc in self.services.values_mut() {
             svc.state = ServiceState::Idle;
         }
-        self.pods.clear();
+        self.pod_map.clear();
 
         // Send DestroyNamespace to each worker, set fabric_status to Destroying.
         // DestroyNamespace handles stopping pods on the worker side.
         for (wid, ws) in &mut self.workers {
             ws.fabric_status = FabricStatus::Destroying;
-            ws.pods.clear();
             out.worker_commands.push((
                 wid.clone(),
                 WorkerCommand::DestroyNamespace {
@@ -365,20 +359,17 @@ impl NamespaceStateMachine {
 
         // Register pod.
         debug_assert!(
-            !self.pods.contains_key(pod_id),
+            !self.pod_map.contains(pod_id),
             "Pod {:?} already exists in pods map — outer-layer bug",
             pod_id
         );
-        self.pods.insert(
+        self.pod_map.insert(
             pod_id.clone(),
             PodInfo {
                 workload_id: workload_id.clone(),
                 worker_id: worker_id.clone(),
             },
         );
-        if let Some(ws) = self.workers.get_mut(worker_id) {
-            ws.pods.insert(pod_id.clone());
-        }
 
         // Send worker commands to create the service and launch the pod.
         let ns_id = self.namespace_id.clone();
@@ -405,6 +396,12 @@ impl NamespaceStateMachine {
                 containers: wl_spec.containers.clone(),
             },
         ));
+
+        // Emit fabric route add if multi-worker.
+        if self.workers.len() > 1 {
+            let pod_ip = wl_spec.network.ip;
+            self.emit_fabric_route_add(pod_ip, worker_id, out);
+        }
 
         // Emit pod launching event.
         out.events.push(SmNamespaceEvent::Workload {
@@ -434,6 +431,7 @@ impl NamespaceStateMachine {
         worker_id: &WorkerId,
         pod_id: &PodId,
         snapshot_id: &SnapshotId,
+        pool_id: &PoolId,
         out: &mut NamespaceOutput,
     ) {
         if self.status == NamespaceStatus::Destroying {
@@ -461,20 +459,17 @@ impl NamespaceStateMachine {
 
         // Register pod.
         debug_assert!(
-            !self.pods.contains_key(pod_id),
+            !self.pod_map.contains(pod_id),
             "Pod {:?} already exists in pods map — outer-layer bug",
             pod_id
         );
-        self.pods.insert(
+        self.pod_map.insert(
             pod_id.clone(),
             PodInfo {
                 workload_id: workload_id.clone(),
                 worker_id: worker_id.clone(),
             },
         );
-        if let Some(ws) = self.workers.get_mut(worker_id) {
-            ws.pods.insert(pod_id.clone());
-        }
 
         // Send ResumePod to worker.
         let mut pod_network = wl_spec.network.clone();
@@ -487,8 +482,15 @@ impl NamespaceStateMachine {
                 pod_id: pod_id.clone(),
                 snapshot_id: snapshot_id.clone(),
                 network: pod_network,
+                pool_id: pool_id.clone(),
             },
         ));
+
+        // Emit fabric route add if multi-worker.
+        if self.workers.len() > 1 {
+            let pod_ip = wl_spec.network.ip;
+            self.emit_fabric_route_add(pod_ip, worker_id, out);
+        }
 
         // Emit resume event.
         out.events.push(SmNamespaceEvent::Workload {
@@ -506,6 +508,7 @@ impl NamespaceStateMachine {
                 worker_id: worker_id.clone(),
                 pod_id: pod_id.clone(),
                 snapshot_id: snapshot_id.clone(),
+                pool_id: pool_id.clone(),
             },
             &self.namespace_id,
         );

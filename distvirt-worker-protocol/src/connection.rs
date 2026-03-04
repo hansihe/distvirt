@@ -27,6 +27,8 @@
 //!                 available_adapters: vec![],
 //!                 max_pods: 0,
 //!                 available_memory_mb: 0,
+//!                 public_endpoint: String::new(),
+//!                 pools: vec![],
 //!             },
 //!         }).await?;
 //!         Ok::<_, anyhow::Error>(w)
@@ -387,8 +389,8 @@ impl WorkerConnection {
     }
 
     /// Send a [`WorkerReady`] to the orchestrator.
-    pub async fn send_ready(&mut self) -> anyhow::Result<()> {
-        codec::send_worker_ready(&mut self.control, &WorkerReady {})
+    pub async fn send_ready(&mut self, ready: &WorkerReady) -> anyhow::Result<()> {
+        codec::send_worker_ready(&mut self.control, ready)
             .await
             .context("send WorkerReady")
     }

@@ -14,10 +14,10 @@ pub enum WorkloadInput {
     DemandDown,
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     /// Outer layer has generated a pod_id for resuming from snapshot.
-    ResumePod { worker_id: WorkerId, pod_id: PodId, snapshot_id: SnapshotId },
+    ResumePod { worker_id: WorkerId, pod_id: PodId, snapshot_id: SnapshotId, pool_id: PoolId },
     PodRunning { pod_id: PodId },
     PodGone { pod_id: PodId },
-    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId },
+    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId, pool_id: PoolId },
     PodSuspendFailed { pod_id: PodId },
     WorkerLost { worker_id: WorkerId },
     TimerFired { timer_key: TimerKey },
@@ -26,9 +26,12 @@ pub enum WorkloadInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkloadOutput {
     PodRequest,
+    /// Workload needs a pod suspended. The namespace output forwarding layer
+    /// resolves the pool_id from the worker state and emits the actual WorkerCommand.
+    SuspendRequest { worker_id: WorkerId, snapshot_id: SnapshotId },
     /// Workload needs a pod resumed from snapshot. The namespace layer
     /// generates a new pod_id and injects ResumePod back.
-    ResumeRequest { snapshot_id: SnapshotId, worker_id: WorkerId },
+    ResumeRequest { snapshot_id: SnapshotId, worker_id: WorkerId, pool_id: PoolId },
     BecameReady { pod_id: PodId, worker_id: WorkerId },
     BecameUnready,
     WorkerCommand(WorkerId, WorkerCommand),
@@ -71,13 +74,15 @@ impl WorkloadStateMachine {
                         self.state = WorkloadState::WaitingForCapacity;
                         outputs.push(WorkloadOutput::PodRequest);
                     }
-                    WorkloadState::Suspended { worker_id, snapshot_id } if self.demand_count == 1 => {
+                    WorkloadState::Suspended { worker_id, snapshot_id, pool_id } if self.demand_count == 1 => {
                         // Resume from snapshot instead of cold boot.
                         let worker_id = worker_id.clone();
                         let snapshot_id = snapshot_id.clone();
+                        let pool_id = pool_id.clone();
                         outputs.push(WorkloadOutput::ResumeRequest {
                             snapshot_id: snapshot_id.clone(),
                             worker_id: worker_id.clone(),
+                            pool_id,
                         });
                     }
                     // If Suspending and demand comes back, we'll handle it
@@ -127,14 +132,10 @@ impl WorkloadStateMachine {
                                     suspend_timeout.clone(),
                                     std::time::Duration::from_secs(SUSPEND_TIMEOUT_SECS),
                                 ));
-                                outputs.push(WorkloadOutput::WorkerCommand(
-                                    worker_id.clone(),
-                                    WorkerCommand::SuspendPod {
-                                        namespace_id: namespace_id.clone(),
-                                        pod_id: pod_id.clone(),
-                                        snapshot_id: snapshot_id.clone(),
-                                    },
-                                ));
+                                outputs.push(WorkloadOutput::SuspendRequest {
+                                    worker_id: worker_id.clone(),
+                                    snapshot_id: snapshot_id.clone(),
+                                });
                                 self.state = WorkloadState::Suspending {
                                     pod_id,
                                     worker_id,
@@ -182,7 +183,7 @@ impl WorkloadStateMachine {
                     launch_timeout,
                 };
             }
-            WorkloadInput::ResumePod { worker_id, pod_id, snapshot_id } => {
+            WorkloadInput::ResumePod { worker_id, pod_id, snapshot_id, pool_id } => {
                 if !matches!(self.state, WorkloadState::Suspended { .. }) {
                     return outputs;
                 }
@@ -198,6 +199,7 @@ impl WorkloadStateMachine {
                     pod_id,
                     worker_id,
                     snapshot_id,
+                    pool_id,
                     resume_timeout,
                 };
             }
@@ -223,6 +225,7 @@ impl WorkloadStateMachine {
                             pod_id,
                             worker_id,
                             snapshot_id,
+                            pool_id,
                             resume_timeout,
                         } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
                         {
@@ -230,7 +233,7 @@ impl WorkloadStateMachine {
                             // Delete the snapshot now that the pod is running again.
                             outputs.push(WorkloadOutput::WorkerCommand(
                                 worker_id.clone(),
-                                WorkerCommand::DeleteSnapshot { snapshot_id },
+                                WorkerCommand::DeleteSnapshot { snapshot_id, pool_id },
                             ));
 
                             if self.demand_count > 0 {
@@ -254,14 +257,10 @@ impl WorkloadStateMachine {
                                         suspend_timeout.clone(),
                                         std::time::Duration::from_secs(SUSPEND_TIMEOUT_SECS),
                                     ));
-                                    outputs.push(WorkloadOutput::WorkerCommand(
-                                        worker_id.clone(),
-                                        WorkerCommand::SuspendPod {
-                                            namespace_id: namespace_id.clone(),
-                                            pod_id: pod_id.clone(),
-                                            snapshot_id: new_snapshot_id.clone(),
-                                        },
-                                    ));
+                                    outputs.push(WorkloadOutput::SuspendRequest {
+                                        worker_id: worker_id.clone(),
+                                        snapshot_id: new_snapshot_id.clone(),
+                                    });
                                     self.state = WorkloadState::Suspending {
                                         pod_id,
                                         worker_id,
@@ -284,7 +283,7 @@ impl WorkloadStateMachine {
                     _ => {}
                 }
             }
-            WorkloadInput::PodSuspended { pod_id, snapshot_id } => {
+            WorkloadInput::PodSuspended { pod_id, snapshot_id, pool_id } => {
                 // Verify we're suspending this pod.
                 let is_suspending = matches!(
                     &self.state,
@@ -308,11 +307,13 @@ impl WorkloadStateMachine {
                         outputs.push(WorkloadOutput::ResumeRequest {
                             snapshot_id,
                             worker_id,
+                            pool_id,
                         });
                     } else {
                         self.state = WorkloadState::Suspended {
                             worker_id,
                             snapshot_id,
+                            pool_id,
                         };
                     }
                 }
@@ -366,6 +367,7 @@ impl WorkloadStateMachine {
                         pod_id: pid,
                         resume_timeout,
                         snapshot_id,
+                        pool_id,
                         worker_id,
                         ..
                     } if *pid == pod_id => {
@@ -375,6 +377,7 @@ impl WorkloadStateMachine {
                             worker_id.clone(),
                             WorkerCommand::DeleteSnapshot {
                                 snapshot_id: snapshot_id.clone(),
+                                pool_id: pool_id.clone(),
                             },
                         ));
                         outputs.push(WorkloadOutput::BecameUnready);
@@ -472,12 +475,14 @@ impl WorkloadStateMachine {
                         pod_id,
                         worker_id,
                         snapshot_id,
+                        pool_id,
                         resume_timeout,
                     } if *resume_timeout == timer_key => {
                         // Resume timed out. Kill the pod and delete snapshot.
                         let pod_id = pod_id.clone();
                         let worker_id = worker_id.clone();
                         let snapshot_id = snapshot_id.clone();
+                        let pool_id = pool_id.clone();
                         outputs.push(WorkloadOutput::WorkerCommand(
                             worker_id.clone(),
                             WorkerCommand::StopPod {
@@ -488,7 +493,7 @@ impl WorkloadStateMachine {
                         ));
                         outputs.push(WorkloadOutput::WorkerCommand(
                             worker_id,
-                            WorkerCommand::DeleteSnapshot { snapshot_id },
+                            WorkerCommand::DeleteSnapshot { snapshot_id, pool_id },
                         ));
                         outputs.push(WorkloadOutput::BecameUnready);
                         self.transition_on_demand(&mut outputs);

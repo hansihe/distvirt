@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId, PodNetworkConfig,
-    SnapshotId, WorkerEvent,
+    PoolId, SnapshotId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
@@ -29,6 +29,7 @@ pub(crate) const STOP_POD_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) struct SuspendRequest {
     pub(crate) snapshot_id: SnapshotId,
     pub(crate) snapshot_dir: PathBuf,
+    pub(crate) pool_id: PoolId,
     pub(crate) reply: oneshot::Sender<Result<SnapshotArtifacts, String>>,
 }
 
@@ -516,6 +517,7 @@ async fn pod_monitor<I: VmInstance>(
                             pod_id: pod_id.clone(),
                             snapshot_id: req.snapshot_id,
                             snapshot_size_bytes,
+                            pool_id: req.pool_id,
                         },
                     )
                     .await;

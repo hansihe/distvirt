@@ -11,20 +11,20 @@ use super::helpers::*;
 #[test]
 fn test_namespace_new_initializes_services() {
     let spec = test_spec();
-    let ns = NamespaceStateMachine::new(ns_id("test"), spec);
+    let ns = NamespaceStateMachine::new(ns_id("test"), spec, 1);
 
     assert_eq!(ns.status, NamespaceStatus::Creating);
     assert_eq!(ns.services.len(), 1);
     assert!(ns.services.contains_key(&svc_id()));
     assert!(matches!(get_service_state(&ns), ServiceState::Pending));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
-    assert!(ns.pods.is_empty());
+    assert!(ns.pod_map.is_empty());
     assert!(ns.workers.is_empty());
 }
 
 #[test]
 fn test_namespace_update_spec() {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     let new_spec = test_spec_with_activation();
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
@@ -40,7 +40,7 @@ fn test_namespace_update_spec() {
 
 #[test]
 fn test_namespace_delete() {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     let out = ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
     });
@@ -55,12 +55,12 @@ fn test_namespace_delete() {
 
 #[test]
 fn test_namespace_worker_lost_removes_worker() {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     ns.workers.insert(
         worker_id(1),
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
-            pods: std::collections::HashSet::new(),
+            primary_pool_id: None,
         },
     );
 
@@ -74,7 +74,7 @@ fn test_namespace_worker_lost_removes_worker() {
 #[test]
 fn test_namespace_get_status() {
     let ns_name = ns_id("test");
-    let mut ns = NamespaceStateMachine::new(ns_name.clone(), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_name.clone(), test_spec(), 1);
     let out = ns.step(NamespaceInput::GetStatus {
         client_id: client_id(1),
     });
@@ -177,7 +177,7 @@ fn test_update_spec_removes_service() {
 
     assert!(ns.services.is_empty());
     assert!(ns.workloads.is_empty());
-    assert!(ns.pods.is_empty());
+    assert!(ns.pod_map.is_empty());
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
         WorkerCommand::StopPod { .. }
@@ -206,7 +206,7 @@ fn test_update_spec_removes_launching_service() {
 
     assert!(ns.services.is_empty());
     assert!(ns.workloads.is_empty());
-    assert!(ns.pods.is_empty());
+    assert!(ns.pod_map.is_empty());
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
         WorkerCommand::StopPod { .. }
@@ -218,12 +218,12 @@ fn test_update_spec_removes_launching_service() {
 
 #[test]
 fn test_namespace_created_activates_namespace() {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     ns.workers.insert(
         worker_id(1),
         NamespaceWorkerState {
             fabric_status: FabricStatus::Creating,
-            pods: std::collections::HashSet::new(),
+            primary_pool_id: None,
         },
     );
     let mut pod_counter = 0u64;
@@ -425,7 +425,7 @@ fn test_worker_loss_during_active_service() {
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
     assert_eq!(ns.status, NamespaceStatus::Creating);
     assert!(ns.workers.is_empty());
-    assert!(ns.pods.is_empty());
+    assert!(ns.pod_map.is_empty());
 }
 
 #[test]
@@ -460,7 +460,7 @@ fn test_launch_timeout() {
     });
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
-    assert!(!ns.pods.contains_key(&pod_id));
+    assert!(!ns.pod_map.contains(&pod_id));
     assert!(out
         .worker_commands
         .iter()
@@ -487,7 +487,7 @@ fn test_delete_single_worker_stateful() {
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed); // Not destroyed yet, waiting for worker confirmation.
     assert!(!ns.workers.is_empty());
-    assert!(ns.pods.is_empty()); // Pods cleared.
+    assert!(ns.pod_map.is_empty()); // Pods cleared.
     assert!(ns.workers[&worker_id(1)].fabric_status == FabricStatus::Destroying);
     assert!(out
         .worker_commands
@@ -511,7 +511,7 @@ fn test_delete_multi_worker_stateful() {
         worker_id(2),
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
-            pods: std::collections::HashSet::new(),
+            primary_pool_id: None,
         },
     );
 
@@ -569,7 +569,7 @@ fn test_delete_worker_lost_during_teardown() {
 #[test]
 fn test_delete_no_workers_immediate() {
     // Namespace with no workers -> immediate destroy.
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     ns.status = NamespaceStatus::Active;
 
     let out = ns.step(NamespaceInput::Delete {
@@ -696,7 +696,7 @@ fn test_stateful_destroy_with_running_pod() {
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed);
     assert!(!ns.workers.is_empty());
-    assert!(ns.pods.is_empty()); // Pods cleared, workloads reset.
+    assert!(ns.pod_map.is_empty()); // Pods cleared, workloads reset.
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
 
     // Worker confirms.
@@ -717,6 +717,7 @@ fn test_stateful_destroy_from_orchestrator() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
     orch.step(OrchestratorInput::ClientCommand {
         client_id: client_id(1),
@@ -804,7 +805,7 @@ fn test_namespace_failed_treats_like_worker_loss() {
         },
     });
     assert!(ns.workers.is_empty());
-    assert!(ns.pods.is_empty());
+    assert!(ns.pod_map.is_empty());
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
     assert_eq!(ns.status, NamespaceStatus::Creating);
@@ -842,12 +843,12 @@ fn test_destroy_service_on_spec_update() {
 
 #[test]
 fn test_registry_sync_on_namespace_active() {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     ns.workers.insert(
         worker_id(1),
         NamespaceWorkerState {
             fabric_status: FabricStatus::Creating,
-            pods: std::collections::HashSet::new(),
+            primary_pool_id: None,
         },
     );
 
@@ -901,7 +902,7 @@ fn test_outer_layer_scheduling_picks_worker() {
 
 #[test]
 fn test_waiting_for_capacity_no_workers() {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec());
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
 
     // Make namespace Active with no workers.
     ns.status = NamespaceStatus::Active;
@@ -922,7 +923,7 @@ fn test_waiting_for_capacity_no_workers() {
         worker_id(1),
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
-            pods: std::collections::HashSet::new(),
+            primary_pool_id: None,
         },
     );
     let pod_id = PodId("pod-0".into());
@@ -949,6 +950,7 @@ fn test_full_activation_lifecycle_through_orchestrator() {
         worker_id: worker_id(1),
         capabilities: worker_caps(),
         wg_config: None,
+        tunnel_config: None,
     });
 
     // Create namespace with activation service.

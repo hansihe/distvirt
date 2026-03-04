@@ -6,6 +6,8 @@ pub struct OrchestratorConfig {
     pub workers: WorkersConfig,
     #[serde(default)]
     pub wireguard: WireguardConfig,
+    #[serde(default)]
+    pub tunnels: TunnelConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,4 +36,22 @@ impl Default for WireguardConfig {
 
 fn default_wg_port() -> u16 {
     51820
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TunnelConfig {
+    #[serde(default = "default_tunnel_encrypted")]
+    pub encrypted: bool,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        TunnelConfig {
+            encrypted: default_tunnel_encrypted(),
+        }
+    }
+}
+
+fn default_tunnel_encrypted() -> bool {
+    true
 }

@@ -15,11 +15,11 @@
 - Snapshot artifacts stored as directory on worker local filesystem (snapshot.bin, mem.bin, container.ext4, metadata.json)
 
 **Not yet implemented:**
-- Storage pool abstraction (PoolId, pool types, capabilities, pool-aware commands)
+- Storage pool / artifact abstraction — see [Storage Pools & Artifact Management](storage-pools-artifacts.md)
 - Worker `compatibility_hash` for snapshot validation
-- Live migration (TransferSnapshot, Migrating state, MigrationPhase)
-- Namespace-level snapshots (S3 upload/download, namespace manifest)
-- Snapshot registry / eviction management
+- Live migration (TransferArtifact, Migrating state, MigrationPhase)
+- Namespace-level snapshots (S3 export/import, namespace manifest)
+- Artifact registry / eviction management — see [Storage Pools & Artifact Management](storage-pools-artifacts.md)
 - TAP frame drain after VM pause (post-pause frames from TAP fd)
 
 ---
@@ -69,45 +69,9 @@ Namespace snapshots are **consistent** — all pods are suspended at the same lo
 
 ## Storage
 
-### Current Implementation
-
 Snapshots are stored on the worker's local filesystem in a temporary directory. The orchestrator tracks which worker holds a given snapshot via `Suspended { worker_id, snapshot_id }`. There is no pool abstraction yet — resume must happen on the same worker that performed the suspend.
 
-### Target: Storage Pool Model
-
-Storage is modeled as **pools** — named storage locations with known capabilities, locality, and capacity. The orchestrator reasons about pools to plan snapshot placement and transfer paths.
-
-```
-Pool {
-    pool_id: PoolId,
-    pool_type: Local | Shared | Remote,
-    capabilities: Set<Boot | Snapshot | Transfer>,
-    locality: Set<WorkerId>,       // Which workers can access this pool
-    capacity: u64,                 // Bytes available
-}
-```
-
-**Pool types**:
-
-| Type | Example | Locality | Typical capabilities | Latency |
-|------|---------|----------|---------------------|---------|
-| Local | Worker tmpfs, local SSD | Single worker | Boot, Snapshot | Sub-ms to low single-digit ms |
-| Shared | EBS multi-attach, NFS | Multiple workers | Boot, Snapshot | Low ms (depends on backend) |
-| Remote | S3-compatible object store | All workers | Transfer (not Boot) | Hundreds of ms to seconds |
-
-**Transfer as pool-to-pool operations**: The orchestrator plans snapshot movement as transfers between pools. Examples:
-
-- **Same-worker resume**: Snapshot already in local bootable pool — no transfer needed.
-- **Migration with shared storage**: Local→Shared (fast, same volume), boot from Shared on target. Or Shared→Local on target, then boot.
-- **Migration without shared storage**: Local→Local via worker-to-worker streaming.
-- **Namespace snapshot to S3**: Local→Remote.
-- **Restore from S3**: Remote→Local, then boot.
-
-Workers advertise their pools at connect time. The orchestrator tracks pool inventory and makes all placement/eviction decisions. New storage backends become new pool types with different capabilities — no protocol changes needed.
-
-### V1 Scope
-
-V1 implements a single local pool per worker (and optionally one S3 remote pool). Transfer operations are worker-to-worker streaming or upload/download to S3. The pool abstraction exists in the protocol (workers report pools, commands reference pool IDs) but the orchestrator's "planning" is trivial with only these pool types.
+The target storage model — pools, artifact types, access modes, transfer routing, eviction, and S3 integration — is described in **[Storage Pools & Artifact Management](storage-pools-artifacts.md)**.
 
 ---
 
@@ -152,32 +116,11 @@ V1 implements a single local pool per worker (and optionally one S3 remote pool)
 8. Fabric flushes buffered packets → resumed guest
 ```
 
-### Snapshot Registry
+### Snapshot Registry & Eviction
 
-> **Not yet implemented.** Currently the orchestrator tracks snapshots implicitly via `Suspended { worker_id, snapshot_id }`. The registry described below is the target for when we need eviction, invalidation, and multi-pool awareness.
+> **Not yet implemented.** Currently the orchestrator tracks snapshots implicitly via `Suspended { worker_id, snapshot_id }`.
 
-The orchestrator maintains a registry of available snapshots:
-
-```
-SnapshotEntry {
-    snapshot_id: SnapshotId,
-    pod_id: PodId,
-    namespace_id: NamespaceId,
-    pool_id: PoolId,              // Which storage pool holds this snapshot
-    created_at: Timestamp,
-    compatibility_hash: u64,      // Hash of kernel + Firecracker version + VM config
-    image_digest: String,         // Container image digest for invalidation
-    mem_size_bytes: u64,
-    disk_size_bytes: u64,
-}
-```
-
-**Invalidation rules**:
-- Container image changes (different digest) → snapshot invalid
-- Compatibility hash mismatch (kernel, Firecracker version, or VM config change) → snapshot invalid
-- Pool eviction (LRU, space pressure) → snapshot removed, orchestrator notified
-
-**Eviction**: Orchestrator-managed. Workers report pool capacity and current inventory. Orchestrator decides eviction policy (LRU, priority-based, etc.) and issues explicit eviction commands. This enables global rebalancing — e.g. keeping hot snapshots on workers with available capacity, migrating cold snapshots to shared/remote pools.
+Snapshot registry, eviction policy, and placement tracking are part of the broader artifact management system. See [Storage Pools & Artifact Management](storage-pools-artifacts.md) for the placement table, watermark-based eviction, and artifact lifecycle details.
 
 ---
 
@@ -211,9 +154,9 @@ SnapshotEntry {
    e. Worker A: PodSuspended event
 
 4. TRANSFER PHASE
-   a. Orchestrator: TransferSnapshot(snapshot_id, target_worker_id) on worker A
-      → Worker A streams snapshot data to worker B
-      → Or: Worker A uploads to shared storage, worker B pulls
+   a. Orchestrator: TransferArtifact(artifact_id, source, destination) on worker A
+      → Worker A streams snapshot data to worker B (fabric tunnel, shared pool, or S3)
+      → See storage-pools-artifacts.md for transfer routing options
    b. Worker B: TransferComplete event
 
 5. RESUME PHASE
@@ -331,25 +274,7 @@ pub struct WorkerCapabilities {
 }
 ```
 
-**Target extensions** (not yet implemented):
-
-```rust
-pub struct WorkerCapabilities {
-    // ... existing fields ...
-    pub compatibility_hash: u64,       // Hash of kernel + Firecracker version + VM config
-    pub storage_pools: Vec<PoolInfo>,  // Available storage pools on this worker
-}
-
-pub struct PoolInfo {
-    pub pool_id: PoolId,
-    pub pool_type: PoolType,           // Local | Shared | Remote
-    pub capabilities: HashSet<PoolCapability>, // Boot | Snapshot | Transfer
-    pub total_bytes: u64,
-    pub available_bytes: u64,
-}
-```
-
-The orchestrator uses `compatibility_hash` to determine which workers can accept a given snapshot. Mismatches are rejected — no best-effort restore attempts.
+**Target extensions** (not yet implemented): `compatibility_hash` for snapshot validation and `storage_pools: Vec<PoolInfo>` for pool advertisement. See [Storage Pools & Artifact Management](storage-pools-artifacts.md) for pool types and capabilities.
 
 ### Worker Commands
 
@@ -374,26 +299,7 @@ DeleteSnapshot {
 }
 ```
 
-**Target extensions** (not yet implemented — needed for migration and pool-aware storage):
-
-```rust
-SuspendPod {
-    // ... existing fields ...
-    destination_pool_id: PoolId,     // Which pool to store the snapshot in
-}
-
-ResumePod {
-    // ... existing fields ...
-    source_pool_id: PoolId,          // Which pool to load the snapshot from
-}
-
-TransferSnapshot {
-    snapshot_id: SnapshotId,
-    source_pool_id: PoolId,
-    destination_pool_id: PoolId,     // Could be local on another worker, shared, or remote
-    target_worker_id: WorkerId,      // For worker-to-worker streaming transfers
-}
-```
+**Target extensions** (not yet implemented): Pool-aware `SuspendPod`/`ResumePod` commands and `TransferArtifact` for cross-pool artifact movement. See [Storage Pools & Artifact Management](storage-pools-artifacts.md) for the full command and type definitions.
 
 ### Worker Events
 
@@ -414,25 +320,7 @@ PodSuspendFailed {
 }
 ```
 
-**Target extensions** (not yet implemented):
-
-```rust
-PodSuspended {
-    // ... existing fields ...
-    pool_id: PoolId,
-}
-
-SnapshotTransferred {
-    snapshot_id: SnapshotId,
-    destination_pool_id: PoolId,
-}
-
-SnapshotEvicted {
-    snapshot_id: SnapshotId,
-    pool_id: PoolId,
-    reason: String,            // "orchestrator_eviction", "space_pressure", "invalidated"
-}
-```
+**Target extensions** (not yet implemented): Pool-aware events (`PodSuspended` with `pool_id`, `ArtifactTransferred`, `ArtifactEvicted`). See [Storage Pools & Artifact Management](storage-pools-artifacts.md).
 
 ### VMM Traits
 
@@ -526,7 +414,7 @@ pub enum MigrationPhase {
 }
 ```
 
-Note: the current `Suspended` variant tracks `worker_id` directly. When the pool abstraction is added, this will change to reference a `PoolId` / `SnapshotLocation` instead, decoupling snapshot storage from the worker that created it.
+Note: the current `Suspended` variant tracks `worker_id` directly. When the pool abstraction is added, this will change to reference a `PoolId` / artifact placement instead, decoupling snapshot storage from the worker that created it. See [Storage Pools & Artifact Management](storage-pools-artifacts.md).
 
 ---
 
@@ -540,7 +428,7 @@ Note: the current `Suspended` variant tracks `worker_id` directly. When the pool
 
 4. **V1 disk handling: full snapshot with compression** — Snapshot the entire writable disk. For stateless workloads the delta is small and compresses well. Future optimization: guest-internal overlayfs separating base image (read-only, shareable) from guest writes (small overlay).
 
-5. **Storage is orchestrator-managed** — Workers report pool inventory and capacity. Orchestrator makes all placement, eviction, and transfer decisions. This enables global policy (rebalancing, cost-aware placement) and supports future pool types (shared storage, EBS multi-attach).
+5. **Storage is orchestrator-managed** — Workers report pool inventory and capacity. Orchestrator makes all placement, eviction, and transfer decisions. See [Storage Pools & Artifact Management](storage-pools-artifacts.md) for the full storage model.
 
 6. **Incremental migration deferred** — The protocol is designed to support it (transfer commands can express incremental operations), but v1 implements only full-snapshot migration. Pre-copy with dirty page tracking is a future optimization for reducing pause windows.
 

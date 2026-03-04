@@ -11,6 +11,7 @@ pub(super) fn test_network_config() -> NetworkConfig {
         subnet: Ipv4Addr::new(172, 16, 0, 0),
         gateway: Ipv4Addr::new(172, 16, 0, 1),
         prefix_len: 24,
+        segment_id: None,
     }
 }
 
@@ -122,6 +123,7 @@ pub(super) fn worker_caps() -> WorkerCapabilities {
         max_pods: 10,
         available_memory_mb: 1024,
         public_endpoint: String::new(),
+        pools: vec![],
     }
 }
 
@@ -130,6 +132,7 @@ pub(super) fn worker_caps_with_endpoint(endpoint: &str) -> WorkerCapabilities {
         max_pods: 10,
         available_memory_mb: 1024,
         public_endpoint: endpoint.to_string(),
+        pools: vec![],
     }
 }
 
@@ -150,12 +153,12 @@ pub(super) fn wl_id() -> WorkloadId {
 
 /// Create a namespace SM with Active status and one Active worker, ready for testing.
 pub(super) fn active_namespace(spec: NamespaceSpec) -> NamespaceStateMachine {
-    let mut ns = NamespaceStateMachine::new(ns_id("test"), spec);
+    let mut ns = NamespaceStateMachine::new(ns_id("test"), spec, 1);
     ns.workers.insert(
         worker_id(1),
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
-            pods: std::collections::HashSet::new(),
+            primary_pool_id: None,
         },
     );
     ns.status = NamespaceStatus::Active;

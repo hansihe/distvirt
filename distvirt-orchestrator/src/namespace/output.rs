@@ -1,3 +1,4 @@
+use crate::broadcast::broadcast_to_active_workers;
 use crate::service::{ServiceInput, ServiceOutput};
 use crate::types::*;
 use crate::workload::{WorkloadInput, WorkloadOutput};
@@ -39,9 +40,7 @@ impl NamespaceStateMachine {
                     out.worker_commands.push((wid, cmd));
                 }
                 ServiceOutput::BroadcastWorkerCommand(cmd) => {
-                    for wid in self.active_worker_ids() {
-                        out.worker_commands.push((wid, cmd.clone()));
-                    }
+                    broadcast_to_active_workers(&self.workers, out, |_| cmd.clone());
                 }
                 ServiceOutput::TimerSet(key, duration) => {
                     out.timers_set.push((key, duration));
@@ -156,11 +155,35 @@ impl NamespaceStateMachine {
                         }
                     }
                 }
-                WorkloadOutput::ResumeRequest { snapshot_id, worker_id } => {
+                WorkloadOutput::SuspendRequest { worker_id, snapshot_id } => {
+                    // Resolve pool_id from the worker's primary pool.
+                    let pool_id = self
+                        .workers
+                        .get(&worker_id)
+                        .and_then(|ws| ws.primary_pool_id.clone())
+                        .unwrap_or_else(|| PoolId::from("unknown"));
+                    // Get the pod_id from the workload's Suspending state.
+                    let pod_id = self
+                        .workloads
+                        .get(workload_id)
+                        .and_then(|wl| wl.state.pod_id().cloned())
+                        .unwrap_or_else(|| PodId::from("unknown"));
+                    out.worker_commands.push((
+                        worker_id,
+                        WorkerCommand::SuspendPod {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id,
+                            snapshot_id,
+                            pool_id,
+                        },
+                    ));
+                }
+                WorkloadOutput::ResumeRequest { snapshot_id, worker_id, pool_id } => {
                     out.resume_requests.push(ResumeRequest {
                         workload_id: workload_id.clone(),
                         snapshot_id,
                         worker_id,
+                        pool_id,
                     });
                 }
                 WorkloadOutput::WorkerCommand(wid, cmd) => {

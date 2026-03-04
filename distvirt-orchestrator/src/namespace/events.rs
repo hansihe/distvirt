@@ -50,8 +50,13 @@ impl NamespaceStateMachine {
                     if has_active {
                         self.status = NamespaceStatus::Active;
                         self.emit_registry_sync(out);
+                        self.emit_fabric_route_sync(out);
                         self.reconcile_all_services(out);
                     }
+                } else if self.status == NamespaceStatus::Active {
+                    // Second+ worker joining an already-active namespace.
+                    self.emit_registry_sync_to_worker(worker_id, out);
+                    self.emit_fabric_route_sync_to_worker(worker_id, out);
                 }
             }
             WorkerEvent::ServiceActivation { service_id } => {
@@ -107,7 +112,7 @@ impl NamespaceStateMachine {
                 }
             }
             WorkerEvent::PodRunning { pod_id } => {
-                let pod_info = match self.pods.get(&pod_id) {
+                let pod_info = match self.pod_map.get(&pod_id) {
                     Some(info) => info.clone(),
                     None => return,
                 };
@@ -132,11 +137,17 @@ impl NamespaceStateMachine {
                 self.forward_workload_outputs(&wl_id, wl_outputs, out);
             }
             WorkerEvent::PodExited { pod_id, exit_code } => {
-                let pod_info = match self.remove_pod(&pod_id) {
+                let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+                // Remove fabric route if multi-worker.
+                if self.workers.len() > 1 {
+                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
+                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
+                    }
+                }
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodStopped {
@@ -156,11 +167,17 @@ impl NamespaceStateMachine {
                 self.forward_workload_outputs(&wl_id, wl_outputs, out);
             }
             WorkerEvent::PodFailed { pod_id, error } => {
-                let pod_info = match self.remove_pod(&pod_id) {
+                let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+                // Remove fabric route if multi-worker.
+                if self.workers.len() > 1 {
+                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
+                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
+                    }
+                }
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodFailed {
@@ -179,12 +196,18 @@ impl NamespaceStateMachine {
                 };
                 self.forward_workload_outputs(&wl_id, wl_outputs, out);
             }
-            WorkerEvent::PodSuspended { pod_id, snapshot_id } => {
-                let pod_info = match self.remove_pod(&pod_id) {
+            WorkerEvent::PodSuspended { pod_id, snapshot_id, pool_id } => {
+                let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+                // Remove fabric route if multi-worker (pod no longer running).
+                if self.workers.len() > 1 {
+                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
+                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
+                    }
+                }
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspended {
@@ -197,6 +220,7 @@ impl NamespaceStateMachine {
                         WorkloadInput::PodSuspended {
                             pod_id,
                             snapshot_id,
+                            pool_id,
                         },
                         &self.namespace_id,
                     )
@@ -205,12 +229,45 @@ impl NamespaceStateMachine {
                 };
                 self.forward_workload_outputs(&wl_id, wl_outputs, out);
             }
+            WorkerEvent::FabricRouteMiss { dst_ip } => {
+                // Look up workload whose network.ip == dst_ip.
+                let wl_match = self
+                    .spec
+                    .workloads
+                    .iter()
+                    .find(|(_, wl_spec)| wl_spec.network.ip == dst_ip)
+                    .map(|(wl_id, _)| wl_id.clone());
+                if let Some(wl_id) = wl_match {
+                    if let Some(wl) = self.workloads.get(&wl_id) {
+                        match &wl.state {
+                            WorkloadState::Dormant | WorkloadState::Suspended { .. } => {
+                                // Trigger demand up (wake on traffic).
+                                let wl = self.workloads.get_mut(&wl_id).unwrap();
+                                let wl_outputs = wl.step(
+                                    crate::workload::WorkloadInput::DemandUp,
+                                    &self.namespace_id,
+                                );
+                                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                            }
+                            _ => {
+                                // Transient miss during pod startup, ignore.
+                            }
+                        }
+                    }
+                }
+            }
             WorkerEvent::PodSuspendFailed { pod_id, error } => {
-                let pod_info = match self.remove_pod(&pod_id) {
+                let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+                // Remove fabric route if multi-worker.
+                if self.workers.len() > 1 {
+                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
+                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
+                    }
+                }
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspendFailed {
@@ -233,26 +290,17 @@ impl NamespaceStateMachine {
     }
 
     pub(super) fn handle_worker_lost(&mut self, worker_id: &WorkerId, out: &mut NamespaceOutput) {
-        // Find all workloads affected by this worker loss.
-        let affected_workloads: Vec<WorkloadId> = self
-            .pods
-            .iter()
-            .filter(|(_, info)| info.worker_id == *worker_id)
-            .map(|(_, info)| info.workload_id.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        // Remove pods on this worker.
-        let lost_pods: Vec<PodId> = self
-            .pods
-            .iter()
-            .filter(|(_, info)| info.worker_id == *worker_id)
-            .map(|(pid, _)| pid.clone())
-            .collect();
-        for pod_id in &lost_pods {
-            self.pods.remove(pod_id);
-        }
+        // Remove all pods on this worker and collect affected workloads.
+        let _lost_pods = self.pod_map.remove_worker_pods(worker_id);
+        let affected_workloads: Vec<WorkloadId> = {
+            // We already removed the pods, but we need the workload IDs.
+            // Collect unique workload IDs from workloads that reference this worker.
+            self.workloads
+                .iter()
+                .filter(|(_, wl)| wl.state.worker_id() == Some(worker_id))
+                .map(|(wl_id, _)| wl_id.clone())
+                .collect()
+        };
 
         // Forward WorkerLost to affected workloads.
         for wl_id in affected_workloads {
@@ -334,7 +382,7 @@ impl NamespaceStateMachine {
                 };
                 // Clean up pod from pods map.
                 if let TimerKey::LaunchTimeout { pod_id, .. } = timer_key {
-                    self.remove_pod(pod_id);
+                    self.pod_map.remove(pod_id);
                 }
                 self.forward_workload_outputs(&workload_id, wl_outputs, out);
             }
@@ -355,7 +403,7 @@ impl NamespaceStateMachine {
                     return;
                 };
                 // Clean up pod from pods map on timeout.
-                self.remove_pod(&pod_id);
+                self.pod_map.remove(&pod_id);
                 self.forward_workload_outputs(&workload_id, wl_outputs, out);
             }
             TimerKey::ResumeTimeout {
@@ -375,7 +423,7 @@ impl NamespaceStateMachine {
                     return;
                 };
                 // Clean up pod from pods map on timeout.
-                self.remove_pod(&pod_id);
+                self.pod_map.remove(&pod_id);
                 self.forward_workload_outputs(&workload_id, wl_outputs, out);
             }
         }

@@ -546,11 +546,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires WASM activators — run with --include-ignored"]
     fn l4_mark_ready_processes_backend_available() {
-        let Some((_runtime, instance)) = try_load_tcp_activator() else {
-            eprintln!("SKIP: TCP activator WASM not built");
-            return;
-        };
+        let (_runtime, instance) = try_load_tcp_activator()
+            .expect("TCP activator WASM not built — run activators/build.sh");
 
         let sm = distvirt_activator::StreamManager::new(
             distvirt_activator::StreamManagerConfig {
@@ -649,11 +648,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires WASM activators — run with --include-ignored"]
     fn activator_mark_ready_returns_replay_actions() {
-        let Some((_runtime, instance)) = try_load_tcp_activator() else {
-            eprintln!("SKIP: TCP activator WASM not built");
-            return;
-        };
+        let (_runtime, instance) = try_load_tcp_activator()
+            .expect("TCP activator WASM not built — run activators/build.sh");
 
         let mut table = ServiceTable::new();
         table.create(

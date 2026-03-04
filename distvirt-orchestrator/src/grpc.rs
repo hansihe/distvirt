@@ -79,6 +79,7 @@ fn parse_network_config(subnet_str: &str) -> Result<NetworkConfig, Status> {
         subnet,
         gateway,
         prefix_len,
+        segment_id: None,
     })
 }
 

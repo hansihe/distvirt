@@ -23,6 +23,7 @@ pub enum NamespaceInput {
         worker_id: WorkerId,
         pod_id: PodId,
         snapshot_id: SnapshotId,
+        pool_id: PoolId,
     },
     Connect {
         client_id: ClientId,
@@ -57,6 +58,7 @@ pub struct ResumeRequest {
     pub workload_id: WorkloadId,
     pub snapshot_id: SnapshotId,
     pub worker_id: WorkerId,
+    pub pool_id: PoolId,
 }
 
 // --- Orchestrator-domain WorkerEvent ---
@@ -72,8 +74,9 @@ pub enum WorkerEvent {
     PodRunning { pod_id: PodId },
     PodExited { pod_id: PodId, exit_code: i32 },
     PodFailed { pod_id: PodId, error: String },
-    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId },
+    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId, pool_id: PoolId },
     PodSuspendFailed { pod_id: PodId, error: String },
     ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
+    FabricRouteMiss { dst_ip: std::net::Ipv4Addr },
 }

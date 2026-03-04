@@ -454,11 +454,10 @@ const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 50);
 const POD_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 130);
 
 #[tokio::test]
+#[ignore = "requires WASM activators — run with --include-ignored"]
 async fn activator_tcp_syn_emits_backend_need() {
-    let Some((_runtime, instance)) = try_load_tcp_activator() else {
-        eprintln!("SKIP: TCP activator WASM not built");
-        return;
-    };
+    let (_runtime, instance) = try_load_tcp_activator()
+        .expect("TCP activator WASM not built — run activators/build.sh");
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -518,11 +517,10 @@ async fn activator_tcp_syn_emits_backend_need() {
 }
 
 #[tokio::test]
+#[ignore = "requires WASM activators — run with --include-ignored"]
 async fn activator_tcp_rst_dropped() {
-    let Some((_runtime, instance)) = try_load_tcp_activator() else {
-        eprintln!("SKIP: TCP activator WASM not built");
-        return;
-    };
+    let (_runtime, instance) = try_load_tcp_activator()
+        .expect("TCP activator WASM not built — run activators/build.sh");
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -581,11 +579,10 @@ async fn activator_tcp_rst_dropped() {
 }
 
 #[tokio::test]
+#[ignore = "requires WASM activators — run with --include-ignored"]
 async fn activator_forwards_when_ready() {
-    let Some((_runtime, instance)) = try_load_tcp_activator() else {
-        eprintln!("SKIP: TCP activator WASM not built");
-        return;
-    };
+    let (_runtime, instance) = try_load_tcp_activator()
+        .expect("TCP activator WASM not built — run activators/build.sh");
 
     let fabric = make_test_fabric();
 
@@ -885,4 +882,53 @@ async fn service_nat_ip_checksum_valid() {
         sum = (sum & 0xffff) + (sum >> 16);
     }
     assert_eq!(!sum as u16, 0, "IP header checksum should be valid after DNAT");
+}
+
+// --- Tunnel routing tests ---
+
+#[tokio::test]
+async fn test_remote_worker_route_forwards_to_tunnel_port() {
+    use distvirt_worker_protocol::{FabricRouteEntry, RouteDestination, WorkerId};
+
+    let fabric = make_test_fabric();
+
+    let remote_pod_ip = Ipv4Addr::new(10, 0, 0, 50);
+    let worker_id = "remote-worker-1";
+
+    // Create a TestPort to act as the tunnel port.
+    let (tunnel_port, tunnel_handle) = make_test_port();
+
+    // Register it as a tunnel port.
+    let (_port_id, _task) = fabric.add_tunnel_port(worker_id.to_string(), tunnel_port);
+
+    // Add a RemoteWorker route for the remote pod IP.
+    {
+        let tables = fabric.tables();
+        let mut rt = tables.route_table.lock().unwrap();
+        rt.sync(vec![FabricRouteEntry {
+            ip: remote_pod_ip,
+            destination: RouteDestination::RemoteWorker {
+                worker_id: WorkerId::from(worker_id),
+            },
+        }]);
+    }
+
+    // Add a local port that sends a frame to the remote pod IP.
+    let (port0, handle0) = make_test_port();
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+
+    let frame = make_ipv4_frame(remote_pod_ip);
+    handle0.inject_tx.send(frame).await.unwrap();
+
+    // The tunnel port should receive the frame (captured via send_frame).
+    let received = try_recv(&tunnel_handle).await;
+    assert!(
+        received.is_some(),
+        "tunnel port should receive frame for RemoteWorker route"
+    );
+
+    // Verify the frame has the correct dst IP.
+    let received = received.unwrap();
+    let fp = FabricPacket::new(&received).unwrap();
+    assert_eq!(fp.ipv4_dst(), remote_pod_ip);
 }

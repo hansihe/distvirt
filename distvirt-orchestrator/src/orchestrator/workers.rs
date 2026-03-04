@@ -10,6 +10,7 @@ impl Orchestrator {
         worker_id: WorkerId,
         capabilities: WorkerCapabilities,
         wg_config: Option<WorkerWgConfig>,
+        tunnel_config: Option<WorkerTunnelConfig>,
         out: &mut OrchestratorOutput,
     ) {
         // If this worker was already connected, clean up old assignments first.
@@ -23,22 +24,27 @@ impl Orchestrator {
                 capabilities,
                 namespaces: HashSet::new(),
                 wg_config,
+                tunnel_config,
+                conditions: std::collections::HashMap::new(),
             },
         );
 
-        // Assign this worker to any namespace in Creating state with no workers.
-        let workerless: Vec<NamespaceId> = self
+        // Assign this worker to all non-Destroying namespaces that don't already have it.
+        let assignable: Vec<NamespaceId> = self
             .namespaces
             .iter()
             .filter(|(_, ns)| {
-                ns.status == NamespaceStatus::Creating && ns.workers.is_empty()
+                ns.status != NamespaceStatus::Destroying && !ns.workers.contains_key(&worker_id)
             })
             .map(|(ns_id, _)| ns_id.clone())
             .collect();
 
-        for ns_id in workerless {
+        for ns_id in assignable {
             self.assign_worker_to_namespace(&ns_id, &worker_id, out);
         }
+
+        // Push worker registry to all workers.
+        self.push_worker_registry(out);
 
         // Check all namespaces for workloads waiting for capacity and schedule them.
         self.schedule_waiting_pods(out);
@@ -63,5 +69,8 @@ impl Orchestrator {
                 );
             }
         }
+
+        // Push updated worker registry to remaining workers.
+        self.push_worker_registry(out);
     }
 }

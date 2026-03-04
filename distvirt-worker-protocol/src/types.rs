@@ -40,12 +40,14 @@ define_id_newtype!(WorkerId);
 define_id_newtype!(PodId);
 define_id_newtype!(ServiceId);
 define_id_newtype!(SnapshotId);
+define_id_newtype!(PoolId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub subnet: Ipv4Addr,
     pub gateway: Ipv4Addr,
     pub prefix_len: u8,
+    pub segment_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,6 +146,14 @@ pub struct WorkerHello {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolInfo {
+    pub pool_id: PoolId,
+    pub path: String,
+    pub capacity_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerCapabilities {
     pub has_kvm: bool,
     pub has_containerd: bool,
@@ -151,12 +161,29 @@ pub struct WorkerCapabilities {
     pub max_pods: u32,
     pub available_memory_mb: u64,
     pub public_endpoint: String,
+    pub pools: Vec<PoolInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerPeerInfo {
+    pub worker_id: WorkerId,
+    pub endpoint: String,
+    pub public_key: [u8; 32],
+    pub segments: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TunnelPeerStatus {
+    Connected,
+    Disconnected { error: String },
+    HandshakeFailed { error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerAccepted {
     pub worker_id: WorkerId,
     pub adapters: Vec<AdapterConfig>,
+    pub tunnel_encrypted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +203,10 @@ pub enum AdapterConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerReady {}
+pub struct WorkerReady {
+    pub tunnel_listen_port: Option<u16>,
+    pub tunnel_public_key: Option<[u8; 32]>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkerCommand {
@@ -248,15 +278,21 @@ pub enum WorkerCommand {
         namespace_id: NamespaceId,
         pod_id: PodId,
         snapshot_id: SnapshotId,
+        pool_id: PoolId,
     },
     ResumePod {
         namespace_id: NamespaceId,
         pod_id: PodId,
         snapshot_id: SnapshotId,
         network: PodNetworkConfig,
+        pool_id: PoolId,
     },
     DeleteSnapshot {
         snapshot_id: SnapshotId,
+        pool_id: PoolId,
+    },
+    WorkerRegistrySync {
+        workers: Vec<WorkerPeerInfo>,
     },
     Shutdown,
 }
@@ -311,6 +347,7 @@ pub enum WorkerEvent {
         pod_id: PodId,
         snapshot_id: SnapshotId,
         snapshot_size_bytes: u64,
+        pool_id: PoolId,
     },
     PodSuspendFailed {
         namespace_id: NamespaceId,
@@ -319,6 +356,15 @@ pub enum WorkerEvent {
     },
     NamespaceDestroyed {
         namespace_id: NamespaceId,
+    },
+    TunnelStatus {
+        peer_worker_id: WorkerId,
+        status: TunnelPeerStatus,
+    },
+    WorkerCondition {
+        key: String,
+        active: bool,
+        message: String,
     },
 }
 

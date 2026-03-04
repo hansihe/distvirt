@@ -189,6 +189,7 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
                     subnet: Ipv4Addr::new(172, 16, 0, 0),
                     gateway: Ipv4Addr::new(172, 16, 0, 1),
                     prefix_len: 24,
+                    segment_id: None,
                 },
             })
             .await

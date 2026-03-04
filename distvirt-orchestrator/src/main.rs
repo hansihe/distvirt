@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let config_str = std::fs::read_to_string(&cli.config)?;
     let config: OrchestratorConfig = toml::from_str(&config_str)?;
 
-    let mut shell = OrchestratorShell::new(config.wireguard.listen_port);
+    let mut shell = OrchestratorShell::new(config.wireguard.listen_port, config.tunnels.encrypted);
     let handle = shell.handle();
 
     // Start gRPC server.

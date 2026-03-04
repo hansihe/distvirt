@@ -33,12 +33,14 @@ pub enum WorkloadState {
     Suspended {
         worker_id: WorkerId,
         snapshot_id: SnapshotId,
+        pool_id: PoolId,
     },
     /// Pod is being resumed from snapshot. ResumePod sent, waiting for PodRunning.
     Resuming {
         pod_id: PodId,
         worker_id: WorkerId,
         snapshot_id: SnapshotId,
+        pool_id: PoolId,
         resume_timeout: TimerKey,
     },
 }
@@ -68,7 +70,7 @@ pub enum FabricStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceWorkerState {
     pub fabric_status: FabricStatus,
-    pub pods: std::collections::HashSet<PodId>,
+    pub primary_pool_id: Option<PoolId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -78,10 +80,24 @@ pub struct PodInfo {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct WorkerTunnelConfig {
+    pub listen_port: u16,
+    pub public_key: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerCondition {
+    pub active: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkerState {
     pub capabilities: WorkerCapabilities,
     pub namespaces: std::collections::HashSet<NamespaceId>,
     pub wg_config: Option<WorkerWgConfig>,
+    pub tunnel_config: Option<WorkerTunnelConfig>,
+    pub conditions: std::collections::HashMap<String, WorkerCondition>,
 }
 
 impl WorkloadState {
@@ -135,6 +151,7 @@ pub struct WorkerCapabilities {
     pub max_pods: u32,
     pub available_memory_mb: u64,
     pub public_endpoint: String,
+    pub pools: Vec<PoolInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

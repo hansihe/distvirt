@@ -130,8 +130,7 @@ impl WireGuardAdapter {
             None, // no persistent keepalive
             index,
             Some(Arc::clone(&state.rate_limiter)),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to create WireGuard tunnel: {}", e))?;
+        );
 
         let peer = Arc::new(PeerState {
             tunn: Mutex::new(tunn),
@@ -729,7 +728,6 @@ mod tests {
             0,
             None,
         )
-        .expect("failed to create client Tunn")
     }
 
     /// Perform a WireGuard handshake: client initiates, exchanges messages

@@ -47,15 +47,28 @@ pub fn write_network_config(
     write_ipv4(&mut builder.reborrow().init_subnet(), &val.subnet);
     write_ipv4(&mut builder.reborrow().init_gateway(), &val.gateway);
     builder.set_prefix_len(val.prefix_len);
+    match val.segment_id {
+        Some(id) => {
+            builder.set_has_segment_id(true);
+            builder.set_segment_id(id);
+        }
+        None => builder.set_has_segment_id(false),
+    }
 }
 
 pub fn read_network_config(
     reader: schema::network_config::Reader<'_>,
 ) -> capnp::Result<NetworkConfig> {
+    let segment_id = if reader.get_has_segment_id() {
+        Some(reader.get_segment_id())
+    } else {
+        None
+    };
     Ok(NetworkConfig {
         subnet: read_ipv4(reader.get_subnet()?),
         gateway: read_ipv4(reader.get_gateway()?),
         prefix_len: reader.get_prefix_len(),
+        segment_id,
     })
 }
 
@@ -435,6 +448,14 @@ pub fn write_worker_capabilities(
     builder.set_max_pods(val.max_pods);
     builder.set_available_memory_mb(val.available_memory_mb);
     builder.set_public_endpoint(&val.public_endpoint);
+    let mut pools = builder.reborrow().init_pools(val.pools.len() as u32);
+    for (i, pool) in val.pools.iter().enumerate() {
+        let mut p = pools.reborrow().get(i as u32);
+        p.set_pool_id(pool.pool_id.as_ref());
+        p.set_path(&pool.path);
+        p.set_capacity_bytes(pool.capacity_bytes);
+        p.set_available_bytes(pool.available_bytes);
+    }
 }
 
 pub fn read_worker_capabilities(
@@ -445,6 +466,17 @@ pub fn read_worker_capabilities(
     for i in 0..adapters.len() {
         v.push(adapters.get(i)?.to_string()?);
     }
+    let pools_list = reader.get_pools()?;
+    let mut pools = Vec::with_capacity(pools_list.len() as usize);
+    for i in 0..pools_list.len() {
+        let p = pools_list.get(i);
+        pools.push(PoolInfo {
+            pool_id: PoolId::from(p.get_pool_id()?.to_str()?),
+            path: p.get_path()?.to_string()?,
+            capacity_bytes: p.get_capacity_bytes(),
+            available_bytes: p.get_available_bytes(),
+        });
+    }
     Ok(WorkerCapabilities {
         has_kvm: reader.get_has_kvm(),
         has_containerd: reader.get_has_containerd(),
@@ -452,7 +484,44 @@ pub fn read_worker_capabilities(
         max_pods: reader.get_max_pods(),
         available_memory_mb: reader.get_available_memory_mb(),
         public_endpoint: reader.get_public_endpoint()?.to_string()?,
+        pools,
     })
+}
+
+pub fn write_worker_ready(
+    builder: &mut schema::worker_ready::Builder<'_>,
+    val: &WorkerReady,
+) {
+    if let Some(port) = val.tunnel_listen_port {
+        builder.set_has_tunnel_listen_port(true);
+        builder.set_tunnel_listen_port(port);
+    }
+    if let Some(ref key) = val.tunnel_public_key {
+        builder.set_has_tunnel_public_key(true);
+        builder.set_tunnel_public_key(key);
+    }
+}
+
+pub fn read_worker_ready(
+    reader: schema::worker_ready::Reader<'_>,
+) -> WorkerReady {
+    let tunnel_listen_port = if reader.get_has_tunnel_listen_port() {
+        Some(reader.get_tunnel_listen_port())
+    } else {
+        None
+    };
+    let tunnel_public_key = if reader.get_has_tunnel_public_key() {
+        reader
+            .get_tunnel_public_key()
+            .ok()
+            .and_then(|k| <[u8; 32]>::try_from(k).ok())
+    } else {
+        None
+    };
+    WorkerReady {
+        tunnel_listen_port,
+        tunnel_public_key,
+    }
 }
 
 pub fn write_worker_accepted(
@@ -460,6 +529,7 @@ pub fn write_worker_accepted(
     val: &WorkerAccepted,
 ) {
     builder.set_worker_id(val.worker_id.as_ref());
+    builder.set_tunnel_encrypted(val.tunnel_encrypted);
     let mut adapters = builder
         .reborrow()
         .init_adapters(val.adapters.len() as u32);
@@ -479,6 +549,7 @@ pub fn read_worker_accepted(
     Ok(WorkerAccepted {
         worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
         adapters: v,
+        tunnel_encrypted: reader.get_tunnel_encrypted(),
     })
 }
 
@@ -529,6 +600,42 @@ pub fn read_adapter_config(
             interface: os.get_interface()?.to_string()?,
         }),
     }
+}
+
+// --- WorkerPeerInfo ---
+
+pub fn write_worker_peer_info(
+    builder: &mut schema::worker_peer_info::Builder<'_>,
+    val: &WorkerPeerInfo,
+) {
+    builder.set_worker_id(val.worker_id.as_ref());
+    builder.set_endpoint(&val.endpoint);
+    builder.set_public_key(&val.public_key);
+    let mut segments = builder.reborrow().init_segments(val.segments.len() as u32);
+    for (i, seg) in val.segments.iter().enumerate() {
+        segments.set(i as u32, *seg);
+    }
+}
+
+pub fn read_worker_peer_info(
+    reader: schema::worker_peer_info::Reader<'_>,
+) -> capnp::Result<WorkerPeerInfo> {
+    let key_data = reader.get_public_key()?;
+    let mut public_key = [0u8; 32];
+    if key_data.len() >= 32 {
+        public_key.copy_from_slice(&key_data[..32]);
+    }
+    let segments_list = reader.get_segments()?;
+    let mut segments = Vec::with_capacity(segments_list.len() as usize);
+    for i in 0..segments_list.len() {
+        segments.push(segments_list.get(i));
+    }
+    Ok(WorkerPeerInfo {
+        worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
+        endpoint: reader.get_endpoint()?.to_string()?,
+        public_key,
+        segments,
+    })
 }
 
 // --- WorkerCommand ---
@@ -708,27 +815,39 @@ pub fn write_worker_command(
             namespace_id,
             pod_id,
             snapshot_id,
+            pool_id,
         } => {
             let mut b = builder.init_suspend_pod();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
             b.set_snapshot_id(snapshot_id.as_ref());
+            b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::ResumePod {
             namespace_id,
             pod_id,
             snapshot_id,
             network,
+            pool_id,
         } => {
             let mut b = builder.init_resume_pod();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
             b.set_snapshot_id(snapshot_id.as_ref());
             write_pod_network_config(&mut b.reborrow().init_network(), network);
+            b.set_pool_id(pool_id.as_ref());
         }
-        WorkerCommand::DeleteSnapshot { snapshot_id } => {
+        WorkerCommand::DeleteSnapshot { snapshot_id, pool_id } => {
             let mut b = builder.init_delete_snapshot();
             b.set_snapshot_id(snapshot_id.as_ref());
+            b.set_pool_id(pool_id.as_ref());
+        }
+        WorkerCommand::WorkerRegistrySync { workers } => {
+            let mut b = builder.init_worker_registry_sync();
+            let mut list = b.reborrow().init_workers(workers.len() as u32);
+            for (i, peer) in workers.iter().enumerate() {
+                write_worker_peer_info(&mut list.reborrow().get(i as u32), peer);
+            }
         }
         WorkerCommand::Shutdown => {
             builder.set_shutdown(());
@@ -912,6 +1031,7 @@ pub fn read_worker_command(
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
                 snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+                pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
         ResumePod(r) => {
@@ -921,13 +1041,24 @@ pub fn read_worker_command(
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
                 snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
                 network: read_pod_network_config(r.get_network()?)?,
+                pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
         DeleteSnapshot(r) => {
             let r = r?;
             Ok(WorkerCommand::DeleteSnapshot {
                 snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+                pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
+        }
+        WorkerRegistrySync(r) => {
+            let r = r?;
+            let workers_list = r.get_workers()?;
+            let mut workers = Vec::with_capacity(workers_list.len() as usize);
+            for i in 0..workers_list.len() {
+                workers.push(read_worker_peer_info(workers_list.get(i))?);
+            }
+            Ok(WorkerCommand::WorkerRegistrySync { workers })
         }
         Shutdown(()) => Ok(WorkerCommand::Shutdown),
     }
@@ -1036,12 +1167,14 @@ pub fn write_worker_event(
             pod_id,
             snapshot_id,
             snapshot_size_bytes,
+            pool_id,
         } => {
             let mut b = builder.init_pod_suspended();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
             b.set_snapshot_id(snapshot_id.as_ref());
             b.set_snapshot_size_bytes(*snapshot_size_bytes);
+            b.set_pool_id(pool_id.as_ref());
         }
         WorkerEvent::PodSuspendFailed {
             namespace_id,
@@ -1052,6 +1185,34 @@ pub fn write_worker_event(
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
             b.set_error(error);
+        }
+        WorkerEvent::TunnelStatus {
+            peer_worker_id,
+            status,
+        } => {
+            let mut b = builder.init_tunnel_status();
+            b.set_peer_worker_id(peer_worker_id.as_ref());
+            match status {
+                TunnelPeerStatus::Connected => {
+                    b.set_connected(());
+                }
+                TunnelPeerStatus::Disconnected { error } => {
+                    b.init_disconnected().set_error(error);
+                }
+                TunnelPeerStatus::HandshakeFailed { error } => {
+                    b.init_handshake_failed().set_error(error);
+                }
+            }
+        }
+        WorkerEvent::WorkerCondition {
+            key,
+            active,
+            message,
+        } => {
+            let mut b = builder.init_worker_condition();
+            b.set_key(key);
+            b.set_active(*active);
+            b.set_message(message);
         }
     }
 }
@@ -1144,6 +1305,7 @@ pub fn read_worker_event(
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
                 snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
                 snapshot_size_bytes: r.get_snapshot_size_bytes(),
+                pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
         PodSuspendFailed(r) => {
@@ -1152,6 +1314,33 @@ pub fn read_worker_event(
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
                 error: r.get_error()?.to_string()?,
+            })
+        }
+        TunnelStatus(r) => {
+            let r = r?;
+            let peer_worker_id = WorkerId::from(r.get_peer_worker_id()?.to_str()?);
+            let status = match r.which()? {
+                schema::tunnel_status_evt::Connected(()) => TunnelPeerStatus::Connected,
+                schema::tunnel_status_evt::Disconnected(d) => TunnelPeerStatus::Disconnected {
+                    error: d.get_error()?.to_string()?,
+                },
+                schema::tunnel_status_evt::HandshakeFailed(h) => {
+                    TunnelPeerStatus::HandshakeFailed {
+                        error: h.get_error()?.to_string()?,
+                    }
+                }
+            };
+            Ok(WorkerEvent::TunnelStatus {
+                peer_worker_id,
+                status,
+            })
+        }
+        WorkerCondition(r) => {
+            let r = r?;
+            Ok(WorkerEvent::WorkerCondition {
+                key: r.get_key()?.to_string()?,
+                active: r.get_active(),
+                message: r.get_message()?.to_string()?,
             })
         }
     }

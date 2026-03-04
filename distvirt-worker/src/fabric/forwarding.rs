@@ -25,6 +25,8 @@ pub(crate) struct FabricContextInner<P: FramePort> {
     pub(crate) subnet: Ipv4Addr,
     pub(crate) prefix_len: u8,
     pub(crate) gateway_ip: Ipv4Addr,
+    /// worker_id → port_id for tunnel ports (inter-worker forwarding).
+    pub(crate) tunnel_ports: Mutex<HashMap<String, PortId>>,
 }
 
 impl<P: FramePort> FabricContextInner<P> {
@@ -295,10 +297,19 @@ async fn dispatch_frame<P: FramePort>(
             log::trace!("fabric: frame to {} dropped by route policy", dst_ip);
         }
         RouteAction::RemoteWorker { worker_id } => {
-            log::debug!(
-                "fabric: frame to {} destined for remote worker {} (stub: dropping)",
-                dst_ip, worker_id
-            );
+            let port = {
+                let tp = ctx.inner.tunnel_ports.lock().unwrap();
+                tp.get(&worker_id).and_then(|pid| {
+                    ctx.inner.ports.lock().unwrap().get(pid).cloned()
+                })
+            };
+            if let Some(port) = port {
+                if let Err(e) = port.send_frame(packet).await {
+                    log::warn!("fabric: tunnel send to worker {} failed: {}", worker_id, e);
+                }
+            } else {
+                log::debug!("fabric: no tunnel port for worker {}, dropping", worker_id);
+            }
         }
         RouteAction::NoRoute => {
             // 6. dst_ip is the gateway itself or outside subnet → forward to gateway.

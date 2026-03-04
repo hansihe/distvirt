@@ -97,6 +97,7 @@ pub async fn run_compose(
             subnet: DEFAULT_SUBNET,
             gateway: DEFAULT_GATEWAY,
             prefix_len: DEFAULT_PREFIX_LEN,
+            segment_id: None,
         },
     })
     .await
@@ -295,6 +296,16 @@ pub async fn run_compose(
                     }
                     WorkerEvent::PodSuspendFailed { pod_id, error, .. } => {
                         log::error!("pod '{}' suspend failed: {}", pod_id, error);
+                    }
+                    WorkerEvent::TunnelStatus { peer_worker_id, status } => {
+                        log::debug!("tunnel status for '{}': {:?}", peer_worker_id, status);
+                    }
+                    WorkerEvent::WorkerCondition { key, active, message } => {
+                        if active {
+                            log::info!("worker condition asserted: {} — {}", key, message);
+                        } else {
+                            log::info!("worker condition deasserted: {}", key);
+                        }
                     }
                 }
             }

@@ -129,6 +129,7 @@ fn test_network_config() -> NetworkConfig {
         subnet: Ipv4Addr::new(172, 16, 0, 0),
         gateway: Ipv4Addr::new(172, 16, 0, 1),
         prefix_len: 24,
+        segment_id: None,
     }
 }
 
@@ -289,7 +290,7 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
     }
 
     // Every pod in the pods map should reference a known workload.
-    for (pid, pod_info) in &ns.pods {
+    for (pid, pod_info) in ns.pod_map.iter() {
         assert!(
             ns.workloads.contains_key(&pod_info.workload_id),
             "Pod {:?} references unknown workload {:?}",
@@ -305,7 +306,7 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
                 pod_id, worker_id, ..
             } => {
                 assert!(
-                    ns.pods.contains_key(pod_id),
+                    ns.pod_map.contains(pod_id),
                     "Workload {:?} in Launching references unknown pod {:?}",
                     wl_id,
                     pod_id
@@ -321,7 +322,7 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
                 pod_id, worker_id, ..
             } => {
                 assert!(
-                    ns.pods.contains_key(pod_id),
+                    ns.pod_map.contains(pod_id),
                     "Workload {:?} in Running references unknown pod {:?}",
                     wl_id,
                     pod_id
@@ -436,10 +437,93 @@ fn check_orchestrator_invariants(orch: &Orchestrator, output: &OrchestratorOutpu
 
 // --- Proptest Harnesses ---
 
+// --- PodMap proptest ---
+
+use distvirt_orchestrator::pod_map::PodMap;
+
+#[derive(Debug, Clone)]
+enum PodMapOp {
+    Insert(PodId, WorkerId),
+    Remove(PodId),
+    RemoveWorker(WorkerId),
+    Clear,
+}
+
+fn arb_pod_map_op() -> impl Strategy<Value = PodMapOp> {
+    prop_oneof![
+        (arb_pod_id(), arb_worker_id()).prop_map(|(p, w)| PodMapOp::Insert(p, w)),
+        arb_pod_id().prop_map(PodMapOp::Remove),
+        arb_worker_id().prop_map(PodMapOp::RemoveWorker),
+        Just(PodMapOp::Clear),
+    ]
+}
+
+fn check_pod_map_consistency(map: &PodMap, shadow: &HashMap<PodId, (WorkerId, WorkloadId)>) {
+    // Length matches.
+    assert_eq!(map.len(), shadow.len(), "PodMap len mismatch");
+
+    // Every shadow entry is in the map with correct worker.
+    for (pid, (wid, wlid)) in shadow {
+        let info = map.get(pid).unwrap_or_else(|| panic!("pod {:?} missing from PodMap", pid));
+        assert_eq!(&info.worker_id, wid);
+        assert_eq!(&info.workload_id, wlid);
+    }
+
+    // Worker counts match.
+    let mut counts: HashMap<WorkerId, usize> = HashMap::new();
+    for (_pid, (wid, _)) in shadow {
+        *counts.entry(wid.clone()).or_default() += 1;
+    }
+    for (wid, expected) in &counts {
+        assert_eq!(
+            map.worker_pod_count(wid),
+            *expected,
+            "worker_pod_count mismatch for {:?}",
+            wid
+        );
+    }
+}
+
 proptest! {
     #[test]
+    fn pod_map_shadow_consistency(ops in prop::collection::vec(arb_pod_map_op(), 0..200)) {
+        let mut map = PodMap::new();
+        let mut shadow: HashMap<PodId, (WorkerId, WorkloadId)> = HashMap::new();
+        let dummy_wl = WorkloadId("wl".into());
+
+        for op in ops {
+            match op {
+                PodMapOp::Insert(pid, wid) => {
+                    if shadow.contains_key(&pid) {
+                        // Skip duplicate — would panic in debug mode.
+                        continue;
+                    }
+                    shadow.insert(pid.clone(), (wid.clone(), dummy_wl.clone()));
+                    map.insert(pid, PodInfo {
+                        worker_id: wid,
+                        workload_id: dummy_wl.clone(),
+                    });
+                }
+                PodMapOp::Remove(pid) => {
+                    shadow.remove(&pid);
+                    map.remove(&pid);
+                }
+                PodMapOp::RemoveWorker(wid) => {
+                    shadow.retain(|_, (w, _)| *w != wid);
+                    map.remove_worker_pods(&wid);
+                }
+                PodMapOp::Clear => {
+                    shadow.clear();
+                    map.clear();
+                }
+            }
+            check_pod_map_consistency(&map, &shadow);
+        }
+    }
+
+    #[test]
     fn namespace_invariants_hold(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
-        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), single_service_spec());
+        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), single_service_spec(), 1);
         for input in inputs {
             let output = ns.step(input);
             check_namespace_invariants(&ns, &output);
@@ -448,7 +532,7 @@ proptest! {
 
     #[test]
     fn namespace_invariants_hold_multi_service(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
-        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), multi_service_spec());
+        let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), multi_service_spec(), 1);
         for input in inputs {
             let output = ns.step(input);
             check_namespace_invariants(&ns, &output);
@@ -482,8 +566,10 @@ proptest! {
                         max_pods: 10,
                         available_memory_mb: 1024,
                         public_endpoint: String::new(),
+                        pools: vec![],
                     },
                     wg_config: None,
+                    tunnel_config: None,
                 },
                 3 => OrchestratorInput::WorkerDisconnected {
                     worker_id: WorkerId(format!("w-{}", rng_state % 3)),

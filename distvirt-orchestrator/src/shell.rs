@@ -49,6 +49,7 @@ pub struct OrchestratorShell {
     timer_ns: HashMap<TimerKey, NamespaceId>,
     next_worker_id: u64,
     wg_listen_port: u16,
+    tunnel_encrypted: bool,
     log_subscribers: Vec<LogSubscriber>,
     log_buffers: HashMap<(NamespaceId, WorkloadId), VecDeque<LogChunkData>>,
     event_subscribers: Vec<EventSubscriber>,
@@ -198,7 +199,7 @@ impl ShellHandle {
 }
 
 impl OrchestratorShell {
-    pub fn new(wg_listen_port: u16) -> Self {
+    pub fn new(wg_listen_port: u16, tunnel_encrypted: bool) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         OrchestratorShell {
             orchestrator: Orchestrator::new(),
@@ -210,6 +211,7 @@ impl OrchestratorShell {
             timer_ns: HashMap::new(),
             next_worker_id: 1,
             wg_listen_port,
+            tunnel_encrypted,
             log_subscribers: Vec::new(),
             log_buffers: HashMap::new(),
             event_subscribers: Vec::new(),
@@ -264,15 +266,30 @@ impl OrchestratorShell {
         conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
             worker_id: worker_id.clone(),
             adapters,
+            tunnel_encrypted: self.tunnel_encrypted,
         })
         .await?;
-        conn.recv_ready().await?;
+        let ready = conn.recv_ready().await?;
 
         // Map protocol capabilities to orchestrator capabilities.
         let capabilities = WorkerCapabilities {
             max_pods: hello.capabilities.max_pods,
             available_memory_mb: hello.capabilities.available_memory_mb,
             public_endpoint: hello.capabilities.public_endpoint.clone(),
+            pools: hello.capabilities.pools.clone(),
+        };
+
+        // Extract tunnel config from WorkerReady (set after handshake so the
+        // worker knows whether to enable encryption).
+        let tunnel_config = match (
+            ready.tunnel_listen_port,
+            ready.tunnel_public_key,
+        ) {
+            (Some(port), Some(key)) => Some(WorkerTunnelConfig {
+                listen_port: port,
+                public_key: key,
+            }),
+            _ => None,
         };
 
         let tx = self.msg_tx.clone();
@@ -386,6 +403,7 @@ impl OrchestratorShell {
             worker_id: worker_id.clone(),
             capabilities,
             wg_config,
+            tunnel_config,
         });
         self.process_output(output).await;
 
@@ -558,7 +576,7 @@ impl OrchestratorShell {
                     .orchestrator
                     .namespaces
                     .get(&namespace_id)
-                    .and_then(|ns| ns.pods.get(&pod_id))
+                    .and_then(|ns| ns.pod_map.get(&pod_id))
                     .map(|info| info.workload_id.clone());
                 let _ = reply.send(workload_id);
                 return;
@@ -582,6 +600,33 @@ impl OrchestratorShell {
 
         let input = match msg {
             ShellMsg::WorkerEvent { worker_id, event } => {
+                // Handle worker-scoped conditions directly (not routed to namespace SM).
+                if let distvirt_worker_protocol::WorkerEvent::WorkerCondition {
+                    ref key,
+                    active,
+                    ref message,
+                } = event
+                {
+                    if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
+                        if active {
+                            log::info!(
+                                "worker {} condition asserted: {} — {}",
+                                worker_id.0, key, message
+                            );
+                            ws.conditions.insert(
+                                key.clone(),
+                                WorkerCondition {
+                                    active: true,
+                                    message: message.clone(),
+                                },
+                            );
+                        } else {
+                            log::info!("worker {} condition deasserted: {}", worker_id.0, key);
+                            ws.conditions.remove(key);
+                        }
+                    }
+                    return;
+                }
                 self.convert_worker_event(worker_id, event)
             }
             ShellMsg::WorkerDisconnected { worker_id } => {
@@ -709,12 +754,13 @@ impl OrchestratorShell {
                 namespace_id,
                 pod_id,
                 snapshot_id,
+                pool_id,
                 ..
             } => Some(OrchestratorInput::NamespaceInput {
                 namespace_id,
                 input: NamespaceInput::WorkerEvent {
                     worker_id,
-                    event: WorkerEvent::PodSuspended { pod_id, snapshot_id },
+                    event: WorkerEvent::PodSuspended { pod_id, snapshot_id, pool_id },
                 },
             }),
             ProtoEvent::PodSuspendFailed {
@@ -728,10 +774,26 @@ impl OrchestratorShell {
                     event: WorkerEvent::PodSuspendFailed { pod_id, error },
                 },
             }),
+            ProtoEvent::FabricRouteMiss {
+                namespace_id,
+                dst_ip,
+            } => Some(OrchestratorInput::NamespaceInput {
+                namespace_id,
+                input: NamespaceInput::WorkerEvent {
+                    worker_id,
+                    event: WorkerEvent::FabricRouteMiss { dst_ip },
+                },
+            }),
+            ProtoEvent::TunnelStatus { .. } => {
+                // Informational only for now.
+                log::debug!("tunnel status event from worker {}", worker_id.0);
+                None
+            }
+            // WorkerCondition is handled directly in handle_msg (needs &mut self).
+            ProtoEvent::WorkerCondition { .. } => unreachable!(),
             // Wire-only variants — not routed to orchestrator SM.
             ProtoEvent::ShuttingDown => None,
             ProtoEvent::PodLogStreamError { .. } => None,
-            ProtoEvent::FabricRouteMiss { .. } => None,
         }
     }
 

@@ -36,6 +36,10 @@ struct NetworkConfig {
   # Gateway IP within the subnet (e.g., 172.16.0.1).
   prefixLen @2 :UInt8;
   # Subnet prefix length (e.g., 24 for a /24).
+  hasSegmentId @3 :Bool;
+  segmentId @4 :UInt16;
+  # Optional segment ID for inter-worker tunnel routing.
+  # When hasSegmentId is false, the namespace has no tunnel segment assigned.
 }
 
 # Network configuration assigned to a specific pod.
@@ -287,6 +291,22 @@ struct WorkerCapabilities {
   publicEndpoint @5 :Text;
   # Public IP/hostname where this worker is reachable (e.g. "203.0.113.5" or
   # "worker1.example.com"). Empty string means no public endpoint advertised.
+  hasTunnelListenPort @6 :Bool;
+  tunnelListenPort @7 :UInt16;
+  # Optional tunnel listen port for inter-worker fabric tunnels.
+  hasTunnelPublicKey @8 :Bool;
+  tunnelPublicKey @9 :Data;
+  # Optional 32-byte Noise static public key for tunnel authentication.
+  pools @10 :List(PoolInfo);
+  # Storage pools available on this worker.
+}
+
+# Information about a storage pool on a worker.
+struct PoolInfo {
+  poolId @0 :Text;
+  path @1 :Text;
+  capacityBytes @2 :UInt64;
+  availableBytes @3 :UInt64;
 }
 
 # Sent by the orchestrator after validating WorkerHello.
@@ -295,6 +315,7 @@ struct WorkerCapabilities {
 struct WorkerAccepted {
   workerId @0 :Text;
   adapters @1 :List(AdapterConfig);
+  tunnelEncrypted @2 :Bool;
 }
 
 # Configuration for an ingress adapter assigned to a worker.
@@ -320,6 +341,10 @@ struct AdapterConfig {
 #
 # After this, the orchestrator may begin sending namespace/pod commands.
 struct WorkerReady {
+  tunnelListenPort @0 :UInt16;
+  hasTunnelListenPort @1 :Bool;
+  tunnelPublicKey @2 :Data;
+  hasTunnelPublicKey @3 :Bool;
 }
 
 # --- Control Stream: Command Payloads ---
@@ -502,6 +527,8 @@ struct SuspendPodCmd {
   podId @1 :Text;
   snapshotId @2 :Text;
   # Unique identifier for this snapshot (assigned by orchestrator).
+  poolId @3 :Text;
+  # Storage pool to write snapshot to.
 }
 
 # Resume a previously suspended pod from a snapshot.
@@ -519,6 +546,8 @@ struct ResumePodCmd {
   # Snapshot to restore from.
   network @3 :PodNetworkConfig;
   # Network config for the restored pod (fresh TAP, potentially new IP).
+  poolId @4 :Text;
+  # Storage pool where snapshot is stored.
 }
 
 # Delete a snapshot from disk.
@@ -527,6 +556,41 @@ struct ResumePodCmd {
 # succeeds even if the snapshot doesn't exist.
 struct DeleteSnapshotCmd {
   snapshotId @0 :Text;
+  poolId @1 :Text;
+  # Storage pool where snapshot is stored.
+}
+
+# Information about a worker peer for inter-worker tunnel establishment.
+struct WorkerPeerInfo {
+  workerId @0 :Text;
+  endpoint @1 :Text;
+  # "host:port" endpoint for tunnel connections.
+  publicKey @2 :Data;
+  # 32-byte Noise static public key.
+  segments @3 :List(UInt16);
+  # Segment IDs this worker participates in.
+}
+
+# Full-state replacement of the worker peer registry.
+#
+# Sent to all workers when the set of tunnel-capable workers changes.
+# Each worker uses this to establish or tear down tunnels autonomously.
+struct WorkerRegistrySyncCmd {
+  workers @0 :List(WorkerPeerInfo);
+}
+
+# Status of a tunnel connection to a peer worker.
+struct TunnelStatusEvt {
+  peerWorkerId @0 :Text;
+  union {
+    connected @1 :Void;
+    disconnected :group {
+      error @2 :Text;
+    }
+    handshakeFailed :group {
+      error @3 :Text;
+    }
+  }
 }
 
 # --- Control Stream: Commands (orchestrator -> worker) ---
@@ -569,6 +633,8 @@ struct WorkerCommand {
     #
     # The worker acknowledges with WorkerEvent.shuttingDown, cancels all
     # namespaces and pods, awaits cleanup, then exits.
+    workerRegistrySync @18 :WorkerRegistrySyncCmd;
+    # Full-state replacement of the worker peer registry for tunnel establishment.
   }
 }
 
@@ -682,6 +748,8 @@ struct PodSuspendedEvt {
   snapshotId @2 :Text;
   snapshotSizeBytes @3 :UInt64;
   # Total size of the snapshot on disk (metadata + snapshot.bin + mem.bin + container.ext4).
+  poolId @4 :Text;
+  # Storage pool where snapshot was written.
 }
 
 # The pod could not be suspended.
@@ -734,7 +802,26 @@ struct WorkerEvent {
     fabricRouteMiss @10 :FabricRouteMissEvt;
     podSuspended @11 :PodSuspendedEvt;
     podSuspendFailed @12 :PodSuspendFailedEvt;
+    tunnelStatus @13 :TunnelStatusEvt;
+    # Status of a tunnel connection to a peer worker.
+    workerCondition @14 :WorkerConditionEvt;
+    # Worker-scoped condition assert/deassert (level-triggered status).
   }
+}
+
+# A worker-scoped condition assert/deassert.
+#
+# Workers use this to report level-triggered status conditions like
+# "low storage", "spot preemption imminent", "tunnel peer unreachable".
+# Active conditions persist until explicitly deasserted (active=false).
+# On worker disconnect, all conditions are implicitly cleared.
+struct WorkerConditionEvt {
+  key @0 :Text;
+  # Condition identifier (e.g. "storage/root-low", "spot/preemption").
+  active @1 :Bool;
+  # true = assert (condition is active), false = deassert (condition cleared).
+  message @2 :Text;
+  # Human-readable detail about the condition.
 }
 
 # --- Log Stream Header ---
