@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, PoolId, WorkerCommand,
-    WorkerEvent,
+    ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, PoolId, PoolInfo,
+    WorkerCommand, WorkerEvent,
 };
 
 use super::common::*;
@@ -24,13 +24,18 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     let shared_dir = tempfile::tempdir()?;
     let shared_pool_id = PoolId::from("shared");
 
-    let extra_pools = vec![(shared_pool_id.clone(), shared_dir.path().to_path_buf())];
+    let pushed_pools = vec![PoolInfo {
+        pool_id: shared_pool_id.clone(),
+        path: shared_dir.path().to_string_lossy().into_owned(),
+        capacity_bytes: 0,
+        available_bytes: 0,
+    }];
 
     // --- Start two workers, both with the shared pool ---
     let (mut conn_a, handle_a) =
-        setup_with_pools("worker-a", extra_pools.clone()).await?;
+        setup_with_pools("worker-a", pushed_pools.clone()).await?;
     let (mut conn_b, handle_b) =
-        setup_with_pools("worker-b", extra_pools).await?;
+        setup_with_pools("worker-b", pushed_pools).await?;
 
     let network = NetworkConfig {
         subnet: Ipv4Addr::new(10, 0, 0, 0),
@@ -94,7 +99,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
         .send_command(&WorkerCommand::SuspendPod {
             namespace_id: "ns-shared".into(),
             pod_id: "pod-migrate".into(),
-            snapshot_id: "snap-shared".into(),
+            artifact_id: "snap-shared".into(),
             pool_id: shared_pool_id.clone(),
         })
         .await?;
@@ -113,16 +118,16 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
 
     match &event {
         WorkerEvent::PodSuspended {
-            snapshot_size_bytes, ..
+            artifact_size_bytes, ..
         } => {
             assert!(
-                *snapshot_size_bytes > 0,
+                *artifact_size_bytes > 0,
                 "snapshot should have non-zero size, got {}",
-                snapshot_size_bytes
+                artifact_size_bytes
             );
             eprintln!(
-                "e2e: pod suspended on worker-a, snapshot_size={}",
-                snapshot_size_bytes
+                "e2e: pod suspended on worker-a, artifact_size={}",
+                artifact_size_bytes
             );
         }
         other => panic!("expected PodSuspended, got {:?}", other),
@@ -146,7 +151,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
         .send_command(&WorkerCommand::ResumePod {
             namespace_id: "ns-shared".into(),
             pod_id: "pod-migrated".into(),
-            snapshot_id: "snap-shared".into(),
+            artifact_id: "snap-shared".into(),
             network: pod_network,
             pool_id: shared_pool_id.clone(),
         })

@@ -33,6 +33,53 @@ struct NamespaceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PlacementSnapshot {
+    placements: BTreeMap<ArtifactId, PlacementEntrySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PlacementEntrySnapshot {
+    pool_id: PoolId,
+    worker_id: WorkerId,
+    locked_by: Option<PodId>,
+}
+
+impl PlacementSnapshot {
+    fn from_table(table: &PlacementTable) -> Self {
+        PlacementSnapshot {
+            placements: table
+                .iter()
+                .map(|(id, p)| {
+                    (
+                        id.clone(),
+                        PlacementEntrySnapshot {
+                            pool_id: p.pool_id.clone(),
+                            worker_id: p.worker_id.clone(),
+                            locked_by: p.locked_by.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn to_table(&self) -> PlacementTable {
+        let mut table = PlacementTable::default();
+        for (id, entry) in &self.placements {
+            table.insert(
+                id.clone(),
+                ArtifactPlacement {
+                    pool_id: entry.pool_id.clone(),
+                    worker_id: entry.worker_id.clone(),
+                    locked_by: entry.locked_by.clone(),
+                },
+            );
+        }
+        table
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkloadSnapshot {
     state: WorkloadState,
     demand_count: u32,
@@ -218,6 +265,7 @@ impl NamespaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ModelState {
     namespace: NamespaceSnapshot,
+    placement: PlacementSnapshot,
     pending_timers: BTreeSet<TimerKey>,
     /// Monotonic flag: set to true once any pod has been launched.
     /// Used only for reachability properties (false→true only, no divergence).
@@ -285,6 +333,7 @@ impl Model for NamespaceModel {
         let snapshot = NamespaceSnapshot::from_state_machine(&sm);
         vec![ModelState {
             namespace: snapshot,
+            placement: PlacementSnapshot { placements: BTreeMap::new() },
             pending_timers: BTreeSet::new(),
             ever_launched_pod: false,
             last_output_commands_valid: true,
@@ -378,7 +427,7 @@ impl Model for NamespaceModel {
                         WorkloadState::Suspending {
                             pod_id,
                             worker_id: suspend_wid,
-                            snapshot_id,
+                            artifact_id,
                             ..
                         } => {
                             if wid.0 == suspend_wid.0 {
@@ -386,7 +435,7 @@ impl Model for NamespaceModel {
                                     worker_id: wid.clone(),
                                     event: WorkerEvent::PodSuspended {
                                         pod_id: pod_id.clone(),
-                                        snapshot_id: snapshot_id.clone(),
+                                        artifact_id: artifact_id.clone(),
                                         pool_id: PoolId::from("default-pool"),
                                     },
                                 });
@@ -474,6 +523,7 @@ impl Model for NamespaceModel {
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut sm = state.namespace.to_state_machine();
+        let mut placement_table = state.placement.to_table();
 
         let input = match action {
             ModelAction::WorkerEvent { worker_id, event } => {
@@ -489,7 +539,7 @@ impl Model for NamespaceModel {
         // Snapshot pre-step workers for command validity check.
         let pre_step_workers: BTreeSet<WorkerId> = sm.workers.keys().cloned().collect();
 
-        let output = sm.step(input);
+        let output = sm.step(input, &mut placement_table);
 
         // Check that all worker commands target workers present pre-step.
         let mut commands_valid = output
@@ -526,7 +576,7 @@ impl Model for NamespaceModel {
                     workload_id: req.workload_id.clone(),
                     worker_id: wid,
                     pod_id,
-                });
+                }, &mut placement_table);
 
                 commands_valid = commands_valid
                     && launch_out
@@ -546,13 +596,18 @@ impl Model for NamespaceModel {
         for req in &output.resume_requests {
             let pod_id = next_free_pod_id(&sm);
 
+            // Look up placement table for worker_id.
+            let worker_id = match placement_table.get(&req.artifact_id) {
+                Some(p) => p.worker_id.clone(),
+                None => continue,
+            };
+
             let resume_out = sm.step(NamespaceInput::ResumePod {
                 workload_id: req.workload_id.clone(),
-                worker_id: req.worker_id.clone(),
+                worker_id,
                 pod_id,
-                snapshot_id: req.snapshot_id.clone(),
-                pool_id: req.pool_id.clone(),
-            });
+                artifact_id: req.artifact_id.clone(),
+            }, &mut placement_table);
 
             commands_valid = commands_valid
                 && resume_out
@@ -569,6 +624,7 @@ impl Model for NamespaceModel {
 
         Some(ModelState {
             namespace: NamespaceSnapshot::from_state_machine(&sm),
+            placement: PlacementSnapshot::from_table(&placement_table),
             pending_timers,
             ever_launched_pod,
             last_output_commands_valid: commands_valid,
@@ -590,10 +646,9 @@ impl Model for NamespaceModel {
                                 return false;
                             }
                         }
-                        WorkloadState::Suspended { worker_id, .. } => {
-                            if !ns.workers.contains_key(worker_id) {
-                                return false;
-                            }
+                        WorkloadState::Suspended { .. } => {
+                            // Worker reference is in placement table, not in the state.
+                            // Checked separately.
                         }
                         _ => {}
                     }
@@ -644,7 +699,6 @@ impl Model for NamespaceModel {
                         WorkloadState::Launching { worker_id, .. }
                         | WorkloadState::Running { worker_id, .. }
                         | WorkloadState::Suspending { worker_id, .. }
-                        | WorkloadState::Suspended { worker_id, .. }
                         | WorkloadState::Resuming { worker_id, .. } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
@@ -659,6 +713,18 @@ impl Model for NamespaceModel {
             // pre-transition worker set during next_state).
             Property::<Self>::always("no worker commands to absent workers", |_model, state| {
                 state.last_output_commands_valid
+            }),
+            // Safety: Suspended workloads have valid placement table entries.
+            Property::<Self>::always("suspended workloads have valid placement", |_model, state| {
+                let ns = &state.namespace;
+                for (_wl_id, wl) in &ns.workloads {
+                    if let WorkloadState::Suspended { ref artifact_id } = wl.state {
+                        if !state.placement.placements.contains_key(artifact_id) {
+                            return false;
+                        }
+                    }
+                }
+                true
             }),
             // Reachability: Can reach a Running workload state.
             Property::<Self>::sometimes("can reach active service", |_model, state| {

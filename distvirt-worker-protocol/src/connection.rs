@@ -332,7 +332,7 @@ impl WorkerConnection {
         })
         .await?;
 
-        let control = control_opt.unwrap();
+        let control = control_opt.expect("invariant: poll_fn sets control_opt before Ready(Ok)");
 
         let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<NewStreamRequest>();
 

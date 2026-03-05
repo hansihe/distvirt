@@ -260,24 +260,24 @@ impl NamespaceStateMachine {
     }
 
     /// Pure state transition. No I/O.
-    pub fn step(&mut self, input: NamespaceInput) -> NamespaceOutput {
+    pub fn step(&mut self, input: NamespaceInput, placement_table: &mut PlacementTable) -> NamespaceOutput {
         let mut out = NamespaceOutput::default();
 
         match input {
             NamespaceInput::WorkerEvent { worker_id, event } => {
-                self.handle_worker_event(&worker_id, event, &mut out);
+                self.handle_worker_event(&worker_id, event, placement_table, &mut out);
             }
             NamespaceInput::WorkerLost { worker_id } => {
-                self.handle_worker_lost(&worker_id, &mut out);
+                self.handle_worker_lost(&worker_id, placement_table, &mut out);
             }
             NamespaceInput::TimerFired { timer_key } => {
-                self.handle_timer_fired(&timer_key, &mut out);
+                self.handle_timer_fired(&timer_key, placement_table, &mut out);
             }
             NamespaceInput::UpdateSpec { client_id, spec } => {
-                self.handle_update_spec(client_id, spec, &mut out);
+                self.handle_update_spec(client_id, spec, placement_table, &mut out);
             }
             NamespaceInput::Delete { client_id } => {
-                self.handle_delete(client_id, &mut out);
+                self.handle_delete(client_id, placement_table, &mut out);
             }
             NamespaceInput::GetStatus { client_id } => {
                 self.handle_get_status(client_id, &mut out);
@@ -321,16 +321,15 @@ impl NamespaceStateMachine {
                 worker_id,
                 pod_id,
             } => {
-                self.handle_launch_pod(&workload_id, &worker_id, &pod_id, &mut out);
+                self.handle_launch_pod(&workload_id, &worker_id, &pod_id, placement_table, &mut out);
             }
             NamespaceInput::ResumePod {
                 workload_id,
                 worker_id,
                 pod_id,
-                snapshot_id,
-                pool_id,
+                artifact_id,
             } => {
-                self.handle_resume_pod(&workload_id, &worker_id, &pod_id, &snapshot_id, &pool_id, &mut out);
+                self.handle_resume_pod(&workload_id, &worker_id, &pod_id, &artifact_id, placement_table, &mut out);
             }
             NamespaceInput::Connect {
                 client_id,
@@ -356,7 +355,7 @@ impl NamespaceStateMachine {
                 client_id,
                 workload_id,
             } => {
-                self.handle_deactivate_workload(client_id, workload_id, &mut out);
+                self.handle_deactivate_workload(client_id, workload_id, placement_table, &mut out);
             }
         }
 

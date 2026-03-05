@@ -163,10 +163,10 @@ impl ServiceTable {
             None => return None,
         };
         let entity = self.by_ip.get_mut(&ip)?;
-        if entity.backend_ip.is_none() {
+        let Some(backend_ip) = entity.backend_ip else {
             log::warn!("service '{}': mark_ready called but no backend set", service_id);
             return None;
-        }
+        };
         entity.ready = true;
 
         log::debug!(
@@ -193,7 +193,6 @@ impl ServiceTable {
                 entity.service_id, frames.len(), actions.len()
             );
 
-            let backend_ip = entity.backend_ip.unwrap();
             let service_ip = entity.ip;
             return Some(MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions });
         }
@@ -207,7 +206,6 @@ impl ServiceTable {
             entity.service_id, frames.len()
         );
 
-        let backend_ip = entity.backend_ip.unwrap();
         let service_ip = entity.ip;
         Some(MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions: Vec::new() })
     }
@@ -342,7 +340,7 @@ impl ServiceTable {
                 entity.buffer_start = None;
                 result.push(ServiceFlushData {
                     service_ip: *ip,
-                    backend_ip: entity.backend_ip.unwrap(),
+                    backend_ip: *backend_ip,
                     frames,
                 });
             }

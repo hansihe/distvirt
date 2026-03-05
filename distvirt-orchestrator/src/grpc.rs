@@ -793,10 +793,10 @@ fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
                         worker_id: worker_id.0,
                     })
                 }
-                SmWorkloadEvent::PodSuspended { worker_id, snapshot_id } => {
+                SmWorkloadEvent::PodSuspended { worker_id, artifact_id } => {
                     proto::workload_event::Event::PodSuspended(proto::WorkloadPodSuspended {
                         worker_id: worker_id.0,
-                        snapshot_id: snapshot_id.0,
+                        snapshot_id: artifact_id.0,
                     })
                 }
                 SmWorkloadEvent::PodSuspendFailed { reason } => {

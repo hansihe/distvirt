@@ -34,10 +34,17 @@ pub struct PreparedImage {
 
 impl Drop for PreparedImage {
     fn drop(&mut self) {
-        // Unmount the rootfs.
-        let path_c = std::ffi::CString::new(self.rootfs_path.to_str().unwrap_or("")).unwrap();
-        unsafe {
-            libc::umount2(path_c.as_ptr(), libc::MNT_DETACH);
+        // Unmount the rootfs. Avoid unwrap — panicking in Drop can abort.
+        if let Some(path_str) = self.rootfs_path.to_str() {
+            if let Ok(path_c) = std::ffi::CString::new(path_str) {
+                unsafe {
+                    libc::umount2(path_c.as_ptr(), libc::MNT_DETACH);
+                }
+            } else {
+                log::warn!("PreparedImage drop: rootfs path contains null byte, skipping umount");
+            }
+        } else {
+            log::warn!("PreparedImage drop: rootfs path is not valid UTF-8, skipping umount");
         }
         let _ = std::fs::remove_dir(&self.rootfs_path);
 
@@ -337,7 +344,9 @@ async fn mount_rootfs(
     let source_c =
         std::ffi::CString::new(mount.source.as_str()).context("mount source")?;
     let target_c =
-        std::ffi::CString::new(mount_dir.to_str().unwrap()).context("mount target")?;
+        std::ffi::CString::new(mount_dir.to_str()
+            .ok_or_else(|| anyhow::anyhow!("mount dir is not valid UTF-8: {:?}", mount_dir))?)
+            .context("mount target")?;
     let options = mount.options.join(",");
     log::debug!(
         "snapshot mount: source={:?}, type={:?}, target={:?}, options={:?}",

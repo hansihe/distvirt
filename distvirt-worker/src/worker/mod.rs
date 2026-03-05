@@ -9,8 +9,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use distvirt_activator::ActivatorRuntime;
 use distvirt_worker_protocol::{
-    ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
-    PodId, PodNetworkConfig, PoolId, SnapshotId, WorkerCapabilities, WorkerCommand,
+    ArtifactId, ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
+    PodId, PodNetworkConfig, PoolId, PoolInfo, WorkerCapabilities, WorkerCommand,
     WorkerConnection, WorkerEvent, WorkerHello, WorkerReady,
 };
 use tokio::sync::mpsc;
@@ -122,11 +122,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         }
     }
 
-    /// Register an additional pool before calling `run()`.
-    pub fn add_pool(&mut self, pool_id: PoolId, path: PathBuf) {
-        self.pools.insert(pool_id, path);
-    }
-
     /// Look up a pool's root directory by ID.
     fn pool_path(&self, pool_id: &PoolId) -> Option<&PathBuf> {
         self.pools.get(pool_id)
@@ -183,6 +178,22 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             .await
             .context("handshake: recv WorkerAccepted")?;
         log::info!("worker: accepted as worker_id={}", accepted.worker_id);
+
+        // Process pools pushed by the orchestrator.
+        for pool in &accepted.pools {
+            let path = std::path::PathBuf::from(&pool.path);
+            if !path.exists() {
+                log::warn!(
+                    "worker: pushed pool '{}' path {} does not exist, skipping",
+                    pool.pool_id,
+                    pool.path
+                );
+                continue;
+            }
+            log::info!("worker: registering pushed pool '{}' at {}", pool.pool_id, pool.path);
+            self.pools.insert(pool.pool_id.clone(), path);
+        }
+
         self.adapter_manager = AdapterManager::new(&accepted.adapters).await;
 
         // Initialize tunnel manager after handshake so we know whether
@@ -212,7 +223,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         // --- Command loop ---
         let log_opener = conn.log_stream_opener();
 
-        let result = loop {
+        let mut capacity_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        capacity_interval.tick().await; // consume the immediate first tick
+        let mut last_pools: Vec<PoolInfo> = Vec::new();
+
+        let result = 'result: loop {
             tokio::select! {
                 cmd_result = conn.recv_command() => {
                     match cmd_result {
@@ -247,6 +262,88 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     if let Err(e) = conn.send_event(&event).await {
                         log::error!("worker: failed to send event: {:#}", e);
                         break Err(e);
+                    }
+                }
+                _ = capacity_interval.tick() => {
+                    let pools: Vec<PoolInfo> = self
+                        .pools
+                        .iter()
+                        .map(|(pool_id, path)| {
+                            let (capacity_bytes, available_bytes) = pool_disk_stats(path);
+                            PoolInfo {
+                                pool_id: pool_id.clone(),
+                                path: path.to_string_lossy().into_owned(),
+                                capacity_bytes,
+                                available_bytes,
+                            }
+                        })
+                        .collect();
+
+                    // Only send if capacity changed meaningfully (>1% delta on any pool).
+                    let changed = pools.len() != last_pools.len() || pools.iter().zip(last_pools.iter()).any(|(new, old)| {
+                        if new.pool_id != old.pool_id || new.capacity_bytes != old.capacity_bytes {
+                            return true;
+                        }
+                        let threshold = old.capacity_bytes / 100; // 1%
+                        let diff = if new.available_bytes > old.available_bytes {
+                            new.available_bytes - old.available_bytes
+                        } else {
+                            old.available_bytes - new.available_bytes
+                        };
+                        diff > threshold
+                    });
+
+                    if changed {
+                        // Check watermark thresholds and emit/deassert conditions.
+                        for pool in &pools {
+                            if pool.capacity_bytes == 0 {
+                                continue;
+                            }
+                            let used_pct = ((pool.capacity_bytes - pool.available_bytes) as f64
+                                / pool.capacity_bytes as f64
+                                * 100.0) as u64;
+
+                            let soft_key = format!("storage/pool/{}/pressure-soft", pool.pool_id);
+                            let hard_key = format!("storage/pool/{}/pressure-hard", pool.pool_id);
+
+                            // Hard threshold: 95%
+                            let hard_active = used_pct >= 95;
+                            if let Err(e) = conn.send_event(&WorkerEvent::WorkerCondition {
+                                key: hard_key,
+                                active: hard_active,
+                                message: if hard_active {
+                                    format!("pool {} at {}% capacity", pool.pool_id, used_pct)
+                                } else {
+                                    String::new()
+                                },
+                            }).await {
+                                log::error!("worker: failed to send condition event: {:#}", e);
+                                break 'result Err(e);
+                            }
+
+                            // Soft threshold: 85%
+                            let soft_active = used_pct >= 85;
+                            if let Err(e) = conn.send_event(&WorkerEvent::WorkerCondition {
+                                key: soft_key,
+                                active: soft_active,
+                                message: if soft_active {
+                                    format!("pool {} at {}% capacity", pool.pool_id, used_pct)
+                                } else {
+                                    String::new()
+                                },
+                            }).await {
+                                log::error!("worker: failed to send condition event: {:#}", e);
+                                break 'result Err(e);
+                            }
+                        }
+
+                        if let Err(e) = conn.send_event(&WorkerEvent::PoolCapacityUpdate {
+                            pools: pools.clone(),
+                        }).await {
+                            log::error!("worker: failed to send capacity update: {:#}", e);
+                            break 'result Err(e);
+                        }
+                        last_pools = pools;
                     }
                 }
             }
@@ -411,24 +508,24 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             WorkerCommand::SuspendPod {
                 namespace_id,
                 pod_id,
-                snapshot_id,
+                artifact_id,
                 pool_id,
             } => {
-                self.handle_suspend_pod(&namespace_id, &pod_id, snapshot_id, pool_id)
+                self.handle_suspend_pod(&namespace_id, &pod_id, artifact_id, pool_id)
                     .await
             }
             WorkerCommand::ResumePod {
                 namespace_id,
                 pod_id,
-                snapshot_id,
+                artifact_id,
                 network,
                 pool_id,
             } => {
-                self.handle_resume_pod(&namespace_id, pod_id, snapshot_id, network, pool_id)
+                self.handle_resume_pod(&namespace_id, pod_id, artifact_id, network, pool_id)
                     .await
             }
-            WorkerCommand::DeleteSnapshot { snapshot_id, pool_id } => {
-                self.handle_delete_snapshot(&snapshot_id, &pool_id).await
+            WorkerCommand::DeleteArtifact { artifact_id, pool_id } => {
+                self.handle_delete_artifact(&artifact_id, &pool_id).await
             }
             WorkerCommand::WorkerRegistrySync { workers } => {
                 log::info!("received worker registry sync with {} peers", workers.len());
@@ -634,7 +731,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         &mut self,
         namespace_id: &NamespaceId,
         pod_id: &PodId,
-        snapshot_id: SnapshotId,
+        artifact_id: ArtifactId,
         pool_id: PoolId,
     ) -> Result<(), FatalError> {
         let pool_base = match self.pool_path(&pool_id) {
@@ -652,7 +749,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 return Ok(());
             }
         };
-        let snapshot_dir = pool_base.join(snapshot_id.as_ref());
+        let snapshot_dir = pool_base.join(artifact_id.as_ref());
 
         let suspend_tx = {
             let ns = self.get_namespace_mut(namespace_id)?;
@@ -676,7 +773,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
         let req = SuspendRequest {
-            snapshot_id: snapshot_id.clone(),
+            artifact_id: artifact_id.clone(),
             snapshot_dir,
             pool_id,
             reply: reply_tx,
@@ -716,7 +813,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         &mut self,
         namespace_id: &NamespaceId,
         pod_id: PodId,
-        snapshot_id: SnapshotId,
+        artifact_id: ArtifactId,
         network: PodNetworkConfig,
         pool_id: PoolId,
     ) -> Result<(), FatalError> {
@@ -741,7 +838,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         })?;
 
         // Load snapshot metadata.
-        let snapshot_dir = pool_base.join(snapshot_id.as_ref());
+        let snapshot_dir = pool_base.join(artifact_id.as_ref());
         let metadata_path = snapshot_dir.join("metadata.json");
         let metadata_bytes = match tokio::fs::read(&metadata_path).await {
             Ok(bytes) => bytes,
@@ -821,31 +918,31 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         Ok(())
     }
 
-    async fn handle_delete_snapshot(
+    async fn handle_delete_artifact(
         &self,
-        snapshot_id: &SnapshotId,
+        artifact_id: &ArtifactId,
         pool_id: &PoolId,
     ) -> Result<(), FatalError> {
         let pool_base = match self.pool_path(pool_id) {
             Some(p) => p,
             None => {
                 log::warn!(
-                    "delete_snapshot: unknown pool '{}', ignoring",
+                    "delete_artifact: unknown pool '{}', ignoring",
                     pool_id
                 );
                 return Ok(());
             }
         };
-        let snapshot_dir = pool_base.join(snapshot_id.as_ref());
+        let snapshot_dir = pool_base.join(artifact_id.as_ref());
         if snapshot_dir.exists() {
             if let Err(e) = tokio::fs::remove_dir_all(&snapshot_dir).await {
                 log::error!(
-                    "delete_snapshot: failed to remove {}: {}",
+                    "delete_artifact: failed to remove {}: {}",
                     snapshot_dir.display(),
                     e
                 );
             } else {
-                log::info!("delete_snapshot: removed {}", snapshot_dir.display());
+                log::info!("delete_artifact: removed {}", snapshot_dir.display());
             }
         }
         Ok(())

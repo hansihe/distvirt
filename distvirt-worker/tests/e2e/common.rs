@@ -5,8 +5,8 @@ use std::time::Duration;
 use futures_lite::io::AsyncReadExt;
 
 use distvirt_worker_protocol::{
-    NetworkConfig, OrchestratorConnection, PodNetworkConfig, WorkerAccepted, WorkerCommand,
-    WorkerConnection, WorkerEvent, WorkerId,
+    NetworkConfig, OrchestratorConnection, PodNetworkConfig, PoolInfo, WorkerAccepted,
+    WorkerCommand, WorkerConnection, WorkerEvent, WorkerId,
 };
 
 /// Returns `true` if the E2E env var is set, otherwise prints a skip message.
@@ -37,18 +37,18 @@ pub async fn setup_with_activators() -> anyhow::Result<(OrchestratorConnection, 
     setup_full(Some(component_dir), None, vec![]).await
 }
 
-/// Like `setup()`, but with extra pools registered on the worker and a custom worker ID.
+/// Like `setup()`, but with pools pushed to the worker via handshake and a custom worker ID.
 pub async fn setup_with_pools(
     worker_id: &str,
-    extra_pools: Vec<(distvirt_worker_protocol::PoolId, PathBuf)>,
+    pushed_pools: Vec<PoolInfo>,
 ) -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
-    setup_full(None, Some(worker_id), extra_pools).await
+    setup_full(None, Some(worker_id), pushed_pools).await
 }
 
 async fn setup_full(
     component_dir: Option<PathBuf>,
     worker_id: Option<&str>,
-    extra_pools: Vec<(distvirt_worker_protocol::PoolId, PathBuf)>,
+    pushed_pools: Vec<PoolInfo>,
 ) -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
     let _ = env_logger::try_init();
 
@@ -73,10 +73,7 @@ async fn setup_full(
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let mut worker = distvirt_worker::worker::Worker::new(kernel, rootfs, vmm, image_provider, component_dir, String::new());
-        for (pool_id, path) in extra_pools {
-            worker.add_pool(pool_id, path);
-        }
+        let worker = distvirt_worker::worker::Worker::new(kernel, rootfs, vmm, image_provider, component_dir, String::new());
         worker.run(conn).await
     });
 
@@ -91,6 +88,7 @@ async fn setup_full(
         worker_id: WorkerId::from(wid),
         adapters: vec![],
         tunnel_encrypted: true,
+        pools: pushed_pools,
     })
     .await?;
 

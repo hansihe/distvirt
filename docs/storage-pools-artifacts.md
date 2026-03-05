@@ -349,15 +349,15 @@ Foundation — replace ad-hoc snapshot tempdir with pool-aware storage. No orche
 
 ### Phase 2: Orchestrator Placement Table
 
-7. [ ] Orchestrator tracks `PlacementTable`: artifact → set of (pool, lock, ref_count)
+7. [x] Orchestrator tracks `PlacementTable`: artifact → set of (pool, lock, ref_count) — `PlacementTable` in `types/states.rs` with `ArtifactPlacement { snapshot_id, pool_id, worker_id, locked_by }`. Namespace output layer populates on suspend, cleans up on resume/delete/worker-lost. Simplified v1: single placement per artifact (no ref_count yet).
 8. [x] `WorkerState` gains pool info from handshake — `WorkerState.capabilities.pools` populated from `WorkerHello` at `shell.rs:279`
-9. [~] `WorkloadState::Suspended` references `ArtifactId` + `PoolId` instead of `snapshot_id` + `worker_id` — currently stores `{ worker_id, snapshot_id, pool_id }`, no `ArtifactId` type yet
-10. [ ] Capacity reporting from workers (periodic or event-driven) — fields exist on `PoolInfo` but hardcoded to 0, no reporting loop
+9. [x] `WorkloadState::Suspended` references `ArtifactId` instead of `snapshot_id` + `worker_id` — `Suspended { artifact_id }`, `Suspending`/`Resuming` use `artifact_id`. Worker/pool resolved via `PlacementTable`. Workload SM emits `DeleteArtifact` instead of raw `WorkerCommand::DeleteArtifact`. `ArtifactId` defined in `distvirt-worker-protocol` via `define_id_newtype!`. `SnapshotId` removed — `ArtifactId` used end-to-end.
+10. [x] Capacity reporting from workers (periodic or event-driven) — `PoolCapacityUpdate` worker event added to wire protocol. Worker sends fresh `Vec<PoolInfo>` every 30s (suppressed when delta <1%). Orchestrator updates `WorkerState.capabilities.pools` on receipt. Worker emits `WorkerCondition` events at soft (85%) and hard (95%) watermark thresholds (`storage/pool/<id>/pressure-soft`, `storage/pool/<id>/pressure-hard`).
 
 ### Phase 3: Orchestrator-Pushed Pool Config
 
-11. [ ] Pool config in `WorkerAccepted` — orchestrator can push additional pools to workers
-12. [ ] Shared pool support (same `PoolId` across multiple workers)
+11. [x] Pool config in `WorkerAccepted` — orchestrator can push additional pools to workers via `WorkerAccepted.pools`. `OrchestratorConfig.pools` TOML section converts to `PoolInfo` and is sent during handshake. Worker registers pushed pools after receiving `WorkerAccepted`, skipping paths that don't exist.
+12. [x] Shared pool support (same `PoolId` across multiple workers) — pools pushed via `WorkerAccepted` handshake. E2E test `test_cross_worker_shared_pool_resume` validates suspend on worker A → resume on worker B via a shared directory-backed pool. `Worker::add_pool()` removed; all pool registration now happens via the protocol handshake.
 
 ### Phase 4: Transfers & Eviction
 

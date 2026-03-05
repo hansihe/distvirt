@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId, PodNetworkConfig,
-    PoolId, SnapshotId, WorkerEvent,
+    PoolId, ArtifactId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
@@ -27,7 +27,7 @@ pub(crate) const STOP_POD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Request to suspend a running pod.
 pub(crate) struct SuspendRequest {
-    pub(crate) snapshot_id: SnapshotId,
+    pub(crate) artifact_id: ArtifactId,
     pub(crate) snapshot_dir: PathBuf,
     pub(crate) pool_id: PoolId,
     pub(crate) reply: oneshot::Sender<Result<SnapshotArtifacts, String>>,
@@ -504,19 +504,19 @@ async fn pod_monitor<I: VmInstance>(
 
         // Suspend request: snapshot the VM and exit.
         Some(req) = suspend_rx.recv() => {
-            log::info!("pod '{}': suspend requested, snapshot_id={}", pod_id, req.snapshot_id);
+            log::info!("pod '{}': suspend requested, artifact_id={}", pod_id, req.artifact_id);
             match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
                 Ok(artifacts) => {
                     // Calculate snapshot size.
-                    let snapshot_size_bytes = dir_size(&req.snapshot_dir).await.unwrap_or(0);
+                    let artifact_size_bytes = dir_size(&req.snapshot_dir).await.unwrap_or(0);
                     let _ = req.reply.send(Ok(artifacts));
                     send_event(
                         &event_tx,
                         WorkerEvent::PodSuspended {
                             namespace_id: namespace_id.clone(),
                             pod_id: pod_id.clone(),
-                            snapshot_id: req.snapshot_id,
-                            snapshot_size_bytes,
+                            artifact_id: req.artifact_id,
+                            artifact_size_bytes,
                             pool_id: req.pool_id,
                         },
                     )

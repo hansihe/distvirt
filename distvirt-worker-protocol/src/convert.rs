@@ -536,6 +536,14 @@ pub fn write_worker_accepted(
     for (i, ac) in val.adapters.iter().enumerate() {
         write_adapter_config(adapters.reborrow().get(i as u32), ac);
     }
+    let mut pools = builder.reborrow().init_pools(val.pools.len() as u32);
+    for (i, pool) in val.pools.iter().enumerate() {
+        let mut p = pools.reborrow().get(i as u32);
+        p.set_pool_id(pool.pool_id.as_ref());
+        p.set_path(&pool.path);
+        p.set_capacity_bytes(pool.capacity_bytes);
+        p.set_available_bytes(pool.available_bytes);
+    }
 }
 
 pub fn read_worker_accepted(
@@ -546,10 +554,22 @@ pub fn read_worker_accepted(
     for i in 0..adapters.len() {
         v.push(read_adapter_config(adapters.get(i))?);
     }
+    let pools_list = reader.get_pools()?;
+    let mut pools = Vec::with_capacity(pools_list.len() as usize);
+    for i in 0..pools_list.len() {
+        let p = pools_list.get(i);
+        pools.push(PoolInfo {
+            pool_id: PoolId::from(p.get_pool_id()?.to_str()?),
+            path: p.get_path()?.to_string()?,
+            capacity_bytes: p.get_capacity_bytes(),
+            available_bytes: p.get_available_bytes(),
+        });
+    }
     Ok(WorkerAccepted {
         worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
         adapters: v,
         tunnel_encrypted: reader.get_tunnel_encrypted(),
+        pools,
     })
 }
 
@@ -814,32 +834,32 @@ pub fn write_worker_command(
         WorkerCommand::SuspendPod {
             namespace_id,
             pod_id,
-            snapshot_id,
+            artifact_id,
             pool_id,
         } => {
             let mut b = builder.init_suspend_pod();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
-            b.set_snapshot_id(snapshot_id.as_ref());
+            b.set_snapshot_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::ResumePod {
             namespace_id,
             pod_id,
-            snapshot_id,
+            artifact_id,
             network,
             pool_id,
         } => {
             let mut b = builder.init_resume_pod();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
-            b.set_snapshot_id(snapshot_id.as_ref());
+            b.set_snapshot_id(artifact_id.as_ref());
             write_pod_network_config(&mut b.reborrow().init_network(), network);
             b.set_pool_id(pool_id.as_ref());
         }
-        WorkerCommand::DeleteSnapshot { snapshot_id, pool_id } => {
+        WorkerCommand::DeleteArtifact { artifact_id, pool_id } => {
             let mut b = builder.init_delete_snapshot();
-            b.set_snapshot_id(snapshot_id.as_ref());
+            b.set_snapshot_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::WorkerRegistrySync { workers } => {
@@ -1030,7 +1050,7 @@ pub fn read_worker_command(
             Ok(WorkerCommand::SuspendPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1039,15 +1059,15 @@ pub fn read_worker_command(
             Ok(WorkerCommand::ResumePod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 network: read_pod_network_config(r.get_network()?)?,
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
         DeleteSnapshot(r) => {
             let r = r?;
-            Ok(WorkerCommand::DeleteSnapshot {
-                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
+            Ok(WorkerCommand::DeleteArtifact {
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1165,15 +1185,15 @@ pub fn write_worker_event(
         WorkerEvent::PodSuspended {
             namespace_id,
             pod_id,
-            snapshot_id,
-            snapshot_size_bytes,
+            artifact_id,
+            artifact_size_bytes,
             pool_id,
         } => {
             let mut b = builder.init_pod_suspended();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(pod_id.as_ref());
-            b.set_snapshot_id(snapshot_id.as_ref());
-            b.set_snapshot_size_bytes(*snapshot_size_bytes);
+            b.set_snapshot_id(artifact_id.as_ref());
+            b.set_snapshot_size_bytes(*artifact_size_bytes);
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerEvent::PodSuspendFailed {
@@ -1213,6 +1233,17 @@ pub fn write_worker_event(
             b.set_key(key);
             b.set_active(*active);
             b.set_message(message);
+        }
+        WorkerEvent::PoolCapacityUpdate { pools } => {
+            let mut b = builder.init_pool_capacity_update();
+            let mut list = b.reborrow().init_pools(pools.len() as u32);
+            for (i, pool) in pools.iter().enumerate() {
+                let mut p = list.reborrow().get(i as u32);
+                p.set_pool_id(pool.pool_id.as_ref());
+                p.set_path(&pool.path);
+                p.set_capacity_bytes(pool.capacity_bytes);
+                p.set_available_bytes(pool.available_bytes);
+            }
         }
     }
 }
@@ -1303,8 +1334,8 @@ pub fn read_worker_event(
             Ok(WorkerEvent::PodSuspended {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-                snapshot_id: SnapshotId::from(r.get_snapshot_id()?.to_str()?),
-                snapshot_size_bytes: r.get_snapshot_size_bytes(),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
+                artifact_size_bytes: r.get_snapshot_size_bytes(),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1342,6 +1373,21 @@ pub fn read_worker_event(
                 active: r.get_active(),
                 message: r.get_message()?.to_string()?,
             })
+        }
+        PoolCapacityUpdate(r) => {
+            let r = r?;
+            let pools_list = r.get_pools()?;
+            let mut pools = Vec::with_capacity(pools_list.len() as usize);
+            for i in 0..pools_list.len() {
+                let p = pools_list.get(i);
+                pools.push(PoolInfo {
+                    pool_id: PoolId::from(p.get_pool_id()?.to_str()?),
+                    path: p.get_path()?.to_string()?,
+                    capacity_bytes: p.get_capacity_bytes(),
+                    available_bytes: p.get_available_bytes(),
+                });
+            }
+            Ok(WorkerEvent::PoolCapacityUpdate { pools })
         }
     }
 }

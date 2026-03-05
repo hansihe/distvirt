@@ -41,7 +41,7 @@ enum WlModelAction {
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     PodRunning { pod_id: PodId },
     PodGone { pod_id: PodId },
-    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId },
+    PodSuspended { pod_id: PodId, artifact_id: ArtifactId },
     PodSuspendFailed { pod_id: PodId },
     WorkerLost { worker_id: WorkerId },
     TimerFired { timer_key: TimerKey },
@@ -144,12 +144,12 @@ impl Model for WorkloadModel {
             }
             WorkloadState::Dormant => {}
             WorkloadState::Suspending {
-                pod_id, worker_id, snapshot_id, ..
+                pod_id, worker_id, artifact_id, ..
             } => {
                 // Pod can finish suspending successfully.
                 actions.push(WlModelAction::PodSuspended {
                     pod_id: pod_id.clone(),
-                    snapshot_id: snapshot_id.clone(),
+                    artifact_id: artifact_id.clone(),
                 });
                 // Suspend can fail.
                 actions.push(WlModelAction::PodSuspendFailed {
@@ -165,12 +165,9 @@ impl Model for WorkloadModel {
                     });
                 }
             }
-            WorkloadState::Suspended { worker_id, .. } => {
-                if self.enable_worker_loss {
-                    actions.push(WlModelAction::WorkerLost {
-                        worker_id: worker_id.clone(),
-                    });
-                }
+            WorkloadState::Suspended { .. } => {
+                // Worker loss for suspended state is now handled by the namespace layer
+                // via placement table. The workload SM no longer stores worker_id here.
             }
             WorkloadState::Resuming {
                 pod_id, worker_id, ..
@@ -209,8 +206,8 @@ impl Model for WorkloadModel {
             }
             WlModelAction::PodRunning { pod_id } => (WorkloadInput::PodRunning { pod_id }, None),
             WlModelAction::PodGone { pod_id } => (WorkloadInput::PodGone { pod_id }, None),
-            WlModelAction::PodSuspended { pod_id, snapshot_id } => {
-                (WorkloadInput::PodSuspended { pod_id, snapshot_id, pool_id: PoolId::from("default-pool") }, None)
+            WlModelAction::PodSuspended { pod_id, artifact_id } => {
+                (WorkloadInput::PodSuspended { pod_id, artifact_id }, None)
             }
             WlModelAction::PodSuspendFailed { pod_id } => {
                 (WorkloadInput::PodSuspendFailed { pod_id }, None)
@@ -244,16 +241,17 @@ impl Model for WorkloadModel {
         }
 
         // Process ResumeRequest outputs: simulate outer layer injecting ResumePod.
+        // In the real system, the namespace layer resolves worker_id from the placement table.
+        // Here we use a dummy worker_id since the workload SM doesn't validate it.
         for out in &outputs {
-            if let WorkloadOutput::ResumeRequest { snapshot_id, worker_id, pool_id } = out {
+            if let WorkloadOutput::ResumeRequest { artifact_id } = out {
                 let pod_id = PodId(format!("pod-{}", next_pod_id));
                 next_pod_id += 1;
                 let resume_outputs = sm.step(
                     WorkloadInput::ResumePod {
-                        worker_id: worker_id.clone(),
+                        worker_id: wl_worker_id(0),
                         pod_id,
-                        snapshot_id: snapshot_id.clone(),
-                        pool_id: pool_id.clone(),
+                        artifact_id: artifact_id.clone(),
                     },
                     &ns,
                 );

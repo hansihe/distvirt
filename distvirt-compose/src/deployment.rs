@@ -108,7 +108,8 @@ fn topo_sort(deployment: &Deployment) -> Vec<String> {
         if let Some(deps) = dependents.get(name) {
             let mut next: Vec<&str> = Vec::new();
             for &dep in deps {
-                let deg = in_degree.get_mut(dep).unwrap();
+                let deg = in_degree.get_mut(dep)
+                    .expect("invariant: dependent must exist in in_degree map");
                 *deg -= 1;
                 if *deg == 0 {
                     next.push(dep);

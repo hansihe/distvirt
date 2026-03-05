@@ -117,7 +117,8 @@ impl RouteTable {
                 }
 
                 // Re-borrow state after last_miss manipulation.
-                let state = self.routes.get_mut(&dst_ip).unwrap();
+                let state = self.routes.get_mut(&dst_ip)
+                    .expect("invariant: dst_ip confirmed in routes above");
 
                 // Check timeout: if buffer has been active too long, drop.
                 if let Some(start) = state.buffer_start {

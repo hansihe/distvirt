@@ -68,11 +68,10 @@ pub fn parse_qname(query: &[u8]) -> Option<String> {
 /// - Appends one answer RR: NAME (pointer to offset 12), TYPE=A, CLASS=IN, TTL=60, RDATA=ip
 pub fn synthesize_a_response(query: &[u8], ip: Ipv4Addr) -> Vec<u8> {
     // Find end of question section: skip QNAME + QTYPE(2) + QCLASS(2)
-    let qname_end = find_qname_end(query, 12);
-    if qname_end.is_none() {
+    let Some(qname_end) = find_qname_end(query, 12) else {
         return Vec::new();
-    }
-    let question_end = qname_end.unwrap() + 4; // +2 QTYPE +2 QCLASS
+    };
+    let question_end = qname_end + 4; // +2 QTYPE +2 QCLASS
     if question_end > query.len() {
         return Vec::new();
     }
@@ -123,11 +122,10 @@ pub fn synthesize_a_response(query: &[u8], ip: Ipv4Addr) -> Vec<u8> {
 
 /// Build a minimal NXDOMAIN response from a query.
 fn synthesize_nxdomain_response(query: &[u8]) -> Vec<u8> {
-    let qname_end = find_qname_end(query, 12);
-    if qname_end.is_none() {
+    let Some(qname_end) = find_qname_end(query, 12) else {
         return Vec::new();
-    }
-    let question_end = qname_end.unwrap() + 4;
+    };
+    let question_end = qname_end + 4;
     if question_end > query.len() {
         return Vec::new();
     }
@@ -401,7 +399,7 @@ mod tests {
     fn try_resolve_found() {
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
         {
-            let mut map = registry.write().unwrap();
+            let mut map = registry.write().expect("poisoned");
             map.insert("db".to_string(), Ipv4Addr::new(172, 16, 0, 3));
         }
 

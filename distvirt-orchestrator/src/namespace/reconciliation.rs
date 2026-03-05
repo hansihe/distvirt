@@ -4,17 +4,17 @@ use crate::workload::WorkloadInput;
 use super::NamespaceStateMachine;
 
 impl NamespaceStateMachine {
-    pub(crate) fn reconcile_all_services(&mut self, out: &mut NamespaceOutput) {
+    pub(crate) fn reconcile_all_services(&mut self, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
         if self.status == NamespaceStatus::Destroying {
             return;
         }
         let svc_ids: Vec<ServiceId> = self.spec.services.keys().cloned().collect();
         for svc_id in svc_ids {
-            self.reconcile_service(&svc_id, out);
+            self.reconcile_service(&svc_id, placement_table, out);
         }
     }
 
-    fn reconcile_service(&mut self, svc_id: &ServiceId, out: &mut NamespaceOutput) {
+    fn reconcile_service(&mut self, svc_id: &ServiceId, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
         let svc = match self.services.get(svc_id) {
             Some(s) => s,
             None => return,
@@ -35,7 +35,8 @@ impl NamespaceStateMachine {
                 if has_activation {
                     // Create the service on workers and move to Idle.
                     let ns_id = self.namespace_id.clone();
-                    let svc_spec = self.spec.services.get(svc_id).cloned().unwrap();
+                    let svc_spec = self.spec.services.get(svc_id).cloned()
+                        .expect("invariant: svc_id from reconcile_pair must exist in spec.services");
                     for wid in self.active_worker_ids() {
                         out.worker_commands.push((
                             wid,
@@ -47,21 +48,27 @@ impl NamespaceStateMachine {
                             },
                         ));
                     }
-                    self.services.get_mut(svc_id).unwrap().state = ServiceState::Idle;
+                    self.services.get_mut(svc_id)
+                        .expect("invariant: svc_id from reconcile_pair must exist in services")
+                        .state = ServiceState::Idle;
                 } else {
                     // Always-on: demand up immediately.
-                    self.services.get_mut(svc_id).unwrap().state = ServiceState::NeedBackend;
+                    self.services.get_mut(svc_id)
+                        .expect("invariant: svc_id from reconcile_pair must exist in services")
+                        .state = ServiceState::NeedBackend;
                     // Step workload with DemandUp.
-                    let wl = self.workloads.get_mut(&wl_id).unwrap();
+                    let wl = self.workloads.get_mut(&wl_id)
+                        .expect("invariant: wl_id from reconcile_pair must exist in workloads");
                     let wl_outputs = wl.step(WorkloadInput::DemandUp, &self.namespace_id);
-                    self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                    self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
                 }
             }
             (ServiceState::NeedBackend, WorkloadState::Dormant) => {
                 // Workload is dormant but service needs backend - demand up.
-                let wl = self.workloads.get_mut(&wl_id).unwrap();
+                let wl = self.workloads.get_mut(&wl_id)
+                    .expect("invariant: wl_id from reconcile_pair must exist in workloads");
                 let wl_outputs = wl.step(WorkloadInput::DemandUp, &self.namespace_id);
-                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
             _ => {}
         }

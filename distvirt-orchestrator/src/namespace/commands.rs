@@ -9,6 +9,7 @@ impl NamespaceStateMachine {
         &mut self,
         client_id: ClientId,
         spec: NamespaceSpec,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         if self.status == NamespaceStatus::Destroying {
@@ -89,41 +90,44 @@ impl NamespaceStateMachine {
                         self.pod_map.remove(pod_id);
                     }
                     WorkloadState::Suspended {
-                        worker_id,
-                        snapshot_id,
-                        pool_id,
+                        artifact_id,
                     } => {
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::DeleteSnapshot {
-                                snapshot_id: snapshot_id.clone(),
-                                pool_id: pool_id.clone(),
-                            },
-                        ));
+                        // Look up placement table and emit DeleteArtifact.
+                        if let Some(placement) = placement_table.remove(artifact_id) {
+                            out.worker_commands.push((
+                                placement.worker_id,
+                                WorkerCommand::DeleteArtifact {
+                                    artifact_id: artifact_id.clone(),
+                                    pool_id: placement.pool_id,
+                                },
+                            ));
+                        }
                     }
                     WorkloadState::Resuming {
                         pod_id,
-                        worker_id,
-                        snapshot_id,
-                        pool_id,
+                        artifact_id,
                         resume_timeout,
+                        ..
                     } => {
                         out.timers_cancel.push(resume_timeout.clone());
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: false,
-                            },
-                        ));
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::DeleteSnapshot {
-                                snapshot_id: snapshot_id.clone(),
-                                pool_id: pool_id.clone(),
-                            },
-                        ));
+                        // Look up placement for the worker to stop pod on and delete snapshot.
+                        if let Some(placement) = placement_table.remove(artifact_id) {
+                            out.worker_commands.push((
+                                placement.worker_id.clone(),
+                                WorkerCommand::StopPod {
+                                    namespace_id: self.namespace_id.clone(),
+                                    pod_id: pod_id.clone(),
+                                    graceful: false,
+                                },
+                            ));
+                            out.worker_commands.push((
+                                placement.worker_id,
+                                WorkerCommand::DeleteArtifact {
+                                    artifact_id: artifact_id.clone(),
+                                    pool_id: placement.pool_id,
+                                },
+                            ));
+                        }
                         self.pod_map.remove(pod_id);
                     }
                 }
@@ -205,13 +209,13 @@ impl NamespaceStateMachine {
             if !removed_services.is_empty() {
                 self.emit_registry_sync(out);
             }
-            self.reconcile_all_services(out);
+            self.reconcile_all_services(placement_table, out);
         }
 
         out.client_events.push((client_id, ClientEvent::Ok));
     }
 
-    pub(super) fn handle_delete(&mut self, client_id: ClientId, out: &mut NamespaceOutput) {
+    pub(super) fn handle_delete(&mut self, client_id: ClientId, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
         self.status = NamespaceStatus::Destroying;
         let ns_id = self.namespace_id.clone();
 
@@ -230,33 +234,33 @@ impl NamespaceStateMachine {
                     out.timers_cancel.push(suspend_timeout.clone());
                 }
                 WorkloadState::Suspended {
-                    worker_id,
-                    snapshot_id,
-                    pool_id,
+                    artifact_id,
                 } => {
-                    out.worker_commands.push((
-                        worker_id.clone(),
-                        WorkerCommand::DeleteSnapshot {
-                            snapshot_id: snapshot_id.clone(),
-                            pool_id: pool_id.clone(),
-                        },
-                    ));
+                    if let Some(placement) = placement_table.remove(artifact_id) {
+                        out.worker_commands.push((
+                            placement.worker_id,
+                            WorkerCommand::DeleteArtifact {
+                                artifact_id: artifact_id.clone(),
+                                pool_id: placement.pool_id,
+                            },
+                        ));
+                    }
                 }
                 WorkloadState::Resuming {
-                    worker_id,
-                    snapshot_id,
-                    pool_id,
+                    artifact_id,
                     resume_timeout,
                     ..
                 } => {
                     out.timers_cancel.push(resume_timeout.clone());
-                    out.worker_commands.push((
-                        worker_id.clone(),
-                        WorkerCommand::DeleteSnapshot {
-                            snapshot_id: snapshot_id.clone(),
-                            pool_id: pool_id.clone(),
-                        },
-                    ));
+                    if let Some(placement) = placement_table.remove(artifact_id) {
+                        out.worker_commands.push((
+                            placement.worker_id,
+                            WorkerCommand::DeleteArtifact {
+                                artifact_id: artifact_id.clone(),
+                                pool_id: placement.pool_id,
+                            },
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -317,6 +321,7 @@ impl NamespaceStateMachine {
         workload_id: &WorkloadId,
         worker_id: &WorkerId,
         pod_id: &PodId,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         if self.status == NamespaceStatus::Destroying {
@@ -413,7 +418,8 @@ impl NamespaceStateMachine {
         });
 
         // Step the workload SM.
-        let wl = self.workloads.get_mut(workload_id).unwrap();
+        let wl = self.workloads.get_mut(workload_id)
+            .expect("invariant: workload confirmed to exist at top of handle_launch_pod");
         let wl_outputs = wl.step(
             WorkloadInput::LaunchPod {
                 worker_id: worker_id.clone(),
@@ -422,7 +428,7 @@ impl NamespaceStateMachine {
             &self.namespace_id,
         );
         let wl_id = workload_id.clone();
-        self.forward_workload_outputs(&wl_id, wl_outputs, out);
+        self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
     }
 
     pub(super) fn handle_resume_pod(
@@ -430,8 +436,8 @@ impl NamespaceStateMachine {
         workload_id: &WorkloadId,
         worker_id: &WorkerId,
         pod_id: &PodId,
-        snapshot_id: &SnapshotId,
-        pool_id: &PoolId,
+        artifact_id: &ArtifactId,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         if self.status == NamespaceStatus::Destroying {
@@ -450,6 +456,15 @@ impl NamespaceStateMachine {
         ) {
             return;
         }
+
+        // Look up placement table to get pool_id.
+        let placement = match placement_table.get(artifact_id) {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        // Lock the artifact for this pod.
+        placement_table.lock(artifact_id, pod_id);
 
         // Get workload spec for pod network config.
         let wl_spec = match self.spec.workloads.get(workload_id) {
@@ -480,9 +495,9 @@ impl NamespaceStateMachine {
             WorkerCommand::ResumePod {
                 namespace_id: self.namespace_id.clone(),
                 pod_id: pod_id.clone(),
-                snapshot_id: snapshot_id.clone(),
+                artifact_id: artifact_id.clone(),
                 network: pod_network,
-                pool_id: pool_id.clone(),
+                pool_id: placement.pool_id,
             },
         ));
 
@@ -502,24 +517,25 @@ impl NamespaceStateMachine {
         });
 
         // Step the workload SM.
-        let wl = self.workloads.get_mut(workload_id).unwrap();
+        let wl = self.workloads.get_mut(workload_id)
+            .expect("invariant: workload confirmed to exist at top of handle_resume_pod");
         let wl_outputs = wl.step(
             WorkloadInput::ResumePod {
                 worker_id: worker_id.clone(),
                 pod_id: pod_id.clone(),
-                snapshot_id: snapshot_id.clone(),
-                pool_id: pool_id.clone(),
+                artifact_id: artifact_id.clone(),
             },
             &self.namespace_id,
         );
         let wl_id = workload_id.clone();
-        self.forward_workload_outputs(&wl_id, wl_outputs, out);
+        self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
     }
 
     pub(super) fn handle_deactivate_workload(
         &mut self,
         client_id: ClientId,
         workload_id: WorkloadId,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         // Check workload exists.
@@ -596,7 +612,7 @@ impl NamespaceStateMachine {
             });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
-            self.forward_service_outputs(&sid, &wl_id, svc_outputs, out);
+            self.forward_service_outputs(&sid, &wl_id, svc_outputs, placement_table, out);
             deactivated_any = true;
         }
 

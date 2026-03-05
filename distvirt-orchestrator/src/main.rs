@@ -21,7 +21,17 @@ async fn main() -> anyhow::Result<()> {
     let config_str = std::fs::read_to_string(&cli.config)?;
     let config: OrchestratorConfig = toml::from_str(&config_str)?;
 
-    let mut shell = OrchestratorShell::new(config.wireguard.listen_port, config.tunnels.encrypted);
+    let pool_configs: Vec<distvirt_worker_protocol::PoolInfo> = config
+        .pools
+        .iter()
+        .map(|pc| distvirt_worker_protocol::PoolInfo {
+            pool_id: distvirt_worker_protocol::PoolId::from(pc.pool_id.as_str()),
+            path: pc.path.clone(),
+            capacity_bytes: 0,
+            available_bytes: 0,
+        })
+        .collect();
+    let mut shell = OrchestratorShell::new(config.wireguard.listen_port, config.tunnels.encrypted, pool_configs);
     let handle = shell.handle();
 
     // Start gRPC server.

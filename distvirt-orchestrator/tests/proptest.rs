@@ -524,8 +524,9 @@ proptest! {
     #[test]
     fn namespace_invariants_hold(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
         let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), single_service_spec(), 1);
+        let mut pt = PlacementTable::default();
         for input in inputs {
-            let output = ns.step(input);
+            let output = ns.step(input, &mut pt);
             check_namespace_invariants(&ns, &output);
         }
     }
@@ -533,8 +534,9 @@ proptest! {
     #[test]
     fn namespace_invariants_hold_multi_service(inputs in prop::collection::vec(arb_namespace_input(), 0..100)) {
         let mut ns = NamespaceStateMachine::new(NamespaceId("prop-ns".into()), multi_service_spec(), 1);
+        let mut pt = PlacementTable::default();
         for input in inputs {
-            let output = ns.step(input);
+            let output = ns.step(input, &mut pt);
             check_namespace_invariants(&ns, &output);
         }
     }

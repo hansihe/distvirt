@@ -173,7 +173,17 @@ pub(super) fn step_with_scheduling(
     input: NamespaceInput,
     pod_counter: &mut u64,
 ) -> NamespaceOutput {
-    let mut out = ns.step(input);
+    let mut pt = PlacementTable::default();
+    step_with_scheduling_pt(ns, input, pod_counter, &mut pt)
+}
+
+pub(super) fn step_with_scheduling_pt(
+    ns: &mut NamespaceStateMachine,
+    input: NamespaceInput,
+    pod_counter: &mut u64,
+    pt: &mut PlacementTable,
+) -> NamespaceOutput {
+    let mut out = ns.step(input, pt);
     let requests = std::mem::take(&mut out.pod_requests);
     for req in requests {
         // Pick first active worker.
@@ -189,7 +199,7 @@ pub(super) fn step_with_scheduling(
                 workload_id: req.workload_id,
                 worker_id: wid,
                 pod_id,
-            });
+            }, pt);
             out.worker_commands.extend(launch_out.worker_commands);
             out.timers_set.extend(launch_out.timers_set);
             out.timers_cancel.extend(launch_out.timers_cancel);

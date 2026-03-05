@@ -1,4 +1,63 @@
+use std::collections::HashMap;
+
 use super::*;
+
+// --- Artifact Placement ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPlacement {
+    pub pool_id: PoolId,
+    pub worker_id: WorkerId,
+    pub locked_by: Option<PodId>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacementTable {
+    placements: HashMap<ArtifactId, ArtifactPlacement>,
+}
+
+impl PlacementTable {
+    pub fn insert(&mut self, artifact_id: ArtifactId, placement: ArtifactPlacement) {
+        self.placements.insert(artifact_id, placement);
+    }
+
+    pub fn get(&self, artifact_id: &ArtifactId) -> Option<&ArtifactPlacement> {
+        self.placements.get(artifact_id)
+    }
+
+    pub fn remove(&mut self, artifact_id: &ArtifactId) -> Option<ArtifactPlacement> {
+        self.placements.remove(artifact_id)
+    }
+
+    pub fn lock(&mut self, artifact_id: &ArtifactId, pod_id: &PodId) {
+        if let Some(p) = self.placements.get_mut(artifact_id) {
+            p.locked_by = Some(pod_id.clone());
+        }
+    }
+
+    pub fn unlock(&mut self, artifact_id: &ArtifactId) {
+        if let Some(p) = self.placements.get_mut(artifact_id) {
+            p.locked_by = None;
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ArtifactId, &ArtifactPlacement)> {
+        self.placements.iter()
+    }
+
+    pub fn remove_by_worker(&mut self, worker_id: &WorkerId) -> Vec<(ArtifactId, ArtifactPlacement)> {
+        let to_remove: Vec<ArtifactId> = self
+            .placements
+            .iter()
+            .filter(|(_, p)| p.worker_id == *worker_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        to_remove
+            .into_iter()
+            .filter_map(|id| self.placements.remove(&id).map(|p| (id, p)))
+            .collect()
+    }
+}
 
 // --- Domain Enums ---
 
@@ -26,21 +85,18 @@ pub enum WorkloadState {
     Suspending {
         pod_id: PodId,
         worker_id: WorkerId,
-        snapshot_id: SnapshotId,
+        artifact_id: ArtifactId,
         suspend_timeout: TimerKey,
     },
-    /// Pod is suspended. Snapshot exists on worker.
+    /// Pod is suspended. Artifact tracked in placement table.
     Suspended {
-        worker_id: WorkerId,
-        snapshot_id: SnapshotId,
-        pool_id: PoolId,
+        artifact_id: ArtifactId,
     },
     /// Pod is being resumed from snapshot. ResumePod sent, waiting for PodRunning.
     Resuming {
         pod_id: PodId,
         worker_id: WorkerId,
-        snapshot_id: SnapshotId,
-        pool_id: PoolId,
+        artifact_id: ArtifactId,
         resume_timeout: TimerKey,
     },
 }
@@ -128,8 +184,16 @@ impl WorkloadState {
             WorkloadState::Launching { worker_id, .. }
             | WorkloadState::Running { worker_id, .. }
             | WorkloadState::Suspending { worker_id, .. }
-            | WorkloadState::Suspended { worker_id, .. }
             | WorkloadState::Resuming { worker_id, .. } => Some(worker_id),
+            _ => None,
+        }
+    }
+
+    pub fn artifact_id(&self) -> Option<&ArtifactId> {
+        match self {
+            WorkloadState::Suspending { artifact_id, .. }
+            | WorkloadState::Suspended { artifact_id, .. }
+            | WorkloadState::Resuming { artifact_id, .. } => Some(artifact_id),
             _ => None,
         }
     }

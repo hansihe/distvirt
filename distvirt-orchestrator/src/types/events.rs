@@ -25,7 +25,7 @@ pub enum SmWorkloadEvent {
     PodStopped { exit_code: i32 },
     PodFailed { reason: String },
     PodSuspending { pod_id: PodId, worker_id: WorkerId },
-    PodSuspended { worker_id: WorkerId, snapshot_id: SnapshotId },
+    PodSuspended { worker_id: WorkerId, artifact_id: ArtifactId },
     PodSuspendFailed { reason: String },
     PodResuming { pod_id: PodId, worker_id: WorkerId },
 }

@@ -106,7 +106,7 @@ pub struct TunnelPortHandle {
 
 impl Drop for TunnelPortHandle {
     fn drop(&mut self) {
-        let mut st = self.state.write().unwrap();
+        let mut st = self.state.write().expect("poisoned");
         st.segment_channels.remove(&self.segment_id);
         log::info!("tunnel: segment {} port handle dropped", self.segment_id);
     }
@@ -191,7 +191,7 @@ impl TunnelTransport {
         };
 
         {
-            let mut st = self.state.write().unwrap();
+            let mut st = self.state.write().expect("poisoned");
             st.addr_to_worker.insert(endpoint, worker_id.clone());
             st.peers.insert(worker_id.clone(), PeerState { endpoint, noise });
         }
@@ -206,7 +206,7 @@ impl TunnelTransport {
 
     /// Deregister a remote worker.
     pub fn remove_peer(&self, worker_id: &str) {
-        let mut st = self.state.write().unwrap();
+        let mut st = self.state.write().expect("poisoned");
         if let Some(peer) = st.peers.remove(worker_id) {
             st.addr_to_worker.remove(&peer.endpoint);
         }
@@ -226,7 +226,7 @@ impl TunnelTransport {
         segment_id: u16,
     ) -> io::Result<(ChannelPort, TunnelPortHandle)> {
         let endpoint = {
-            let st = self.state.read().unwrap();
+            let st = self.state.read().expect("poisoned");
             st.peers
                 .get(worker_id)
                 .map(|p| p.endpoint)
@@ -245,7 +245,7 @@ impl TunnelTransport {
 
         // Register the segment channel for ingress demux.
         {
-            let mut st = self.state.write().unwrap();
+            let mut st = self.state.write().expect("poisoned");
             st.segment_channels.insert(segment_id, adapter_tx);
         }
 
@@ -286,7 +286,7 @@ impl TunnelTransport {
 
     /// Send the next handshake message for the given peer.
     fn send_handshake_msg(&self, worker_id: &str) {
-        let mut st = self.state.write().unwrap();
+        let mut st = self.state.write().expect("poisoned");
         let peer = match st.peers.get_mut(worker_id) {
             Some(p) => p,
             None => return,
@@ -339,7 +339,7 @@ async fn recv_loop(
         if encrypted {
             // Look up peer by source address.
             let worker_id = {
-                let st = state.read().unwrap();
+                let st = state.read().expect("poisoned");
                 st.addr_to_worker.get(&peer_addr).cloned()
             };
 
@@ -352,7 +352,7 @@ async fn recv_loop(
             };
 
             // Check peer noise state.
-            let mut st = state.write().unwrap();
+            let mut st = state.write().expect("poisoned");
             let peer = match st.peers.get_mut(&worker_id) {
                 Some(p) => p,
                 None => continue,
@@ -438,7 +438,7 @@ async fn recv_loop(
             continue;
         }
 
-        let st = state.read().unwrap();
+        let st = state.read().expect("poisoned");
         dispatch_frame(&st, &buf[..n]);
     }
 }
@@ -483,7 +483,7 @@ async fn egress_loop(
     if encrypted {
         loop {
             {
-                let st = state.read().unwrap();
+                let st = state.read().expect("poisoned");
                 if let Some(peer) = st.peers.get(&worker_id) {
                     if matches!(&peer.noise, Some(NoiseSession::Transport(_))) {
                         break;
@@ -518,7 +518,7 @@ async fn egress_loop(
             // Encrypt the frame.
             let mut encrypt_buf = vec![0u8; frame.len() + NOISE_TAG_LEN];
             let ciphertext_len = {
-                let mut st = state.write().unwrap();
+                let mut st = state.write().expect("poisoned");
                 let peer = match st.peers.get_mut(&worker_id) {
                     Some(p) => p,
                     None => break,

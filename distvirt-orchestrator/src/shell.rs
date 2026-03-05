@@ -50,6 +50,7 @@ pub struct OrchestratorShell {
     next_worker_id: u64,
     wg_listen_port: u16,
     tunnel_encrypted: bool,
+    worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>,
     log_subscribers: Vec<LogSubscriber>,
     log_buffers: HashMap<(NamespaceId, WorkloadId), VecDeque<LogChunkData>>,
     event_subscribers: Vec<EventSubscriber>,
@@ -199,7 +200,7 @@ impl ShellHandle {
 }
 
 impl OrchestratorShell {
-    pub fn new(wg_listen_port: u16, tunnel_encrypted: bool) -> Self {
+    pub fn new(wg_listen_port: u16, tunnel_encrypted: bool, worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         OrchestratorShell {
             orchestrator: Orchestrator::new(),
@@ -212,6 +213,7 @@ impl OrchestratorShell {
             next_worker_id: 1,
             wg_listen_port,
             tunnel_encrypted,
+            worker_pool_configs,
             log_subscribers: Vec::new(),
             log_buffers: HashMap::new(),
             event_subscribers: Vec::new(),
@@ -267,16 +269,25 @@ impl OrchestratorShell {
             worker_id: worker_id.clone(),
             adapters,
             tunnel_encrypted: self.tunnel_encrypted,
+            pools: self.worker_pool_configs.clone(),
         })
         .await?;
         let ready = conn.recv_ready().await?;
 
         // Map protocol capabilities to orchestrator capabilities.
+        // Merge pushed pools into the worker's self-reported pools so the
+        // orchestrator's view matches the worker's actual pool set.
+        let mut pools = hello.capabilities.pools.clone();
+        for pushed in &self.worker_pool_configs {
+            if !pools.iter().any(|p| p.pool_id == pushed.pool_id) {
+                pools.push(pushed.clone());
+            }
+        }
         let capabilities = WorkerCapabilities {
             max_pods: hello.capabilities.max_pods,
             available_memory_mb: hello.capabilities.available_memory_mb,
             public_endpoint: hello.capabilities.public_endpoint.clone(),
-            pools: hello.capabilities.pools.clone(),
+            pools,
         };
 
         // Extract tunnel config from WorkerReady (set after handshake so the
@@ -601,6 +612,28 @@ impl OrchestratorShell {
         let input = match msg {
             ShellMsg::WorkerEvent { worker_id, event } => {
                 // Handle worker-scoped conditions directly (not routed to namespace SM).
+                // Handle pool capacity updates directly (worker-scoped, not routed to namespace SM).
+                if let distvirt_worker_protocol::WorkerEvent::PoolCapacityUpdate {
+                    ref pools,
+                } = event
+                {
+                    if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
+                        log::debug!(
+                            "worker {} pool capacity update: {} pool(s)",
+                            worker_id.0,
+                            pools.len()
+                        );
+                        for new_pool in pools {
+                            if let Some(existing) = ws.capabilities.pools.iter_mut().find(|p| p.pool_id == new_pool.pool_id) {
+                                existing.capacity_bytes = new_pool.capacity_bytes;
+                                existing.available_bytes = new_pool.available_bytes;
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Handle worker-scoped conditions directly (not routed to namespace SM).
                 if let distvirt_worker_protocol::WorkerEvent::WorkerCondition {
                     ref key,
                     active,
@@ -753,14 +786,14 @@ impl OrchestratorShell {
             ProtoEvent::PodSuspended {
                 namespace_id,
                 pod_id,
-                snapshot_id,
+                artifact_id,
                 pool_id,
                 ..
             } => Some(OrchestratorInput::NamespaceInput {
                 namespace_id,
                 input: NamespaceInput::WorkerEvent {
                     worker_id,
-                    event: WorkerEvent::PodSuspended { pod_id, snapshot_id, pool_id },
+                    event: WorkerEvent::PodSuspended { pod_id, artifact_id, pool_id },
                 },
             }),
             ProtoEvent::PodSuspendFailed {
@@ -789,8 +822,9 @@ impl OrchestratorShell {
                 log::debug!("tunnel status event from worker {}", worker_id.0);
                 None
             }
-            // WorkerCondition is handled directly in handle_msg (needs &mut self).
+            // WorkerCondition and PoolCapacityUpdate are handled directly in handle_msg (needs &mut self).
             ProtoEvent::WorkerCondition { .. } => unreachable!(),
+            ProtoEvent::PoolCapacityUpdate { .. } => unreachable!(),
             // Wire-only variants — not routed to orchestrator SM.
             ProtoEvent::ShuttingDown => None,
             ProtoEvent::PodLogStreamError { .. } => None,

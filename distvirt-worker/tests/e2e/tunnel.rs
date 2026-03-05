@@ -48,6 +48,7 @@ async fn setup_worker(
         worker_id: WorkerId::from(worker_id),
         adapters: vec![],
         tunnel_encrypted: true,
+        pools: vec![],
     })
     .await?;
 

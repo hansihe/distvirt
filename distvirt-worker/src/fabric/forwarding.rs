@@ -35,10 +35,10 @@ impl<P: FramePort> FabricContextInner<P> {
     /// Locks `ip_port_table` then `ports`; returns `None` if the IP is unknown
     /// or the port has been removed.
     pub(crate) fn resolve_ip(&self, ip: &Ipv4Addr) -> Option<SharedPort<P>> {
-        let table = self.ip_port_table.lock().unwrap();
+        let table = self.ip_port_table.lock().expect("poisoned");
         let port_id = table.lookup(ip)?;
         drop(table);
-        self.ports.lock().unwrap().get(&port_id).cloned()
+        self.ports.lock().expect("poisoned").get(&port_id).cloned()
     }
 
     /// Check if a destination IP is within the fabric subnet.
@@ -82,10 +82,10 @@ pub(super) struct PortGuard<P: FramePort> {
 impl<P: FramePort> Drop for PortGuard<P> {
     fn drop(&mut self) {
         {
-            let mut table = self.inner.ip_port_table.lock().unwrap();
+            let mut table = self.inner.ip_port_table.lock().expect("poisoned");
             table.remove_by_port(self.port_id);
         }
-        let mut ports = self.inner.ports.lock().unwrap();
+        let mut ports = self.inner.ports.lock().expect("poisoned");
         ports.remove(&self.port_id);
         log::info!("fabric: port {} removed (guard dropped)", self.port_id);
     }
@@ -149,14 +149,14 @@ async fn dispatch_frame<P: FramePort>(
     // 3. Service VIP → DNAT path.
     {
         let svc_result = {
-            let mut st = ctx.inner.service_table.lock().unwrap();
-            let ip_table = ctx.inner.ip_port_table.lock().unwrap();
+            let mut st = ctx.inner.service_table.lock().expect("poisoned");
+            let ip_table = ctx.inner.ip_port_table.lock().expect("poisoned");
             st.lookup_and_buffer(dst_ip, packet, |ip: &Ipv4Addr| ip_table.contains_ip(ip))
         };
 
         if let Some((svc_action, should_activate)) = svc_result {
             let service_id = if should_activate {
-                let st = ctx.inner.service_table.lock().unwrap();
+                let st = ctx.inner.service_table.lock().expect("poisoned");
                 st.get_service_id(&dst_ip).map(String::from)
             } else {
                 None
@@ -189,7 +189,7 @@ async fn dispatch_frame<P: FramePort>(
                                 backend_ip: pod_ip,
                                 last_seen: std::time::Instant::now(),
                             };
-                            ctx.inner.nat_table.lock().unwrap().insert(reverse_key, nat_entry);
+                            ctx.inner.nat_table.lock().expect("poisoned").insert(reverse_key, nat_entry);
                         }
 
                         if let Err(e) = dst_port.send_frame(&rewritten).await {
@@ -258,7 +258,7 @@ async fn dispatch_frame<P: FramePort>(
                     src_port: s_port,
                     dst_port: d_port,
                 };
-                let mut nat = ctx.inner.nat_table.lock().unwrap();
+                let mut nat = ctx.inner.nat_table.lock().expect("poisoned");
                 nat.lookup(&key).map(|e| e.service_ip)
             } else {
                 None
@@ -285,7 +285,7 @@ async fn dispatch_frame<P: FramePort>(
 
     // 5. Route table → buffer / remote worker / drop.
     let (action, should_miss) = {
-        let mut rt = ctx.inner.route_table.lock().unwrap();
+        let mut rt = ctx.inner.route_table.lock().expect("poisoned");
         rt.lookup_and_buffer(dst_ip, packet)
     };
 
@@ -298,9 +298,9 @@ async fn dispatch_frame<P: FramePort>(
         }
         RouteAction::RemoteWorker { worker_id } => {
             let port = {
-                let tp = ctx.inner.tunnel_ports.lock().unwrap();
+                let tp = ctx.inner.tunnel_ports.lock().expect("poisoned");
                 tp.get(&worker_id).and_then(|pid| {
-                    ctx.inner.ports.lock().unwrap().get(pid).cloned()
+                    ctx.inner.ports.lock().expect("poisoned").get(pid).cloned()
                 })
             };
             if let Some(port) = port {
@@ -405,7 +405,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
                 service_id, raw_frame.len()
             );
             let nat_info = {
-                let st = ctx.inner.service_table.lock().unwrap();
+                let st = ctx.inner.service_table.lock().expect("poisoned");
                 st.get_nat_info_by_id(service_id)
             };
             if let Some((service_ip, backend_ip)) = nat_info {
@@ -431,7 +431,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
                             backend_ip,
                             last_seen: std::time::Instant::now(),
                         };
-                        ctx.inner.nat_table.lock().unwrap().insert(reverse_key, nat_entry);
+                        ctx.inner.nat_table.lock().expect("poisoned").insert(reverse_key, nat_entry);
                     }
 
                     match dst_port.send_frame(&rewritten).await {
@@ -532,7 +532,7 @@ fn schedule_poll_timer<P: FramePort>(
         tokio::time::sleep(delay).await;
 
         let result = {
-            let mut st = ctx.inner.service_table.lock().unwrap();
+            let mut st = ctx.inner.service_table.lock().expect("poisoned");
             st.handle_timeout_for_ip(ip)
         };
 

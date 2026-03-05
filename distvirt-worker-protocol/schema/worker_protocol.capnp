@@ -316,6 +316,7 @@ struct WorkerAccepted {
   workerId @0 :Text;
   adapters @1 :List(AdapterConfig);
   tunnelEncrypted @2 :Bool;
+  pools @3 :List(PoolInfo);
 }
 
 # Configuration for an ingress adapter assigned to a worker.
@@ -518,7 +519,7 @@ struct RemoveWireGuardPeerCmd {
 #
 # The worker sends PrepareSuspend to the guest, waits for SuspendReady,
 # takes a Firecracker snapshot, and kills the VM. The snapshot is stored
-# under the worker's snapshot base directory keyed by snapshotId.
+# under the worker's pool directory keyed by artifactId.
 #
 # On success, emits WorkerEvent.podSuspended. On failure, emits
 # WorkerEvent.podSuspendFailed.
@@ -526,7 +527,8 @@ struct SuspendPodCmd {
   namespaceId @0 :Text;
   podId @1 :Text;
   snapshotId @2 :Text;
-  # Unique identifier for this snapshot (assigned by orchestrator).
+  # Artifact ID for this snapshot (assigned by orchestrator).
+  # Wire name kept as snapshotId for backwards compatibility.
   poolId @3 :Text;
   # Storage pool to write snapshot to.
 }
@@ -543,21 +545,24 @@ struct ResumePodCmd {
   namespaceId @0 :Text;
   podId @1 :Text;
   snapshotId @2 :Text;
-  # Snapshot to restore from.
+  # Artifact ID of the snapshot to restore from.
+  # Wire name kept as snapshotId for backwards compatibility.
   network @3 :PodNetworkConfig;
   # Network config for the restored pod (fresh TAP, potentially new IP).
   poolId @4 :Text;
   # Storage pool where snapshot is stored.
 }
 
-# Delete a snapshot from disk.
+# Delete an artifact from disk.
 #
-# Removes the snapshot directory identified by snapshotId. Idempotent --
-# succeeds even if the snapshot doesn't exist.
+# Removes the artifact directory identified by the artifact ID. Idempotent --
+# succeeds even if the artifact doesn't exist.
 struct DeleteSnapshotCmd {
   snapshotId @0 :Text;
+  # Artifact ID to delete.
+  # Wire name kept as snapshotId for backwards compatibility.
   poolId @1 :Text;
-  # Storage pool where snapshot is stored.
+  # Storage pool where artifact is stored.
 }
 
 # Information about a worker peer for inter-worker tunnel establishment.
@@ -746,10 +751,12 @@ struct PodSuspendedEvt {
   namespaceId @0 :Text;
   podId @1 :Text;
   snapshotId @2 :Text;
+  # Artifact ID of the snapshot.
+  # Wire name kept as snapshotId for backwards compatibility.
   snapshotSizeBytes @3 :UInt64;
-  # Total size of the snapshot on disk (metadata + snapshot.bin + mem.bin + container.ext4).
+  # Total size of the artifact on disk (metadata + snapshot.bin + mem.bin + container.ext4).
   poolId @4 :Text;
-  # Storage pool where snapshot was written.
+  # Storage pool where artifact was written.
 }
 
 # The pod could not be suspended.
@@ -806,6 +813,8 @@ struct WorkerEvent {
     # Status of a tunnel connection to a peer worker.
     workerCondition @14 :WorkerConditionEvt;
     # Worker-scoped condition assert/deassert (level-triggered status).
+    poolCapacityUpdate @15 :PoolCapacityUpdateEvt;
+    # Periodic update of storage pool capacity from the worker.
   }
 }
 
@@ -815,6 +824,16 @@ struct WorkerEvent {
 # "low storage", "spot preemption imminent", "tunnel peer unreachable".
 # Active conditions persist until explicitly deasserted (active=false).
 # On worker disconnect, all conditions are implicitly cleared.
+# Periodic update of storage pool capacity from the worker.
+#
+# Sent periodically by the worker so the orchestrator has fresh capacity
+# data for eviction and placement decisions. Only sent when capacity has
+# meaningfully changed since the last report.
+struct PoolCapacityUpdateEvt {
+  pools @0 :List(PoolInfo);
+  # Fresh capacity data for all pools on this worker.
+}
+
 struct WorkerConditionEvt {
   key @0 :Text;
   # Condition identifier (e.g. "storage/root-low", "spot/preemption").

@@ -22,8 +22,7 @@ pub enum NamespaceInput {
         workload_id: WorkloadId,
         worker_id: WorkerId,
         pod_id: PodId,
-        snapshot_id: SnapshotId,
-        pool_id: PoolId,
+        artifact_id: ArtifactId,
     },
     Connect {
         client_id: ClientId,
@@ -56,9 +55,7 @@ pub struct NamespaceOutput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResumeRequest {
     pub workload_id: WorkloadId,
-    pub snapshot_id: SnapshotId,
-    pub worker_id: WorkerId,
-    pub pool_id: PoolId,
+    pub artifact_id: ArtifactId,
 }
 
 // --- Orchestrator-domain WorkerEvent ---
@@ -74,7 +71,7 @@ pub enum WorkerEvent {
     PodRunning { pod_id: PodId },
     PodExited { pod_id: PodId, exit_code: i32 },
     PodFailed { pod_id: PodId, error: String },
-    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId, pool_id: PoolId },
+    PodSuspended { pod_id: PodId, artifact_id: ArtifactId, pool_id: PoolId },
     PodSuspendFailed { pod_id: PodId, error: String },
     ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },

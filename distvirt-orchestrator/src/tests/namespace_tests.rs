@@ -25,11 +25,12 @@ fn test_namespace_new_initializes_services() {
 #[test]
 fn test_namespace_update_spec() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
+    let mut pt = PlacementTable::default();
     let new_spec = test_spec_with_activation();
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
         spec: new_spec.clone(),
-    });
+    }, &mut pt);
 
     assert_eq!(ns.spec, new_spec);
     assert!(out
@@ -41,9 +42,10 @@ fn test_namespace_update_spec() {
 #[test]
 fn test_namespace_delete() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
+    let mut pt = PlacementTable::default();
     let out = ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
 
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(out.destroyed);
@@ -56,6 +58,7 @@ fn test_namespace_delete() {
 #[test]
 fn test_namespace_worker_lost_removes_worker() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
+    let mut pt = PlacementTable::default();
     ns.workers.insert(
         worker_id(1),
         NamespaceWorkerState {
@@ -66,7 +69,7 @@ fn test_namespace_worker_lost_removes_worker() {
 
     ns.step(NamespaceInput::WorkerLost {
         worker_id: worker_id(1),
-    });
+    }, &mut pt);
 
     assert!(!ns.workers.contains_key(&worker_id(1)));
 }
@@ -75,9 +78,10 @@ fn test_namespace_worker_lost_removes_worker() {
 fn test_namespace_get_status() {
     let ns_name = ns_id("test");
     let mut ns = NamespaceStateMachine::new(ns_name.clone(), test_spec(), 1);
+    let mut pt = PlacementTable::default();
     let out = ns.step(NamespaceInput::GetStatus {
         client_id: client_id(1),
-    });
+    }, &mut pt);
 
     assert!(out.client_events.iter().any(|(cid, ev)| {
         *cid == client_id(1)
@@ -153,6 +157,7 @@ fn test_list_namespaces_empty() {
 #[test]
 fn test_update_spec_removes_service() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Reconcile to get the service launched.
@@ -161,7 +166,7 @@ fn test_update_spec_removes_service() {
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id: pod_id.clone() },
-    });
+    }, &mut pt);
     assert!(matches!(get_workload_state(&ns), WorkloadState::Running { .. }));
 
     // Update spec with no services/workloads — svc1 should be removed.
@@ -173,7 +178,7 @@ fn test_update_spec_removes_service() {
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
         spec: empty_spec,
-    });
+    }, &mut pt);
 
     assert!(ns.services.is_empty());
     assert!(ns.workloads.is_empty());
@@ -187,6 +192,7 @@ fn test_update_spec_removes_service() {
 #[test]
 fn test_update_spec_removes_launching_service() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Reconcile to get the service launching.
@@ -202,7 +208,7 @@ fn test_update_spec_removes_launching_service() {
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
         spec: empty_spec,
-    });
+    }, &mut pt);
 
     assert!(ns.services.is_empty());
     assert!(ns.workloads.is_empty());
@@ -291,12 +297,13 @@ fn test_activation_service_lifecycle() {
     let pod_id = get_launching_pod_id(&ns);
 
     // PodRunning → Active.
+    let mut pt = PlacementTable::default();
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning {
             pod_id: pod_id.clone(),
         },
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Running { .. }
@@ -324,14 +331,14 @@ fn test_activation_service_lifecycle() {
             service_id: svc_id(),
             need: BackendNeed::None,
         },
-    });
+    }, &mut pt);
     assert!(!out.timers_set.is_empty());
     let idle_timer = out.timers_set[0].0.clone();
 
     // Idle timer fires → service back to Idle, workload goes Dormant.
     let out = ns.step(NamespaceInput::TimerFired {
         timer_key: idle_timer,
-    });
+    }, &mut pt);
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
     // The idle timeout causes DemandDown which stops the pod via the workload SM.
@@ -345,6 +352,7 @@ fn test_activation_service_lifecycle() {
 #[test]
 fn test_always_on_service_lifecycle() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Reconcile: always-on service goes Pending → NeedBackend, workload goes WaitingForCapacity → Launching.
@@ -362,7 +370,7 @@ fn test_always_on_service_lifecycle() {
         event: WorkerEvent::PodRunning {
             pod_id: pod_id.clone(),
         },
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Running { .. }
@@ -393,6 +401,7 @@ fn test_always_on_service_lifecycle() {
 #[test]
 fn test_worker_loss_during_active_service() {
     let mut ns = active_namespace(test_spec_with_activation());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Get to Active state.
@@ -411,7 +420,7 @@ fn test_worker_loss_during_active_service() {
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Running { .. }
@@ -420,7 +429,7 @@ fn test_worker_loss_during_active_service() {
     // Worker lost → service should go to Idle, workload to Dormant, namespace to Creating.
     let _out = ns.step(NamespaceInput::WorkerLost {
         worker_id: worker_id(1),
-    });
+    }, &mut pt);
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
     assert_eq!(ns.status, NamespaceStatus::Creating);
@@ -431,6 +440,7 @@ fn test_worker_loss_during_active_service() {
 #[test]
 fn test_launch_timeout() {
     let mut ns = active_namespace(test_spec_with_activation());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Get to Launching state.
@@ -457,7 +467,7 @@ fn test_launch_timeout() {
     // Launch timeout fires → should stop pod and go to Idle (activation service).
     let out = ns.step(NamespaceInput::TimerFired {
         timer_key: launch_timeout,
-    });
+    }, &mut pt);
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
     assert!(!ns.pod_map.contains(&pod_id));
@@ -470,6 +480,7 @@ fn test_launch_timeout() {
 #[test]
 fn test_delete_single_worker_stateful() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Get to Active with a running pod.
@@ -478,12 +489,12 @@ fn test_delete_single_worker_stateful() {
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
-    });
+    }, &mut pt);
 
     // Delete — stateful: workers stay in map with Destroying status.
     let out = ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed); // Not destroyed yet, waiting for worker confirmation.
     assert!(!ns.workers.is_empty());
@@ -498,7 +509,7 @@ fn test_delete_single_worker_stateful() {
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::NamespaceDestroyed,
-    });
+    }, &mut pt);
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -506,6 +517,7 @@ fn test_delete_single_worker_stateful() {
 #[test]
 fn test_delete_multi_worker_stateful() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     // Add a second worker.
     ns.workers.insert(
         worker_id(2),
@@ -518,7 +530,7 @@ fn test_delete_multi_worker_stateful() {
     // Delete.
     let out = ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed);
     assert_eq!(ns.workers.len(), 2);
@@ -527,7 +539,7 @@ fn test_delete_multi_worker_stateful() {
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::NamespaceDestroyed,
-    });
+    }, &mut pt);
     assert!(!out.destroyed); // Still waiting for worker-2.
     assert_eq!(ns.workers.len(), 1);
 
@@ -535,7 +547,7 @@ fn test_delete_multi_worker_stateful() {
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(2),
         event: WorkerEvent::NamespaceDestroyed,
-    });
+    }, &mut pt);
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -543,6 +555,7 @@ fn test_delete_multi_worker_stateful() {
 #[test]
 fn test_delete_worker_lost_during_teardown() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     reconcile_active_namespace(&mut ns, &mut pod_counter);
@@ -550,18 +563,18 @@ fn test_delete_worker_lost_during_teardown() {
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
-    });
+    }, &mut pt);
 
     // Delete.
     ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
 
     // Worker disconnects instead of confirming.
     let out = ns.step(NamespaceInput::WorkerLost {
         worker_id: worker_id(1),
-    });
+    }, &mut pt);
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -570,11 +583,12 @@ fn test_delete_worker_lost_during_teardown() {
 fn test_delete_no_workers_immediate() {
     // Namespace with no workers -> immediate destroy.
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
+    let mut pt = PlacementTable::default();
     ns.status = NamespaceStatus::Active;
 
     let out = ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
@@ -583,6 +597,7 @@ fn test_delete_no_workers_immediate() {
 #[test]
 fn test_idle_timer_cancelled_on_traffic() {
     let mut ns = active_namespace(test_spec_with_activation());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Get to Active.
@@ -601,7 +616,7 @@ fn test_idle_timer_cancelled_on_traffic() {
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
-    });
+    }, &mut pt);
 
     // BackendNeed::None → idle timer set.
     let out = ns.step(NamespaceInput::WorkerEvent {
@@ -610,7 +625,7 @@ fn test_idle_timer_cancelled_on_traffic() {
             service_id: svc_id(),
             need: BackendNeed::None,
         },
-    });
+    }, &mut pt);
     assert!(!out.timers_set.is_empty());
 
     // BackendNeed::Traffic → idle timer cancelled.
@@ -620,7 +635,7 @@ fn test_idle_timer_cancelled_on_traffic() {
             service_id: svc_id(),
             need: BackendNeed::Traffic,
         },
-    });
+    }, &mut pt);
     assert!(!out.timers_cancel.is_empty());
 }
 
@@ -629,6 +644,7 @@ fn test_idle_timer_cancelled_on_traffic() {
 #[test]
 fn test_destroying_namespace_ignores_activation() {
     let mut ns = active_namespace(test_spec_with_activation());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Reconcile to get service to Idle.
@@ -638,7 +654,7 @@ fn test_destroying_namespace_ignores_activation() {
     // Delete namespace.
     ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     // Workers stay in map with Destroying status.
     assert!(!ns.workers.is_empty());
@@ -650,7 +666,7 @@ fn test_destroying_namespace_ignores_activation() {
         event: WorkerEvent::ServiceActivation {
             service_id: svc_id(),
         },
-    });
+    }, &mut pt);
     assert!(out.pod_requests.is_empty());
     assert!(out.worker_commands.is_empty());
 }
@@ -658,15 +674,16 @@ fn test_destroying_namespace_ignores_activation() {
 #[test]
 fn test_update_spec_rejected_during_teardown() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
 
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(2),
         spec: test_spec(),
-    });
+    }, &mut pt);
     assert!(out.client_events.iter().any(|(_, ev)| matches!(
         ev,
         ClientEvent::Error { .. }
@@ -676,6 +693,7 @@ fn test_update_spec_rejected_during_teardown() {
 #[test]
 fn test_stateful_destroy_with_running_pod() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Get service to Active.
@@ -686,13 +704,13 @@ fn test_stateful_destroy_with_running_pod() {
         event: WorkerEvent::PodRunning {
             pod_id: pod_id.clone(),
         },
-    });
+    }, &mut pt);
     assert!(matches!(get_workload_state(&ns), WorkloadState::Running { .. }));
 
     // Delete namespace — stateful: not immediately destroyed.
     let out = ns.step(NamespaceInput::Delete {
         client_id: client_id(1),
-    });
+    }, &mut pt);
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed);
     assert!(!ns.workers.is_empty());
@@ -703,7 +721,7 @@ fn test_stateful_destroy_with_running_pod() {
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::NamespaceDestroyed,
-    });
+    }, &mut pt);
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -773,6 +791,7 @@ fn test_stateful_destroy_from_orchestrator() {
 #[test]
 fn test_namespace_failed_treats_like_worker_loss() {
     let mut ns = active_namespace(test_spec_with_activation());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Get to Active state with a running pod.
@@ -791,7 +810,7 @@ fn test_namespace_failed_treats_like_worker_loss() {
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Running { .. }
@@ -803,7 +822,7 @@ fn test_namespace_failed_treats_like_worker_loss() {
         event: WorkerEvent::NamespaceFailed {
             error: "gateway crashed".into(),
         },
-    });
+    }, &mut pt);
     assert!(ns.workers.is_empty());
     assert!(ns.pod_map.is_empty());
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
@@ -816,6 +835,7 @@ fn test_namespace_failed_treats_like_worker_loss() {
 #[test]
 fn test_destroy_service_on_spec_update() {
     let mut ns = active_namespace(test_spec_with_activation());
+    let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
     // Reconcile to get service to Idle (CreateService sent).
@@ -831,7 +851,7 @@ fn test_destroy_service_on_spec_update() {
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
         spec: empty_spec,
-    });
+    }, &mut pt);
 
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
@@ -844,6 +864,7 @@ fn test_destroy_service_on_spec_update() {
 #[test]
 fn test_registry_sync_on_namespace_active() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
+    let mut pt = PlacementTable::default();
     ns.workers.insert(
         worker_id(1),
         NamespaceWorkerState {
@@ -855,7 +876,7 @@ fn test_registry_sync_on_namespace_active() {
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::NamespaceCreated,
-    });
+    }, &mut pt);
 
     assert_eq!(ns.status, NamespaceStatus::Active);
     // Should emit RegistrySync.
@@ -870,12 +891,13 @@ fn test_registry_sync_on_namespace_active() {
 #[test]
 fn test_outer_layer_scheduling_picks_worker() {
     let mut ns = active_namespace(test_spec());
+    let mut pt = PlacementTable::default();
 
     // Reconcile — workload should go to WaitingForCapacity with a PodRequest.
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(99),
         spec: ns.spec.clone(),
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::WaitingForCapacity
@@ -889,7 +911,7 @@ fn test_outer_layer_scheduling_picks_worker() {
         workload_id: wl_id(),
         worker_id: worker_id(1),
         pod_id: pod_id.clone(),
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Launching { .. }
@@ -903,6 +925,7 @@ fn test_outer_layer_scheduling_picks_worker() {
 #[test]
 fn test_waiting_for_capacity_no_workers() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
+    let mut pt = PlacementTable::default();
 
     // Make namespace Active with no workers.
     ns.status = NamespaceStatus::Active;
@@ -911,7 +934,7 @@ fn test_waiting_for_capacity_no_workers() {
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(99),
         spec: ns.spec.clone(),
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::WaitingForCapacity
@@ -931,7 +954,7 @@ fn test_waiting_for_capacity_no_workers() {
         workload_id: wl_id(),
         worker_id: worker_id(1),
         pod_id: pod_id.clone(),
-    });
+    }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Launching { .. }

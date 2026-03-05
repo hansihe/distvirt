@@ -61,7 +61,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::SuspendPod {
         namespace_id: "ns-suspend".into(),
         pod_id: "pod-suspend".into(),
-        snapshot_id: "snap-1".into(),
+        artifact_id: "snap-1".into(),
         pool_id: "local-default".into(),
     })
     .await?;
@@ -83,21 +83,21 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
         WorkerEvent::PodSuspended {
             namespace_id,
             pod_id,
-            snapshot_id,
-            snapshot_size_bytes,
+            artifact_id,
+            artifact_size_bytes,
             ..
         } => {
             assert_eq!(namespace_id, "ns-suspend");
             assert_eq!(pod_id, "pod-suspend");
-            assert_eq!(snapshot_id, "snap-1");
+            assert_eq!(artifact_id, "snap-1");
             assert!(
-                *snapshot_size_bytes > 0,
+                *artifact_size_bytes > 0,
                 "snapshot should have non-zero size, got {}",
-                snapshot_size_bytes
+                artifact_size_bytes
             );
             eprintln!(
-                "e2e: pod suspended, snapshot_size={}",
-                snapshot_size_bytes
+                "e2e: pod suspended, artifact_size={}",
+                artifact_size_bytes
             );
         }
         other => panic!("expected PodSuspended, got {:?}", other),
@@ -107,7 +107,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-suspend".into(),
         pod_id: "pod-resumed".into(),
-        snapshot_id: "snap-1".into(),
+        artifact_id: "snap-1".into(),
         network: test_pod_network_config(),
         pool_id: "local-default".into(),
     })
@@ -135,8 +135,8 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     // Clean up snapshot
-    conn.send_command(&WorkerCommand::DeleteSnapshot {
-        snapshot_id: "snap-1".into(),
+    conn.send_command(&WorkerCommand::DeleteArtifact {
+        artifact_id: "snap-1".into(),
         pool_id: "local-default".into(),
     })
     .await?;
@@ -281,7 +281,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::SuspendPod {
         namespace_id: "ns-susp-net".into(),
         pod_id: "pod-server".into(),
-        snapshot_id: "snap-net".into(),
+        artifact_id: "snap-net".into(),
         pool_id: "local-default".into(),
     })
     .await?;
@@ -303,7 +303,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-susp-net".into(),
         pod_id: "pod-server-resumed".into(),
-        snapshot_id: "snap-net".into(),
+        artifact_id: "snap-net".into(),
         network: test_pod_network_config(),
         pool_id: "local-default".into(),
     })
@@ -385,8 +385,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    conn.send_command(&WorkerCommand::DeleteSnapshot {
-        snapshot_id: "snap-net".into(),
+    conn.send_command(&WorkerCommand::DeleteArtifact {
+        artifact_id: "snap-net".into(),
         pool_id: "local-default".into(),
     })
     .await?;
@@ -539,7 +539,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::SuspendPod {
         namespace_id: "ns-act-resume".into(),
         pod_id: "pod-server".into(),
-        snapshot_id: "snap-act".into(),
+        artifact_id: "snap-act".into(),
         pool_id: "local-default".into(),
     })
     .await?;
@@ -607,7 +607,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-act-resume".into(),
         pod_id: "pod-server-resumed".into(),
-        snapshot_id: "snap-act".into(),
+        artifact_id: "snap-act".into(),
         network: test_pod_network_config(),
         pool_id: "local-default".into(),
     })
@@ -664,8 +664,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    conn.send_command(&WorkerCommand::DeleteSnapshot {
-        snapshot_id: "snap-act".into(),
+    conn.send_command(&WorkerCommand::DeleteArtifact {
+        artifact_id: "snap-act".into(),
         pool_id: "local-default".into(),
     })
     .await?;

@@ -9,6 +9,7 @@ impl NamespaceStateMachine {
         &mut self,
         worker_id: &WorkerId,
         event: WorkerEvent,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         if !self.workers.contains_key(worker_id) {
@@ -18,7 +19,7 @@ impl NamespaceStateMachine {
         match event {
             WorkerEvent::NamespaceFailed { .. } => {
                 // Treat like worker loss for this namespace.
-                self.handle_worker_lost(worker_id, out);
+                self.handle_worker_lost(worker_id, placement_table, out);
                 return;
             }
             WorkerEvent::NamespaceDestroyed => {
@@ -29,7 +30,7 @@ impl NamespaceStateMachine {
                     }
                 } else {
                     // Unexpected: worker destroyed namespace without being asked.
-                    self.handle_worker_lost(worker_id, out);
+                    self.handle_worker_lost(worker_id, placement_table, out);
                 }
                 return;
             }
@@ -51,7 +52,7 @@ impl NamespaceStateMachine {
                         self.status = NamespaceStatus::Active;
                         self.emit_registry_sync(out);
                         self.emit_fabric_route_sync(out);
-                        self.reconcile_all_services(out);
+                        self.reconcile_all_services(placement_table, out);
                     }
                 } else if self.status == NamespaceStatus::Active {
                     // Second+ worker joining an already-active namespace.
@@ -71,7 +72,7 @@ impl NamespaceStateMachine {
                     });
                     let svc_outputs =
                         svc.step(ServiceInput::ServiceActivation, &self.namespace_id);
-                    self.forward_service_outputs(&service_id.clone(), &wl_id, svc_outputs, out);
+                    self.forward_service_outputs(&service_id.clone(), &wl_id, svc_outputs, placement_table, out);
                 }
             }
             WorkerEvent::ServiceBackendNeed { service_id, need } => {
@@ -108,7 +109,7 @@ impl NamespaceStateMachine {
                         ServiceInput::ServiceBackendNeed { need },
                         &self.namespace_id,
                     );
-                    self.forward_service_outputs(&service_id.clone(), &wl_id, svc_outputs, out);
+                    self.forward_service_outputs(&service_id.clone(), &wl_id, svc_outputs, placement_table, out);
                 }
             }
             WorkerEvent::PodRunning { pod_id } => {
@@ -134,7 +135,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
             WorkerEvent::PodExited { pod_id, exit_code } => {
                 let pod_info = match self.pod_map.remove(&pod_id) {
@@ -164,7 +165,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
             WorkerEvent::PodFailed { pod_id, error } => {
                 let pod_info = match self.pod_map.remove(&pod_id) {
@@ -194,9 +195,9 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
-            WorkerEvent::PodSuspended { pod_id, snapshot_id, pool_id } => {
+            WorkerEvent::PodSuspended { pod_id, artifact_id, pool_id } => {
                 let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
@@ -208,26 +209,34 @@ impl NamespaceStateMachine {
                         self.emit_fabric_route_remove(wl_spec.network.ip, out);
                     }
                 }
+                // Update placement table with actual pool_id from worker.
+                placement_table.insert(
+                    artifact_id.clone(),
+                    ArtifactPlacement {
+                        pool_id,
+                        worker_id: pod_info.worker_id.clone(),
+                        locked_by: None,
+                    },
+                );
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspended {
                         worker_id: pod_info.worker_id.clone(),
-                        snapshot_id: snapshot_id.clone(),
+                        artifact_id: artifact_id.clone(),
                     },
                 });
                 let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
                     wl.step(
                         WorkloadInput::PodSuspended {
                             pod_id,
-                            snapshot_id,
-                            pool_id,
+                            artifact_id,
                         },
                         &self.namespace_id,
                     )
                 } else {
                     return;
                 };
-                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
             WorkerEvent::FabricRouteMiss { dst_ip } => {
                 // Look up workload whose network.ip == dst_ip.
@@ -242,12 +251,13 @@ impl NamespaceStateMachine {
                         match &wl.state {
                             WorkloadState::Dormant | WorkloadState::Suspended { .. } => {
                                 // Trigger demand up (wake on traffic).
-                                let wl = self.workloads.get_mut(&wl_id).unwrap();
+                                let wl = self.workloads.get_mut(&wl_id)
+                                    .expect("invariant: wl_id matched from spec must exist in workloads");
                                 let wl_outputs = wl.step(
                                     crate::workload::WorkloadInput::DemandUp,
                                     &self.namespace_id,
                                 );
-                                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
                             }
                             _ => {
                                 // Transient miss during pod startup, ignore.
@@ -284,12 +294,14 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.forward_workload_outputs(&wl_id, wl_outputs, out);
+                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
         }
     }
 
-    pub(super) fn handle_worker_lost(&mut self, worker_id: &WorkerId, out: &mut NamespaceOutput) {
+    pub(super) fn handle_worker_lost(&mut self, worker_id: &WorkerId, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
+        // Remove all artifacts placed on this worker.
+        placement_table.remove_by_worker(worker_id);
         // Remove all pods on this worker and collect affected workloads.
         let _lost_pods = self.pod_map.remove_worker_pods(worker_id);
         let affected_workloads: Vec<WorkloadId> = {
@@ -314,7 +326,7 @@ impl NamespaceStateMachine {
             } else {
                 continue;
             };
-            self.forward_workload_outputs(&wl_id, wl_outputs, out);
+            self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
         }
 
         self.workers.remove(worker_id);
@@ -326,11 +338,11 @@ impl NamespaceStateMachine {
         } else if self.workers.is_empty() && self.status == NamespaceStatus::Active {
             self.status = NamespaceStatus::Creating;
         } else if self.status == NamespaceStatus::Active {
-            self.reconcile_all_services(out);
+            self.reconcile_all_services(placement_table, out);
         }
     }
 
-    pub(super) fn handle_timer_fired(&mut self, timer_key: &TimerKey, out: &mut NamespaceOutput) {
+    pub(super) fn handle_timer_fired(&mut self, timer_key: &TimerKey, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
         match timer_key {
             TimerKey::IdleTimeout { service_id } => {
                 let service_id = service_id.clone();
@@ -362,7 +374,7 @@ impl NamespaceStateMachine {
                         },
                         &self.namespace_id,
                     );
-                    self.forward_service_outputs(&service_id, &wl_id, svc_outputs, out);
+                    self.forward_service_outputs(&service_id, &wl_id, svc_outputs, placement_table, out);
                 }
             }
             TimerKey::LaunchTimeout {
@@ -384,7 +396,7 @@ impl NamespaceStateMachine {
                 if let TimerKey::LaunchTimeout { pod_id, .. } = timer_key {
                     self.pod_map.remove(pod_id);
                 }
-                self.forward_workload_outputs(&workload_id, wl_outputs, out);
+                self.forward_workload_outputs(&workload_id, wl_outputs, placement_table, out);
             }
             TimerKey::SuspendTimeout {
                 workload_id,
@@ -404,7 +416,7 @@ impl NamespaceStateMachine {
                 };
                 // Clean up pod from pods map on timeout.
                 self.pod_map.remove(&pod_id);
-                self.forward_workload_outputs(&workload_id, wl_outputs, out);
+                self.forward_workload_outputs(&workload_id, wl_outputs, placement_table, out);
             }
             TimerKey::ResumeTimeout {
                 workload_id,
@@ -424,7 +436,7 @@ impl NamespaceStateMachine {
                 };
                 // Clean up pod from pods map on timeout.
                 self.pod_map.remove(&pod_id);
-                self.forward_workload_outputs(&workload_id, wl_outputs, out);
+                self.forward_workload_outputs(&workload_id, wl_outputs, placement_table, out);
             }
         }
     }

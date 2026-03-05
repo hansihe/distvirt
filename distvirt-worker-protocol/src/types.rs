@@ -39,8 +39,8 @@ define_id_newtype!(NamespaceId);
 define_id_newtype!(WorkerId);
 define_id_newtype!(PodId);
 define_id_newtype!(ServiceId);
-define_id_newtype!(SnapshotId);
 define_id_newtype!(PoolId);
+define_id_newtype!(ArtifactId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -184,6 +184,7 @@ pub struct WorkerAccepted {
     pub worker_id: WorkerId,
     pub adapters: Vec<AdapterConfig>,
     pub tunnel_encrypted: bool,
+    pub pools: Vec<PoolInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,18 +278,18 @@ pub enum WorkerCommand {
     SuspendPod {
         namespace_id: NamespaceId,
         pod_id: PodId,
-        snapshot_id: SnapshotId,
+        artifact_id: ArtifactId,
         pool_id: PoolId,
     },
     ResumePod {
         namespace_id: NamespaceId,
         pod_id: PodId,
-        snapshot_id: SnapshotId,
+        artifact_id: ArtifactId,
         network: PodNetworkConfig,
         pool_id: PoolId,
     },
-    DeleteSnapshot {
-        snapshot_id: SnapshotId,
+    DeleteArtifact {
+        artifact_id: ArtifactId,
         pool_id: PoolId,
     },
     WorkerRegistrySync {
@@ -345,8 +346,8 @@ pub enum WorkerEvent {
     PodSuspended {
         namespace_id: NamespaceId,
         pod_id: PodId,
-        snapshot_id: SnapshotId,
-        snapshot_size_bytes: u64,
+        artifact_id: ArtifactId,
+        artifact_size_bytes: u64,
         pool_id: PoolId,
     },
     PodSuspendFailed {
@@ -365,6 +366,9 @@ pub enum WorkerEvent {
         key: String,
         active: bool,
         message: String,
+    },
+    PoolCapacityUpdate {
+        pools: Vec<PoolInfo>,
     },
 }
 

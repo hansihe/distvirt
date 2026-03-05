@@ -34,7 +34,7 @@ impl Orchestrator {
                         workload_id: req.workload_id,
                         worker_id,
                         pod_id,
-                    });
+                    }, &mut self.placement_table);
                     // Recursively process outputs from LaunchPod (it won't emit more pod_requests).
                     out.worker_commands
                         .extend(launch_out.worker_commands.iter().cloned());
@@ -54,14 +54,21 @@ impl Orchestrator {
         // Process resume requests from the namespace.
         for req in resume_requests {
             let pod_id = self.gen_pod_id();
+            // Look up placement table to resolve worker_id for the artifact.
+            let worker_id = self.placement_table
+                .get(&req.artifact_id)
+                .map(|p| p.worker_id.clone());
+            let worker_id = match worker_id {
+                Some(wid) => wid,
+                None => continue,
+            };
             if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
                 let resume_out = ns.step(NamespaceInput::ResumePod {
                     workload_id: req.workload_id,
-                    worker_id: req.worker_id,
+                    worker_id,
                     pod_id,
-                    snapshot_id: req.snapshot_id,
-                    pool_id: req.pool_id,
-                });
+                    artifact_id: req.artifact_id,
+                }, &mut self.placement_table);
                 // Recursively process outputs from ResumePod.
                 out.worker_commands
                     .extend(resume_out.worker_commands.iter().cloned());
@@ -112,7 +119,7 @@ impl Orchestrator {
                         workload_id: wl_id,
                         worker_id,
                         pod_id,
-                    });
+                    }, &mut self.placement_table);
                     out.worker_commands
                         .extend(launch_out.worker_commands.iter().cloned());
                     out.timers_set

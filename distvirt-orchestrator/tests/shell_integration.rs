@@ -152,7 +152,7 @@ async fn test_always_on_service_full_lifecycle() {
     // Connect orchestrator side and perform handshake.
     let orch_conn = OrchestratorConnection::connect(orch_half).await.unwrap();
 
-    let mut shell = OrchestratorShell::new(51820, true);
+    let mut shell = OrchestratorShell::new(51820, true, vec![]);
     let worker_id = shell.add_worker(orch_conn).await.unwrap();
     assert_eq!(worker_id, WorkerId::from("w-1"));
 

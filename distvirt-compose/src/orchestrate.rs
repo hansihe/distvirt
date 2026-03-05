@@ -291,8 +291,8 @@ pub async fn run_compose(
                     WorkerEvent::NamespaceDestroyed { namespace_id: _ } => {
                         log::info!("namespace destroyed");
                     }
-                    WorkerEvent::PodSuspended { pod_id, snapshot_id, .. } => {
-                        log::info!("pod '{}' suspended (snapshot: {})", pod_id, snapshot_id);
+                    WorkerEvent::PodSuspended { pod_id, artifact_id, .. } => {
+                        log::info!("pod '{}' suspended (artifact: {})", pod_id, artifact_id);
                     }
                     WorkerEvent::PodSuspendFailed { pod_id, error, .. } => {
                         log::error!("pod '{}' suspend failed: {}", pod_id, error);
@@ -306,6 +306,9 @@ pub async fn run_compose(
                         } else {
                             log::info!("worker condition deasserted: {}", key);
                         }
+                    }
+                    WorkerEvent::PoolCapacityUpdate { pools } => {
+                        log::debug!("pool capacity update: {} pool(s)", pools.len());
                     }
                 }
             }

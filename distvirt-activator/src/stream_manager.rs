@@ -193,8 +193,9 @@ impl StreamManager {
         let mut listeners = Vec::new();
         for &port in &config.listen_ports {
             for _ in 0..config.listen_pool_size {
-                let handle = Self::create_listener(&mut sockets, port, config.tcp_buffer_size);
-                listeners.push(handle);
+                if let Some(handle) = Self::create_listener(&mut sockets, port, config.tcp_buffer_size) {
+                    listeners.push(handle);
+                }
             }
         }
 
@@ -240,18 +241,26 @@ impl StreamManager {
     }
 
     /// Create a listening TCP socket on the given port.
+    ///
+    /// Returns `None` if `port` is 0 (smoltcp rejects it) or if `listen()` fails
+    /// for any other reason. Callers must handle the `None` case.
     fn create_listener(
         sockets: &mut SocketSet<'static>,
         port: u16,
         buffer_size: usize,
-    ) -> SocketHandle {
+    ) -> Option<SocketHandle> {
+        if port == 0 {
+            log::error!("stream_manager: refusing to listen on port 0");
+            return None;
+        }
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; buffer_size]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; buffer_size]);
         let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-        socket
-            .listen(IpListenEndpoint { addr: None, port })
-            .expect("listen should not fail on fresh socket");
-        sockets.add(socket)
+        if let Err(e) = socket.listen(IpListenEndpoint { addr: None, port }) {
+            log::error!("stream_manager: listen on port {} failed: {}", port, e);
+            return None;
+        }
+        Some(sockets.add(socket))
     }
 
     /// Allocate the next stream ID.
@@ -288,12 +297,20 @@ impl StreamManager {
         });
 
         for handle in new_established {
-            let stream_id = self.alloc_stream_id();
             // Determine the local port so we can re-create a listener for it.
+            // The socket may have already closed (e.g. RST during handshake),
+            // in which case local_endpoint() returns None — skip it.
             let local_port = {
                 let socket = self.sockets.get::<tcp::Socket>(handle);
-                socket.local_endpoint().unwrap().port
+                match socket.local_endpoint() {
+                    Some(ep) => ep.port,
+                    None => {
+                        log::warn!("stream_manager: established socket has no local endpoint, skipping");
+                        continue;
+                    }
+                }
             };
+            let stream_id = self.alloc_stream_id();
             self.streams.insert(
                 stream_id,
                 StreamState {
@@ -309,9 +326,11 @@ impl StreamManager {
             events.push(Event::StreamOpen(stream_id));
 
             // Replenish listener pool for this port.
-            let new_listener =
-                Self::create_listener(&mut self.sockets, local_port, self.config.tcp_buffer_size);
-            self.listeners.push(new_listener);
+            if let Some(new_listener) =
+                Self::create_listener(&mut self.sockets, local_port, self.config.tcp_buffer_size)
+            {
+                self.listeners.push(new_listener);
+            }
         }
 
         // 2. Scan established streams for data and close events.
@@ -354,7 +373,7 @@ impl StreamManager {
                 }
             }
 
-            let state = self.streams.get_mut(&stream_id).unwrap();
+            let Some(state) = self.streams.get_mut(&stream_id) else { continue; };
             let socket = self.sockets.get::<tcp::Socket>(handle);
 
             // Check for upstream connect completion.

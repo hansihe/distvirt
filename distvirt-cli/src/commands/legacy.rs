@@ -100,7 +100,9 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
 
             let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker);
             let image_provider = ContainerdOverlayfsProvider {
-                socket: containerd_socket.to_str().unwrap().to_string(),
+                socket: containerd_socket.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("containerd socket path is not valid UTF-8: {:?}", containerd_socket))?
+                    .to_string(),
                 namespace,
             };
 
@@ -157,7 +159,9 @@ pub async fn run(command: LegacyCommands) -> anyhow::Result<()> {
 
             let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker);
             let image_provider = ContainerdOverlayfsProvider {
-                socket: containerd_socket.to_str().unwrap().to_string(),
+                socket: containerd_socket.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("containerd socket path is not valid UTF-8: {:?}", containerd_socket))?
+                    .to_string(),
                 namespace,
             };
 

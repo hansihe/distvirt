@@ -90,7 +90,8 @@ impl Vmm for Firecracker {
             &api_socket,
             "/boot-source",
             &serde_json::json!({
-                "kernel_image_path": config.kernel_path.to_str().unwrap(),
+                "kernel_image_path": config.kernel_path.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8: {:?}", config.kernel_path))?,
                 "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init"
             }),
         )

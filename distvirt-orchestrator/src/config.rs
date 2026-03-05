@@ -8,6 +8,14 @@ pub struct OrchestratorConfig {
     pub wireguard: WireguardConfig,
     #[serde(default)]
     pub tunnels: TunnelConfig,
+    #[serde(default)]
+    pub pools: Vec<PoolConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoolConfig {
+    pub pool_id: String,
+    pub path: String,
 }
 
 #[derive(Debug, Deserialize)]

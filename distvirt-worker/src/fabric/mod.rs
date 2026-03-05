@@ -168,13 +168,13 @@ impl<P: FramePort> Fabric<P> {
         let port = Arc::new(port);
 
         {
-            let mut ports = self.ctx.inner.ports.lock().unwrap();
+            let mut ports = self.ctx.inner.ports.lock().expect("poisoned");
             ports.insert(port_id, Arc::clone(&port));
         }
 
         // Pre-register IP so the fabric can route to this port immediately.
         if let Some(ip) = pod_ip {
-            let mut table = self.ctx.inner.ip_port_table.lock().unwrap();
+            let mut table = self.ctx.inner.ip_port_table.lock().expect("poisoned");
             table.insert(ip, port_id);
         }
 
@@ -183,7 +183,7 @@ impl<P: FramePort> Fabric<P> {
         // buffered because the backend IP wasn't reachable yet.
         if let Some(ip) = pod_ip {
             let service_flushes = {
-                let mut st = self.ctx.inner.service_table.lock().unwrap();
+                let mut st = self.ctx.inner.service_table.lock().expect("poisoned");
                 st.flush_by_backend_ip(&ip)
             };
             if !service_flushes.is_empty() {
@@ -204,7 +204,7 @@ impl<P: FramePort> Fabric<P> {
         // Flush buffered frames if an IP was provided.
         if let Some(pod_ip) = pod_ip {
             let buffered = {
-                let mut rt = self.ctx.inner.route_table.lock().unwrap();
+                let mut rt = self.ctx.inner.route_table.lock().expect("poisoned");
                 rt.flush_buffer(pod_ip)
             };
             if !buffered.is_empty() {
@@ -248,7 +248,7 @@ impl<P: FramePort> Fabric<P> {
     ) {
         let _ = self.ctx.inner.gateway_tx.set(egress_tx);
 
-        *self._gateway_ingress_task.lock().unwrap() = Some(TaskHandle::spawn(gateway_ingress_task(
+        *self._gateway_ingress_task.lock().expect("poisoned") = Some(TaskHandle::spawn(gateway_ingress_task(
             ingress_rx,
             self.ctx.clone(),
         )));
@@ -261,12 +261,12 @@ impl<P: FramePort> Fabric<P> {
                 loop {
                     interval.tick().await;
                     {
-                        let mut nat = inner.nat_table.lock().unwrap();
+                        let mut nat = inner.nat_table.lock().expect("poisoned");
                         nat.gc(std::time::Duration::from_secs(300));
                     }
                 }
             });
-            *self._gc_task.lock().unwrap() = Some(gc_task);
+            *self._gc_task.lock().expect("poisoned") = Some(gc_task);
         }
 
         log::info!("fabric: gateway connected");
@@ -289,7 +289,7 @@ impl<P: FramePort> Fabric<P> {
     pub fn add_tunnel_port(&self, worker_id: String, port: P) -> (PortId, TaskHandle<()>) {
         let (port_id, task) = self.add_port_inner(port, None);
         {
-            let mut tp = self.ctx.inner.tunnel_ports.lock().unwrap();
+            let mut tp = self.ctx.inner.tunnel_ports.lock().expect("poisoned");
             tp.insert(worker_id.clone(), port_id);
         }
         log::info!("fabric: registered tunnel port {} for worker {}", port_id, worker_id);
@@ -299,7 +299,7 @@ impl<P: FramePort> Fabric<P> {
     /// Remove a tunnel port for a remote worker.
     #[allow(dead_code)]
     pub fn remove_tunnel_port(&self, worker_id: &str) {
-        let mut tp = self.ctx.inner.tunnel_ports.lock().unwrap();
+        let mut tp = self.ctx.inner.tunnel_ports.lock().expect("poisoned");
         if let Some(port_id) = tp.remove(worker_id) {
             log::info!("fabric: removed tunnel port {} for worker {}", port_id, worker_id);
         }
@@ -321,7 +321,7 @@ impl<P: FramePort> Fabric<P> {
         service_id: &str,
     ) {
         let dst_ip = {
-            let st = self.ctx.inner.service_table.lock().unwrap();
+            let st = self.ctx.inner.service_table.lock().expect("poisoned");
             st.get_ip_by_id(service_id)
                 .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
         };
@@ -356,7 +356,7 @@ impl<P: FramePort> Fabric<P> {
 
         // Insert NAT entries for all flushed frames.
         {
-            let mut nat = self.ctx.inner.nat_table.lock().unwrap();
+            let mut nat = self.ctx.inner.nat_table.lock().expect("poisoned");
             for frame in &frames {
                 if let Some(fp) = FabricPacket::new(frame) {
                     let ip = fp.ip_packet();

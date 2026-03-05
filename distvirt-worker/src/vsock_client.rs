@@ -72,7 +72,7 @@ impl GuestSession {
         })
         .await?;
 
-        let control = control_opt.unwrap();
+        let control = control_opt.expect("invariant: poll_fn sets control_opt before Ready(Ok)");
 
         // Spawn the driver task. This moves the Connection into the task,
         // which continuously drives yamux frame processing.

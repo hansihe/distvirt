@@ -11,6 +11,7 @@ impl NamespaceStateMachine {
         _service_id: &ServiceId,
         workload_id: &WorkloadId,
         outputs: Vec<ServiceOutput>,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         for svc_out in outputs {
@@ -34,7 +35,7 @@ impl NamespaceStateMachine {
                             },
                         });
                     }
-                    self.forward_workload_outputs(workload_id, wl_outputs, out);
+                    self.forward_workload_outputs(workload_id, wl_outputs, placement_table, out);
                 }
                 ServiceOutput::WorkerCommand(wid, cmd) => {
                     out.worker_commands.push((wid, cmd));
@@ -56,6 +57,7 @@ impl NamespaceStateMachine {
         &mut self,
         workload_id: &WorkloadId,
         outputs: Vec<WorkloadOutput>,
+        placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         for wl_out in outputs {
@@ -151,40 +153,85 @@ impl NamespaceStateMachine {
                             );
                             let wl_id = svc.workload_id.clone();
                             // Need to handle DemandUp from always-on services.
-                            self.forward_service_outputs(&sid, &wl_id, svc_outputs, out);
+                            self.forward_service_outputs(&sid, &wl_id, svc_outputs, placement_table, out);
                         }
                     }
                 }
-                WorkloadOutput::SuspendRequest { worker_id, snapshot_id } => {
-                    // Resolve pool_id from the worker's primary pool.
-                    let pool_id = self
-                        .workers
-                        .get(&worker_id)
-                        .and_then(|ws| ws.primary_pool_id.clone())
-                        .unwrap_or_else(|| PoolId::from("unknown"));
-                    // Get the pod_id from the workload's Suspending state.
+                WorkloadOutput::SuspendRequest { worker_id, artifact_id } => {
+                    // pod_id must exist: SuspendRequest is only emitted when
+                    // the workload transitions to Suspending { pod_id, .. }.
                     let pod_id = self
                         .workloads
                         .get(workload_id)
                         .and_then(|wl| wl.state.pod_id().cloned())
-                        .unwrap_or_else(|| PodId::from("unknown"));
+                        .expect("invariant: workload must be in Suspending state when SuspendRequest is emitted");
+
+                    // Resolve pool_id from the worker's primary pool.
+                    // If the worker has no pool, we cannot suspend — feed failure
+                    // back to the workload SM so it recovers gracefully.
+                    let pool_id = match self
+                        .workers
+                        .get(&worker_id)
+                        .and_then(|ws| ws.primary_pool_id.clone())
+                    {
+                        Some(id) => id,
+                        None => {
+                            out.events.push(SmNamespaceEvent::Workload {
+                                workload_id: workload_id.clone(),
+                                event: SmWorkloadEvent::PodSuspendFailed {
+                                    reason: "worker has no storage pool".into(),
+                                },
+                            });
+                            let wl_outputs = if let Some(wl) = self.workloads.get_mut(workload_id) {
+                                wl.step(
+                                    WorkloadInput::PodSuspendFailed { pod_id },
+                                    &self.namespace_id,
+                                )
+                            } else {
+                                continue;
+                            };
+                            let wl_id = workload_id.clone();
+                            self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
+                            continue;
+                        }
+                    };
+
+                    // Create placement table entry.
+                    placement_table.insert(
+                        artifact_id.clone(),
+                        ArtifactPlacement {
+                            pool_id: pool_id.clone(),
+                            worker_id: worker_id.clone(),
+                            locked_by: None,
+                        },
+                    );
                     out.worker_commands.push((
                         worker_id,
                         WorkerCommand::SuspendPod {
                             namespace_id: self.namespace_id.clone(),
                             pod_id,
-                            snapshot_id,
+                            artifact_id,
                             pool_id,
                         },
                     ));
                 }
-                WorkloadOutput::ResumeRequest { snapshot_id, worker_id, pool_id } => {
+                WorkloadOutput::ResumeRequest { artifact_id } => {
                     out.resume_requests.push(ResumeRequest {
                         workload_id: workload_id.clone(),
-                        snapshot_id,
-                        worker_id,
-                        pool_id,
+                        artifact_id,
                     });
+                }
+                WorkloadOutput::DeleteArtifact { artifact_id } => {
+                    // Look up placement and emit DeleteArtifact to correct worker.
+                    if let Some(placement) = placement_table.remove(&artifact_id) {
+                        out.worker_commands.push((
+                            placement.worker_id,
+                            WorkerCommand::DeleteArtifact {
+                                artifact_id,
+                                pool_id: placement.pool_id,
+                            },
+                        ));
+                    }
                 }
                 WorkloadOutput::WorkerCommand(wid, cmd) => {
                     out.worker_commands.push((wid, cmd));

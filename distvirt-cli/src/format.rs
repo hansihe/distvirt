@@ -279,7 +279,7 @@ fn workload_event_description(we: &WorkloadEvent) -> String {
             format!("pod suspending on {}", s.worker_id)
         }
         Some(workload_event::Event::PodSuspended(s)) => {
-            format!("pod suspended (snapshot: {})", s.snapshot_id)
+            format!("pod suspended (artifact: {})", s.snapshot_id)
         }
         Some(workload_event::Event::PodSuspendFailed(f)) => {
             format!("pod suspend failed: {}", f.reason)

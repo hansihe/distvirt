@@ -15,6 +15,15 @@ pub struct Orchestrator {
     pub next_pod_id: u64,
     pub next_segment_id: u16,
     pub active_segment_ids: HashSet<u16>,
+    /// Global artifact placement table tracking where artifacts are stored across the cluster.
+    ///
+    /// Currently a simple data structure passed by `&mut` reference to namespace state machines.
+    /// As artifact lifecycle grows more complex (transfers, eviction policies, multi-step operations),
+    /// this should evolve into a separate state machine with its own command/event interface:
+    ///   Namespace → PlacementSM: RegisterArtifact, Lock, Unlock, Remove
+    ///   PlacementSM → Namespace: ArtifactLost (eviction), TransferComplete
+    /// This would enable independent model-checking of placement invariants.
+    pub placement_table: PlacementTable,
 }
 
 impl Default for Orchestrator {
@@ -32,6 +41,7 @@ impl Orchestrator {
             next_pod_id: 0,
             next_segment_id: 1,
             active_segment_ids: HashSet::new(),
+            placement_table: PlacementTable::default(),
         }
     }
 
@@ -134,7 +144,7 @@ impl Orchestrator {
         out: &mut OrchestratorOutput,
     ) {
         if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
-            let ns_out = ns.step(input);
+            let ns_out = ns.step(input, &mut self.placement_table);
             self.process_namespace_output(namespace_id, ns_out, out);
         } else {
             // If the input carries a client_id, send an error back.
