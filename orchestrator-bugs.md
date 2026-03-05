@@ -142,42 +142,158 @@ eventually `DemandDown`. `FabricRouteMiss` violates this contract.
 
 ---
 
-## Potential Fixes
+## Fixes
 
-### Structural fixes (address multiple bugs)
+### Fix 1: Schedule on NamespaceCreated, not on worker connect (Bug 1)
 
-1. **Post-NamespaceCreated reconciliation for existing namespaces** (fixes Bug 1):
-   When a new worker joins an already-Active namespace, call
-   `reconcile_all_services` or at minimum `schedule_waiting_pods` after fabric
-   becomes Active. Small change in the `NamespaceCreated` handler.
+Remove `schedule_waiting_pods()` from `handle_worker_connected`
+(`orchestrator/scheduling.rs`). Instead, call it from the `NamespaceCreated`
+handler when a worker's fabric becomes `Active` — specifically in the
+`else if self.status == Active` branch (`namespace/events.rs:57-61`).
 
-2. **Collect-then-process output model** (fixes Bug 5, prevents future similar
-   bugs): Instead of processing workload/service outputs immediately and
-   recursively, collect all outputs into a batch, then process them in a second
-   pass. Prevents re-entrant state mutation. Significant structural change.
+This eliminates the temporal ordering problem entirely: scheduling only runs
+when the worker is actually eligible (`FabricStatus::Active`), so
+`select_worker_for_pod` will find it.
 
-3. **WorkloadReady notification for late-binding services** (fixes Bugs 4 and
-   6's NeedBackend issue): When `DemandUp` arrives on an already-Running
-   workload, emit `BecameReady`. Alternatively, handle in the namespace layer —
-   when stepping a service produces `DemandUp` and the target workload is
-   already `Running`, immediately send `WorkloadReady` back to the service.
+Note: `handle_worker_lost` with the last worker sets status to `Creating` and
+skips reconciliation. When a new worker arrives and triggers `NamespaceCreated`,
+the namespace goes `Creating` → `Active`, which calls `reconcile_all_services`.
+However, `reconcile_service` only handles `(NeedBackend, Dormant)` — not
+`(NeedBackend, WaitingForCapacity)`. Calling `schedule_waiting_pods` on
+`NamespaceCreated` covers this gap.
 
-### Specific fixes
+### Fix 2: Collect-then-process output model (Bug 5, systemic)
 
-4. **Bug 2:** In PodSuspended handler's `Demand` and `None`-with-demand
-   branches, add `self.state = WorkloadState::Suspended { artifact_id }` before
-   emitting `ResumeRequest`.
+Replace the recursive `forward_workload_outputs` ↔ `forward_service_outputs`
+call chain (`namespace/output.rs:9-54, 56+`) with a queue-based round
+processing loop:
 
-5. **Bug 3:** In `handle_worker_lost`, after removing placements, iterate
-   workloads in `Suspended` state and check if their `artifact_id` was in the
-   removed set. Transition to `Dormant` (or `WaitingForCapacity` if demand > 0).
+```
+let mut wl_queue: VecDeque<(WorkloadId, WorkloadInput)> = ...;
+let mut svc_queue: VecDeque<(ServiceId, ServiceInput)> = ...;
 
-6. **Bug 5 (targeted fix):** Don't emit `BecameUnready` from `PodGone` in
-   `Resuming` state before `transition_on_intent` — or emit it after the next
-   state is determined. Since the workload will retry via `RetryBackoff`, the
-   service doesn't need to know it was briefly unready.
+while !wl_queue.is_empty() || !svc_queue.is_empty() {
+    // drain workload queue, collect outputs
+    // translate workload outputs → service inputs, push to svc_queue
+    // drain service queue, collect outputs
+    // translate service outputs → workload inputs, push to wl_queue
+}
+```
 
-7. **Bug 6 orphaned demand:** Either (a) don't use `DemandUp` for route misses
-   — have the namespace layer directly check if the workload should be woken
-   and issue a `PodRequest` bypassing the demand system, or (b) track
-   route-miss demand separately with a timer-based auto-expire.
+This gives a clear separation between "compute next state" and "propagate
+effects". Bug 5 becomes impossible — the `BecameUnready` → `DemandDown` chain
+happens in a subsequent round, after retry logic has already set the state.
+
+Add an iteration cap as a convergence guard. In practice the demand model is
+monotonic per round, so it should converge quickly.
+
+**Demand model invariant comments** — add at key locations:
+- `WorkloadInput::DemandUp` handler (`workload.rs:184`): every `DemandUp` must
+  have a corresponding entity that will eventually `DemandDown`
+- `forward_service_outputs` (`namespace/output.rs:19`): services are the
+  canonical demand holders
+- `FabricRouteMiss` handler (`namespace/events.rs:250`): note this bypasses the
+  service demand model (to be fixed by Fix 8)
+
+### Fix 3: Late-joiner WorkloadReady at namespace layer (Bugs 4, 6)
+
+Handle in `forward_service_outputs` (`namespace/output.rs:19-38`): after
+processing `DemandUp`, if the target workload is already `Running`,
+immediately enqueue `ServiceInput::WorkloadReady` back to the originating
+service.
+
+This keeps the workload SM's concern narrow — it doesn't need to know about
+services. The namespace layer is the right place for this translation since it
+already mediates all cross-SM communication.
+
+### Fix 4: Add `Transitioning` sentinel variant (Bug 2, systemic)
+
+Add `WorkloadState::Transitioning` to `types/states.rs`. Replace all 18
+`mem::replace(&mut self.state, WorkloadState::Dormant)` call sites in
+`workload.rs` with `mem::replace(&mut self.state, WorkloadState::Transitioning)`.
+
+Make `Transitioning` panic in `worker_id()`, `pod_id()` and other state
+helpers, so any forgotten overwrite is caught immediately rather than silently
+landing in a valid quiescent state.
+
+Add a stateright property:
+```rust
+Property::always("no transitioning state", |_model, state| {
+    state.namespace.workloads.values()
+        .all(|wl| !matches!(wl.state, WorkloadState::Transitioning))
+})
+```
+
+This catches the entire bug class at model-checking time — any code path that
+forgets to set the final state will be found exhaustively.
+
+### Fix 5: Set state to Suspended before ResumeRequest (Bug 2)
+
+In the `PodSuspended` handler (`workload.rs:497-504`):
+- `PendingIntent::Demand` branch: add
+  `self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() }`
+  before emitting `ResumeRequest`.
+- `PendingIntent::None` with `demand_count > 0` branch: same.
+
+This ensures `handle_resume_pod`'s
+`if !matches!(self.state, WorkloadState::Suspended { .. })` guard passes.
+
+### Fix 6: Store worker_id in Suspended (Bug 3)
+
+Change `WorkloadState::Suspended { artifact_id }` to
+`Suspended { artifact_id, worker_id }` in `types/states.rs:116`. Update all
+construction sites (PodSuspended handler branches, etc.).
+
+`handle_worker_lost` (`namespace/events.rs:338`) uses
+`wl.state.worker_id() == Some(worker_id)` to find affected workloads.
+Currently `Suspended` doesn't return a `worker_id`, so it's never matched.
+With this change, `Suspended` workloads on a lost worker will be naturally
+found and transitioned to `WaitingForCapacity` (if `demand_count > 0`) or
+`Dormant`.
+
+The existing stateright property "suspended workloads have valid placement"
+(`stateright_model.rs:770`) will catch regressions. Update the model's
+`WorkloadSnapshot` accordingly.
+
+### Fix 7: Don't emit BecameUnready during Resuming→PodGone (Bug 5)
+
+Remove `outputs.push(WorkloadOutput::BecameUnready)` from the `Resuming`
+`PodGone` handler (`workload.rs:597`). The workload will retry via
+`RetryBackoff` — services don't need to know about transient resume failures.
+
+This is the targeted fix for Bug 5. Fix 2 (collect-then-process) prevents the
+root cause generically and should be preferred long-term. This fix is simpler
+and can be applied independently/first.
+
+### Fix 8: Bypass demand system for FabricRouteMiss (Bug 6)
+
+In the `FabricRouteMiss` handler (`namespace/events.rs:250-277`): instead of
+calling `wl.step(WorkloadInput::DemandUp)`, directly check the workload state
+at the namespace level and issue a `PodRequest` (for `Dormant`) or
+`ResumeRequest` (for `Suspended`).
+
+Route misses are wake-up hints, not persistent demand — they should not touch
+`demand_count`. The demand model's invariant (every `DemandUp` has a
+corresponding entity that will `DemandDown`) would be violated by anonymous
+sources.
+
+---
+
+## Additional Concerns
+
+### `reconcile_service` doesn't handle `(NeedBackend, Suspended)`
+
+`reconcile_service` matches on `(ServiceState, WorkloadState)` pairs but only
+handles `(NeedBackend, Dormant)` and `(Pending, Dormant)`. If a workload is
+`Suspended` and a service is in `NeedBackend`, reconciliation won't issue a
+`ResumeRequest`. Verify this is covered by the `Suspended` → `DemandUp` path
+outside reconciliation, or add a `(NeedBackend, Suspended)` case.
+
+### Interaction between last-worker-lost and Fix 1
+
+When the last worker is lost, `handle_worker_lost` sets namespace status to
+`Creating` and skips `reconcile_all_services`. When a new worker arrives and
+its `NamespaceCreated` transitions the namespace `Creating` → `Active`,
+`reconcile_all_services` runs — but it won't match workloads already in
+`WaitingForCapacity` (reconciliation only handles `Dormant`). Fix 1 (calling
+`schedule_waiting_pods` on `NamespaceCreated`) covers this gap.
