@@ -39,6 +39,7 @@ Each namespace gets an isolated userspace L3 network. Pods see a normal network 
 - **IP fabric** — packet router connecting all pods via TAP devices, with a static IP-to-port table
 - **smoltcp gateway** — userspace IP stack handling DNS (service discovery + upstream forwarding) and internet egress via TUN
 - **Service entities** — virtual IPs on the fabric with buffering and readiness gating. Traffic to a service IP is held until the backing pod is ready, then flushed.
+- **Inter-worker tunnels** — Noise-encrypted UDP tunnels connecting fabric segments across workers, multiplexing all namespaces over a single socket per peer
 
 ### Protocol-Aware Activation
 
@@ -79,13 +80,15 @@ The `dv` CLI has two layers:
 - **Orchestrator state machine** — workload lifecycle, service management, IP assignment, dependency ordering
 - **Suspend/resume** — VMM snapshot/restore, orchestrator lifecycle management, guest protocol coordination
 - **Guest agent** — container setup, output streaming, signal forwarding, network configuration
+- **Distributed multi-worker mode** — Noise-encrypted UDP tunnels connecting fabric segments across workers, scheduling and pod lifecycle across multiple worker nodes
+- **Storage pools & artifacts** — abstraction layer for VM snapshots, container images, and volumes with pool-aware placement and transfer planning
 
 ### In progress / planned
 
-- **Distributed multi-worker mode** — TCP/TLS transport, tunnel ports connecting fabric segments across workers
+- **Native spec format** — YAML-based namespace spec exposing distvirt-native concepts (activation policies, protocol activators, service/workload separation); compose files remain supported via conversion
 - **Live migration** — suspend on source, transfer snapshot, resume on target, with fabric buffering for invisibility
 - **Namespace snapshots** — full checkpoint to S3, enabling `dv clone` and disaster recovery
-- **Autoscaling** — scale workers based on need, drain workers transparently by live migration 
+- **Autoscaling** — scale workers based on need, drain workers transparently by live migration
 - **Streaming RPCs** — `WatchNamespaceStatus`
 - **Reverse proxy ingress** — L7 edge termination with shareable URLs
 
