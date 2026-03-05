@@ -2,7 +2,6 @@ use crate::service::ServiceInput;
 use crate::types::*;
 use crate::workload::WorkloadInput;
 
-use super::output::PendingOutput;
 use super::NamespaceStateMachine;
 
 impl NamespaceStateMachine {
@@ -122,14 +121,7 @@ impl NamespaceStateMachine {
             } else {
                 return;
             };
-            self.process_outputs(
-                PendingOutput::Workload {
-                    workload_id: workload_id.clone(),
-                    outputs: wl_outputs,
-                },
-                placement_table,
-                out,
-            );
+            self.translate_workload_effects(workload_id, wl_outputs, placement_table, out);
         }
 
         // Reconcile readiness: sync service states based on workload state.
@@ -140,11 +132,12 @@ impl NamespaceStateMachine {
     ///
     /// - WorkloadReady: workload Running + service in NeedBackend → send WorkloadReady
     /// - WorkloadUnready: workload not Running + service Active → send WorkloadUnready
-    /// - Re-activation during retry: workload retrying + activation service in Idle → send ServiceActivation
+    ///   If `needs_successful_boot`, immediately re-activate activation services that
+    ///   went Idle (preserves demand through worker loss / pod failure recovery).
     fn reconcile_readiness(
         &mut self,
         workload_id: &WorkloadId,
-        placement_table: &mut PlacementTable,
+        _placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         let wl = match self.workloads.get(workload_id) {
@@ -153,10 +146,7 @@ impl NamespaceStateMachine {
         };
 
         let is_running = matches!(wl.state, WorkloadState::Running { .. });
-        let is_retrying = matches!(
-            wl.state,
-            WorkloadState::RetryBackoff { .. } | WorkloadState::WaitingForCapacity
-        );
+        let needs_boot = wl.needs_successful_boot;
 
         // Collect service IDs mapped to this workload.
         let svc_ids: Vec<ServiceId> = self
@@ -209,19 +199,13 @@ impl NamespaceStateMachine {
                     &self.namespace_id,
                 );
                 if !svc_outputs.is_empty() {
-                    self.process_outputs(
-                        PendingOutput::Service {
-                            service_id: sid.clone(),
-                            workload_id: workload_id.clone(),
-                            outputs: svc_outputs,
-                        },
-                        placement_table,
-                        out,
-                    );
+                    self.translate_service_effects(svc_outputs, out);
                 }
             }
         } else {
             // Workload not running: send WorkloadUnready to Active services.
+            // If needs_successful_boot, immediately re-activate activation services
+            // that went Active → Idle (preserves demand through recovery).
             for sid in &svc_ids {
                 let svc = match self.services.get(sid) {
                     Some(s) => s,
@@ -232,52 +216,27 @@ impl NamespaceStateMachine {
                 }
 
                 let svc = self.services.get_mut(sid).unwrap();
+                let has_activation = svc.has_activation;
                 let svc_outputs = svc.step(
                     ServiceInput::WorkloadUnready,
                     &self.namespace_id,
                 );
-                let wl_id = svc.workload_id.clone();
                 if !svc_outputs.is_empty() {
-                    self.process_outputs(
-                        PendingOutput::Service {
-                            service_id: sid.clone(),
-                            workload_id: wl_id,
-                            outputs: svc_outputs,
-                        },
-                        placement_table,
-                        out,
-                    );
+                    self.translate_service_effects(svc_outputs, out);
                 }
-            }
 
-            // During retry, re-activate activation services that went Idle
-            // so they transition Idle → NeedBackend and preserve demand
-            // through reconciliation (wants_backend() stays true).
-            if is_retrying {
-                for sid in &svc_ids {
-                    let svc = match self.services.get(sid) {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    if !(svc.has_activation && matches!(svc.state, ServiceState::Idle)) {
-                        continue;
-                    }
-
+                // If committed to booting and this activation service just went
+                // Idle, re-activate it so it transitions Idle → NeedBackend and
+                // preserves demand through reconciliation.
+                let svc = self.services.get(sid).unwrap();
+                if needs_boot && has_activation && matches!(svc.state, ServiceState::Idle) {
                     let svc = self.services.get_mut(sid).unwrap();
                     let svc_outputs = svc.step(
                         ServiceInput::ServiceActivation,
                         &self.namespace_id,
                     );
                     if !svc_outputs.is_empty() {
-                        self.process_outputs(
-                            PendingOutput::Service {
-                                service_id: sid.clone(),
-                                workload_id: workload_id.clone(),
-                                outputs: svc_outputs,
-                            },
-                            placement_table,
-                            out,
-                        );
+                        self.translate_service_effects(svc_outputs, out);
                     }
                 }
             }

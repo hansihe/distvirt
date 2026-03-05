@@ -411,16 +411,15 @@ explores SM transitions; reconciliation is deterministic glue.
 - `tests/stateright_model.rs` — updated WorkloadSnapshot mappings
 - `tests/proptest.rs` — updated demand consistency check
 
-### Phase 2: Remove readiness routing — 🔧 IN PROGRESS (partially applied, 1 test failing)
-
-**What's done (changes are on the working tree, unstaged):**
+### Phase 2: Remove readiness routing ✅ COMPLETE
 
 1. ✅ Renamed `notify_late_joiner_services()` → `reconcile_readiness()` in
    `reconciliation.rs`, expanded to handle:
    - WorkloadReady: workload Running + service NeedBackend → send WorkloadReady
    - WorkloadUnready: workload not Running + service Active → send WorkloadUnready
-   - Re-activation during retry: after sending WorkloadUnready, re-activate
-     activation services that went Idle → NeedBackend (preserves demand)
+   - Targeted re-activation: after sending WorkloadUnready, if
+     `needs_successful_boot` is true and an activation service went Idle,
+     immediately re-activate it (Idle → NeedBackend) to preserve demand
    - BackendReady observability event emitted from reconcile_readiness
 2. ✅ Removed `BecameReady`/`BecameUnready` from `WorkloadOutput` enum
 3. ✅ Removed all ~18 emission sites in `workload.rs` `step()`
@@ -428,62 +427,97 @@ explores SM transitions; reconciliation is deterministic glue.
    in `output.rs`
 5. ✅ Removed unused `ServiceInput` import from `output.rs`
 6. ✅ Updated scenario test comments in `multi_service.rs`, `resume_failure.rs`
+7. ✅ Added `needs_successful_boot` flag to `WorkloadStateMachine`
+8. ✅ Updated stateright workload model, stateright namespace model, proptests
 
-**Test results: 1 failure**
+**All tests pass** (72 lib, 45 e2e/scenario, 14 stateright workload,
+7 stateright model, 4 stateright service, 4 proptest).
 
-- 72/72 lib tests pass ✅
-- 44/45 scenario tests pass, **1 FAILS**: `test_demand_up_during_resume`
-- Stateright, proptest not yet re-run (lib tests cover them)
+**Key implementation decisions:**
 
-**The failing test: `scenarios::transition_intents::test_demand_up_during_resume`**
+- **`needs_successful_boot` flag:** Once demand goes 0→non-zero, the workload
+  is committed to reaching Running before it can go Dormant via SetDemand(0).
+  Also set on WorkerLost and PodGone (infrastructure/application failure
+  recovery). Cleared on PodRunning→Running or entering Failed.
 
-```
-workload 'ns/shared': expected Suspended, got Running
-```
+- **Boot commitment semantics:** When `needs_successful_boot` is true,
+  SetDemand(0) is a no-op for WaitingForCapacity, RetryBackoff, and Launching
+  states. The workload continues its boot/retry sequence. Once Running is
+  reached, `needs_successful_boot` clears and normal demand-driven behavior
+  resumes. This eliminates the need for the old `is_retrying` block that
+  spuriously re-activated ALL idle activation services during
+  WaitingForCapacity (which was the root cause of the `test_demand_up_during_resume`
+  failure — svc-b was activated on first boot even though only svc-a had
+  traffic).
 
-Test flow (uses `multi_service_spec` — two activation services svc-a/svc-b on
-one suspend-on-idle workload, custom handler that hangs ResumePod):
-1. Activate svc-a → workload launches → Running, svc-a Active
-2. BackendNeed::None on svc-a → idle timer starts
-3. `advance_time(31s)` → idle timer fires → svc-a Active → Idle
-4. Expected: demand drops to 0 → SetDemand(0) → Suspending → SuspendPod →
-   worker responds → Suspended
-5. Actual: workload stays Running
+- **Targeted re-activation:** Instead of a separate `is_retrying` block that
+  iterated all services, re-activation now happens inline in the
+  WorkloadUnready loop. Only services that were JUST sent WorkloadUnready
+  (Active → Idle) get re-activated when `needs_successful_boot` is true.
+  First boot: no Active services to unready → no spurious re-activation.
+  Worker loss: Active service gets unreadied → immediately re-activated.
 
-**Root cause not yet identified.** The SetDemand(0) handler and Suspending
-transition logic look correct after the edits. The idle timer path
-(`IdleTimeout` → service step → `reconcile_demand`) is unchanged. Confirmed
-test passes on the pre-change commit. Need to investigate why the workload
-never leaves Running — either demand isn't dropping to 0, or
-`reconcile_readiness` is interfering (e.g., re-sending WorkloadReady
-somewhere it shouldn't).
-
-**Key correction from plan:** The plan said "when retrying, do NOT send
-WorkloadUnready" but the actual old behavior was: always send WorkloadUnready
-(Active → Idle), then re-activate activation services (Idle → NeedBackend).
-The initial implementation matched the plan and caused 2 test failures
-(`test_worker_loss_during_active_service`, `test_namespace_failed_treats_like_worker_loss`).
-Fixed by restructuring reconcile_readiness to always send WorkloadUnready when
-not Running, then re-activate during retry as a second pass. Those 2 tests
-now pass.
+- **`transition_on_demand` updated:** Now checks
+  `current_demand > 0 || needs_successful_boot` to ensure the workload
+  retries even if demand dropped to 0 during the boot sequence.
 
 **Files changed:**
-- `src/namespace/reconciliation.rs` — `reconcile_readiness()` replacing
-  `notify_late_joiner_services()`
-- `src/workload.rs` — removed BecameReady/BecameUnready enum variants + all
-  emission sites
+- `src/workload.rs` — added `needs_successful_boot` field, set/clear logic in
+  SetDemand, WorkerLost, PodGone, PodSuspendFailed, PodRunning,
+  ForceDeactivate, SpecChanged, transition_on_demand; removed
+  BecameReady/BecameUnready enum variants + all emission sites
+- `src/namespace/reconciliation.rs` — `reconcile_readiness()` with targeted
+  re-activation replacing `is_retrying` block
 - `src/namespace/output.rs` — removed BecameReady/BecameUnready match arms,
   removed unused ServiceInput import
+- `tests/stateright_workload.rs` — added `needs_successful_boot` to model
+  state, updated properties for new demand semantics
+- `tests/stateright_model.rs` — added `needs_successful_boot` to
+  WorkloadSnapshot
 - `tests/scenarios/multi_service.rs` — updated comments
 - `tests/scenarios/resume_failure.rs` — updated comments
 
-### Phase 3: Simplify output translation
+### Phase 3: Simplify output translation ✅ COMPLETE
 
-1. Remove `PendingOutput` enum and `process_outputs` queue
-2. Collapse `translate_workload_outputs` and `translate_service_outputs` into
-   simple effect pass-through (`translate_effects`)
-3. Replace `reconcile_all_services` with the new reconciliation pass
-4. Update stateright models, verify properties still hold
+1. ✅ Removed `PendingOutput` enum, `process_outputs()` queue loop, and
+   `VecDeque` import from `output.rs`
+2. ✅ Replaced `translate_workload_outputs` with `translate_workload_effects` —
+   public method with inline SuspendRequest cascade (bounded 2-iteration loop
+   instead of queue push)
+3. ✅ Replaced `translate_service_outputs` with `translate_service_effects` —
+   simplified signature (dropped unused `_service_id`, `_workload_id`,
+   `_placement_table`, `_queue` params)
+4. ✅ Updated ~14 call sites in `events.rs`, ~4 in `commands.rs`, ~4 in
+   `reconciliation.rs`
+5. ✅ Removed `PendingOutput` imports from all three call-site files
+6. ✅ Fixed unused variable warnings (`_placement_table` in `reconcile_readiness`,
+   removed dead `wl_id` binding)
+
+**All tests pass** (14 stateright workload tests, compilation clean with no
+warnings).
+
+**Key implementation decisions:**
+
+- **SuspendRequest cascade handled inline:** The only non-trivial logic in the
+  old queue was the SuspendRequest → PodSuspendFailed → re-queued outputs path.
+  This is now a bounded 2-iteration loop inside `translate_workload_effects`.
+  PodSuspendFailed never produces another SuspendRequest, so 2 iterations is
+  the theoretical maximum.
+
+- **`reconcile_all_services` unchanged:** The plan originally mentioned
+  replacing it, but that was written before Phases 1+2. It's already correct
+  and not related to the output queue infrastructure.
+
+**Files changed:**
+- `src/namespace/output.rs` — rewrote: removed PendingOutput/process_outputs/
+  old translate functions, added translate_workload_effects and
+  translate_service_effects
+- `src/namespace/events.rs` — replaced ~14 process_outputs calls, removed
+  PendingOutput import
+- `src/namespace/commands.rs` — replaced ~4 process_outputs calls, removed
+  PendingOutput import
+- `src/namespace/reconciliation.rs` — replaced ~4 process_outputs calls,
+  removed PendingOutput import, fixed unused variables
 
 ### Phase 4: Clean up
 

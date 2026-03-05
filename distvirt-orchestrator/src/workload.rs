@@ -37,6 +37,12 @@ pub struct WorkloadStateMachine {
     /// Set by FabricRouteMiss to wake a dormant workload. Cleared on PodRunning.
     /// NOTE: preserves Bug 6 — never cleared externally, needs worker-side FabricRouteMissResolved.
     pub route_miss_wake: bool,
+    /// Once demand appears (0→non-zero) or the workload loses its pod (WorkerLost,
+    /// PodGone), the workload is committed to reaching Running before it can go
+    /// Dormant via SetDemand(0). Cleared on successful PodRunning→Running or on
+    /// entering Failed (retries exhausted). This prevents demand fluctuations from
+    /// aborting an in-progress boot/retry sequence.
+    pub needs_successful_boot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,15 +106,17 @@ impl WorkloadStateMachine {
             consecutive_failures: 0,
             max_retries: MAX_RETRIES,
             route_miss_wake: false,
+            needs_successful_boot: false,
         }
     }
 
     /// Helper: transition to dormant or waiting-for-capacity based on demand,
     /// with exponential backoff on consecutive failures.
     fn transition_on_demand(&mut self, outputs: &mut Vec<WorkloadOutput>) {
-        if self.current_demand > 0 {
+        if self.current_demand > 0 || self.needs_successful_boot {
             if self.consecutive_failures >= self.max_retries {
                 self.state = WorkloadState::Failed;
+                self.needs_successful_boot = false;
                 outputs.push(WorkloadOutput::ConditionSet {
                     key: "failed".into(),
                     message: format!(
@@ -188,7 +196,8 @@ impl WorkloadStateMachine {
                 self.current_demand = count;
 
                 if count > 0 && old == 0 {
-                    // Demand appeared: wake workload.
+                    // Demand appeared: wake workload. Commit to reaching Running.
+                    self.needs_successful_boot = true;
                     match &self.state {
                         WorkloadState::Dormant => {
                             self.state = WorkloadState::WaitingForCapacity;
@@ -208,10 +217,24 @@ impl WorkloadStateMachine {
                         _ => {}
                     }
                 } else if count == 0 && old > 0 {
-                    // Demand dropped to zero: shut down.
+                    // Demand dropped to zero: shut down (unless committed to booting).
                     match std::mem::replace(&mut self.state, WorkloadState::Transitioning) {
+                        WorkloadState::WaitingForCapacity if self.needs_successful_boot => {
+                            // Committed to booting — stay in WaitingForCapacity.
+                            self.state = WorkloadState::WaitingForCapacity;
+                        }
                         WorkloadState::WaitingForCapacity => {
                             self.state = WorkloadState::Dormant;
+                        }
+                        mut state @ WorkloadState::Launching { .. } if self.needs_successful_boot => {
+                            // Committed to booting — let launch complete.
+                            // Clear Demand pending since demand is now 0.
+                            if let WorkloadState::Launching { ref mut pending, .. } = state {
+                                if *pending == PendingIntent::Demand {
+                                    *pending = PendingIntent::None;
+                                }
+                            }
+                            self.state = state;
                         }
                         WorkloadState::Launching {
                             pod_id,
@@ -272,6 +295,10 @@ impl WorkloadStateMachine {
                         }
                         WorkloadState::Dormant => {
                             self.state = WorkloadState::Dormant;
+                        }
+                        state @ WorkloadState::RetryBackoff { .. } if self.needs_successful_boot => {
+                            // Committed to booting — keep retrying.
+                            self.state = state;
                         }
                         WorkloadState::RetryBackoff { backoff_timer } => {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
@@ -346,6 +373,7 @@ impl WorkloadStateMachine {
             WorkloadInput::PodRunning { pod_id } => {
                 self.consecutive_failures = 0;
                 self.last_failure_reason = None;
+                self.needs_successful_boot = false;
                 // NOTE: route_miss_wake is intentionally NOT cleared here.
                 // Bug 6: FabricRouteMiss demand is never externally resolved.
                 // Clearing on PodRunning would drop demand before any service activates.
@@ -515,6 +543,7 @@ impl WorkloadStateMachine {
                     return outputs;
                 }
                 self.consecutive_failures += 1;
+                self.needs_successful_boot = true;
                 if let WorkloadState::Suspending {
                     suspend_timeout,
                     pending,
@@ -537,6 +566,8 @@ impl WorkloadStateMachine {
                 if is_failure {
                     self.consecutive_failures += 1;
                 }
+                // Pod lost — commit to reaching Running before going dormant.
+                self.needs_successful_boot = true;
                 match &self.state {
                     WorkloadState::Launching {
                         pod_id: pid,
@@ -599,6 +630,19 @@ impl WorkloadStateMachine {
                 }
             }
             WorkloadInput::WorkerLost { worker_id } => {
+                // Worker lost — commit to reaching Running before going dormant.
+                // Set before match so it's active when transition_on_demand runs.
+                let affects_us = match &self.state {
+                    WorkloadState::Launching { worker_id: wid, .. }
+                    | WorkloadState::Running { worker_id: wid, .. }
+                    | WorkloadState::Suspending { worker_id: wid, .. }
+                    | WorkloadState::Resuming { worker_id: wid, .. } => *wid == worker_id,
+                    WorkloadState::Suspended { .. } => true,
+                    _ => false,
+                };
+                if affects_us {
+                    self.needs_successful_boot = true;
+                }
                 match &self.state {
                     WorkloadState::Launching {
                         worker_id: wid,
@@ -751,6 +795,7 @@ impl WorkloadStateMachine {
                 }
             }
             WorkloadInput::ForceDeactivate => {
+                self.needs_successful_boot = false;
                 match &self.state {
                     WorkloadState::Dormant | WorkloadState::WaitingForCapacity => {
                         // Already inactive, no-op.
@@ -825,6 +870,7 @@ impl WorkloadStateMachine {
                 }
             }
             WorkloadInput::SpecChanged => {
+                self.needs_successful_boot = false;
                 match &self.state {
                     WorkloadState::Dormant | WorkloadState::WaitingForCapacity => {
                         // No-op: will launch with new spec next time.

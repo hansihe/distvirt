@@ -2,7 +2,6 @@ use crate::service::ServiceInput;
 use crate::types::*;
 use crate::workload::{PodGoneReason, WorkloadInput};
 
-use super::output::PendingOutput;
 use super::NamespaceStateMachine;
 
 impl NamespaceStateMachine {
@@ -73,7 +72,7 @@ impl NamespaceStateMachine {
                     });
                     let svc_outputs =
                         svc.step(ServiceInput::ServiceActivation, &self.namespace_id);
-                    self.process_outputs(PendingOutput::Service { service_id: service_id.clone(), workload_id: wl_id.clone(), outputs: svc_outputs }, placement_table, out);
+                    self.translate_service_effects(svc_outputs, out);
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }
             }
@@ -111,7 +110,7 @@ impl NamespaceStateMachine {
                         ServiceInput::ServiceBackendNeed { need },
                         &self.namespace_id,
                     );
-                    self.process_outputs(PendingOutput::Service { service_id: service_id.clone(), workload_id: wl_id.clone(), outputs: svc_outputs }, placement_table, out);
+                    self.translate_service_effects(svc_outputs, out);
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }
             }
@@ -138,7 +137,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&wl_id, placement_table, out);
             }
             WorkerEvent::PodExited { pod_id, exit_code } => {
@@ -170,7 +169,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&wl_id, placement_table, out);
             }
             WorkerEvent::PodFailed { pod_id, error } => {
@@ -202,7 +201,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&wl_id, placement_table, out);
             }
             WorkerEvent::ArtifactWriteStarted { artifact_id, pool_id } => {
@@ -251,7 +250,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&wl_id, placement_table, out);
             }
             WorkerEvent::FabricRouteMiss { dst_ip } => {
@@ -313,7 +312,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&wl_id, placement_table, out);
             }
         }
@@ -352,7 +351,7 @@ impl NamespaceStateMachine {
             } else {
                 continue;
             };
-            self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+            self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
             self.reconcile_demand(&wl_id, placement_table, out);
         }
 
@@ -401,7 +400,7 @@ impl NamespaceStateMachine {
                         },
                         &self.namespace_id,
                     );
-                    self.process_outputs(PendingOutput::Service { service_id: service_id.clone(), workload_id: wl_id.clone(), outputs: svc_outputs }, placement_table, out);
+                    self.translate_service_effects(svc_outputs, out);
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }
             }
@@ -424,7 +423,7 @@ impl NamespaceStateMachine {
                 if let TimerKey::LaunchTimeout { pod_id, .. } = timer_key {
                     self.pod_map.remove(pod_id);
                 }
-                self.process_outputs(PendingOutput::Workload { workload_id: workload_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
             TimerKey::SuspendTimeout {
@@ -445,7 +444,7 @@ impl NamespaceStateMachine {
                 };
                 // Clean up pod from pods map on timeout.
                 self.pod_map.remove(&pod_id);
-                self.process_outputs(PendingOutput::Workload { workload_id: workload_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
             TimerKey::ResumeTimeout {
@@ -466,7 +465,7 @@ impl NamespaceStateMachine {
                 };
                 // Clean up pod from pods map on timeout.
                 self.pod_map.remove(&pod_id);
-                self.process_outputs(PendingOutput::Workload { workload_id: workload_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
             TimerKey::RetryBackoffTimeout { workload_id } => {
@@ -481,7 +480,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                self.process_outputs(PendingOutput::Workload { workload_id: workload_id.clone(), outputs: wl_outputs }, placement_table, out);
+                self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
         }

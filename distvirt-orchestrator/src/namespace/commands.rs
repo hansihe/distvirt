@@ -2,7 +2,6 @@ use crate::service::{ServiceInput, ServiceStateMachine};
 use crate::types::*;
 use crate::workload::{WorkloadInput, WorkloadStateMachine};
 
-use super::output::PendingOutput;
 use super::{prefix_len_to_netmask, NamespaceStateMachine};
 
 impl NamespaceStateMachine {
@@ -200,7 +199,7 @@ impl NamespaceStateMachine {
                                 WorkloadInput::SpecChanged,
                                 &self.namespace_id,
                             );
-                            self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                            self.translate_workload_effects(wl_id, wl_outputs, placement_table, out);
                             self.reconcile_demand(wl_id, placement_table, out);
                         }
                     }
@@ -451,7 +450,7 @@ impl NamespaceStateMachine {
             &self.namespace_id,
         );
         let wl_id = workload_id.clone();
-        self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+        self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
         self.reconcile_demand(&wl_id, placement_table, out);
     }
 
@@ -552,7 +551,7 @@ impl NamespaceStateMachine {
             &self.namespace_id,
         );
         let wl_id = workload_id.clone();
-        self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+        self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
         self.reconcile_demand(&wl_id, placement_table, out);
     }
 
@@ -637,7 +636,7 @@ impl NamespaceStateMachine {
             });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
-            self.process_outputs(PendingOutput::Service { service_id: sid.clone(), workload_id: wl_id.clone(), outputs: svc_outputs }, placement_table, out);
+            self.translate_service_effects(svc_outputs, out);
             self.reconcile_demand(&wl_id, placement_table, out);
             deactivated_any = true;
         }

@@ -91,6 +91,7 @@ struct WorkloadSnapshot {
     current_demand: u32,
     consecutive_failures: u32,
     route_miss_wake: bool,
+    needs_successful_boot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -143,6 +144,7 @@ impl NamespaceSnapshot {
                             current_demand: v.current_demand,
                             consecutive_failures: v.consecutive_failures,
                             route_miss_wake: v.route_miss_wake,
+                            needs_successful_boot: v.needs_successful_boot,
                         },
                     )
                 })
