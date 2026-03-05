@@ -1,6 +1,7 @@
 use crate::types::*;
 use crate::workload::WorkloadInput;
 
+use super::output::PendingOutput;
 use super::NamespaceStateMachine;
 
 impl NamespaceStateMachine {
@@ -60,7 +61,7 @@ impl NamespaceStateMachine {
                     let wl = self.workloads.get_mut(&wl_id)
                         .expect("invariant: wl_id from reconcile_pair must exist in workloads");
                     let wl_outputs = wl.step(WorkloadInput::DemandUp, &self.namespace_id);
-                    self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
+                    self.process_outputs(PendingOutput::Workload { workload_id: wl_id, outputs: wl_outputs }, placement_table, out);
                 }
             }
             (ServiceState::NeedBackend, WorkloadState::Dormant) => {
@@ -68,7 +69,7 @@ impl NamespaceStateMachine {
                 let wl = self.workloads.get_mut(&wl_id)
                     .expect("invariant: wl_id from reconcile_pair must exist in workloads");
                 let wl_outputs = wl.step(WorkloadInput::DemandUp, &self.namespace_id);
-                self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
+                self.process_outputs(PendingOutput::Workload { workload_id: wl_id, outputs: wl_outputs }, placement_table, out);
             }
             _ => {}
         }

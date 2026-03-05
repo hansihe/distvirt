@@ -130,6 +130,10 @@ pub enum WorkloadState {
     },
     /// Terminal failure state after max retries exhausted.
     Failed,
+    /// Transient sentinel used during `mem::replace` destructuring.
+    /// Must never be observed outside of a single `step()` call.
+    /// If this variant survives, it means a code path forgot to set the final state.
+    Transitioning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -200,6 +204,7 @@ impl WorkloadState {
             WorkloadState::Resuming { .. } => "resuming",
             WorkloadState::RetryBackoff { .. } => "retry_backoff",
             WorkloadState::Failed => "failed",
+            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
         }
     }
 
@@ -209,6 +214,7 @@ impl WorkloadState {
             | WorkloadState::Running { pod_id, .. }
             | WorkloadState::Suspending { pod_id, .. }
             | WorkloadState::Resuming { pod_id, .. } => Some(pod_id),
+            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
             _ => None,
         }
     }
@@ -219,6 +225,7 @@ impl WorkloadState {
             | WorkloadState::Running { worker_id, .. }
             | WorkloadState::Suspending { worker_id, .. }
             | WorkloadState::Resuming { worker_id, .. } => Some(worker_id),
+            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
             _ => None,
         }
     }
@@ -228,6 +235,7 @@ impl WorkloadState {
             WorkloadState::Suspending { artifact_id, .. }
             | WorkloadState::Suspended { artifact_id, .. }
             | WorkloadState::Resuming { artifact_id, .. } => Some(artifact_id),
+            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
             _ => None,
         }
     }

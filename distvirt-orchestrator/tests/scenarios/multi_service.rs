@@ -8,14 +8,10 @@ use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerEvent};
 /// Two services back same workload. Activate A → workload launches.
 /// Activate B → workload already running.
 ///
-/// BUG: When a second service activates on an already-Running workload, the service
-/// goes to NeedBackend but never receives WorkloadReady/BackendReady because the
-/// workload doesn't re-emit BecameReady when demand goes from 1→2 while Running.
-/// The service gets stuck in NeedBackend. Fix: when DemandUp is forwarded to an
-/// already-Running workload, the namespace layer should emit BackendReady +
-/// WorkloadReady to the originating service.
-///
-/// This test documents the bug: svc-b stays in NeedBackend after activation.
+/// Previously buggy: svc-b would get stuck in NeedBackend because the workload
+/// didn't re-emit BecameReady when demand went from 1→2 while Running.
+/// Fixed: the namespace layer now sends WorkloadReady to the originating service
+/// when DemandUp arrives on an already-Running workload.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_two_services_one_workload_shared_demand() {
     let mut h = TestHarness::new();
@@ -46,8 +42,8 @@ async fn test_two_services_one_workload_shared_demand() {
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
-    // BUG: svc-b is stuck in NeedBackend (see docstring above)
-    h.assert_service_need_backend("ns", "svc-b");
+    // Fixed: svc-b receives late-joiner WorkloadReady and transitions to Active.
+    h.assert_service_active("ns", "svc-b");
 
     // Idle svc-a → demand drops. Workload stays running because svc-b has demand
     // (even though svc-b is in NeedBackend, it has issued DemandUp).
@@ -64,8 +60,7 @@ async fn test_two_services_one_workload_shared_demand() {
 }
 
 /// Workload already running via svc-a. svc-b activates. No state change in workload.
-///
-/// BUG: svc-b gets stuck in NeedBackend (same bug as above).
+/// svc-b receives late-joiner WorkloadReady and transitions to Active.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_service_activation_while_already_running() {
     let mut h = TestHarness::new();
@@ -101,6 +96,6 @@ async fn test_service_activation_while_already_running() {
 
     // svc-a is still Active
     h.assert_service_active("ns", "svc-a");
-    // BUG: svc-b is NeedBackend, not Active (see test_two_services_one_workload_shared_demand)
-    h.assert_service_need_backend("ns", "svc-b");
+    // Fixed: svc-b receives late-joiner WorkloadReady and transitions to Active.
+    h.assert_service_active("ns", "svc-b");
 }

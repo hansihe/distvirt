@@ -224,6 +224,7 @@ impl Model for WorkloadModel {
                 actions.push(WlModelAction::SpecChanged);
                 actions.push(WlModelAction::ManualRestart);
             }
+            WorkloadState::Transitioning => unreachable!("Transitioning in model"),
         }
     }
 
@@ -327,6 +328,10 @@ impl Model for WorkloadModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
+            // Safety: Transitioning sentinel must never survive a step() call.
+            Property::<Self>::always("no transitioning state", |_model, state| {
+                !matches!(state.state, WorkloadState::Transitioning)
+            }),
             // Safety: demand_count == 0 implies Dormant (no pod without demand).
             Property::<Self>::always("no pod without demand", |_model, state| {
                 if state.demand_count == 0 {

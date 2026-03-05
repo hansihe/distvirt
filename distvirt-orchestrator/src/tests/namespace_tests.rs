@@ -426,12 +426,14 @@ fn test_worker_loss_during_active_service() {
         WorkloadState::Running { .. }
     ));
 
-    // Worker lost → service should go to Idle, workload to Dormant, namespace to Creating.
+    // Worker lost → workload enters WaitingForCapacity (demand preserved),
+    // service stays NeedBackend (re-activated to wait for recovery).
+    // Namespace goes to Creating (no workers left).
     let _out = ns.step(NamespaceInput::WorkerLost {
         worker_id: worker_id(1),
     }, &mut pt);
-    assert!(matches!(get_service_state(&ns), ServiceState::Idle));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
+    assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
+    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
     assert_eq!(ns.status, NamespaceStatus::Creating);
     assert!(ns.workers.is_empty());
     assert!(ns.pod_map.is_empty());
@@ -464,12 +466,13 @@ fn test_launch_timeout() {
         other => panic!("expected Launching, got {:?}", other),
     };
 
-    // Launch timeout fires → should stop pod and go to Idle (activation service).
+    // Launch timeout fires → workload enters WaitingForCapacity (demand preserved),
+    // service stays NeedBackend (re-activated to wait for recovery).
     let out = ns.step(NamespaceInput::TimerFired {
         timer_key: launch_timeout,
     }, &mut pt);
-    assert!(matches!(get_service_state(&ns), ServiceState::Idle));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
+    assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
+    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
     assert!(!ns.pod_map.contains(&pod_id));
     assert!(out
         .worker_commands
@@ -816,7 +819,8 @@ fn test_namespace_failed_treats_like_worker_loss() {
         WorkloadState::Running { .. }
     ));
 
-    // NamespaceFailed should act like worker loss.
+    // NamespaceFailed should act like worker loss: workload enters WaitingForCapacity
+    // (demand preserved), service stays NeedBackend.
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
         event: WorkerEvent::NamespaceFailed {
@@ -825,8 +829,8 @@ fn test_namespace_failed_treats_like_worker_loss() {
     }, &mut pt);
     assert!(ns.workers.is_empty());
     assert!(ns.pod_map.is_empty());
-    assert!(matches!(get_service_state(&ns), ServiceState::Idle));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
+    assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
+    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
     assert_eq!(ns.status, NamespaceStatus::Creating);
 }
 

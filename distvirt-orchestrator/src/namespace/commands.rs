@@ -2,6 +2,7 @@ use crate::service::{ServiceInput, ServiceStateMachine};
 use crate::types::*;
 use crate::workload::{WorkloadInput, WorkloadStateMachine};
 
+use super::output::PendingOutput;
 use super::{prefix_len_to_netmask, NamespaceStateMachine};
 
 impl NamespaceStateMachine {
@@ -73,6 +74,7 @@ impl NamespaceStateMachine {
                         self.pod_map.remove(pod_id);
                     }
                     WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed => {}
+                    WorkloadState::Transitioning => unreachable!("Transitioning in workload removal"),
                     WorkloadState::RetryBackoff { backoff_timer } => {
                         out.timers_cancel.push(backoff_timer.clone());
                     }
@@ -198,7 +200,7 @@ impl NamespaceStateMachine {
                                 WorkloadInput::SpecChanged,
                                 &self.namespace_id,
                             );
-                            self.forward_workload_outputs(wl_id, wl_outputs, placement_table, out);
+                            self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
                         }
                     }
                     if suspend_changed {
@@ -448,7 +450,7 @@ impl NamespaceStateMachine {
             &self.namespace_id,
         );
         let wl_id = workload_id.clone();
-        self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
+        self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
     }
 
     pub(super) fn handle_resume_pod(
@@ -548,7 +550,7 @@ impl NamespaceStateMachine {
             &self.namespace_id,
         );
         let wl_id = workload_id.clone();
-        self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
+        self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
     }
 
     pub(super) fn handle_deactivate_workload(
@@ -632,7 +634,7 @@ impl NamespaceStateMachine {
             });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
-            self.forward_service_outputs(&sid, &wl_id, svc_outputs, placement_table, out);
+            self.process_outputs(PendingOutput::Service { service_id: sid.clone(), workload_id: wl_id, outputs: svc_outputs }, placement_table, out);
             deactivated_any = true;
         }
 

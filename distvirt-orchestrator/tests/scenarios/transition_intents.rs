@@ -85,13 +85,11 @@ async fn test_demand_during_suspend_immediate_resume() {
     });
     h.converge().await;
 
-    // BUG: Workload ends up Dormant instead of Resuming/Running.
-    // See docstring for details. When this bug is fixed, change assertion to:
-    //   assert!(matches!(state, WorkloadState::Resuming { .. } | WorkloadState::Running { .. }))
+    // Fixed: Workload correctly transitions through Suspended → Resuming → Running.
     let state = h.workload_state("ns", "web");
     assert!(
-        matches!(state, WorkloadState::Dormant),
-        "BUG (expected Resuming/Running but got Dormant due to missing state update in PodSuspended handler): got {:?}",
+        matches!(state, WorkloadState::Resuming { .. } | WorkloadState::Running { .. }),
+        "Expected Resuming or Running after demand-during-suspend, got {:?}",
         state
     );
 }

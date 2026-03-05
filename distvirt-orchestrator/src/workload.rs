@@ -181,6 +181,7 @@ impl WorkloadStateMachine {
         let mut outputs = Vec::new();
 
         match input {
+            // INVARIANT: every DemandUp must have a corresponding entity that will eventually DemandDown
             WorkloadInput::DemandUp => {
                 self.demand_count += 1;
                 match &self.state {
@@ -207,9 +208,9 @@ impl WorkloadStateMachine {
                     self.demand_count -= 1;
                 }
                 if self.demand_count == 0 {
-                    match std::mem::replace(&mut self.state, WorkloadState::Dormant) {
+                    match std::mem::replace(&mut self.state, WorkloadState::Transitioning) {
                         WorkloadState::WaitingForCapacity => {
-                            // Just go dormant, no pod to stop.
+                            self.state = WorkloadState::Dormant;
                         }
                         WorkloadState::Launching {
                             pod_id,
@@ -218,6 +219,7 @@ impl WorkloadStateMachine {
                             ..
                         } => {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
+                            self.state = WorkloadState::Dormant;
                             outputs.push(WorkloadOutput::WorkerCommand(
                                 worker_id,
                                 WorkerCommand::StopPod {
@@ -257,6 +259,7 @@ impl WorkloadStateMachine {
                                     pending: PendingIntent::None,
                                 };
                             } else {
+                                self.state = WorkloadState::Dormant;
                                 outputs.push(WorkloadOutput::WorkerCommand(
                                     worker_id,
                                     WorkerCommand::StopPod {
@@ -267,7 +270,9 @@ impl WorkloadStateMachine {
                                 ));
                             }
                         }
-                        WorkloadState::Dormant => {}
+                        WorkloadState::Dormant => {
+                            self.state = WorkloadState::Dormant;
+                        }
                         // If already suspending/suspended/resuming and demand drops
                         // further, restore the state — these states handle their own
                         // lifecycle.
@@ -275,12 +280,12 @@ impl WorkloadStateMachine {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
                             outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
                             self.consecutive_failures = 0;
-                            // state already set to Dormant by mem::replace
+                            self.state = WorkloadState::Dormant;
                         }
                         WorkloadState::Failed => {
                             outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
                             self.consecutive_failures = 0;
-                            // state already set to Dormant by mem::replace
+                            self.state = WorkloadState::Dormant;
                         }
                         other @ (WorkloadState::Suspending { .. }
                             | WorkloadState::Suspended { .. }
@@ -297,6 +302,7 @@ impl WorkloadStateMachine {
                                 _ => {}
                             }
                         }
+                        WorkloadState::Transitioning => unreachable!("Transitioning in DemandDown"),
                     }
                 }
             }
@@ -350,7 +356,7 @@ impl WorkloadStateMachine {
                             worker_id,
                             launch_timeout,
                             pending,
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
                             match pending {
@@ -383,7 +389,7 @@ impl WorkloadStateMachine {
                             artifact_id,
                             resume_timeout,
                             pending,
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(resume_timeout));
                             // Delete the artifact now that the pod is running again.
@@ -478,7 +484,7 @@ impl WorkloadStateMachine {
                     suspend_timeout,
                     pending,
                     ..
-                } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                 {
                     outputs.push(WorkloadOutput::TimerCancel(suspend_timeout));
 
@@ -496,11 +502,13 @@ impl WorkloadStateMachine {
                         }
                         PendingIntent::Demand => {
                             // Demand is guaranteed > 0 by invariant — immediately resume.
+                            self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() };
                             outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
                         }
                         PendingIntent::None => {
                             if self.demand_count > 0 {
                                 // Demand came back while we were suspending — immediately resume.
+                                self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() };
                                 outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
                             } else {
                                 self.state = WorkloadState::Suspended { artifact_id };
@@ -522,7 +530,7 @@ impl WorkloadStateMachine {
                     suspend_timeout,
                     pending,
                     ..
-                } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                 {
                     outputs.push(WorkloadOutput::TimerCancel(suspend_timeout));
                     // Pod is dead after failed suspend. Transition based on intent.
@@ -549,7 +557,7 @@ impl WorkloadStateMachine {
                             launch_timeout,
                             pending,
                             ..
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
                             outputs.push(WorkloadOutput::BecameUnready);
@@ -570,7 +578,7 @@ impl WorkloadStateMachine {
                             suspend_timeout,
                             pending,
                             ..
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             // Pod died while we were trying to suspend it.
                             outputs.push(WorkloadOutput::TimerCancel(suspend_timeout));
@@ -587,7 +595,7 @@ impl WorkloadStateMachine {
                             artifact_id,
                             pending,
                             ..
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             // Pod died during resume. Snapshot may be corrupted, delete it.
                             outputs.push(WorkloadOutput::TimerCancel(resume_timeout));
@@ -611,7 +619,7 @@ impl WorkloadStateMachine {
                             launch_timeout,
                             pending,
                             ..
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
                             outputs.push(WorkloadOutput::BecameUnready);
@@ -632,7 +640,7 @@ impl WorkloadStateMachine {
                             suspend_timeout,
                             pending,
                             ..
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(suspend_timeout));
                             // BecameUnready already emitted on entry to Suspending.
@@ -652,7 +660,7 @@ impl WorkloadStateMachine {
                             resume_timeout,
                             pending,
                             ..
-                        } = std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                        } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(resume_timeout));
                             outputs.push(WorkloadOutput::BecameUnready);
@@ -760,7 +768,7 @@ impl WorkloadStateMachine {
                     }
                     WorkloadState::Running { .. } => {
                         if let WorkloadState::Running { pod_id, worker_id } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::BecameUnready);
                             if self.suspend_on_idle {
@@ -788,6 +796,7 @@ impl WorkloadStateMachine {
                                     pending: PendingIntent::Deactivate,
                                 };
                             } else {
+                                self.state = WorkloadState::Dormant;
                                 outputs.push(WorkloadOutput::WorkerCommand(
                                     worker_id,
                                     WorkerCommand::StopPod {
@@ -810,11 +819,12 @@ impl WorkloadStateMachine {
                     }
                     WorkloadState::RetryBackoff { .. } => {
                         if let WorkloadState::RetryBackoff { backoff_timer } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
                             outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
                             self.consecutive_failures = 0;
+                            self.state = WorkloadState::Dormant;
                         }
                     }
                     WorkloadState::Failed => {
@@ -822,6 +832,7 @@ impl WorkloadStateMachine {
                         self.consecutive_failures = 0;
                         self.state = WorkloadState::Dormant;
                     }
+                    WorkloadState::Transitioning => unreachable!("Transitioning in ForceDeactivate"),
                 }
             }
             WorkloadInput::SpecChanged => {
@@ -836,7 +847,7 @@ impl WorkloadStateMachine {
                     }
                     WorkloadState::Running { .. } => {
                         if let WorkloadState::Running { pod_id, worker_id } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::WorkerCommand(
                                 worker_id,
@@ -853,7 +864,7 @@ impl WorkloadStateMachine {
                     }
                     WorkloadState::Suspended { .. } => {
                         if let WorkloadState::Suspended { artifact_id } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::DeleteArtifact { artifact_id });
                             self.consecutive_failures = 0;
@@ -862,7 +873,7 @@ impl WorkloadStateMachine {
                     }
                     WorkloadState::RetryBackoff { .. } => {
                         if let WorkloadState::RetryBackoff { backoff_timer } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
                             outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
@@ -875,13 +886,14 @@ impl WorkloadStateMachine {
                         outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
                         self.transition_on_demand(&mut outputs);
                     }
+                    WorkloadState::Transitioning => unreachable!("Transitioning in SpecChanged"),
                 }
             }
             WorkloadInput::ManualRestart => {
                 match &self.state {
                     WorkloadState::Running { .. } => {
                         if let WorkloadState::Running { pod_id, worker_id } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::WorkerCommand(
                                 worker_id,
@@ -898,7 +910,7 @@ impl WorkloadStateMachine {
                     }
                     WorkloadState::RetryBackoff { .. } => {
                         if let WorkloadState::RetryBackoff { backoff_timer } =
-                            std::mem::replace(&mut self.state, WorkloadState::Dormant)
+                            std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
                             outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });

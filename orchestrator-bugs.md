@@ -5,6 +5,7 @@ Analysis of 6 bugs documented in `distvirt-orchestrator/tests/scenarios/` test f
 ## Bug 1: Worker reconnect fails to reschedule WaitingForCapacity workloads
 
 **File:** `scenarios/worker_disconnect.rs`
+**Status:** FIXED
 
 When a worker disconnects, `handle_worker_lost` moves affected workloads to
 `WaitingForCapacity`. When a new worker connects, `handle_worker_connected`
@@ -23,6 +24,7 @@ worker is eligible. The "already-Active namespace" path skips reconciliation.
 ## Bug 2: PodSuspended leaves state as Dormant instead of Suspended
 
 **File:** `scenarios/transition_intents.rs`
+**Status:** FIXED
 
 The `PodSuspended` handler uses `mem::replace(&mut self.state, Dormant)` to
 destructure the old state. For `PendingIntent::Demand` and `PendingIntent::None`
@@ -55,6 +57,7 @@ but `Suspended` doesn't carry worker info.
 ## Bug 4: Second service on already-Running workload stuck in NeedBackend
 
 **File:** `scenarios/multi_service.rs`
+**Status:** FIXED
 
 When a second service activates and sends `DemandUp`, the workload is already
 `Running`. The `DemandUp` handler (workload.rs:202) is a no-op for `Running` —
@@ -68,6 +71,7 @@ already-running workload. No mechanism for late joiners to query current state.
 ## Bug 5: Resume failure causes Dormant instead of RetryBackoff
 
 **File:** `scenarios/resume_failure.rs`
+**Status:** FIXED
 
 When `PodGone` fires during `Resuming`, the workload emits `BecameUnready`
 (workload.rs:597). In `forward_workload_outputs`, `BecameUnready` is forwarded
@@ -84,6 +88,7 @@ This is a re-entrant state mutation problem.
 ## Bug 6: FabricRouteMiss causes orphaned demand
 
 **File:** `scenarios/fabric_route_miss.rs`
+**Status:** PARTIALLY FIXED (NeedBackend issue fixed, orphaned demand remains)
 
 Two issues:
 
@@ -91,8 +96,10 @@ Two issues:
    workload (events.rs:~270) with no corresponding entity that will ever send
    `DemandDown`. The demand count is permanently elevated.
 
-2. **NeedBackend (same as Bug 4):** When a service subsequently activates on an
-   already-running workload, it gets stuck in `NeedBackend`.
+2. ~~**NeedBackend (same as Bug 4):** When a service subsequently activates on an
+   already-running workload, it gets stuck in `NeedBackend`.~~
+   **FIXED:** Late-joiner WorkloadReady now notifies services when DemandUp
+   arrives on an already-Running workload.
 
 **Root cause:** `FabricRouteMiss` acts as an anonymous demand source with no
 lifecycle management.
@@ -101,33 +108,39 @@ lifecycle management.
 
 ## Structural Analysis: Why Did These Bugs Happen?
 
-### 1. The `mem::replace` pattern (Bug 2)
+### 1. The `mem::replace` pattern (Bug 2) — FIXED
 
-The workload SM uses `mem::replace(&mut self.state, Dormant)` extensively to
-destructure enum variants. `Dormant` is the placeholder but also a valid state.
-If any code path forgets to overwrite `self.state`, the workload silently lands
-in `Dormant` with no error. A sentinel/invalid placeholder or a builder pattern
-that forces setting the new state would catch this at compile time.
+The workload SM used `mem::replace(&mut self.state, Dormant)` extensively to
+destructure enum variants. `Dormant` was the placeholder but also a valid state.
+If any code path forgot to overwrite `self.state`, the workload silently landed
+in `Dormant` with no error.
 
-### 2. Synchronous/eager output processing (Bug 5)
+**Fix applied:** Replaced the `Dormant` placeholder with a `Transitioning`
+sentinel variant that panics in all state accessors. All code paths now
+explicitly set the final state. Stateright property `"no transitioning state"`
+catches any future regressions at model-checking time.
 
-The namespace layer processes workload outputs immediately and recursively —
-`forward_workload_outputs` can trigger service SM steps, which produce
-`DemandDown`, which is immediately fed back to the workload SM. This re-entrant
-mutation means ordering of outputs matters enormously. Bug 5 is a direct
-consequence: `BecameUnready` triggers a chain that zeroes demand before retry
-logic runs.
+### 2. Synchronous/eager output processing (Bug 5) — FIXED
 
-### 3. Event-only notification model (Bugs 1, 4, 6)
+The namespace layer previously processed workload outputs immediately and
+recursively — `forward_workload_outputs` could trigger service SM steps, which
+produced `DemandDown`, which was immediately fed back to the workload SM.
+
+**Fix applied:** Replaced with queue-based `process_outputs` using
+`VecDeque<PendingOutput>`. All outputs from a single `step()` call are now
+processed before side effects run. Additionally, when `BecameUnready` fires on
+a retrying workload (RetryBackoff/WaitingForCapacity), activation services are
+re-activated to NeedBackend to preserve demand through failure recovery.
+
+### 3. Event-only notification model (Bugs 1, 4, 6) — FIXED
 
 `BecameReady` is only emitted as a one-shot event during state transitions.
 There's no mechanism for late joiners to query current state:
 
-- Bug 4: A second service can't learn the workload is already running.
-- Bug 1: A new worker can't learn workloads are waiting for capacity.
-
-The reconciliation system (`reconcile_all_services`) partially addresses this
-but is only called in specific code paths, not consistently.
+- ~~Bug 4: A second service can't learn the workload is already running.~~
+  **FIXED:** Late-joiner WorkloadReady in `translate_service_outputs`.
+- ~~Bug 1: A new worker can't learn workloads are waiting for capacity.~~
+  **FIXED:** `schedule_waiting_pods` called in `process_namespace_output`.
 
 ### 4. Missing cross-reference between state and placement table (Bug 3)
 
@@ -144,99 +157,84 @@ eventually `DemandDown`. `FabricRouteMiss` violates this contract.
 
 ## Fixes
 
-### Fix 1: Schedule on NamespaceCreated, not on worker connect (Bug 1)
+### Fix 1: Schedule on NamespaceCreated, not on worker connect (Bug 1) — IMPLEMENTED
 
-Remove `schedule_waiting_pods()` from `handle_worker_connected`
-(`orchestrator/scheduling.rs`). Instead, call it from the `NamespaceCreated`
-handler when a worker's fabric becomes `Active` — specifically in the
-`else if self.status == Active` branch (`namespace/events.rs:57-61`).
+Removed `schedule_waiting_pods()` from `handle_worker_connected`
+(`orchestrator/workers.rs`). Added it to `process_namespace_output`
+(`orchestrator/scheduling.rs`) after processing pod/resume requests. This runs
+after every namespace step, which covers NamespaceCreated (worker becomes
+Active), WorkerLost (workloads move to WaitingForCapacity), etc.
 
-This eliminates the temporal ordering problem entirely: scheduling only runs
-when the worker is actually eligible (`FabricStatus::Active`), so
-`select_worker_for_pod` will find it.
+The call is idempotent — it scans for WaitingForCapacity workloads and only
+acts when an Active worker is available. Most calls find nothing to schedule.
 
-Note: `handle_worker_lost` with the last worker sets status to `Creating` and
-skips reconciliation. When a new worker arrives and triggers `NamespaceCreated`,
-the namespace goes `Creating` → `Active`, which calls `reconcile_all_services`.
-However, `reconcile_service` only handles `(NeedBackend, Dormant)` — not
-`(NeedBackend, WaitingForCapacity)`. Calling `schedule_waiting_pods` on
-`NamespaceCreated` covers this gap.
+### Fix 2: Collect-then-process output model (Bug 5, systemic) — IMPLEMENTED
 
-### Fix 2: Collect-then-process output model (Bug 5, systemic)
+Replaced the recursive `forward_workload_outputs` ↔ `forward_service_outputs`
+call chain (`namespace/output.rs`) with a queue-based processing loop using
+`VecDeque<PendingOutput>`. The `PendingOutput` enum has `Workload` and `Service`
+variants. A single `process_outputs` method drains the queue iteratively with
+a MAX_ITERATIONS=100 convergence guard.
 
-Replace the recursive `forward_workload_outputs` ↔ `forward_service_outputs`
-call chain (`namespace/output.rs:9-54, 56+`) with a queue-based round
-processing loop:
+`translate_workload_outputs` and `translate_service_outputs` are non-recursive
+versions of the old functions that push to the queue instead of calling each
+other directly.
 
-```
-let mut wl_queue: VecDeque<(WorkloadId, WorkloadInput)> = ...;
-let mut svc_queue: VecDeque<(ServiceId, ServiceInput)> = ...;
+**Additional fix for Bug 5:** Queue-based processing alone doesn't fully fix
+the resume failure case because the service's DemandDown still runs (just
+deferred). The fix adds **retry-aware BecameUnready handling**: when
+`BecameUnready` fires on a retrying workload (RetryBackoff or
+WaitingForCapacity), DemandDown from activation services is filtered out, and
+the service is re-activated (Idle → NeedBackend via ServiceActivation) to
+preserve demand through failure recovery. Always-on services are unaffected
+(they already stay in NeedBackend on WorkloadUnready).
 
-while !wl_queue.is_empty() || !svc_queue.is_empty() {
-    // drain workload queue, collect outputs
-    // translate workload outputs → service inputs, push to svc_queue
-    // drain service queue, collect outputs
-    // translate service outputs → workload inputs, push to wl_queue
-}
-```
-
-This gives a clear separation between "compute next state" and "propagate
-effects". Bug 5 becomes impossible — the `BecameUnready` → `DemandDown` chain
-happens in a subsequent round, after retry logic has already set the state.
-
-Add an iteration cap as a convergence guard. In practice the demand model is
-monotonic per round, so it should converge quickly.
-
-**Demand model invariant comments** — add at key locations:
-- `WorkloadInput::DemandUp` handler (`workload.rs:184`): every `DemandUp` must
+**Demand model invariant comments** added:
+- `WorkloadInput::DemandUp` handler (`workload.rs`): every `DemandUp` must
   have a corresponding entity that will eventually `DemandDown`
-- `forward_service_outputs` (`namespace/output.rs:19`): services are the
+- `translate_service_outputs` DemandUp/DemandDown arm: services are the
   canonical demand holders
-- `FabricRouteMiss` handler (`namespace/events.rs:250`): note this bypasses the
-  service demand model (to be fixed by Fix 8)
 
-### Fix 3: Late-joiner WorkloadReady at namespace layer (Bugs 4, 6)
+### Fix 3: Late-joiner WorkloadReady at namespace layer (Bugs 4, 6) — IMPLEMENTED
 
-Handle in `forward_service_outputs` (`namespace/output.rs:19-38`): after
-processing `DemandUp`, if the target workload is already `Running`,
-immediately enqueue `ServiceInput::WorkloadReady` back to the originating
-service.
+In `translate_service_outputs` (`namespace/output.rs`), after processing
+`DemandUp` and stepping the workload SM: if the workload is already `Running`,
+immediately step the originating service with `ServiceInput::WorkloadReady`
+(constructing `ServiceBackend` from the workload spec). DemandUp/DemandDown
+from the service's response are filtered (same as BecameReady handling).
 
-This keeps the workload SM's concern narrow — it doesn't need to know about
-services. The namespace layer is the right place for this translation since it
-already mediates all cross-SM communication.
+This fixes Bug 4 completely and Bug 6's NeedBackend issue. Bug 6's orphaned
+demand from FabricRouteMiss remains unfixed (see Fix 8).
 
-### Fix 4: Add `Transitioning` sentinel variant (Bug 2, systemic)
+### Fix 4: Add `Transitioning` sentinel variant (Bug 2, systemic) — IMPLEMENTED
 
-Add `WorkloadState::Transitioning` to `types/states.rs`. Replace all 18
+Added `WorkloadState::Transitioning` to `types/states.rs`. Replaced all 18
 `mem::replace(&mut self.state, WorkloadState::Dormant)` call sites in
 `workload.rs` with `mem::replace(&mut self.state, WorkloadState::Transitioning)`.
 
-Make `Transitioning` panic in `worker_id()`, `pod_id()` and other state
-helpers, so any forgotten overwrite is caught immediately rather than silently
-landing in a valid quiescent state.
+Every code path that previously relied on the `Dormant` placeholder being the
+final state now explicitly sets `self.state = WorkloadState::Dormant`.
 
-Add a stateright property:
-```rust
-Property::always("no transitioning state", |_model, state| {
-    state.namespace.workloads.values()
-        .all(|wl| !matches!(wl.state, WorkloadState::Transitioning))
-})
-```
+`Transitioning` panics in `as_str()`, `worker_id()`, `pod_id()`, and
+`artifact_id()`, so any forgotten overwrite is caught immediately rather than
+silently landing in a valid quiescent state.
 
-This catches the entire bug class at model-checking time — any code path that
-forgets to set the final state will be found exhaustively.
+Added stateright property `"no transitioning state"` to both the workload-level
+and namespace-level model checkers, catching the entire bug class exhaustively.
 
-### Fix 5: Set state to Suspended before ResumeRequest (Bug 2)
+### Fix 5: Set state to Suspended before ResumeRequest (Bug 2) — IMPLEMENTED
 
-In the `PodSuspended` handler (`workload.rs:497-504`):
-- `PendingIntent::Demand` branch: add
+In the `PodSuspended` handler (`workload.rs`):
+- `PendingIntent::Demand` branch: added
   `self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() }`
   before emitting `ResumeRequest`.
 - `PendingIntent::None` with `demand_count > 0` branch: same.
 
 This ensures `handle_resume_pod`'s
 `if !matches!(self.state, WorkloadState::Suspended { .. })` guard passes.
+
+Updated `test_demand_during_suspend_immediate_resume` from asserting the buggy
+`Dormant` state to asserting `Resuming` or `Running`.
 
 ### Fix 6: Store worker_id in Suspended (Bug 3)
 
@@ -257,13 +255,11 @@ The existing stateright property "suspended workloads have valid placement"
 
 ### Fix 7: Don't emit BecameUnready during Resuming→PodGone (Bug 5)
 
-Remove `outputs.push(WorkloadOutput::BecameUnready)` from the `Resuming`
-`PodGone` handler (`workload.rs:597`). The workload will retry via
-`RetryBackoff` — services don't need to know about transient resume failures.
-
-This is the targeted fix for Bug 5. Fix 2 (collect-then-process) prevents the
-root cause generically and should be preferred long-term. This fix is simpler
-and can be applied independently/first.
+**Superseded by Fix 2's retry-aware BecameUnready handling.** The queue-based
+output model with retry compensation addresses this more generically — it
+preserves demand through any failure recovery path (not just Resuming→PodGone),
+while still forwarding WorkloadUnready to services so they clear backend info
+on workers.
 
 ### Fix 8: Bypass demand system for FabricRouteMiss (Bug 6)
 
@@ -296,4 +292,20 @@ When the last worker is lost, `handle_worker_lost` sets namespace status to
 its `NamespaceCreated` transitions the namespace `Creating` → `Active`,
 `reconcile_all_services` runs — but it won't match workloads already in
 `WaitingForCapacity` (reconciliation only handles `Dormant`). Fix 1 (calling
-`schedule_waiting_pods` on `NamespaceCreated`) covers this gap.
+`schedule_waiting_pods` in `process_namespace_output`) covers this gap.
+
+### Demand preservation through failures (new behavior from Fix 2)
+
+With the retry-aware BecameUnready handling, activation services now stay in
+NeedBackend (instead of going Idle) when a workload fails and enters a retry
+state. This means:
+
+- **Worker loss**: workload stays WaitingForCapacity, service stays NeedBackend.
+  When a new worker joins, the workload is automatically scheduled.
+- **Launch timeout**: workload stays WaitingForCapacity, service stays NeedBackend.
+  The workload is immediately re-schedulable.
+- **Pod failure during retry**: workload enters RetryBackoff, service stays
+  NeedBackend. After backoff, the workload retries.
+
+This is strictly better than the old behavior where failures caused activation
+services to drop demand, requiring a new ServiceActivation event to restart.

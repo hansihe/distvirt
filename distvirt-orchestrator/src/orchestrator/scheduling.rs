@@ -83,6 +83,11 @@ impl Orchestrator {
             }
         }
 
+        // Schedule any workloads waiting for capacity. This is idempotent and covers:
+        // NamespaceCreated (worker becomes Active), WorkerLost (workloads move to
+        // WaitingForCapacity and may be schedulable on other workers), etc.
+        self.schedule_waiting_pods(out);
+
         // If namespace is fully destroyed, remove it and clean up worker references.
         if destroyed {
             if let Some(ns) = self.namespaces.remove(&namespace_id) {

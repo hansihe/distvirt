@@ -13,23 +13,9 @@ use crate::harness::*;
 /// 2. Re-activate → ResumePod sent → worker returns PodFailed
 /// 3. Expected: workload enters RetryBackoff → cold launch via LaunchPod
 ///
-/// **BUG**: The workload ends up Dormant instead of RetryBackoff/Running.
-///
-/// Root cause: When ResumePod fails (PodGone on Resuming state), the workload
-/// emits `BecameUnready` as one of its outputs. When `forward_workload_outputs`
-/// processes `BecameUnready`, it calls `ServiceInput::WorkloadUnready` on the
-/// service, which emits `DemandDown`. This `DemandDown` is immediately forwarded
-/// to the workload, decrementing `demand_count` to 0. By the time
-/// `transition_on_demand` runs (which was called with demand_count=1 inside
-/// `wl.step()`), the subsequent `PodRequest` output gets forwarded, but the
-/// `DemandDown` from BecameUnready has already set the workload to Dormant,
-/// cancelling the retry.
-///
-/// Fix: The workload SM's `PodGone` handler for `Resuming` should NOT emit
-/// `BecameUnready` before `transition_on_intent`, OR the namespace layer should
-/// defer processing `BecameUnready` side effects until after all workload outputs
-/// are collected. Alternatively, `transition_on_demand` should be called before
-/// `BecameUnready` is emitted.
+/// Previously buggy: BecameUnready triggered DemandDown which zeroed demand_count
+/// before retry logic could run. Fixed by queue-based output processing that
+/// collects all outputs before processing side effects.
 #[tokio::test(start_paused = true)]
 async fn test_resume_failure_falls_back_to_cold_launch() {
     let mut h = TestHarness::new();
@@ -81,14 +67,9 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     });
     h.converge().await;
 
-    // BUG: The workload ends up Dormant instead of RetryBackoff.
-    // This is because BecameUnready triggers DemandDown from the service,
-    // which drops demand_count to 0 before the retry logic can take effect.
-    //
-    // Expected behavior: workload should be in RetryBackoff (with demand still up),
-    // then after backoff, relaunch via cold LaunchPod.
-    //
-    // Actual behavior: workload is Dormant, service is Idle, no retry occurs.
-    h.assert_workload_dormant("ns1", "web");
-    h.assert_service_idle("ns1", "web-svc");
+    // Fixed: Queue-based output processing ensures DemandDown from BecameUnready
+    // doesn't zero demand_count before retry logic runs. The workload should enter
+    // RetryBackoff, then after backoff, relaunch via cold LaunchPod.
+    h.assert_workload_retry_backoff("ns1", "web");
+    h.assert_service_need_backend("ns1", "web-svc");
 }

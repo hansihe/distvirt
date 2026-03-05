@@ -499,6 +499,7 @@ impl Model for NamespaceModel {
                         | WorkloadState::Dormant
                         | WorkloadState::RetryBackoff { .. }
                         | WorkloadState::Failed => {}
+                        WorkloadState::Transitioning => unreachable!("Transitioning in model"),
                     }
                 }
             }
@@ -685,6 +686,11 @@ impl Model for NamespaceModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         let mut props = vec![
+            // Safety: Transitioning sentinel must never survive a step() call.
+            Property::<Self>::always("no transitioning state", |_model, state| {
+                state.namespace.workloads.values()
+                    .all(|wl| !matches!(wl.state, WorkloadState::Transitioning))
+            }),
             // Safety: No commands sent to workers not in namespace's worker map.
             Property::<Self>::always("no commands to unknown workers", |_model, state| {
                 let ns = &state.namespace;

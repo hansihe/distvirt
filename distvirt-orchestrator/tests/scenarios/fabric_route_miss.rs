@@ -127,22 +127,17 @@ async fn test_route_miss_ignored_for_unknown_ip() {
     h.assert_workload_dormant("ns", "web");
 }
 
-/// BUG DOCUMENTATION: FabricRouteMiss sends DemandUp directly to the workload SM
-/// with no corresponding DemandDown source. This causes two related problems:
+/// BUG DOCUMENTATION (partially fixed): FabricRouteMiss sends DemandUp directly to
+/// the workload SM with no corresponding DemandDown source.
 ///
-/// 1. **Orphaned demand**: demand_count gets permanently elevated by 1, so even when
-///    all services go idle and fire DemandDown, the workload never reaches demand_count=0
-///    and thus never suspends/goes dormant.
+/// **Fixed**: Late-joiner WorkloadReady now notifies services when DemandUp arrives
+/// on an already-Running workload, so the service correctly transitions to Active.
 ///
-/// 2. **Service stuck in NeedBackend**: When a ServiceActivation arrives while the
-///    workload is already Running (activated by FabricRouteMiss), the service transitions
-///    Idle → NeedBackend and sends DemandUp. But the workload is already Running, so it
-///    just increments demand_count without re-emitting BecameReady. The service never
-///    receives WorkloadReady and stays stuck in NeedBackend forever.
-///
-/// This test asserts the CURRENT (buggy) behavior. Correct behavior: the workload
-/// should suspend/go dormant when all services are idle, regardless of FabricRouteMiss
-/// history, and services should be notified of already-running backends.
+/// **Remaining bug**: Orphaned demand from FabricRouteMiss. demand_count gets
+/// permanently elevated by 1, so even when all services go idle and fire DemandDown,
+/// the workload never reaches demand_count=0 and thus never suspends/goes dormant.
+/// Correct behavior: workload should suspend when all services are idle, regardless
+/// of FabricRouteMiss history.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_route_miss_demand_leak() {
     let mut h = TestHarness::new();
@@ -164,8 +159,7 @@ async fn test_route_miss_demand_leak() {
 
     // Step 2: ServiceActivation arrives (e.g. real traffic hits the service IP).
     // Service SM goes Idle → NeedBackend → sends another DemandUp. demand_count = 2.
-    // BUG: The service stays stuck in NeedBackend because the already-running workload
-    // doesn't re-emit BecameReady, so the service never gets WorkloadReady.
+    // Fixed: Late-joiner WorkloadReady notifies the service, so it transitions to Active.
     h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
         namespace_id: "ns".into(),
         service_id: ServiceId::from("web-svc"),
@@ -173,17 +167,16 @@ async fn test_route_miss_demand_leak() {
     });
     h.converge().await;
     h.assert_workload_running("ns", "web");
-    // BUG: service is stuck in NeedBackend (should be Active).
-    h.assert_service_need_backend("ns", "web-svc");
+    // Fixed: service is now Active (previously stuck in NeedBackend).
+    h.assert_service_active("ns", "web-svc");
 
     // Step 3: Advance well past the idle timeout.
-    // Since the service is stuck in NeedBackend (never reached Active), there's no
-    // idle timer to fire and no DemandDown path at all.
+    // The service is Active with backend_need=Active, no idle timer fires
+    // (would need BackendNeed::None to start idle timer).
     h.advance_time(timeout * 3).await;
 
-    // BUG: workload is still Running because demand_count == 2 (one orphaned from
-    // FabricRouteMiss, one from the stuck NeedBackend service). Neither will ever
-    // produce a DemandDown.
+    // BUG (remaining): workload is still Running because demand_count == 2
+    // (one orphaned from FabricRouteMiss, one from the service).
     // Correct behavior: workload should be Suspended after all services are idle.
     h.assert_workload_running("ns", "web");
 }

@@ -46,9 +46,6 @@ impl Orchestrator {
 
         // Push worker registry to all workers.
         self.push_worker_registry(out);
-
-        // Check all namespaces for workloads waiting for capacity and schedule them.
-        self.schedule_waiting_pods(out);
     }
 
     pub(crate) fn handle_worker_disconnected(
