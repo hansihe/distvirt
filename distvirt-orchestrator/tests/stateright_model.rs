@@ -88,8 +88,9 @@ impl PlacementSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkloadSnapshot {
     state: WorkloadState,
-    demand_count: u32,
+    current_demand: u32,
     consecutive_failures: u32,
+    route_miss_wake: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,8 +140,9 @@ impl NamespaceSnapshot {
                         k.clone(),
                         WorkloadSnapshot {
                             state: v.state.clone(),
-                            demand_count: v.demand_count,
+                            current_demand: v.current_demand,
                             consecutive_failures: v.consecutive_failures,
+                            route_miss_wake: v.route_miss_wake,
                         },
                     )
                 })
@@ -207,8 +209,9 @@ impl NamespaceSnapshot {
             let mut wl = distvirt_orchestrator::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle);
             wl.max_retries = max_retries;
             wl.state = wl_snap.state.clone();
-            wl.demand_count = wl_snap.demand_count;
+            wl.current_demand = wl_snap.current_demand;
             wl.consecutive_failures = wl_snap.consecutive_failures;
+            wl.route_miss_wake = wl_snap.route_miss_wake;
             workloads.insert(wl_id.clone(), wl);
         }
 

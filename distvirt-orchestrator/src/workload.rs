@@ -23,7 +23,8 @@ impl std::fmt::Display for PodGoneReason {
 pub struct WorkloadStateMachine {
     pub workload_id: WorkloadId,
     pub state: WorkloadState,
-    pub demand_count: u32,
+    /// Current demand level, set authoritatively by the namespace reconciliation layer.
+    pub current_demand: u32,
     /// Whether to suspend the pod instead of stopping it when demand drops to zero.
     pub suspend_on_idle: bool,
     /// Reason for the most recent pod failure, for observability.
@@ -33,12 +34,14 @@ pub struct WorkloadStateMachine {
     /// Maximum number of retries before entering terminal Failed state.
     /// Defaults to MAX_RETRIES (5). Can be lowered for model checking.
     pub max_retries: u32,
+    /// Set by FabricRouteMiss to wake a dormant workload. Cleared on PodRunning.
+    /// NOTE: preserves Bug 6 — never cleared externally, needs worker-side FabricRouteMissResolved.
+    pub route_miss_wake: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkloadInput {
-    DemandUp,
-    DemandDown,
+    SetDemand { count: u32 },
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     /// Outer layer has generated a pod_id for resuming from snapshot.
     ResumePod { worker_id: WorkerId, pod_id: PodId, artifact_id: ArtifactId },
@@ -93,18 +96,19 @@ impl WorkloadStateMachine {
         WorkloadStateMachine {
             workload_id,
             state: WorkloadState::Dormant,
-            demand_count: 0,
+            current_demand: 0,
             suspend_on_idle,
             last_failure_reason: None,
             consecutive_failures: 0,
             max_retries: MAX_RETRIES,
+            route_miss_wake: false,
         }
     }
 
     /// Helper: transition to dormant or waiting-for-capacity based on demand,
     /// with exponential backoff on consecutive failures.
     fn transition_on_demand(&mut self, outputs: &mut Vec<WorkloadOutput>) {
-        if self.demand_count > 0 {
+        if self.current_demand > 0 {
             if self.consecutive_failures >= self.max_retries {
                 self.state = WorkloadState::Failed;
                 outputs.push(WorkloadOutput::ConditionSet {
@@ -158,7 +162,7 @@ impl WorkloadStateMachine {
                 self.transition_on_demand(outputs);
             }
             PendingIntent::Demand | PendingIntent::None => {
-                // Fall back to demand_count check (existing behavior).
+                // Fall back to current_demand check (existing behavior).
                 self.transition_on_demand(outputs);
             }
         }
@@ -181,33 +185,32 @@ impl WorkloadStateMachine {
         let mut outputs = Vec::new();
 
         match input {
-            // INVARIANT: every DemandUp must have a corresponding entity that will eventually DemandDown
-            WorkloadInput::DemandUp => {
-                self.demand_count += 1;
-                match &self.state {
-                    WorkloadState::Dormant if self.demand_count == 1 => {
-                        self.state = WorkloadState::WaitingForCapacity;
-                        outputs.push(WorkloadOutput::PodRequest);
+            WorkloadInput::SetDemand { count } => {
+                let old = self.current_demand;
+                self.current_demand = count;
+
+                if count > 0 && old == 0 {
+                    // Demand appeared: wake workload.
+                    match &self.state {
+                        WorkloadState::Dormant => {
+                            self.state = WorkloadState::WaitingForCapacity;
+                            outputs.push(WorkloadOutput::PodRequest);
+                        }
+                        WorkloadState::Suspended { artifact_id } => {
+                            // Resume from snapshot instead of cold boot.
+                            outputs.push(WorkloadOutput::ResumeRequest {
+                                artifact_id: artifact_id.clone(),
+                            });
+                        }
+                        WorkloadState::Launching { .. }
+                        | WorkloadState::Suspending { .. }
+                        | WorkloadState::Resuming { .. } => {
+                            self.upgrade_pending(PendingIntent::Demand);
+                        }
+                        _ => {}
                     }
-                    WorkloadState::Suspended { artifact_id } if self.demand_count == 1 => {
-                        // Resume from snapshot instead of cold boot.
-                        outputs.push(WorkloadOutput::ResumeRequest {
-                            artifact_id: artifact_id.clone(),
-                        });
-                    }
-                    WorkloadState::Launching { .. }
-                    | WorkloadState::Suspending { .. }
-                    | WorkloadState::Resuming { .. } => {
-                        self.upgrade_pending(PendingIntent::Demand);
-                    }
-                    _ => {}
-                }
-            }
-            WorkloadInput::DemandDown => {
-                if self.demand_count > 0 {
-                    self.demand_count -= 1;
-                }
-                if self.demand_count == 0 {
+                } else if count == 0 && old > 0 {
+                    // Demand dropped to zero: shut down.
                     match std::mem::replace(&mut self.state, WorkloadState::Transitioning) {
                         WorkloadState::WaitingForCapacity => {
                             self.state = WorkloadState::Dormant;
@@ -273,9 +276,6 @@ impl WorkloadStateMachine {
                         WorkloadState::Dormant => {
                             self.state = WorkloadState::Dormant;
                         }
-                        // If already suspending/suspended/resuming and demand drops
-                        // further, restore the state — these states handle their own
-                        // lifecycle.
                         WorkloadState::RetryBackoff { backoff_timer } => {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
                             outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
@@ -302,9 +302,10 @@ impl WorkloadStateMachine {
                                 _ => {}
                             }
                         }
-                        WorkloadState::Transitioning => unreachable!("Transitioning in DemandDown"),
+                        WorkloadState::Transitioning => unreachable!("Transitioning in SetDemand"),
                     }
                 }
+                // Other transitions (count changed but still >0 or still 0): no-op.
             }
             WorkloadInput::LaunchPod { worker_id, pod_id } => {
                 if !matches!(self.state, WorkloadState::WaitingForCapacity) {
@@ -348,6 +349,9 @@ impl WorkloadStateMachine {
             WorkloadInput::PodRunning { pod_id } => {
                 self.consecutive_failures = 0;
                 self.last_failure_reason = None;
+                // NOTE: route_miss_wake is intentionally NOT cleared here.
+                // Bug 6: FabricRouteMiss demand is never externally resolved.
+                // Clearing on PodRunning would drop demand before any service activates.
                 outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
                 match &self.state {
                     WorkloadState::Launching { pod_id: pid, .. } if *pid == pod_id => {
@@ -419,7 +423,7 @@ impl WorkloadStateMachine {
                                     self.state = WorkloadState::Running { pod_id, worker_id };
                                 }
                                 PendingIntent::None => {
-                                    if self.demand_count > 0 {
+                                    if self.current_demand > 0 {
                                         outputs.push(WorkloadOutput::BecameReady {
                                             pod_id: pod_id.clone(),
                                             worker_id: worker_id.clone(),
@@ -506,7 +510,7 @@ impl WorkloadStateMachine {
                             outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
                         }
                         PendingIntent::None => {
-                            if self.demand_count > 0 {
+                            if self.current_demand > 0 {
                                 // Demand came back while we were suspending — immediately resume.
                                 self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() };
                                 outputs.push(WorkloadOutput::ResumeRequest { artifact_id });

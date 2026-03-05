@@ -23,9 +23,6 @@ pub(crate) enum PendingOutput {
 impl NamespaceStateMachine {
     /// Process outputs from workload/service state machines using a queue to avoid
     /// recursive calls between forward_workload_outputs and forward_service_outputs.
-    /// This ensures all outputs from one step are fully collected before processing
-    /// side effects, preventing bugs where DemandDown zeroes demand_count before
-    /// retry logic runs.
     pub(crate) fn process_outputs(
         &mut self,
         initial: PendingOutput,
@@ -75,90 +72,19 @@ impl NamespaceStateMachine {
         }
     }
 
-    /// Non-recursive version of the old `forward_service_outputs`.
-    /// Instead of calling forward_workload_outputs directly, pushes to the queue.
+    /// Translate service outputs. Services no longer emit demand events;
+    /// only pass-through for WorkerCommand, BroadcastWorkerCommand, TimerSet, TimerCancel.
     fn translate_service_outputs(
         &mut self,
-        service_id: &ServiceId,
-        workload_id: &WorkloadId,
+        _service_id: &ServiceId,
+        _workload_id: &WorkloadId,
         outputs: Vec<ServiceOutput>,
         _placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
-        queue: &mut VecDeque<PendingOutput>,
+        _queue: &mut VecDeque<PendingOutput>,
     ) {
         for svc_out in outputs {
             match svc_out {
-                // Services are the canonical demand holders — see demand model invariants
-                ServiceOutput::DemandUp | ServiceOutput::DemandDown => {
-                    let wl_input = match svc_out {
-                        ServiceOutput::DemandUp => WorkloadInput::DemandUp,
-                        ServiceOutput::DemandDown => WorkloadInput::DemandDown,
-                        _ => unreachable!(),
-                    };
-                    let wl_outputs = if let Some(wl) = self.workloads.get_mut(workload_id) {
-                        wl.step(wl_input, &self.namespace_id)
-                    } else {
-                        continue;
-                    };
-                    if let Some(wl) = self.workloads.get(workload_id) {
-                        out.events.push(SmNamespaceEvent::Workload {
-                            workload_id: workload_id.clone(),
-                            event: SmWorkloadEvent::DemandChanged {
-                                demanding_services: wl.demand_count,
-                            },
-                        });
-                    }
-
-                    // Fix 3: Late-joiner WorkloadReady
-                    // When DemandUp arrives on an already-Running workload, the workload SM
-                    // doesn't emit BecameReady. Notify the originating service directly.
-                    if matches!(svc_out, ServiceOutput::DemandUp) {
-                        if let Some(wl) = self.workloads.get(workload_id) {
-                            if let WorkloadState::Running { ref pod_id, ref worker_id, .. } = wl.state {
-                                if let Some(wl_spec) = self.spec.workloads.get(workload_id) {
-                                    let backend = ServiceBackend {
-                                        pod_ip: wl_spec.network.ip,
-                                    };
-                                    let pod_id = pod_id.clone();
-                                    let worker_id = worker_id.clone();
-                                    if let Some(svc) = self.services.get_mut(service_id) {
-                                        let svc_outputs = svc.step(
-                                            ServiceInput::WorkloadReady {
-                                                pod_id,
-                                                worker_id,
-                                                backend,
-                                            },
-                                            &self.namespace_id,
-                                        );
-                                        // Filter out DemandUp/DemandDown (same as BecameReady handling)
-                                        let filtered: Vec<ServiceOutput> = svc_outputs
-                                            .into_iter()
-                                            .filter(|o| {
-                                                !matches!(
-                                                    o,
-                                                    ServiceOutput::DemandUp
-                                                        | ServiceOutput::DemandDown
-                                                )
-                                            })
-                                            .collect();
-                                        if !filtered.is_empty() {
-                                            queue.push_back(PendingOutput::Service {
-                                                service_id: service_id.clone(),
-                                                workload_id: workload_id.clone(),
-                                                outputs: filtered,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    queue.push_back(PendingOutput::Workload {
-                        workload_id: workload_id.clone(),
-                        outputs: wl_outputs,
-                    });
-                }
                 ServiceOutput::WorkerCommand(wid, cmd) => {
                     out.worker_commands.push((wid, cmd));
                 }
@@ -175,8 +101,7 @@ impl NamespaceStateMachine {
         }
     }
 
-    /// Non-recursive version of the old `forward_workload_outputs`.
-    /// Instead of calling forward_service_outputs directly, pushes to the queue.
+    /// Translate workload outputs. BecameReady/BecameUnready are forwarded to services.
     fn translate_workload_outputs(
         &mut self,
         workload_id: &WorkloadId,
@@ -219,7 +144,7 @@ impl NamespaceStateMachine {
                         None => continue,
                     };
 
-                    // Forward to all services mapped to this workload.
+                    // Forward WorkloadReady to all services mapped to this workload.
                     let svc_ids: Vec<ServiceId> = self
                         .service_workload
                         .iter()
@@ -236,21 +161,11 @@ impl NamespaceStateMachine {
                                 },
                                 &self.namespace_id,
                             );
-                            // Filter out DemandUp/DemandDown from BecameReady responses.
-                            let filtered: Vec<ServiceOutput> = svc_outputs
-                                .into_iter()
-                                .filter(|o| {
-                                    !matches!(
-                                        o,
-                                        ServiceOutput::DemandUp | ServiceOutput::DemandDown
-                                    )
-                                })
-                                .collect();
-                            if !filtered.is_empty() {
+                            if !svc_outputs.is_empty() {
                                 queue.push_back(PendingOutput::Service {
                                     service_id: sid.clone(),
                                     workload_id: workload_id.clone(),
-                                    outputs: filtered,
+                                    outputs: svc_outputs,
                                 });
                             }
                         }
@@ -258,9 +173,6 @@ impl NamespaceStateMachine {
                 }
                 WorkloadOutput::BecameUnready => {
                     // Check if the workload is retrying (RetryBackoff or WaitingForCapacity).
-                    // If so, preserve demand: filter out DemandDown from service responses
-                    // and re-activate activation services so they wait for the workload to
-                    // recover instead of dropping demand.
                     let is_retrying = self
                         .workloads
                         .get(workload_id)
@@ -273,7 +185,7 @@ impl NamespaceStateMachine {
                         })
                         .unwrap_or(false);
 
-                    // Forward to all services mapped to this workload.
+                    // Forward WorkloadUnready to all services mapped to this workload.
                     let svc_ids: Vec<ServiceId> = self
                         .service_workload
                         .iter()
@@ -287,61 +199,31 @@ impl NamespaceStateMachine {
                                 &self.namespace_id,
                             );
                             let wl_id = svc.workload_id.clone();
-
-                            if is_retrying {
-                                // Workload is retrying — preserve demand.
-                                // Filter DemandDown from service outputs so the workload's
-                                // demand_count stays correct.
-                                let filtered: Vec<ServiceOutput> = svc_outputs
-                                    .into_iter()
-                                    .filter(|o| {
-                                        !matches!(
-                                            o,
-                                            ServiceOutput::DemandUp | ServiceOutput::DemandDown
-                                        )
-                                    })
-                                    .collect();
-                                if !filtered.is_empty() {
-                                    queue.push_back(PendingOutput::Service {
-                                        service_id: sid.clone(),
-                                        workload_id: wl_id.clone(),
-                                        outputs: filtered,
-                                    });
-                                }
-                                // The service internally went Idle (activation) or stayed
-                                // NeedBackend (always-on). For activation services, re-activate
-                                // so they transition Idle → NeedBackend and wait for recovery.
-                                if svc.has_activation
-                                    && matches!(svc.state, ServiceState::Idle)
-                                {
-                                    let reactivate_outputs = svc.step(
-                                        ServiceInput::ServiceActivation,
-                                        &self.namespace_id,
-                                    );
-                                    // Filter out DemandUp — demand is already counted.
-                                    let filtered: Vec<ServiceOutput> = reactivate_outputs
-                                        .into_iter()
-                                        .filter(|o| {
-                                            !matches!(
-                                                o,
-                                                ServiceOutput::DemandUp | ServiceOutput::DemandDown
-                                            )
-                                        })
-                                        .collect();
-                                    if !filtered.is_empty() {
-                                        queue.push_back(PendingOutput::Service {
-                                            service_id: sid.clone(),
-                                            workload_id: wl_id,
-                                            outputs: filtered,
-                                        });
-                                    }
-                                }
-                            } else {
+                            if !svc_outputs.is_empty() {
                                 queue.push_back(PendingOutput::Service {
                                     service_id: sid.clone(),
-                                    workload_id: wl_id,
+                                    workload_id: wl_id.clone(),
                                     outputs: svc_outputs,
                                 });
+                            }
+                            // During retry, re-activate activation services that went Idle
+                            // so they transition Idle → NeedBackend and preserve demand
+                            // through reconciliation (wants_backend() stays true).
+                            if is_retrying
+                                && svc.has_activation
+                                && matches!(svc.state, ServiceState::Idle)
+                            {
+                                let reactivate_outputs = svc.step(
+                                    ServiceInput::ServiceActivation,
+                                    &self.namespace_id,
+                                );
+                                if !reactivate_outputs.is_empty() {
+                                    queue.push_back(PendingOutput::Service {
+                                        service_id: sid.clone(),
+                                        workload_id: wl_id,
+                                        outputs: reactivate_outputs,
+                                    });
+                                }
                             }
                         }
                     }

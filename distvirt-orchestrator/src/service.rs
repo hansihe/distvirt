@@ -24,8 +24,6 @@ pub enum ServiceInput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceOutput {
-    DemandUp,
-    DemandDown,
     WorkerCommand(WorkerId, WorkerCommand),
     /// Emit to all active workers.
     BroadcastWorkerCommand(WorkerCommand),
@@ -47,6 +45,12 @@ impl ServiceStateMachine {
             has_activation,
             idle_timeout,
         }
+    }
+
+    /// Returns true if this service currently wants a backend (i.e., contributes demand).
+    /// True for NeedBackend and Active states.
+    pub fn wants_backend(&self) -> bool {
+        matches!(self.state, ServiceState::NeedBackend | ServiceState::Active { .. })
     }
 
     pub fn step(&mut self, input: ServiceInput, namespace_id: &NamespaceId) -> Vec<ServiceOutput> {
@@ -98,7 +102,6 @@ impl ServiceStateMachine {
                         ));
                         if self.has_activation {
                             self.state = ServiceState::Idle;
-                            outputs.push(ServiceOutput::DemandDown);
                         } else {
                             // Always-on: stay NeedBackend, workload will retry.
                             self.state = ServiceState::NeedBackend;
@@ -108,7 +111,6 @@ impl ServiceStateMachine {
                         if self.has_activation {
                             // Activation service: go back to Idle, drop demand.
                             self.state = ServiceState::Idle;
-                            outputs.push(ServiceOutput::DemandDown);
                         } else {
                             // Always-on: stay NeedBackend, workload will retry.
                             self.state = ServiceState::NeedBackend;
@@ -123,7 +125,6 @@ impl ServiceStateMachine {
             ServiceInput::ServiceActivation => {
                 if matches!(self.state, ServiceState::Idle) {
                     self.state = ServiceState::NeedBackend;
-                    outputs.push(ServiceOutput::DemandUp);
                 }
             }
             ServiceInput::ServiceBackendNeed { need } => {
@@ -166,7 +167,6 @@ impl ServiceStateMachine {
                         && *backend_need == BackendNeed::None
                         && self.has_activation
                     {
-                        outputs.push(ServiceOutput::DemandDown);
                         outputs.push(ServiceOutput::BroadcastWorkerCommand(
                             WorkerCommand::UpdateServiceBackend {
                                 namespace_id: namespace_id.clone(),
@@ -189,7 +189,6 @@ impl ServiceStateMachine {
                         if let Some(tk) = idle_timer.clone() {
                             outputs.push(ServiceOutput::TimerCancel(tk));
                         }
-                        outputs.push(ServiceOutput::DemandDown);
                         outputs.push(ServiceOutput::BroadcastWorkerCommand(
                             WorkerCommand::UpdateServiceBackend {
                                 namespace_id: namespace_id.clone(),

@@ -28,19 +28,19 @@ struct WorkloadModel {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WlModelState {
     state: WorkloadState,
-    demand_count: u32,
+    current_demand: u32,
     consecutive_failures: u32,
     pending_timers: BTreeSet<TimerKey>,
     next_pod_id: u64,
     step_count: usize,
+    route_miss_wake: bool,
 }
 
 // --- Actions ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WlModelAction {
-    DemandUp,
-    DemandDown,
+    SetDemand { count: u32 },
     ForceDeactivate,
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     PodRunning { pod_id: PodId },
@@ -86,23 +86,21 @@ impl Model for WorkloadModel {
     fn init_states(&self) -> Vec<Self::State> {
         vec![WlModelState {
             state: WorkloadState::Dormant,
-            demand_count: 0,
+            current_demand: 0,
             consecutive_failures: 0,
             pending_timers: BTreeSet::new(),
             next_pod_id: 0,
             step_count: 0,
+            route_miss_wake: false,
         }]
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
-        // Any service can send DemandUp.
-        if (state.demand_count as usize) < self.num_services {
-            actions.push(WlModelAction::DemandUp);
-        }
-
-        // Any service with active demand can send DemandDown.
-        if state.demand_count > 0 {
-            actions.push(WlModelAction::DemandDown);
+        // SetDemand: can set to any value from 0 to num_services.
+        for count in 0..=(self.num_services as u32) {
+            if count != state.current_demand {
+                actions.push(WlModelAction::SetDemand { count });
+            }
         }
 
         // ForceDeactivate available from any state except Dormant/WaitingForCapacity.
@@ -231,15 +229,15 @@ impl Model for WorkloadModel {
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut sm = WorkloadStateMachine::new(wl_id(), self.enable_suspend);
         sm.state = state.state.clone();
-        sm.demand_count = state.demand_count;
+        sm.current_demand = state.current_demand;
         sm.consecutive_failures = state.consecutive_failures;
+        sm.route_miss_wake = state.route_miss_wake;
 
         let mut next_pod_id = state.next_pod_id;
         let ns = ns_id();
 
         let (input, fired_timer) = match action {
-            WlModelAction::DemandUp => (WorkloadInput::DemandUp, None),
-            WlModelAction::DemandDown => (WorkloadInput::DemandDown, None),
+            WlModelAction::SetDemand { count } => (WorkloadInput::SetDemand { count }, None),
             WlModelAction::ForceDeactivate => (WorkloadInput::ForceDeactivate, None),
             WlModelAction::LaunchPod { worker_id, pod_id } => {
                 next_pod_id += 1;
@@ -314,11 +312,12 @@ impl Model for WorkloadModel {
 
         Some(WlModelState {
             state: sm.state,
-            demand_count: sm.demand_count,
+            current_demand: sm.current_demand,
             consecutive_failures: sm.consecutive_failures,
             pending_timers,
             next_pod_id,
             step_count: state.step_count + 1,
+            route_miss_wake: sm.route_miss_wake,
         })
     }
 
@@ -332,9 +331,9 @@ impl Model for WorkloadModel {
             Property::<Self>::always("no transitioning state", |_model, state| {
                 !matches!(state.state, WorkloadState::Transitioning)
             }),
-            // Safety: demand_count == 0 implies Dormant (no pod without demand).
+            // Safety: current_demand == 0 implies Dormant (no pod without demand).
             Property::<Self>::always("no pod without demand", |_model, state| {
-                if state.demand_count == 0 {
+                if state.current_demand == 0 {
                     matches!(
                         state.state,
                         WorkloadState::Dormant
@@ -354,7 +353,7 @@ impl Model for WorkloadModel {
             // Safety: Failed implies max retries and demand.
             Property::<Self>::always("failed implies max retries and demand", |_model, state| {
                 if matches!(state.state, WorkloadState::Failed) {
-                    state.consecutive_failures >= 5 && state.demand_count > 0
+                    state.consecutive_failures >= 5 && state.current_demand > 0
                 } else {
                     true
                 }
@@ -383,10 +382,10 @@ impl Model for WorkloadModel {
                     true
                 }
             }),
-            // Safety: demand_count never exceeds num_services.
+            // Safety: current_demand never exceeds num_services.
             // (Enforced by action generation, but verify state consistency.)
             Property::<Self>::always("demand count bounded", |model, state| {
-                (state.demand_count as usize) <= model.num_services
+                (state.current_demand as usize) <= model.num_services
             }),
             // Safety: Launching state always has a pending launch timeout timer.
             Property::<Self>::always("launching has timeout timer", |_model, state| {
@@ -455,10 +454,10 @@ impl Model for WorkloadModel {
             Property::<Self>::sometimes("can reach dormant after running", |_model, state| {
                 state.next_pod_id > 0 && matches!(state.state, WorkloadState::Dormant)
             }),
-            // Safety: pending == Demand implies demand_count > 0.
+            // Safety: pending == Demand implies current_demand > 0.
             Property::<Self>::always("pending demand implies demand count", |_model, state| {
                 if let Some(PendingIntent::Demand) = get_pending(&state.state) {
-                    state.demand_count > 0
+                    state.current_demand > 0
                 } else {
                     true
                 }

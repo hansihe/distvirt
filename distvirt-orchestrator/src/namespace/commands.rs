@@ -201,6 +201,7 @@ impl NamespaceStateMachine {
                                 &self.namespace_id,
                             );
                             self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+                            self.reconcile_demand(wl_id, placement_table, out);
                         }
                     }
                     if suspend_changed {
@@ -300,7 +301,7 @@ impl NamespaceStateMachine {
         // Reset workloads and services so no stale references remain.
         for wl in self.workloads.values_mut() {
             wl.state = WorkloadState::Dormant;
-            wl.demand_count = 0;
+            wl.current_demand = 0;
         }
         for svc in self.services.values_mut() {
             svc.state = ServiceState::Idle;
@@ -451,6 +452,7 @@ impl NamespaceStateMachine {
         );
         let wl_id = workload_id.clone();
         self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+        self.reconcile_demand(&wl_id, placement_table, out);
     }
 
     pub(super) fn handle_resume_pod(
@@ -551,6 +553,7 @@ impl NamespaceStateMachine {
         );
         let wl_id = workload_id.clone();
         self.process_outputs(PendingOutput::Workload { workload_id: wl_id.clone(), outputs: wl_outputs }, placement_table, out);
+        self.reconcile_demand(&wl_id, placement_table, out);
     }
 
     pub(super) fn handle_deactivate_workload(
@@ -634,7 +637,8 @@ impl NamespaceStateMachine {
             });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
-            self.process_outputs(PendingOutput::Service { service_id: sid.clone(), workload_id: wl_id, outputs: svc_outputs }, placement_table, out);
+            self.process_outputs(PendingOutput::Service { service_id: sid.clone(), workload_id: wl_id.clone(), outputs: svc_outputs }, placement_table, out);
+            self.reconcile_demand(&wl_id, placement_table, out);
             deactivated_any = true;
         }
 

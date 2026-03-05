@@ -546,7 +546,7 @@ fn test_deactivate_workload_active_idle() {
         ServiceState::Idle
     ));
     // Workload demand should have dropped.
-    assert_eq!(ns.workloads[&wl_id()].demand_count, 0);
+    assert_eq!(ns.workloads[&wl_id()].current_demand, 0);
 }
 
 #[test]
