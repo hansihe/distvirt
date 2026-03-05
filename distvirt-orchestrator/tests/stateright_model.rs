@@ -72,6 +72,7 @@ impl PlacementSnapshot {
                     pool_id: entry.pool_id.clone(),
                     worker_id: entry.worker_id.clone(),
                     locked_by: entry.locked_by.clone(),
+                    status: ArtifactStatus::Ready,
                 },
             );
         }

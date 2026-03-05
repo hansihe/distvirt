@@ -815,6 +815,10 @@ struct WorkerEvent {
     # Worker-scoped condition assert/deassert (level-triggered status).
     poolCapacityUpdate @15 :PoolCapacityUpdateEvt;
     # Periodic update of storage pool capacity from the worker.
+    artifactWriteStarted @16 :ArtifactWriteStartedEvt;
+    # An artifact write has begun on a storage pool.
+    artifactWriteCommitted @17 :ArtifactWriteCommittedEvt;
+    # An artifact write has completed and is durable.
   }
 }
 
@@ -841,6 +845,29 @@ struct WorkerConditionEvt {
   # true = assert (condition is active), false = deassert (condition cleared).
   message @2 :Text;
   # Human-readable detail about the condition.
+}
+
+# An artifact write has started on a storage pool.
+#
+# Emitted by the worker before beginning a suspend snapshot write.
+# The orchestrator records the placement as in-progress (Writing status)
+# so that other workers don't attempt to read a half-written artifact.
+struct ArtifactWriteStartedEvt {
+  namespaceId @0 :Text;
+  artifactId @1 :Text;
+  poolId @2 :Text;
+}
+
+# An artifact write has completed and is durable on disk.
+#
+# Emitted by the worker after a suspend snapshot is fully written.
+# The orchestrator transitions the placement from Writing to Ready,
+# making it available for resume operations.
+struct ArtifactWriteCommittedEvt {
+  namespaceId @0 :Text;
+  artifactId @1 :Text;
+  poolId @2 :Text;
+  sizeBytes @3 :UInt64;
 }
 
 # --- Log Stream Header ---

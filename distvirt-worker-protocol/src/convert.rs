@@ -1245,6 +1245,28 @@ pub fn write_worker_event(
                 p.set_available_bytes(pool.available_bytes);
             }
         }
+        WorkerEvent::ArtifactWriteStarted {
+            namespace_id,
+            artifact_id,
+            pool_id,
+        } => {
+            let mut b = builder.init_artifact_write_started();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_artifact_id(artifact_id.as_ref());
+            b.set_pool_id(pool_id.as_ref());
+        }
+        WorkerEvent::ArtifactWriteCommitted {
+            namespace_id,
+            artifact_id,
+            pool_id,
+            size_bytes,
+        } => {
+            let mut b = builder.init_artifact_write_committed();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_artifact_id(artifact_id.as_ref());
+            b.set_pool_id(pool_id.as_ref());
+            b.set_size_bytes(*size_bytes);
+        }
     }
 }
 
@@ -1388,6 +1410,23 @@ pub fn read_worker_event(
                 });
             }
             Ok(WorkerEvent::PoolCapacityUpdate { pools })
+        }
+        ArtifactWriteStarted(r) => {
+            let r = r?;
+            Ok(WorkerEvent::ArtifactWriteStarted {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
+                pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
+            })
+        }
+        ArtifactWriteCommitted(r) => {
+            let r = r?;
+            Ok(WorkerEvent::ArtifactWriteCommitted {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
+                pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
+                size_bytes: r.get_size_bytes(),
+            })
         }
     }
 }

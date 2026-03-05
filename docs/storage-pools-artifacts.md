@@ -131,13 +131,45 @@ The orchestrator maintains a placement table mapping artifacts to pools:
 struct ArtifactPlacement {
     artifact_id: ArtifactId,
     pool_id: PoolId,
+    status: ArtifactStatus,
     locked_by: Option<PodId>,    // For Exclusive artifacts — which pod holds the lock
     ref_count: u32,              // For SharedRO — number of active consumers
     parent_artifact: Option<ArtifactId>,  // For CopyOnUse working copies — reference to template
 }
+
+enum ArtifactStatus {
+    Writing,    // Write in progress — not readable, not complete
+    Ready,      // Write committed — available for use
+}
 ```
 
 This is the core data structure for planning transfers and eviction.
+
+### Two-Phase Artifact Writes
+
+Artifact writes use a two-phase protocol: the worker emits `ArtifactWriteStarted` when it begins writing, and `ArtifactWriteCommitted` when the write is durable (fsynced). The placement table tracks this via `ArtifactStatus`.
+
+This keeps the artifact lifecycle self-contained — the placement table reacts to artifact events without needing to interpret the commands that caused the write (suspend, transfer, image pull, etc.). Every `Writing` entry must eventually receive a `Committed` or be cleaned up.
+
+**Why this matters for shared pools**: Multiple workers can access the same pool. Without write status tracking, a worker could attempt to read a half-written artifact. With it, the orchestrator knows not to schedule reads from `Writing` artifacts, and can clean up incomplete writes after a crash.
+
+**Protocol**:
+
+```
+Worker begins writing artifact to pool
+  → Worker emits ArtifactWriteStarted { artifact_id, pool_id }
+  → Orchestrator creates placement entry with status: Writing
+
+Worker completes write + fsync
+  → Worker emits ArtifactWriteCommitted { artifact_id, pool_id }
+  → Orchestrator updates placement entry to status: Ready
+```
+
+**Crash recovery**: On worker disconnect, any placement entries still in `Writing` are known-bad:
+- **Shared pool**: Orchestrator issues a cleanup command to another worker that can access the pool.
+- **Local pool**: Entries are dropped — the pool is gone with the worker.
+
+For local pools the two-phase protocol is less critical (if the worker dies, its local pool is effectively gone), but using a uniform protocol across all pool types keeps the artifact manager simple and its invariants consistent.
 
 ---
 

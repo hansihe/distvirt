@@ -66,6 +66,49 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     })
     .await?;
 
+    // Assert two-phase artifact write events arrive before PodSuspended
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteStarted { .. })
+    })
+    .await?;
+    match &event {
+        WorkerEvent::ArtifactWriteStarted {
+            namespace_id,
+            artifact_id,
+            pool_id,
+        } => {
+            assert_eq!(namespace_id, "ns-suspend");
+            assert_eq!(artifact_id, "snap-1");
+            assert_eq!(pool_id, "local-default");
+        }
+        other => panic!("expected ArtifactWriteStarted, got {:?}", other),
+    }
+    eprintln!("e2e: received ArtifactWriteStarted");
+
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteCommitted { .. })
+    })
+    .await?;
+    match &event {
+        WorkerEvent::ArtifactWriteCommitted {
+            namespace_id,
+            artifact_id,
+            pool_id,
+            size_bytes,
+        } => {
+            assert_eq!(namespace_id, "ns-suspend");
+            assert_eq!(artifact_id, "snap-1");
+            assert_eq!(pool_id, "local-default");
+            assert!(
+                *size_bytes > 0,
+                "committed artifact should have non-zero size, got {}",
+                size_bytes
+            );
+        }
+        other => panic!("expected ArtifactWriteCommitted, got {:?}", other),
+    }
+    eprintln!("e2e: received ArtifactWriteCommitted");
+
     // Wait for PodSuspended (or PodSuspendFailed)
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(
@@ -285,6 +328,29 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         pool_id: "local-default".into(),
     })
     .await?;
+
+    // Assert two-phase artifact write events
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteStarted { .. })
+    })
+    .await?;
+    assert!(
+        matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
+            if namespace_id == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default"),
+        "unexpected ArtifactWriteStarted: {:?}", event
+    );
+    eprintln!("e2e: received ArtifactWriteStarted");
+
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteCommitted { .. })
+    })
+    .await?;
+    assert!(
+        matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
+            if namespace_id == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default" && *size_bytes > 0),
+        "unexpected ArtifactWriteCommitted: {:?}", event
+    );
+    eprintln!("e2e: received ArtifactWriteCommitted");
 
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(
@@ -543,6 +609,29 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         pool_id: "local-default".into(),
     })
     .await?;
+
+    // Assert two-phase artifact write events
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteStarted { .. })
+    })
+    .await?;
+    assert!(
+        matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
+            if namespace_id == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default"),
+        "unexpected ArtifactWriteStarted: {:?}", event
+    );
+    eprintln!("e2e: received ArtifactWriteStarted");
+
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteCommitted { .. })
+    })
+    .await?;
+    assert!(
+        matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
+            if namespace_id == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default" && *size_bytes > 0),
+        "unexpected ArtifactWriteCommitted: {:?}", event
+    );
+    eprintln!("e2e: received ArtifactWriteCommitted");
 
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(

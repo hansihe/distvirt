@@ -370,6 +370,17 @@ pub enum WorkerEvent {
     PoolCapacityUpdate {
         pools: Vec<PoolInfo>,
     },
+    ArtifactWriteStarted {
+        namespace_id: NamespaceId,
+        artifact_id: ArtifactId,
+        pool_id: PoolId,
+    },
+    ArtifactWriteCommitted {
+        namespace_id: NamespaceId,
+        artifact_id: ArtifactId,
+        pool_id: PoolId,
+        size_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

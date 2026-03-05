@@ -73,6 +73,8 @@ pub enum WorkerEvent {
     PodFailed { pod_id: PodId, error: String },
     PodSuspended { pod_id: PodId, artifact_id: ArtifactId, pool_id: PoolId },
     PodSuspendFailed { pod_id: PodId, error: String },
+    ArtifactWriteStarted { artifact_id: ArtifactId, pool_id: PoolId },
+    ArtifactWriteCommitted { artifact_id: ArtifactId, pool_id: PoolId, size_bytes: u64 },
     ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
     FabricRouteMiss { dst_ip: std::net::Ipv4Addr },

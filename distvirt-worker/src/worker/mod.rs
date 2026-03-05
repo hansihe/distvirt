@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::AdapterManager;
 use crate::image_provider::ImageProvider;
 use namespace::{FatalError, NamespaceState};
-use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor, send_event, STOP_POD_TIMEOUT};
+use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor, send_event, STOP_POD_TIMEOUT, FORCE_STOP_TIMEOUT};
 use tunnel_manager::TunnelManager;
 use crate::task_handle::TaskHandle;
 use crate::vmm::Vmm;
@@ -655,10 +655,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         }
     }
 
-    // TODO: The `graceful` flag currently has no observable effect — both paths
-    // cancel the token and await with the same STOP_POD_TIMEOUT. Consider either
-    // removing the flag or differentiating behavior (e.g. force-kill immediately
-    // when graceful=false instead of cancelling).
     async fn handle_stop_pod(
         &mut self,
         namespace_id: &NamespaceId,
@@ -667,11 +663,12 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
     ) -> Result<(), FatalError> {
         let ns = self.get_namespace_mut(namespace_id)?;
 
-        if let Some(pod) = ns.pods.remove(pod_id) {
+        if let Some(mut pod) = ns.pods.remove(pod_id) {
             if graceful {
                 // Cancel the pod's token to trigger graceful shutdown in supervisor.
+                // The supervisor will SIGTERM containers, wait for exit, then shut
+                // down the VM cleanly.
                 pod.cancel.cancel();
-                // Await supervisor with an outer timeout.
                 match tokio::time::timeout(STOP_POD_TIMEOUT, pod.supervisor).await {
                     Ok(Ok(())) => {
                         log::info!(
@@ -696,24 +693,21 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     }
                 }
             } else {
-                // Non-graceful: cancel and give the supervisor a short window to
-                // kill the VM and clean up (TAP destruction needs the process gone).
-                pod.cancel.cancel();
-                match tokio::time::timeout(STOP_POD_TIMEOUT, pod.supervisor).await {
+                // Non-graceful: abort the supervisor immediately. This kills the
+                // VM process via Drop (SIGKILL) without attempting graceful
+                // container shutdown.
+                pod.supervisor.abort();
+                // Brief window for the abort to propagate and process cleanup
+                // (e.g. TAP device teardown needs the process gone first).
+                match tokio::time::timeout(FORCE_STOP_TIMEOUT, &mut pod.supervisor).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(join_error)) => {
-                        log::error!(
-                            "worker: pod '{}' supervisor panicked: {}",
-                            pod_id,
-                            join_error
-                        );
-                    }
+                    Ok(Err(_)) => {} // JoinError from abort — expected
                     Err(_) => {
-                        // Timed out — supervisor task is dropped here, aborting it.
                         log::warn!(
-                            "worker: pod '{}' force stop timed out, aborting",
+                            "worker: pod '{}' force stop cleanup timed out",
                             pod_id
                         );
+                        // TaskHandle drops here, ensuring abort.
                     }
                 }
                 log::info!(

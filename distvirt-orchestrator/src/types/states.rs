@@ -4,11 +4,18 @@ use super::*;
 
 // --- Artifact Placement ---
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArtifactStatus {
+    Writing,
+    Ready,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactPlacement {
     pub pool_id: PoolId,
     pub worker_id: WorkerId,
     pub locked_by: Option<PodId>,
+    pub status: ArtifactStatus,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,6 +30,10 @@ impl PlacementTable {
 
     pub fn get(&self, artifact_id: &ArtifactId) -> Option<&ArtifactPlacement> {
         self.placements.get(artifact_id)
+    }
+
+    pub fn get_mut(&mut self, artifact_id: &ArtifactId) -> Option<&mut ArtifactPlacement> {
+        self.placements.get_mut(artifact_id)
     }
 
     pub fn remove(&mut self, artifact_id: &ArtifactId) -> Option<ArtifactPlacement> {

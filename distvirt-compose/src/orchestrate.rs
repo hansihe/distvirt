@@ -310,6 +310,12 @@ pub async fn run_compose(
                     WorkerEvent::PoolCapacityUpdate { pools } => {
                         log::debug!("pool capacity update: {} pool(s)", pools.len());
                     }
+                    WorkerEvent::ArtifactWriteStarted { artifact_id, .. } => {
+                        log::debug!("artifact write started: {}", artifact_id);
+                    }
+                    WorkerEvent::ArtifactWriteCommitted { artifact_id, size_bytes, .. } => {
+                        log::debug!("artifact write committed: {} ({} bytes)", artifact_id, size_bytes);
+                    }
                 }
             }
             Some(log_line) = log_line_rx.recv() => {

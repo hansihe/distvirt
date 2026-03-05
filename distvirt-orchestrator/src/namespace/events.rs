@@ -197,7 +197,23 @@ impl NamespaceStateMachine {
                 };
                 self.forward_workload_outputs(&wl_id, wl_outputs, placement_table, out);
             }
-            WorkerEvent::PodSuspended { pod_id, artifact_id, pool_id } => {
+            WorkerEvent::ArtifactWriteStarted { artifact_id, pool_id } => {
+                placement_table.insert(
+                    artifact_id.clone(),
+                    ArtifactPlacement {
+                        pool_id,
+                        worker_id: worker_id.clone(),
+                        locked_by: None,
+                        status: ArtifactStatus::Writing,
+                    },
+                );
+            }
+            WorkerEvent::ArtifactWriteCommitted { artifact_id, pool_id: _, size_bytes: _ } => {
+                if let Some(placement) = placement_table.get_mut(&artifact_id) {
+                    placement.status = ArtifactStatus::Ready;
+                }
+            }
+            WorkerEvent::PodSuspended { pod_id, artifact_id, pool_id: _ } => {
                 let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
                     None => return,
@@ -209,15 +225,6 @@ impl NamespaceStateMachine {
                         self.emit_fabric_route_remove(wl_spec.network.ip, out);
                     }
                 }
-                // Update placement table with actual pool_id from worker.
-                placement_table.insert(
-                    artifact_id.clone(),
-                    ArtifactPlacement {
-                        pool_id,
-                        worker_id: pod_info.worker_id.clone(),
-                        locked_by: None,
-                    },
-                );
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspended {
@@ -272,6 +279,17 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+                // Clean up any Writing placement entry for this artifact.
+                if let Some(wl) = self.workloads.get(&wl_id) {
+                    if let Some(artifact_id) = wl.state.artifact_id() {
+                        if matches!(
+                            placement_table.get(artifact_id),
+                            Some(p) if p.status == ArtifactStatus::Writing
+                        ) {
+                            placement_table.remove(artifact_id);
+                        }
+                    }
+                }
                 // Remove fabric route if multi-worker.
                 if self.workers.len() > 1 {
                     if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {

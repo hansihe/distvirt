@@ -104,6 +104,29 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
         })
         .await?;
 
+    // Assert two-phase artifact write events
+    let event = recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteStarted { .. })
+    })
+    .await?;
+    assert!(
+        matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
+            if namespace_id == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared"),
+        "unexpected ArtifactWriteStarted: {:?}", event
+    );
+    eprintln!("e2e: received ArtifactWriteStarted on worker-a");
+
+    let event = recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
+        matches!(e, WorkerEvent::ArtifactWriteCommitted { .. })
+    })
+    .await?;
+    assert!(
+        matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
+            if namespace_id == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared" && *size_bytes > 0),
+        "unexpected ArtifactWriteCommitted: {:?}", event
+    );
+    eprintln!("e2e: received ArtifactWriteCommitted on worker-a");
+
     let event = recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
         matches!(
             e,

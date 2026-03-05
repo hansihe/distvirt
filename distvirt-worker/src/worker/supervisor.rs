@@ -22,8 +22,11 @@ use crate::vmm::{NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
 /// Timeout for graceful guest shutdown before force-killing.
 pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Outer timeout for awaiting a pod supervisor after cancellation.
+/// Outer timeout for awaiting a pod supervisor after graceful cancellation.
 pub(crate) const STOP_POD_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Timeout for non-graceful (force) stop cleanup after aborting the supervisor.
+pub(crate) const FORCE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Request to suspend a running pod.
 pub(crate) struct SuspendRequest {
@@ -505,11 +508,32 @@ async fn pod_monitor<I: VmInstance>(
         // Suspend request: snapshot the VM and exit.
         Some(req) = suspend_rx.recv() => {
             log::info!("pod '{}': suspend requested, artifact_id={}", pod_id, req.artifact_id);
+            // Emit ArtifactWriteStarted before beginning the snapshot write.
+            send_event(
+                &event_tx,
+                WorkerEvent::ArtifactWriteStarted {
+                    namespace_id: namespace_id.clone(),
+                    artifact_id: req.artifact_id.clone(),
+                    pool_id: req.pool_id.clone(),
+                },
+            )
+            .await;
             match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
                 Ok(artifacts) => {
                     // Calculate snapshot size.
                     let artifact_size_bytes = dir_size(&req.snapshot_dir).await.unwrap_or(0);
                     let _ = req.reply.send(Ok(artifacts));
+                    // Emit ArtifactWriteCommitted now that snapshot is durable.
+                    send_event(
+                        &event_tx,
+                        WorkerEvent::ArtifactWriteCommitted {
+                            namespace_id: namespace_id.clone(),
+                            artifact_id: req.artifact_id.clone(),
+                            pool_id: req.pool_id.clone(),
+                            size_bytes: artifact_size_bytes,
+                        },
+                    )
+                    .await;
                     send_event(
                         &event_tx,
                         WorkerEvent::PodSuspended {

@@ -457,10 +457,10 @@ impl NamespaceStateMachine {
             return;
         }
 
-        // Look up placement table to get pool_id.
+        // Look up placement table — only resume from Ready artifacts.
         let placement = match placement_table.get(artifact_id) {
-            Some(p) => p.clone(),
-            None => return,
+            Some(p) if p.status == ArtifactStatus::Ready => p.clone(),
+            _ => return,
         };
 
         // Lock the artifact for this pod.

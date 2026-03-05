@@ -71,15 +71,25 @@ propagation. Also fixed the same pattern in `image_provider/containerd.rs:347`
 
 ## MEDIUM SEVERITY
 
-### 7. `graceful` flag in StopPod has no effect
-**`distvirt-worker/src/worker/mod.rs:510-579`**
+### 7. ~~`graceful` flag in StopPod has no effect~~ RESOLVED
+**`distvirt-worker/src/worker/mod.rs:662-724`**
 
 Both graceful and force-kill paths execute identically (cancel token + same timeout). The API contract is misleading — `graceful=false` still does a graceful shutdown.
 
-### 8. Client response routing doesn't match request IDs
-**`distvirt-orchestrator/src/shell.rs:811-817`**
+**Status:** `graceful=false` now aborts the supervisor task immediately (VM process
+killed via `Drop` / SIGKILL) with a 2s cleanup window (`FORCE_STOP_TIMEOUT`),
+skipping the graceful container shutdown sequence entirely. `graceful=true` is
+unchanged (cancel token → SIGTERM containers → VM Shutdown → 15s outer timeout).
 
-Responses are popped from a `BTreeMap` by key order, not matched to the originating request. Multiple in-flight requests from the same client can get misrouted responses.
+### 8. ~~Client response routing doesn't match request IDs~~ RESOLVED
+**`distvirt-orchestrator/src/shell.rs`**
+
+Responses were popped from a `BTreeMap` by key order, not matched to the originating request. Multiple in-flight requests from the same client could get misrouted responses.
+
+**Status:** Replaced `BTreeMap<u64, oneshot::Sender>` with `Option<oneshot::Sender>`,
+enforcing single-request-per-client structurally. Removed unused `request_id` /
+`NEXT_REQUEST_ID` machinery. This is safe because `grpc.rs::unary_command` allocates
+a fresh `ClientId` per gRPC call, so concurrent requests on the same client never occur.
 
 ### 9. Log stream data loss on quick pod exit
 **`distvirt-orchestrator/src/shell.rs:328-391`**
@@ -154,7 +164,7 @@ Splice/Clone return errors at both the gRPC layer and the SM layer — inconsist
 **Weaknesses:**
 - **`.unwrap()` proliferation** — largely addressed. Mutex locks now use `.expect("poisoned")`, internal invariant lookups use descriptive `.expect()`, path conversions return `Result`, and guard-pattern unwraps refactored to `let-else`. Remaining unwraps are in test code or are documented intentional assertions. See `docs/unwrap-cleanup.md` for full breakdown. `parking_lot::Mutex` migration remains a potential future step.
 - **Fallback values instead of hard errors** — "unknown" strings for missing IDs mask real bugs. Fail loud.
-- **No request-response correlation** — the shell routes client events by FIFO order, not by request ID. This will break under concurrent requests.
+- ~~**No request-response correlation**~~ — resolved; `BTreeMap` replaced with `Option`, enforcing single-request-per-client structurally. `request_id` machinery removed.
 - **Testing gaps** — no tests for error paths (lock poisoning, snapshot corruption, worker disconnect during suspend), no race condition tests, no NAT table overflow tests. The E2E tests requiring root/firecracker/containerd make CI hard.
 
 ---
@@ -163,6 +173,6 @@ Splice/Clone return errors at both the gRPC layer and the SM layer — inconsist
 
 1. ~~**Fix the "unknown" fallbacks**~~ — resolved; pool_id missing fails gracefully via `PodSuspendFailed`, pod_id is an `.expect()` invariant
 2. ~~**Fix resume pod FatalError**~~ — resolved; errors now scoped to single pod via `PodFailed`
-3. **Implement request-response matching** in the shell — concurrent clients will break
+3. ~~**Implement request-response matching**~~ — resolved; `Option` enforces single-request-per-client structurally
 4. ~~**Replace `.unwrap()` on Mutexes**~~ — converted to `.expect("poisoned")`; `parking_lot` migration optional
-5. **Implement the `graceful` flag** in StopPod — the API contract is currently broken
+5. ~~**Implement the `graceful` flag** in StopPod~~ — resolved; `graceful=false` now aborts immediately via SIGKILL

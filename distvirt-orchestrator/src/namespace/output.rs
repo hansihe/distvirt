@@ -196,15 +196,7 @@ impl NamespaceStateMachine {
                         }
                     };
 
-                    // Create placement table entry.
-                    placement_table.insert(
-                        artifact_id.clone(),
-                        ArtifactPlacement {
-                            pool_id: pool_id.clone(),
-                            worker_id: worker_id.clone(),
-                            locked_by: None,
-                        },
-                    );
+                    // Placement is created when ArtifactWriteStarted arrives from the worker.
                     out.worker_commands.push((
                         worker_id,
                         WorkerCommand::SuspendPod {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_lite::io::AsyncReadExt;
@@ -62,7 +62,7 @@ struct WorkerHandle {
 }
 
 struct ClientSender {
-    pending: BTreeMap<u64, oneshot::Sender<ClientEvent>>,
+    pending: Option<oneshot::Sender<ClientEvent>>,
 }
 
 enum ShellMsg {
@@ -78,7 +78,6 @@ enum ShellMsg {
     },
     ClientCommand {
         client_id: ClientId,
-        request_id: u64,
         command: ClientCommand,
         response_tx: oneshot::Sender<ClientEvent>,
     },
@@ -119,11 +118,9 @@ enum ShellMsg {
 pub struct ShellHandle {
     msg_tx: mpsc::UnboundedSender<ShellMsg>,
     next_client_id: &'static AtomicU64,
-    next_request_id: &'static AtomicU64,
 }
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ShellHandle {
     /// Allocate a new client ID and register it with the shell.
@@ -186,11 +183,9 @@ impl ShellHandle {
         command: ClientCommand,
     ) -> Result<ClientEvent, anyhow::Error> {
         let (tx, rx) = oneshot::channel();
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         self.msg_tx
             .send(ShellMsg::ClientCommand {
                 client_id,
-                request_id,
                 command,
                 response_tx: tx,
             })
@@ -225,7 +220,6 @@ impl OrchestratorShell {
         ShellHandle {
             msg_tx: self.msg_tx.clone(),
             next_client_id: &NEXT_CLIENT_ID,
-            next_request_id: &NEXT_REQUEST_ID,
         }
     }
 
@@ -465,7 +459,7 @@ impl OrchestratorShell {
                 self.clients.insert(
                     client_id.clone(),
                     ClientSender {
-                        pending: BTreeMap::new(),
+                        pending: None,
                     },
                 );
                 let output = self.orchestrator.step(OrchestratorInput::ClientConnected {
@@ -484,13 +478,12 @@ impl OrchestratorShell {
             }
             ShellMsg::ClientCommand {
                 client_id,
-                request_id,
                 command,
                 response_tx,
             } => {
                 // Register the pending response before stepping.
                 if let Some(client) = self.clients.get_mut(&client_id) {
-                    client.pending.insert(request_id, response_tx);
+                    client.pending = Some(response_tx);
                 }
                 let output = self.orchestrator.step(OrchestratorInput::ClientCommand {
                     client_id: client_id.clone(),
@@ -817,6 +810,29 @@ impl OrchestratorShell {
                     event: WorkerEvent::FabricRouteMiss { dst_ip },
                 },
             }),
+            ProtoEvent::ArtifactWriteStarted {
+                namespace_id,
+                artifact_id,
+                pool_id,
+            } => Some(OrchestratorInput::NamespaceInput {
+                namespace_id,
+                input: NamespaceInput::WorkerEvent {
+                    worker_id,
+                    event: WorkerEvent::ArtifactWriteStarted { artifact_id, pool_id },
+                },
+            }),
+            ProtoEvent::ArtifactWriteCommitted {
+                namespace_id,
+                artifact_id,
+                pool_id,
+                size_bytes,
+            } => Some(OrchestratorInput::NamespaceInput {
+                namespace_id,
+                input: NamespaceInput::WorkerEvent {
+                    worker_id,
+                    event: WorkerEvent::ArtifactWriteCommitted { artifact_id, pool_id, size_bytes },
+                },
+            }),
             ProtoEvent::TunnelStatus { .. } => {
                 // Informational only for now.
                 log::debug!("tunnel status event from worker {}", worker_id.0);
@@ -842,11 +858,8 @@ impl OrchestratorShell {
         // Route client events to pending response senders.
         for (client_id, event) in output.client_events {
             if let Some(client) = self.clients.get_mut(&client_id) {
-                // Send to the first pending sender (FIFO — commands are serialized per client).
-                if let Some((&req_id, _)) = client.pending.iter().next() {
-                    if let Some(tx) = client.pending.remove(&req_id) {
-                        let _ = tx.send(event);
-                    }
+                if let Some(tx) = client.pending.take() {
+                    let _ = tx.send(event);
                 }
             }
         }
@@ -855,10 +868,8 @@ impl OrchestratorShell {
         for (_ns_id, ns_out) in &output.namespace_outputs {
             for (client_id, event) in &ns_out.client_events {
                 if let Some(client) = self.clients.get_mut(client_id) {
-                    if let Some((&req_id, _)) = client.pending.iter().next() {
-                        if let Some(tx) = client.pending.remove(&req_id) {
-                            let _ = tx.send(event.clone());
-                        }
+                    if let Some(tx) = client.pending.take() {
+                        let _ = tx.send(event.clone());
                     }
                 }
             }
