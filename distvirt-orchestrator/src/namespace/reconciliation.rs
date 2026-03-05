@@ -132,55 +132,74 @@ impl NamespaceStateMachine {
             );
         }
 
-        // Late-joiner: if workload is Running and any service is in NeedBackend,
-        // send WorkloadReady so it can transition to Active.
-        self.notify_late_joiner_services(workload_id, placement_table, out);
+        // Reconcile readiness: sync service states based on workload state.
+        self.reconcile_readiness(workload_id, placement_table, out);
     }
 
-    /// Notify services in NeedBackend state when the workload is already Running.
-    /// This handles the "late-joiner" case: a service activates while the workload
-    /// is already Running, so no BecameReady event is emitted.
-    fn notify_late_joiner_services(
+    /// Reconcile service readiness based on workload state.
+    ///
+    /// - WorkloadReady: workload Running + service in NeedBackend → send WorkloadReady
+    /// - WorkloadUnready: workload not Running + service Active → send WorkloadUnready
+    /// - Re-activation during retry: workload retrying + activation service in Idle → send ServiceActivation
+    fn reconcile_readiness(
         &mut self,
         workload_id: &WorkloadId,
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
-        // Check if workload is Running and extract pod_id/worker_id.
-        let (pod_id, worker_id) = match self.workloads.get(workload_id) {
-            Some(wl) => match &wl.state {
-                WorkloadState::Running { pod_id, worker_id } => {
-                    (pod_id.clone(), worker_id.clone())
-                }
-                _ => return,
-            },
+        let wl = match self.workloads.get(workload_id) {
+            Some(wl) => wl,
             None => return,
         };
 
-        // Construct backend from workload spec.
-        let backend = match self.spec.workloads.get(workload_id) {
-            Some(wl_spec) => ServiceBackend {
-                pod_ip: wl_spec.network.ip,
-            },
-            None => return,
-        };
+        let is_running = matches!(wl.state, WorkloadState::Running { .. });
+        let is_retrying = matches!(
+            wl.state,
+            WorkloadState::RetryBackoff { .. } | WorkloadState::WaitingForCapacity
+        );
 
-        // Find services in NeedBackend state for this workload.
+        // Collect service IDs mapped to this workload.
         let svc_ids: Vec<ServiceId> = self
             .service_workload
             .iter()
             .filter(|(_, wl_id)| *wl_id == workload_id)
-            .filter(|(svc_id, _)| {
-                self.services
-                    .get(svc_id)
-                    .map(|svc| matches!(svc.state, ServiceState::NeedBackend))
-                    .unwrap_or(false)
-            })
             .map(|(sid, _)| sid.clone())
             .collect();
 
-        for sid in svc_ids {
-            if let Some(svc) = self.services.get_mut(&sid) {
+        if is_running {
+            // Extract pod_id/worker_id for WorkloadReady.
+            let (pod_id, worker_id) = match &wl.state {
+                WorkloadState::Running { pod_id, worker_id } => {
+                    (pod_id.clone(), worker_id.clone())
+                }
+                _ => unreachable!(),
+            };
+
+            // Construct backend from workload spec.
+            let backend = match self.spec.workloads.get(workload_id) {
+                Some(wl_spec) => ServiceBackend {
+                    pod_ip: wl_spec.network.ip,
+                },
+                None => return,
+            };
+
+            for sid in svc_ids {
+                let svc = match self.services.get(&sid) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if !matches!(svc.state, ServiceState::NeedBackend) {
+                    continue;
+                }
+
+                // Emit BackendReady observability event.
+                out.events.push(SmNamespaceEvent::Service {
+                    service_id: sid.clone(),
+                    workload_id: workload_id.clone(),
+                    event: SmServiceEvent::BackendReady,
+                });
+
+                let svc = self.services.get_mut(&sid).unwrap();
                 let svc_outputs = svc.step(
                     ServiceInput::WorkloadReady {
                         pod_id: pod_id.clone(),
@@ -199,6 +218,67 @@ impl NamespaceStateMachine {
                         placement_table,
                         out,
                     );
+                }
+            }
+        } else {
+            // Workload not running: send WorkloadUnready to Active services.
+            for sid in &svc_ids {
+                let svc = match self.services.get(sid) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if !matches!(svc.state, ServiceState::Active { .. }) {
+                    continue;
+                }
+
+                let svc = self.services.get_mut(sid).unwrap();
+                let svc_outputs = svc.step(
+                    ServiceInput::WorkloadUnready,
+                    &self.namespace_id,
+                );
+                let wl_id = svc.workload_id.clone();
+                if !svc_outputs.is_empty() {
+                    self.process_outputs(
+                        PendingOutput::Service {
+                            service_id: sid.clone(),
+                            workload_id: wl_id,
+                            outputs: svc_outputs,
+                        },
+                        placement_table,
+                        out,
+                    );
+                }
+            }
+
+            // During retry, re-activate activation services that went Idle
+            // so they transition Idle → NeedBackend and preserve demand
+            // through reconciliation (wants_backend() stays true).
+            if is_retrying {
+                for sid in &svc_ids {
+                    let svc = match self.services.get(sid) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if !(svc.has_activation && matches!(svc.state, ServiceState::Idle)) {
+                        continue;
+                    }
+
+                    let svc = self.services.get_mut(sid).unwrap();
+                    let svc_outputs = svc.step(
+                        ServiceInput::ServiceActivation,
+                        &self.namespace_id,
+                    );
+                    if !svc_outputs.is_empty() {
+                        self.process_outputs(
+                            PendingOutput::Service {
+                                service_id: sid.clone(),
+                                workload_id: workload_id.clone(),
+                                outputs: svc_outputs,
+                            },
+                            placement_table,
+                            out,
+                        );
+                    }
                 }
             }
         }

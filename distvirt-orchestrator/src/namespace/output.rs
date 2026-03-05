@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::broadcast::broadcast_to_active_workers;
-use crate::service::{ServiceInput, ServiceOutput};
+use crate::service::ServiceOutput;
 use crate::types::*;
 use crate::workload::{WorkloadInput, WorkloadOutput};
 
@@ -101,7 +101,7 @@ impl NamespaceStateMachine {
         }
     }
 
-    /// Translate workload outputs. BecameReady/BecameUnready are forwarded to services.
+    /// Translate workload outputs into namespace-level actions.
     fn translate_workload_outputs(
         &mut self,
         workload_id: &WorkloadId,
@@ -116,117 +116,6 @@ impl NamespaceStateMachine {
                     out.pod_requests.push(PodRequest {
                         workload_id: workload_id.clone(),
                     });
-                }
-                WorkloadOutput::BecameReady { pod_id, worker_id } => {
-                    // Emit backend ready for all services on this workload.
-                    let svc_ids: Vec<(ServiceId, WorkloadId)> = self
-                        .service_workload
-                        .iter()
-                        .filter(|(_, wl_id)| *wl_id == workload_id)
-                        .map(|(sid, wlid)| (sid.clone(), wlid.clone()))
-                        .collect();
-                    for (sid, wlid) in &svc_ids {
-                        out.events.push(SmNamespaceEvent::Service {
-                            service_id: sid.clone(),
-                            workload_id: wlid.clone(),
-                            event: SmServiceEvent::BackendReady,
-                        });
-                    }
-
-                    // Construct ServiceBackend from workload's PodNetworkConfig.
-                    let backend = self.spec.workloads.get(workload_id).map(|wl_spec| {
-                        ServiceBackend {
-                            pod_ip: wl_spec.network.ip,
-                        }
-                    });
-                    let backend = match backend {
-                        Some(b) => b,
-                        None => continue,
-                    };
-
-                    // Forward WorkloadReady to all services mapped to this workload.
-                    let svc_ids: Vec<ServiceId> = self
-                        .service_workload
-                        .iter()
-                        .filter(|(_, wl_id)| *wl_id == workload_id)
-                        .map(|(sid, _)| sid.clone())
-                        .collect();
-                    for sid in svc_ids {
-                        if let Some(svc) = self.services.get_mut(&sid) {
-                            let svc_outputs = svc.step(
-                                ServiceInput::WorkloadReady {
-                                    pod_id: pod_id.clone(),
-                                    worker_id: worker_id.clone(),
-                                    backend: backend.clone(),
-                                },
-                                &self.namespace_id,
-                            );
-                            if !svc_outputs.is_empty() {
-                                queue.push_back(PendingOutput::Service {
-                                    service_id: sid.clone(),
-                                    workload_id: workload_id.clone(),
-                                    outputs: svc_outputs,
-                                });
-                            }
-                        }
-                    }
-                }
-                WorkloadOutput::BecameUnready => {
-                    // Check if the workload is retrying (RetryBackoff or WaitingForCapacity).
-                    let is_retrying = self
-                        .workloads
-                        .get(workload_id)
-                        .map(|wl| {
-                            matches!(
-                                wl.state,
-                                WorkloadState::RetryBackoff { .. }
-                                    | WorkloadState::WaitingForCapacity
-                            )
-                        })
-                        .unwrap_or(false);
-
-                    // Forward WorkloadUnready to all services mapped to this workload.
-                    let svc_ids: Vec<ServiceId> = self
-                        .service_workload
-                        .iter()
-                        .filter(|(_, wl_id)| *wl_id == workload_id)
-                        .map(|(sid, _)| sid.clone())
-                        .collect();
-                    for sid in svc_ids {
-                        if let Some(svc) = self.services.get_mut(&sid) {
-                            let svc_outputs = svc.step(
-                                ServiceInput::WorkloadUnready,
-                                &self.namespace_id,
-                            );
-                            let wl_id = svc.workload_id.clone();
-                            if !svc_outputs.is_empty() {
-                                queue.push_back(PendingOutput::Service {
-                                    service_id: sid.clone(),
-                                    workload_id: wl_id.clone(),
-                                    outputs: svc_outputs,
-                                });
-                            }
-                            // During retry, re-activate activation services that went Idle
-                            // so they transition Idle → NeedBackend and preserve demand
-                            // through reconciliation (wants_backend() stays true).
-                            if is_retrying
-                                && svc.has_activation
-                                && matches!(svc.state, ServiceState::Idle)
-                            {
-                                let reactivate_outputs = svc.step(
-                                    ServiceInput::ServiceActivation,
-                                    &self.namespace_id,
-                                );
-                                if !reactivate_outputs.is_empty() {
-                                    queue.push_back(PendingOutput::Service {
-                                        service_id: sid.clone(),
-                                        workload_id: wl_id,
-                                        outputs: reactivate_outputs,
-                                    });
-                                }
-                            }
-                        }
-                    }
                 }
                 WorkloadOutput::SuspendRequest {
                     worker_id,

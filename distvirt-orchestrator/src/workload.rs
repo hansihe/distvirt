@@ -72,8 +72,6 @@ pub enum WorkloadOutput {
     /// Artifact should be deleted. The namespace layer resolves placement
     /// and emits the actual WorkerCommand::DeleteArtifact.
     DeleteArtifact { artifact_id: ArtifactId },
-    BecameReady { pod_id: PodId, worker_id: WorkerId },
-    BecameUnready,
     WorkerCommand(WorkerId, WorkerCommand),
     TimerSet(TimerKey, std::time::Duration),
     TimerCancel(TimerKey),
@@ -235,7 +233,6 @@ impl WorkloadStateMachine {
                         WorkloadState::Running {
                             pod_id, worker_id, ..
                         } => {
-                            outputs.push(WorkloadOutput::BecameUnready);
                             if self.suspend_on_idle {
                                 // Suspend instead of stop.
                                 let artifact_id = ArtifactId::from(format!(
@@ -365,10 +362,6 @@ impl WorkloadStateMachine {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
                             match pending {
                                 PendingIntent::None | PendingIntent::Demand => {
-                                    outputs.push(WorkloadOutput::BecameReady {
-                                        pod_id: pod_id.clone(),
-                                        worker_id: worker_id.clone(),
-                                    });
                                     self.state = WorkloadState::Running { pod_id, worker_id };
                                 }
                                 PendingIntent::Deactivate | PendingIntent::Restart => {
@@ -416,18 +409,10 @@ impl WorkloadStateMachine {
                                 }
                                 PendingIntent::Demand => {
                                     // Demand is guaranteed > 0 by invariant.
-                                    outputs.push(WorkloadOutput::BecameReady {
-                                        pod_id: pod_id.clone(),
-                                        worker_id: worker_id.clone(),
-                                    });
                                     self.state = WorkloadState::Running { pod_id, worker_id };
                                 }
                                 PendingIntent::None => {
                                     if self.current_demand > 0 {
-                                        outputs.push(WorkloadOutput::BecameReady {
-                                            pod_id: pod_id.clone(),
-                                            worker_id: worker_id.clone(),
-                                        });
                                         self.state = WorkloadState::Running { pod_id, worker_id };
                                     } else {
                                         // Demand dropped while we were resuming. Stop/suspend immediately.
@@ -564,14 +549,14 @@ impl WorkloadStateMachine {
                         } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             self.transition_on_intent(pending, &mut outputs);
                         }
                     }
                     WorkloadState::Running {
                         pod_id: pid, ..
                     } if *pid == pod_id => {
-                        outputs.push(WorkloadOutput::BecameUnready);
+
                         self.transition_on_demand(&mut outputs);
                     }
                     WorkloadState::Suspending {
@@ -586,7 +571,7 @@ impl WorkloadStateMachine {
                         {
                             // Pod died while we were trying to suspend it.
                             outputs.push(WorkloadOutput::TimerCancel(suspend_timeout));
-                            // BecameUnready was already emitted when we entered Suspending.
+
                             self.transition_on_intent(pending, &mut outputs);
                         }
                     }
@@ -606,7 +591,7 @@ impl WorkloadStateMachine {
                             outputs.push(WorkloadOutput::DeleteArtifact {
                                 artifact_id,
                             });
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             self.transition_on_intent(pending, &mut outputs);
                         }
                     }
@@ -626,14 +611,14 @@ impl WorkloadStateMachine {
                         } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(launch_timeout));
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             self.transition_on_intent(pending, &mut outputs);
                         }
                     }
                     WorkloadState::Running {
                         worker_id: wid, ..
                     } if *wid == worker_id => {
-                        outputs.push(WorkloadOutput::BecameUnready);
+
                         self.transition_on_demand(&mut outputs);
                     }
                     WorkloadState::Suspending {
@@ -647,7 +632,7 @@ impl WorkloadStateMachine {
                         } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(suspend_timeout));
-                            // BecameUnready already emitted on entry to Suspending.
+
                             self.transition_on_intent(pending, &mut outputs);
                         }
                     }
@@ -667,7 +652,7 @@ impl WorkloadStateMachine {
                         } = std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(resume_timeout));
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             self.transition_on_intent(pending, &mut outputs);
                         }
                     }
@@ -697,7 +682,7 @@ impl WorkloadStateMachine {
                                 graceful: false,
                             },
                         ));
-                        outputs.push(WorkloadOutput::BecameUnready);
+
                         self.transition_on_intent(pending, &mut outputs);
                     }
                     WorkloadState::Suspending {
@@ -722,7 +707,7 @@ impl WorkloadStateMachine {
                                 graceful: false,
                             },
                         ));
-                        // BecameUnready already emitted on entry to Suspending.
+
                         self.transition_on_intent(pending, &mut outputs);
                     }
                     WorkloadState::Resuming {
@@ -750,7 +735,7 @@ impl WorkloadStateMachine {
                             },
                         ));
                         outputs.push(WorkloadOutput::DeleteArtifact { artifact_id });
-                        outputs.push(WorkloadOutput::BecameUnready);
+
                         self.transition_on_intent(pending, &mut outputs);
                     }
                     WorkloadState::RetryBackoff { backoff_timer }
@@ -774,7 +759,7 @@ impl WorkloadStateMachine {
                         if let WorkloadState::Running { pod_id, worker_id } =
                             std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             if self.suspend_on_idle {
                                 let artifact_id = ArtifactId::from(format!(
                                     "{}-{}-{}",
@@ -861,7 +846,7 @@ impl WorkloadStateMachine {
                                     graceful: false,
                                 },
                             ));
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             self.consecutive_failures = 0;
                             self.transition_on_demand(&mut outputs);
                         }
@@ -907,7 +892,7 @@ impl WorkloadStateMachine {
                                     graceful: false,
                                 },
                             ));
-                            outputs.push(WorkloadOutput::BecameUnready);
+
                             self.consecutive_failures = 0;
                             self.transition_on_demand(&mut outputs);
                         }

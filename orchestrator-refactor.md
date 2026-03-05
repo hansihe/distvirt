@@ -411,14 +411,71 @@ explores SM transitions; reconciliation is deterministic glue.
 - `tests/stateright_model.rs` — updated WorkloadSnapshot mappings
 - `tests/proptest.rs` — updated demand consistency check
 
-### Phase 2: Remove readiness routing
+### Phase 2: Remove readiness routing — 🔧 IN PROGRESS (partially applied, 1 test failing)
 
-1. Remove `WorkloadOutput::BecameReady/BecameUnready`
-2. Remove BecameReady/BecameUnready handling from `translate_workload_outputs`
-3. Add readiness reconciliation (sync service state with workload state)
-4. Remove late-joiner logic from `translate_service_outputs`
-5. Remove retry-aware BecameUnready handling
-6. Update stateright models
+**What's done (changes are on the working tree, unstaged):**
+
+1. ✅ Renamed `notify_late_joiner_services()` → `reconcile_readiness()` in
+   `reconciliation.rs`, expanded to handle:
+   - WorkloadReady: workload Running + service NeedBackend → send WorkloadReady
+   - WorkloadUnready: workload not Running + service Active → send WorkloadUnready
+   - Re-activation during retry: after sending WorkloadUnready, re-activate
+     activation services that went Idle → NeedBackend (preserves demand)
+   - BackendReady observability event emitted from reconcile_readiness
+2. ✅ Removed `BecameReady`/`BecameUnready` from `WorkloadOutput` enum
+3. ✅ Removed all ~18 emission sites in `workload.rs` `step()`
+4. ✅ Removed BecameReady/BecameUnready match arms from `translate_workload_outputs`
+   in `output.rs`
+5. ✅ Removed unused `ServiceInput` import from `output.rs`
+6. ✅ Updated scenario test comments in `multi_service.rs`, `resume_failure.rs`
+
+**Test results: 1 failure**
+
+- 72/72 lib tests pass ✅
+- 44/45 scenario tests pass, **1 FAILS**: `test_demand_up_during_resume`
+- Stateright, proptest not yet re-run (lib tests cover them)
+
+**The failing test: `scenarios::transition_intents::test_demand_up_during_resume`**
+
+```
+workload 'ns/shared': expected Suspended, got Running
+```
+
+Test flow (uses `multi_service_spec` — two activation services svc-a/svc-b on
+one suspend-on-idle workload, custom handler that hangs ResumePod):
+1. Activate svc-a → workload launches → Running, svc-a Active
+2. BackendNeed::None on svc-a → idle timer starts
+3. `advance_time(31s)` → idle timer fires → svc-a Active → Idle
+4. Expected: demand drops to 0 → SetDemand(0) → Suspending → SuspendPod →
+   worker responds → Suspended
+5. Actual: workload stays Running
+
+**Root cause not yet identified.** The SetDemand(0) handler and Suspending
+transition logic look correct after the edits. The idle timer path
+(`IdleTimeout` → service step → `reconcile_demand`) is unchanged. Confirmed
+test passes on the pre-change commit. Need to investigate why the workload
+never leaves Running — either demand isn't dropping to 0, or
+`reconcile_readiness` is interfering (e.g., re-sending WorkloadReady
+somewhere it shouldn't).
+
+**Key correction from plan:** The plan said "when retrying, do NOT send
+WorkloadUnready" but the actual old behavior was: always send WorkloadUnready
+(Active → Idle), then re-activate activation services (Idle → NeedBackend).
+The initial implementation matched the plan and caused 2 test failures
+(`test_worker_loss_during_active_service`, `test_namespace_failed_treats_like_worker_loss`).
+Fixed by restructuring reconcile_readiness to always send WorkloadUnready when
+not Running, then re-activate during retry as a second pass. Those 2 tests
+now pass.
+
+**Files changed:**
+- `src/namespace/reconciliation.rs` — `reconcile_readiness()` replacing
+  `notify_late_joiner_services()`
+- `src/workload.rs` — removed BecameReady/BecameUnready enum variants + all
+  emission sites
+- `src/namespace/output.rs` — removed BecameReady/BecameUnready match arms,
+  removed unused ServiceInput import
+- `tests/scenarios/multi_service.rs` — updated comments
+- `tests/scenarios/resume_failure.rs` — updated comments
 
 ### Phase 3: Simplify output translation
 

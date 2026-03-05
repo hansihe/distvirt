@@ -13,9 +13,9 @@ use crate::harness::*;
 /// 2. Re-activate → ResumePod sent → worker returns PodFailed
 /// 3. Expected: workload enters RetryBackoff → cold launch via LaunchPod
 ///
-/// Previously buggy: BecameUnready triggered DemandDown which zeroed demand_count
-/// before retry logic could run. Fixed by queue-based output processing that
-/// collects all outputs before processing side effects.
+/// Previously buggy: readiness changes triggered DemandDown which zeroed demand_count
+/// before retry logic could run. Fixed by reconciliation-based readiness syncing
+/// that observes workload state directly.
 #[tokio::test(start_paused = true)]
 async fn test_resume_failure_falls_back_to_cold_launch() {
     let mut h = TestHarness::new();
@@ -67,9 +67,9 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     });
     h.converge().await;
 
-    // Fixed: Queue-based output processing ensures DemandDown from BecameUnready
-    // doesn't zero demand_count before retry logic runs. The workload should enter
-    // RetryBackoff, then after backoff, relaunch via cold LaunchPod.
+    // Fixed: Reconciliation-based readiness syncing ensures demand is preserved
+    // through retry. The workload should enter RetryBackoff, then after backoff,
+    // relaunch via cold LaunchPod.
     h.assert_workload_retry_backoff("ns1", "web");
     h.assert_service_need_backend("ns1", "web-svc");
 }

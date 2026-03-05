@@ -8,10 +8,10 @@ use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerEvent};
 /// Two services back same workload. Activate A → workload launches.
 /// Activate B → workload already running.
 ///
-/// Previously buggy: svc-b would get stuck in NeedBackend because the workload
-/// didn't re-emit BecameReady when demand went from 1→2 while Running.
-/// Fixed: the namespace layer now sends WorkloadReady to the originating service
-/// when DemandUp arrives on an already-Running workload.
+/// Previously buggy: svc-b would get stuck in NeedBackend because readiness
+/// wasn't synced when demand went from 1→2 while Running.
+/// Fixed: reconcile_readiness sends WorkloadReady to services in NeedBackend
+/// when the workload is already Running.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_two_services_one_workload_shared_demand() {
     let mut h = TestHarness::new();
