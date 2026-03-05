@@ -39,6 +39,9 @@ impl RouteTable {
         RouteTable {
             routes: HashMap::new(),
             last_miss: HashMap::new(),
+            // 1-second debounce prevents flooding the orchestrator with duplicate
+            // RouteMiss events when many packets arrive for the same unknown IP
+            // in a short burst (e.g. TCP SYN retransmits).
             miss_debounce: std::time::Duration::from_secs(1),
         }
     }

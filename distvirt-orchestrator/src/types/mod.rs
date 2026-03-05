@@ -55,6 +55,7 @@ pub enum TimerKey {
     LaunchTimeout { workload_id: WorkloadId, pod_id: PodId },
     SuspendTimeout { workload_id: WorkloadId, pod_id: PodId },
     ResumeTimeout { workload_id: WorkloadId, pod_id: PodId },
+    RetryBackoffTimeout { workload_id: WorkloadId },
 }
 
 // --- Pod Request ---

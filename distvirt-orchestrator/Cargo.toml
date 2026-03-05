@@ -7,7 +7,7 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread", "test-util"] }
 anyhow = "1"
 tonic = "0.12"
 prost = "0.13"
@@ -23,6 +23,7 @@ clap = { version = "4", features = ["derive"] }
 [dev-dependencies]
 proptest = "1"
 stateright = "0.31"
+tokio-test = "0.4"
 
 [[bin]]
 name = "distvirt-orchestrator"
@@ -30,3 +31,6 @@ path = "src/main.rs"
 
 [[test]]
 name = "shell_integration"
+
+[[test]]
+name = "e2e"

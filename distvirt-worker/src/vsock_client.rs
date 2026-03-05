@@ -15,8 +15,10 @@ type YamuxStream = yamux::Stream;
 ///
 /// The host acts as yamux client (opens the control stream).
 /// The guest opens output streams that arrive via `accept_output_stream()`.
+/// Async events (e.g. container exits) arrive on a dedicated event stream.
 pub struct GuestSession {
     control: YamuxStream,
+    events: Option<YamuxStream>,
     incoming_rx: mpsc::UnboundedReceiver<YamuxStream>,
 }
 
@@ -37,8 +39,13 @@ impl GuestSession {
         );
 
         // Open the control stream while driving the connection.
-        // We must poll both poll_new_outbound (to create the stream) and
-        // poll_next_inbound (to process yamux frames) simultaneously.
+        //
+        // yamux requires both sides of the connection to be driven
+        // concurrently: poll_next_inbound processes incoming frames (including
+        // internal window updates and acks), while poll_new_outbound sends the
+        // stream-open request. If we only polled poll_new_outbound, the yamux
+        // state machine would never process the peer's response and we'd
+        // deadlock.
         let mut control_opt: Option<YamuxStream> = None;
         let mut early_inbound: Vec<YamuxStream> = Vec::new();
 
@@ -76,6 +83,9 @@ impl GuestSession {
 
         // Spawn the driver task. This moves the Connection into the task,
         // which continuously drives yamux frame processing.
+        // The driver MUST be running before any send/recv on the control
+        // stream — without it, outgoing data is never flushed and incoming
+        // frames are never processed.
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         for stream in early_inbound {
             let _ = incoming_tx.send(stream);
@@ -118,6 +128,7 @@ impl GuestSession {
 
         Ok((GuestSession {
             control,
+            events: None,
             incoming_rx,
         }, yamux_driver))
     }
@@ -152,6 +163,70 @@ impl GuestSession {
             .await
             .context("read payload")?;
         serde_json::from_slice(&buf).context("deserialize message")
+    }
+
+    /// Accept the dedicated event stream opened by the guest.
+    ///
+    /// Must be called after receiving `Ready` but before `accept_output_stream()`.
+    /// The guest opens this stream before sending `Ready`, so it is guaranteed to
+    /// be the first item in `incoming_rx`.
+    pub async fn accept_event_stream(&mut self) -> anyhow::Result<()> {
+        let mut stream = self
+            .incoming_rx
+            .recv()
+            .await
+            .context("yamux connection closed, no event stream")?;
+
+        let mut len_buf = [0u8; 4];
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .context("read event stream header length")?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > 1024 * 1024 {
+            bail!("event stream header too large: {} bytes", len);
+        }
+        let mut buf = vec![0u8; len];
+        stream
+            .read_exact(&mut buf)
+            .await
+            .context("read event stream header payload")?;
+        let header: StreamHeader =
+            serde_json::from_slice(&buf).context("deserialize event StreamHeader")?;
+
+        match header {
+            StreamHeader::Events => {
+                log::info!("accepted event stream from guest");
+                self.events = Some(stream);
+                Ok(())
+            }
+            other => {
+                bail!("expected StreamHeader::Events, got {:?}", other);
+            }
+        }
+    }
+
+    /// Receive a length-prefixed JSON message from the event stream.
+    pub async fn recv_event<T: serde::de::DeserializeOwned>(&mut self) -> anyhow::Result<T> {
+        let events = self
+            .events
+            .as_mut()
+            .context("event stream not established")?;
+        let mut len_buf = [0u8; 4];
+        events
+            .read_exact(&mut len_buf)
+            .await
+            .context("read event length")?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > 1024 * 1024 {
+            bail!("event message too large: {} bytes", len);
+        }
+        let mut buf = vec![0u8; len];
+        events
+            .read_exact(&mut buf)
+            .await
+            .context("read event payload")?;
+        serde_json::from_slice(&buf).context("deserialize event message")
     }
 
     /// Open a new yamux stream for forwarding stdin to a container.

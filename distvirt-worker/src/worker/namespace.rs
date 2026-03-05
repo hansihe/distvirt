@@ -129,6 +129,15 @@ impl NamespaceState {
         });
 
         // Bridge task: map FabricEvents to WorkerEvents.
+        //
+        // Events use try_send (non-blocking, lossy) or send (blocking, reliable)
+        // depending on their semantics:
+        //   - RouteMiss, ServiceActivation: use try_send because these are
+        //     high-frequency, best-effort signals. Dropping one just means a
+        //     slight delay before re-detection on the next packet.
+        //   - ServiceBackendNeed: uses send (blocking) because this controls
+        //     scale-up decisions — losing it could leave a service stuck without
+        //     a backend.
         let bridge_event_tx = bg_event_tx.clone();
         let bridge_ns_id = namespace_id.clone();
         let event_bridge_task = TaskHandle::spawn(async move {

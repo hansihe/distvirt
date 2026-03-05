@@ -1,0 +1,16 @@
+mod lifecycle;
+mod worker_disconnect;
+mod multi_worker;
+mod activation;
+mod retry_failure;
+mod suspend_resume;
+mod transition_intents;
+mod worker_failures;
+mod multi_service;
+mod spec_reconciliation;
+mod resume_failure;
+mod pod_exit_during_suspend;
+mod fabric_route_commands;
+mod registry_commands;
+mod worker_registry_sync;
+mod fabric_route_miss;

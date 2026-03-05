@@ -73,6 +73,7 @@ async fn mock_worker_handshake(conn: &mut WorkerConnection) {
     conn.send_ready(&distvirt_worker_protocol::WorkerReady {
         tunnel_listen_port: None,
         tunnel_public_key: None,
+        transfer_listen_port: None,
     }).await.unwrap();
 }
 

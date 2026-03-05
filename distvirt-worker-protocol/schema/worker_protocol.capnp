@@ -346,6 +346,8 @@ struct WorkerReady {
   hasTunnelListenPort @1 :Bool;
   tunnelPublicKey @2 :Data;
   hasTunnelPublicKey @3 :Bool;
+  hasTransferListenPort @4 :Bool;
+  transferListenPort @5 :UInt16;
 }
 
 # --- Control Stream: Command Payloads ---
@@ -411,6 +413,10 @@ struct LaunchPodCmd {
 # If graceful is true, the worker cancels the pod's token, triggering
 # a graceful VM shutdown with a timeout before force-killing. If false,
 # the pod supervisor is aborted immediately (VM process killed via Drop).
+#
+# The worker responds with PodExited when the pod has been fully stopped
+# and cleaned up. The exit code is 0 for graceful shutdown, or the
+# process exit code for force-kill.
 struct StopPodCmd {
   namespaceId @0 :Text;
   podId @1 :Text;
@@ -523,6 +529,9 @@ struct RemoveWireGuardPeerCmd {
 #
 # On success, emits WorkerEvent.podSuspended. On failure, emits
 # WorkerEvent.podSuspendFailed.
+#
+# If the pod exits or crashes before the suspend completes, the worker
+# emits PodFailed (not PodSuspendFailed). No snapshot artifact is created.
 struct SuspendPodCmd {
   namespaceId @0 :Text;
   podId @1 :Text;
@@ -539,8 +548,9 @@ struct SuspendPodCmd {
 # the vsock session, and re-attaches the pod to the fabric with the
 # provided network config (which may differ from the original).
 #
-# On success, emits WorkerEvent.podRunning. On failure, emits
-# WorkerEvent.podFailed.
+# On success, emits WorkerEvent.podRunning. On failure (corrupt snapshot,
+# VM restore error, etc.), emits WorkerEvent.podFailed. The orchestrator
+# may fall back to a cold launch via LaunchPod.
 struct ResumePodCmd {
   namespaceId @0 :Text;
   podId @1 :Text;
@@ -563,6 +573,24 @@ struct DeleteSnapshotCmd {
   # Wire name kept as snapshotId for backwards compatibility.
   poolId @1 :Text;
   # Storage pool where artifact is stored.
+}
+
+# Transfer an artifact from one pool to another (possibly cross-worker).
+#
+# The source worker reads the artifact and either copies it locally (if
+# destEndpoint is empty) or streams it over TCP to the destination worker.
+# On success the destination emits ArtifactTransferReceivedEvt; on failure
+# the source emits TransferFailedEvt.
+struct TransferArtifactCmd {
+  transferId @0 :UInt64;
+  # Correlation ID assigned by orchestrator. Carried through to all events.
+  sourceArtifactId @1 :Text;
+  sourcePoolId @2 :Text;
+  destArtifactId @3 :Text;
+  # New artifact ID for the copy at the destination. Assigned by orchestrator.
+  destPoolId @4 :Text;
+  destEndpoint @5 :Text;
+  # "host:port" of dest worker's transfer listener. Empty = local copy.
 }
 
 # Information about a worker peer for inter-worker tunnel establishment.
@@ -640,6 +668,8 @@ struct WorkerCommand {
     # namespaces and pods, awaits cleanup, then exits.
     workerRegistrySync @18 :WorkerRegistrySyncCmd;
     # Full-state replacement of the worker peer registry for tunnel establishment.
+    transferArtifact @19 :TransferArtifactCmd;
+    # Transfer an artifact between pools (local or cross-worker).
   }
 }
 
@@ -711,6 +741,21 @@ struct PodLogStreamErrorEvt {
   # Which phase of log streaming failed (e.g., "setup", "streaming").
   error @4 :Text;
 }
+
+# --- Service Activation Signaling ---
+#
+# Services use one of two mutually exclusive signaling paths to tell
+# the orchestrator that a backend pod is needed:
+#
+# 1. ServiceActivation — for services WITHOUT a protocol activator.
+#    Fires on the first frame arrival. Simple "traffic detected" signal.
+#
+# 2. ServiceBackendNeed — for services WITH a protocol activator
+#    (ActivatorConfig). The activator inspects traffic at the protocol
+#    level and signals a nuanced need level (none/traffic/active).
+#
+# Both paths serve the same purpose (telling the orchestrator to
+# schedule a backend), but they never fire for the same service.
 
 # Traffic arrived at a service with no backend (or whose backend isn't ready).
 #
@@ -793,6 +838,10 @@ struct FabricRouteMissEvt {
 # Events report lifecycle transitions and fabric-level signals. The worker
 # never makes scheduling decisions -- it only reports what happened so the
 # orchestrator can react.
+#
+# Ordering guarantee: events for a single namespace are delivered in causal
+# order over the control stream. Events across different namespaces may
+# interleave freely.
 struct WorkerEvent {
   union {
     namespaceCreated @0 :NamespaceCreatedEvt;
@@ -819,6 +868,10 @@ struct WorkerEvent {
     # An artifact write has begun on a storage pool.
     artifactWriteCommitted @17 :ArtifactWriteCommittedEvt;
     # An artifact write has completed and is durable.
+    artifactTransferReceived @18 :ArtifactTransferReceivedEvt;
+    # An artifact transfer has been received and written to disk.
+    transferFailed @19 :TransferFailedEvt;
+    # An artifact transfer has failed.
   }
 }
 
@@ -868,6 +921,32 @@ struct ArtifactWriteCommittedEvt {
   artifactId @1 :Text;
   poolId @2 :Text;
   sizeBytes @3 :UInt64;
+}
+
+# An artifact transfer has been received and written to disk.
+#
+# Emitted by the destination worker (or the local worker for local copies)
+# after the transferred artifact is fully written and durable.
+struct ArtifactTransferReceivedEvt {
+  transferId @0 :UInt64;
+  sourceArtifactId @1 :Text;
+  sourcePoolId @2 :Text;
+  destArtifactId @3 :Text;
+  destPoolId @4 :Text;
+  sizeBytes @5 :UInt64;
+}
+
+# An artifact transfer has failed.
+#
+# Emitted by the source worker when it cannot complete a transfer
+# (network error, missing artifact, etc.).
+struct TransferFailedEvt {
+  transferId @0 :UInt64;
+  sourceArtifactId @1 :Text;
+  sourcePoolId @2 :Text;
+  destArtifactId @3 :Text;
+  destPoolId @4 :Text;
+  error @5 :Text;
 }
 
 # --- Log Stream Header ---

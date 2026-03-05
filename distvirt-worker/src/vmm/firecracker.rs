@@ -29,7 +29,9 @@ impl Vmm for Firecracker {
     async fn launch(&self, config: &VmConfig) -> anyhow::Result<FirecrackerInstance> {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
-        // Copy rootfs image to tmpdir (Firecracker needs writable).
+        // Copy rootfs image to tmpdir — Firecracker needs a writable rootfs,
+        // but the source may be in a read-only location (e.g. Nix store).
+        // Each VM gets its own copy to allow independent filesystem mutations.
         let rootfs_path = tmpdir.path().join("rootfs.ext4");
         tokio::fs::copy(&config.rootfs_image_path, &rootfs_path)
             .await
@@ -92,6 +94,12 @@ impl Vmm for Firecracker {
             &serde_json::json!({
                 "kernel_image_path": config.kernel_path.to_str()
                     .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8: {:?}", config.kernel_path))?,
+                // Boot args for the microVM kernel:
+                //   console=ttyS0  — serial console for boot logs (captured via stdout)
+                //   reboot=k       — use keyboard controller reset (prevents triple-fault reboot loop)
+                //   panic=1        — reboot 1s after kernel panic (fast failure detection)
+                //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
+                //   init=/sbin/init — our custom init binary (not systemd)
                 "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init"
             }),
         )
@@ -128,6 +136,10 @@ impl Vmm for Firecracker {
             &api_socket,
             "/vsock",
             &serde_json::json!({
+                // CID 0 and 1 are reserved (hypervisor and host). CID 2 is
+                // conventionally the host in some setups. We use 3 as the
+                // guest CID — the exact value doesn't matter since we connect
+                // via the UDS path, not by CID.
                 "guest_cid": 3,
                 "uds_path": "./vsock.sock"
             }),
@@ -366,8 +378,14 @@ impl Drop for FirecrackerInstance {
     fn drop(&mut self) {
         // Safety net: if the instance is dropped without explicit cleanup
         // (e.g., task abort, non-graceful stop), send SIGKILL to the process.
-        // start_kill() is non-async and safe to call in synchronous Drop.
-        // Field drop order ensures `child` is killed before `_tmpdir` is removed.
+        //
+        // We use `start_kill()` (not `kill().await`) because Drop is synchronous.
+        // start_kill() sends SIGKILL without awaiting — the OS will reap the zombie.
+        //
+        // IMPORTANT: Rust drops struct fields in declaration order. `child` is
+        // declared before `_tmpdir`, so the process is killed before the tmpdir
+        // is removed. Reordering the struct fields would cause Firecracker to
+        // lose its working directory while still running.
         let _ = self.child.start_kill();
     }
 }
@@ -581,7 +599,9 @@ async fn api_request(
     match read_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(e).context("read API response"),
-        Err(_) => {} // Timeout — check what we have so far.
+        Err(_) => {
+            log::warn!("Firecracker API: read timeout on PUT {}, checking partial response", path);
+        }
     }
 
     let response_str = String::from_utf8_lossy(&response);

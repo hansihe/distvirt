@@ -45,6 +45,8 @@ impl IoSession {
         let (stream_id, payload_len) = parse_output_chunk_header(&header);
         let payload_len = payload_len as usize;
 
+        // Safety limit: reject chunks > 16 MiB to prevent a malicious or
+        // buggy guest from exhausting host memory with a single allocation.
         if payload_len > 16 * 1024 * 1024 {
             bail!("output chunk payload too large: {} bytes", payload_len);
         }

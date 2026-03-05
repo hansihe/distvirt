@@ -121,10 +121,17 @@ impl ServiceTable {
         }
     }
 
-    /// Update the backend for a service. Clears readiness. Only clears the
-    /// buffer when the backend is removed or changes to a different pod;
-    /// setting a backend for the first time preserves buffered frames so
-    /// `mark_ready` can flush them.
+    /// Update the backend for a service. Clears readiness.
+    ///
+    /// Buffer preservation is critical to the activation flow:
+    ///   1. Traffic arrives → frames buffered, ServiceActivation event fires
+    ///   2. Orchestrator assigns a backend → `update_backend(Some(ip))`
+    ///   3. Backend reports ready → `mark_ready()` flushes buffered frames
+    ///
+    /// If `update_backend` cleared the buffer in step 2, the frames that
+    /// triggered activation would be lost. So we only clear the buffer when
+    /// the backend is *removed* or *changes* to a different pod (meaning the
+    /// old buffered frames are stale).
     pub fn update_backend(&mut self, service_id: &str, backend: Option<Ipv4Addr>) {
         let ip = match self.id_to_ip.get(service_id) {
             Some(ip) => *ip,
@@ -147,6 +154,15 @@ impl ServiceTable {
             if should_clear {
                 entity.buffer.clear();
                 entity.buffer_start = None;
+            }
+            // When the backend is removed (service returns to idle), clear the
+            // per-IP activation debounce timer. Without this, a rapid
+            // idle→activate→idle→activate cycle can suppress the second
+            // ServiceActivation event: the debounce window from the first
+            // activation still covers the new traffic, so the orchestrator
+            // never learns about it and the service stays stuck.
+            if backend.is_none() {
+                self.last_activation.remove(&ip);
             }
             entity.processor.on_backend_update(
                 has_backend,

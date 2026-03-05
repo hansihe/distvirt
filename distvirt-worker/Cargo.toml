@@ -25,13 +25,14 @@ smoltcp = { version = "0.12", default-features = false, features = ["medium-ip",
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util", "time", "process", "sync", "fs"] }
 tonic = "0.12"
 yamux = "0.13.9"
-tokio-util = { version = "0.7.18", features = ["compat"] }
+tokio-util = { version = "0.7.18", features = ["compat", "io-util"] }
 futures-lite = "2.6.1"
 boringtun = "0.7"
 sha2 = "0.10"
 hickory-resolver = "0.25"
 zerocopy = { version = "0.8", features = ["derive"] }
 snow = "0.10"
+tar = "0.4"
 
 [dev-dependencies]
 env_logger = "0.11"

@@ -316,6 +316,12 @@ pub async fn run_compose(
                     WorkerEvent::ArtifactWriteCommitted { artifact_id, size_bytes, .. } => {
                         log::debug!("artifact write committed: {} ({} bytes)", artifact_id, size_bytes);
                     }
+                    WorkerEvent::ArtifactTransferReceived { transfer_id, dest_artifact_id, size_bytes, .. } => {
+                        log::debug!("artifact transfer received: transfer_id={} artifact={} ({} bytes)", transfer_id, dest_artifact_id, size_bytes);
+                    }
+                    WorkerEvent::TransferFailed { transfer_id, error, .. } => {
+                        log::error!("artifact transfer failed: transfer_id={} error={}", transfer_id, error);
+                    }
                 }
             }
             Some(log_line) = log_line_rx.recv() => {

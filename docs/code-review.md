@@ -101,10 +101,13 @@ If a pod exits between log stream header read and workload resolution, logs are 
 
 Workload spec changes are logged as warnings but silently applied without redeploying pods. Users won't see their config changes take effect.
 
-### 11. Unsafe `libc::kill` without PID validation
+### 11. ~~Unsafe `libc::kill` without PID validation~~ RESOLVED
 **`distvirt-cli/src/commands/connect.rs:194-196`**
 
 Sends SIGTERM to a stored PID without checking if the process still exists or if PID was reused. Could kill an unrelated process.
+
+**Status:** Now validates PID > 0, probes with `kill(pid, 0)` before sending SIGTERM,
+and warns if the process is no longer running.
 
 ### 12. WireGuard peer IP offset overflow
 **`distvirt-orchestrator/src/wg_peers.rs:75`**
@@ -116,10 +119,14 @@ Uses `u16` for host offset calculation — overflows/wraps for subnets larger th
 
 State files written world-readable, no timestamps, no PID liveness check.
 
-### 14. Snapshot size calculation swallows errors
-**`distvirt-worker/src/worker/supervisor.rs:510`**
+### 14. ~~Snapshot size calculation swallows errors~~ RESOLVED
+**`distvirt-worker/src/worker/supervisor.rs:533`**
 
 `dir_size().unwrap_or(0)` silently reports 0 bytes without logging the error, giving the orchestrator incorrect capacity data.
+
+**Status:** Both call sites (`supervisor.rs` and `artifact_transfer.rs`) now log a
+warning on error before falling back to 0. The duplicate `dir_size` was also
+consolidated (see #20).
 
 ---
 
@@ -130,10 +137,12 @@ State files written world-readable, no timestamps, no PID liveness check.
 
 Workloads/services are force-reset to Dormant/Idle without emitting state change events. External observers see a gap.
 
-### 16. Lost pod info on worker disconnect
-**`distvirt-orchestrator/src/namespace/events.rs:294`**
+### 16. ~~Lost pod info on worker disconnect~~ RESOLVED
+**`distvirt-orchestrator/src/namespace/events.rs:326`**
 
 `_lost_pods` is discarded without logging which pods were lost.
+
+**Status:** Now logs a warning with the count and list of dropped pod IDs.
 
 ### 17. TAP device name silently truncated
 **`distvirt-worker/src/tap.rs:107-109`**
@@ -176,3 +185,92 @@ Splice/Clone return errors at both the gRPC layer and the SM layer — inconsist
 3. ~~**Implement request-response matching**~~ — resolved; `Option` enforces single-request-per-client structurally
 4. ~~**Replace `.unwrap()` on Mutexes**~~ — converted to `.expect("poisoned")`; `parking_lot` migration optional
 5. ~~**Implement the `graceful` flag** in StopPod~~ — resolved; `graceful=false` now aborts immediately via SIGKILL
+
+---
+
+## DISTVIRT-WORKER FOCUSED REVIEW (March 2026)
+
+Deep review of the `distvirt-worker` crate specifically.
+
+### Bugs / Correctness
+
+#### 20. ~~`dir_size` duplicated and non-recursive~~ RESOLVED
+**`supervisor.rs:604` and `artifact_transfer.rs:273`**
+
+Two identical `dir_size` functions that only count files in the immediate directory. If snapshot or artifact directories ever contain subdirectories, sizes will be under-reported. Should be extracted into a shared recursive utility.
+
+**Status:** Consolidated into a single `pub(crate)` function in `supervisor.rs`, now
+recursive (uses a stack to walk subdirectories). `artifact_transfer.rs` imports it.
+
+#### 21. `handle_stop_pod` removes pod before supervisor finishes
+**`worker/mod.rs:701`**
+
+The pod is removed from `ns.pods` via `.remove()` immediately, then the supervisor is awaited. If the supervisor sends a `PodExited`/`PodFailed` event during graceful shutdown, the `remove_finished_pod` call in the main loop (line 276) operates on an already-removed entry. Not a crash (it's a no-op), but the pod is no longer tracked locally when the event fires — the main loop forwards the event to the orchestrator but can't do any local bookkeeping.
+
+#### 22. ~~`local_pool_copy` only copies files, not subdirectories~~ RESOLVED
+**`artifact_transfer.rs:258`**
+
+Only copies immediate child files. If an artifact has nested directories, they are silently dropped. The TCP transfer path uses `tar` which handles this correctly, creating an inconsistency between local and remote transfers.
+
+**Status:** Now uses a stack-based recursive walk matching the `dir_size` pattern,
+copying subdirectories with `create_dir_all`. Consistent with the tar-based TCP path.
+
+#### 23. ~~Missing `ArtifactWriteFailed` event on suspend failure~~ RESOLVED (already handled)
+**`supervisor.rs:521-569`**
+
+When `vm.suspend()` fails, `PodSuspendFailed` is emitted but the `ArtifactWriteStarted` event was already sent (line 521). The orchestrator sees "write started" followed by "suspend failed" but never gets a matching write-failed/aborted event — may leave stale artifact tracking state.
+
+**Status:** Already handled in the orchestrator. `events.rs:284-293` cleans up `Writing`
+placement entries when `PodSuspendFailed` is received. No protocol change needed.
+
+#### 24. ~~`api_request` silently swallows read timeout~~ RESOLVED
+**`vmm/firecracker.rs:599-603`**
+
+If the Firecracker API response read times out, the function proceeds to check whatever partial response was received (`Err(_) => {}`) rather than returning an error. This could mask issues where Firecracker is hung — a partial response might happen to contain a "200" substring and pass validation.
+
+**Status:** Timeout now logs a warning with the API path before proceeding to check
+the partial response.
+
+### Design / Maintainability
+
+#### 25. `FabricPacketMut` duplicates all `FabricPacket` accessors
+**`packet/frame.rs:119-186`**
+
+All read-only accessors from `FabricPacket` are copy-pasted into `FabricPacketMut`. A `Deref` impl or shared trait would eliminate this duplication. Additionally, `FabricPacketMut` is not used anywhere — all mutation goes through the free functions (`rewrite_ipv4_dst`, etc.). Could be removed entirely.
+
+#### 26. Lock contention on service table in hot path
+**`forwarding.rs:152-154`**
+
+The service table and IP port table are locked simultaneously on every packet through the service VIP path. Documented in the lock ordering comment (`mod.rs:11-20`), but will become a bottleneck at scale.
+
+#### 27. Tunnel `recv_loop` holds write lock for entire handshake
+**`tunnel.rs:357`**
+
+The write lock on `TunnelState` is held for the entire handshake message processing including the response send (via `tokio::spawn`). During handshake, this blocks all egress and other ingress lookups. With many peers connecting simultaneously, this causes frame drops.
+
+#### 28. Hardcoded worker capabilities
+**`worker/mod.rs:155-158`**
+
+```rust
+max_pods: 10,
+available_memory_mb: 1024,
+```
+
+These are hardcoded rather than derived from system resources. `available_memory_mb` especially should come from `/proc/meminfo` or similar.
+
+#### 29. `schedule_poll_timer` is recursive via `tokio::spawn`
+**`forwarding.rs:538-563`**
+
+Each timeout reschedules itself by spawning a new task. If smoltcp gets stuck returning very small delays, this could create a large chain of timer tasks. A single persistent timer task per service IP (or bounded retry count) would be more robust.
+
+#### 30. `NetConfig` fields are `String` but carry IP semantics
+**`vmm/mod.rs` via `NetConfig`**
+
+`guest_ip`, `netmask`, and `gateway` are `String` types that originate from `Ipv4Addr` values (`network.ip.to_string()` in `supervisor.rs:219`). These are parsed back to strings for the guest protocol JSON. Using typed fields throughout would prevent format errors and make the code more self-documenting.
+
+### Security
+
+#### 31. Artifact transfer listener has no authentication
+**`artifact_transfer.rs:46`**
+
+The TCP transfer listener accepts connections from any source with no authentication or authorization. An attacker on the network could inject arbitrary artifacts into any pool. The `TransferHeader` has a `_reserved` byte, and a shared secret from the orchestrator handshake could be used to add HMAC verification.

@@ -18,6 +18,8 @@ struct WorkloadModel {
     enable_worker_loss: bool,
     /// Whether to enable suspend-on-idle behavior.
     enable_suspend: bool,
+    /// Whether to enable ForceDeactivate actions.
+    enable_force_deactivate: bool,
     max_steps: usize,
 }
 
@@ -27,6 +29,7 @@ struct WorkloadModel {
 struct WlModelState {
     state: WorkloadState,
     demand_count: u32,
+    consecutive_failures: u32,
     pending_timers: BTreeSet<TimerKey>,
     next_pod_id: u64,
     step_count: usize,
@@ -38,6 +41,7 @@ struct WlModelState {
 enum WlModelAction {
     DemandUp,
     DemandDown,
+    ForceDeactivate,
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     PodRunning { pod_id: PodId },
     PodGone { pod_id: PodId },
@@ -45,6 +49,8 @@ enum WlModelAction {
     PodSuspendFailed { pod_id: PodId },
     WorkerLost { worker_id: WorkerId },
     TimerFired { timer_key: TimerKey },
+    SpecChanged,
+    ManualRestart,
 }
 
 // --- Helpers ---
@@ -61,6 +67,16 @@ fn ns_id() -> NamespaceId {
     NamespaceId("model-ns".into())
 }
 
+/// Extract the pending intent from a workload state, if it's a transition state.
+fn get_pending(state: &WorkloadState) -> Option<PendingIntent> {
+    match state {
+        WorkloadState::Launching { pending, .. }
+        | WorkloadState::Suspending { pending, .. }
+        | WorkloadState::Resuming { pending, .. } => Some(*pending),
+        _ => None,
+    }
+}
+
 // --- Model Implementation ---
 
 impl Model for WorkloadModel {
@@ -71,6 +87,7 @@ impl Model for WorkloadModel {
         vec![WlModelState {
             state: WorkloadState::Dormant,
             demand_count: 0,
+            consecutive_failures: 0,
             pending_timers: BTreeSet::new(),
             next_pod_id: 0,
             step_count: 0,
@@ -86,6 +103,16 @@ impl Model for WorkloadModel {
         // Any service with active demand can send DemandDown.
         if state.demand_count > 0 {
             actions.push(WlModelAction::DemandDown);
+        }
+
+        // ForceDeactivate available from any state except Dormant/WaitingForCapacity.
+        if self.enable_force_deactivate {
+            match &state.state {
+                WorkloadState::Dormant | WorkloadState::WaitingForCapacity => {}
+                _ => {
+                    actions.push(WlModelAction::ForceDeactivate);
+                }
+            }
         }
 
         // Pending timers can fire.
@@ -186,6 +213,17 @@ impl Model for WorkloadModel {
                     });
                 }
             }
+            WorkloadState::RetryBackoff { .. } => {
+                // Timer fire is already covered by the pending_timers loop.
+                // Recovery via spec change or manual restart.
+                actions.push(WlModelAction::SpecChanged);
+                actions.push(WlModelAction::ManualRestart);
+            }
+            WorkloadState::Failed => {
+                // Recovery actions from terminal failure state.
+                actions.push(WlModelAction::SpecChanged);
+                actions.push(WlModelAction::ManualRestart);
+            }
         }
     }
 
@@ -193,6 +231,7 @@ impl Model for WorkloadModel {
         let mut sm = WorkloadStateMachine::new(wl_id(), self.enable_suspend);
         sm.state = state.state.clone();
         sm.demand_count = state.demand_count;
+        sm.consecutive_failures = state.consecutive_failures;
 
         let mut next_pod_id = state.next_pod_id;
         let ns = ns_id();
@@ -200,12 +239,13 @@ impl Model for WorkloadModel {
         let (input, fired_timer) = match action {
             WlModelAction::DemandUp => (WorkloadInput::DemandUp, None),
             WlModelAction::DemandDown => (WorkloadInput::DemandDown, None),
+            WlModelAction::ForceDeactivate => (WorkloadInput::ForceDeactivate, None),
             WlModelAction::LaunchPod { worker_id, pod_id } => {
                 next_pod_id += 1;
                 (WorkloadInput::LaunchPod { worker_id, pod_id }, None)
             }
             WlModelAction::PodRunning { pod_id } => (WorkloadInput::PodRunning { pod_id }, None),
-            WlModelAction::PodGone { pod_id } => (WorkloadInput::PodGone { pod_id }, None),
+            WlModelAction::PodGone { pod_id } => (WorkloadInput::PodGone { pod_id, reason: None }, None),
             WlModelAction::PodSuspended { pod_id, artifact_id } => {
                 (WorkloadInput::PodSuspended { pod_id, artifact_id }, None)
             }
@@ -219,6 +259,8 @@ impl Model for WorkloadModel {
                 let tk = timer_key.clone();
                 (WorkloadInput::TimerFired { timer_key }, Some(tk))
             }
+            WlModelAction::SpecChanged => (WorkloadInput::SpecChanged, None),
+            WlModelAction::ManualRestart => (WorkloadInput::ManualRestart, None),
         };
 
         let outputs = sm.step(input, &ns);
@@ -272,6 +314,7 @@ impl Model for WorkloadModel {
         Some(WlModelState {
             state: sm.state,
             demand_count: sm.demand_count,
+            consecutive_failures: sm.consecutive_failures,
             pending_timers,
             next_pod_id,
             step_count: state.step_count + 1,
@@ -295,6 +338,42 @@ impl Model for WorkloadModel {
                             | WorkloadState::Suspended { .. }
                             | WorkloadState::Resuming { .. }
                     )
+                } else {
+                    true
+                }
+            }),
+            // Safety: consecutive failures never exceed MAX_RETRIES.
+            Property::<Self>::always("consecutive failures bounded", |_model, state| {
+                state.consecutive_failures <= 5
+            }),
+            // Safety: Failed implies max retries and demand.
+            Property::<Self>::always("failed implies max retries and demand", |_model, state| {
+                if matches!(state.state, WorkloadState::Failed) {
+                    state.consecutive_failures >= 5 && state.demand_count > 0
+                } else {
+                    true
+                }
+            }),
+            // Safety: RetryBackoff has its backoff timer in pending_timers.
+            Property::<Self>::always("retry backoff has timer", |_model, state| {
+                if let WorkloadState::RetryBackoff { ref backoff_timer } = state.state {
+                    state.pending_timers.contains(backoff_timer)
+                } else {
+                    true
+                }
+            }),
+            // Safety: Failed state has no timers.
+            Property::<Self>::always("failed has no timers", |_model, state| {
+                if matches!(state.state, WorkloadState::Failed) {
+                    state.pending_timers.is_empty()
+                } else {
+                    true
+                }
+            }),
+            // Safety: Running implies consecutive_failures == 0.
+            Property::<Self>::always("pod running resets failures", |_model, state| {
+                if matches!(state.state, WorkloadState::Running { .. }) {
+                    state.consecutive_failures == 0
                 } else {
                     true
                 }
@@ -371,6 +450,38 @@ impl Model for WorkloadModel {
             Property::<Self>::sometimes("can reach dormant after running", |_model, state| {
                 state.next_pod_id > 0 && matches!(state.state, WorkloadState::Dormant)
             }),
+            // Safety: pending == Demand implies demand_count > 0.
+            Property::<Self>::always("pending demand implies demand count", |_model, state| {
+                if let Some(PendingIntent::Demand) = get_pending(&state.state) {
+                    state.demand_count > 0
+                } else {
+                    true
+                }
+            }),
+            // Reachability: Can reach Suspended via ForceDeactivate (only when both are enabled).
+            Property::<Self>::sometimes("can reach suspended via deactivate", |model, state| {
+                if !model.enable_suspend || !model.enable_force_deactivate {
+                    // Vacuously satisfied when feature is not enabled.
+                    return true;
+                }
+                matches!(state.state, WorkloadState::Suspended { .. })
+            }),
+            // Reachability: Can reach Failed state (needs pod_failure + enough steps).
+            Property::<Self>::sometimes("can reach failed", |model, state| {
+                if !model.enable_pod_failure || model.max_steps < 20 {
+                    return true;
+                }
+                matches!(state.state, WorkloadState::Failed)
+            }),
+            // Reachability: Can recover from Failed via SpecChanged/ManualRestart.
+            Property::<Self>::sometimes("can recover from failed", |model, state| {
+                if !model.enable_pod_failure || model.max_steps < 25 {
+                    return true;
+                }
+                // Running after having been through multiple pod attempts.
+                matches!(state.state, WorkloadState::Running { .. })
+                    && state.next_pod_id > 5
+            }),
         ]
     }
 }
@@ -385,6 +496,7 @@ fn workload_single_service_single_worker() {
         enable_pod_failure: false,
         enable_worker_loss: false,
         enable_suspend: false,
+        enable_force_deactivate: false,
         max_steps: 15,
     }
     .checker()
@@ -406,6 +518,7 @@ fn workload_two_services_single_worker() {
         enable_pod_failure: false,
         enable_worker_loss: false,
         enable_suspend: false,
+        enable_force_deactivate: false,
         max_steps: 15,
     }
     .checker()
@@ -427,6 +540,7 @@ fn workload_with_pod_failure() {
         enable_pod_failure: true,
         enable_worker_loss: false,
         enable_suspend: false,
+        enable_force_deactivate: false,
         max_steps: 20,
     }
     .checker()
@@ -448,6 +562,7 @@ fn workload_with_worker_loss() {
         enable_pod_failure: false,
         enable_worker_loss: true,
         enable_suspend: false,
+        enable_force_deactivate: false,
         max_steps: 20,
     }
     .checker()
@@ -469,6 +584,7 @@ fn workload_full_chaos() {
         enable_pod_failure: true,
         enable_worker_loss: true,
         enable_suspend: false,
+        enable_force_deactivate: false,
         max_steps: 12,
     }
     .checker()
@@ -490,6 +606,7 @@ fn workload_suspend_basic() {
         enable_pod_failure: false,
         enable_worker_loss: false,
         enable_suspend: true,
+        enable_force_deactivate: false,
         max_steps: 20,
     }
     .checker()
@@ -511,6 +628,7 @@ fn workload_suspend_with_failures() {
         enable_pod_failure: true,
         enable_worker_loss: true,
         enable_suspend: true,
+        enable_force_deactivate: false,
         max_steps: 15,
     }
     .checker()
@@ -532,6 +650,7 @@ fn workload_suspend_two_services() {
         enable_pod_failure: true,
         enable_worker_loss: false,
         enable_suspend: true,
+        enable_force_deactivate: false,
         max_steps: 15,
     }
     .checker()
@@ -541,6 +660,138 @@ fn workload_suspend_two_services() {
     result.assert_properties();
     println!(
         "Workload (suspend, 2 services): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_force_deactivate() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: false,
+        enable_worker_loss: false,
+        enable_suspend: true,
+        enable_force_deactivate: true,
+        max_steps: 20,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (force deactivate, suspend): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_force_deactivate_no_suspend() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: false,
+        enable_worker_loss: false,
+        enable_suspend: false,
+        enable_force_deactivate: true,
+        max_steps: 20,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (force deactivate, no suspend): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_force_deactivate_full_chaos() {
+    let result = WorkloadModel {
+        num_services: 2,
+        num_workers: 2,
+        enable_pod_failure: true,
+        enable_worker_loss: true,
+        enable_suspend: true,
+        enable_force_deactivate: true,
+        max_steps: 12,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (force deactivate, full chaos): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_retry_backoff() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: true,
+        enable_worker_loss: false,
+        enable_suspend: false,
+        enable_force_deactivate: false,
+        max_steps: 30,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (retry backoff): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_retry_recovery() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: true,
+        enable_worker_loss: false,
+        enable_suspend: false,
+        enable_force_deactivate: false,
+        max_steps: 35,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (retry recovery): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_retry_with_suspend() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: true,
+        enable_worker_loss: false,
+        enable_suspend: true,
+        enable_force_deactivate: false,
+        max_steps: 30,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (retry with suspend): {} unique states",
         result.unique_state_count()
     );
 }

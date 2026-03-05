@@ -1,3 +1,4 @@
+pub(crate) mod artifact_transfer;
 pub(crate) mod namespace;
 pub(crate) mod supervisor;
 pub(crate) mod tunnel_manager;
@@ -212,9 +213,25 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             }
         }
 
+        // Start artifact transfer listener.
+        let transfer_listen_port = match artifact_transfer::start_transfer_listener("0.0.0.0:0").await {
+            Ok((listener, port)) => {
+                log::info!("worker: artifact transfer listener on port {}", port);
+                let pools = self.pools.clone();
+                let tx = self.bg_event_tx.clone();
+                tokio::spawn(artifact_transfer::transfer_accept_loop(listener, pools, tx));
+                Some(port)
+            }
+            Err(e) => {
+                log::warn!("worker: failed to start transfer listener: {}, transfers disabled", e);
+                None
+            }
+        };
+
         conn.send_ready(&WorkerReady {
             tunnel_listen_port: self.tunnel_manager.as_ref().and_then(|tm| tm.listen_port()),
             tunnel_public_key: self.tunnel_manager.as_ref().and_then(|tm| tm.public_key()),
+            transfer_listen_port,
         })
             .await
             .context("handshake: send WorkerReady")?;
@@ -526,6 +543,24 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             }
             WorkerCommand::DeleteArtifact { artifact_id, pool_id } => {
                 self.handle_delete_artifact(&artifact_id, &pool_id).await
+            }
+            WorkerCommand::TransferArtifact {
+                transfer_id,
+                source_artifact_id,
+                source_pool_id,
+                dest_artifact_id,
+                dest_pool_id,
+                dest_endpoint,
+            } => {
+                self.handle_transfer_artifact(
+                    transfer_id,
+                    source_artifact_id,
+                    source_pool_id,
+                    dest_artifact_id,
+                    dest_pool_id,
+                    dest_endpoint,
+                )
+                .await
             }
             WorkerCommand::WorkerRegistrySync { workers } => {
                 log::info!("received worker registry sync with {} peers", workers.len());
@@ -908,6 +943,143 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 suspend_tx,
             },
         );
+
+        Ok(())
+    }
+
+    async fn handle_transfer_artifact(
+        &mut self,
+        transfer_id: u64,
+        source_artifact_id: ArtifactId,
+        source_pool_id: PoolId,
+        dest_artifact_id: ArtifactId,
+        dest_pool_id: PoolId,
+        dest_endpoint: Option<String>,
+    ) -> Result<(), FatalError> {
+        let source_base = match self.pool_path(&source_pool_id) {
+            Some(p) => p.clone(),
+            None => {
+                send_event(
+                    &self.bg_event_tx,
+                    WorkerEvent::TransferFailed {
+                        transfer_id,
+                        source_artifact_id,
+                        source_pool_id,
+                        dest_artifact_id,
+                        dest_pool_id,
+                        error: "unknown source pool".to_string(),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+        let source_dir = source_base.join(source_artifact_id.as_ref());
+
+        if let Some(endpoint) = dest_endpoint {
+            // Remote transfer: spawn background task to stream artifact via TCP.
+            let tx = self.bg_event_tx.clone();
+            let sa = source_artifact_id.clone();
+            let sp = source_pool_id.clone();
+            let da = dest_artifact_id.clone();
+            let dp = dest_pool_id.clone();
+            tokio::spawn(async move {
+                log::info!(
+                    "artifact transfer: sending transfer_id={} {}:{} -> {} ({}:{})",
+                    transfer_id, sp, sa, endpoint, dp, da,
+                );
+                if let Err(e) = artifact_transfer::send_artifact(
+                    &endpoint,
+                    transfer_id,
+                    &sa,
+                    &sp,
+                    &da,
+                    &dp,
+                    &source_dir,
+                )
+                .await
+                {
+                    log::error!("artifact transfer: send failed: {:#}", e);
+                    send_event(
+                        &tx,
+                        WorkerEvent::TransferFailed {
+                            transfer_id,
+                            source_artifact_id: sa,
+                            source_pool_id: sp,
+                            dest_artifact_id: da,
+                            dest_pool_id: dp,
+                            error: format!("{:#}", e),
+                        },
+                    )
+                    .await;
+                }
+                // No success event from source — dest emits ArtifactTransferReceived.
+            });
+        } else {
+            // Local copy: resolve dest pool, copy files.
+            let dest_base = match self.pool_path(&dest_pool_id) {
+                Some(p) => p.clone(),
+                None => {
+                    send_event(
+                        &self.bg_event_tx,
+                        WorkerEvent::TransferFailed {
+                            transfer_id,
+                            source_artifact_id,
+                            source_pool_id,
+                            dest_artifact_id,
+                            dest_pool_id,
+                            error: "unknown dest pool".to_string(),
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+            };
+            let dest_dir = dest_base.join(dest_artifact_id.as_ref());
+            let tx = self.bg_event_tx.clone();
+            let sa = source_artifact_id.clone();
+            let sp = source_pool_id.clone();
+            let da = dest_artifact_id.clone();
+            let dp = dest_pool_id.clone();
+            tokio::spawn(async move {
+                match artifact_transfer::local_pool_copy(&source_dir, &dest_dir).await {
+                    Ok(size_bytes) => {
+                        log::info!(
+                            "artifact transfer: local copy transfer_id={} done, {} bytes",
+                            transfer_id,
+                            size_bytes,
+                        );
+                        send_event(
+                            &tx,
+                            WorkerEvent::ArtifactTransferReceived {
+                                transfer_id,
+                                source_artifact_id: sa,
+                                source_pool_id: sp,
+                                dest_artifact_id: da,
+                                dest_pool_id: dp,
+                                size_bytes,
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        log::error!("artifact transfer: local copy failed: {:#}", e);
+                        send_event(
+                            &tx,
+                            WorkerEvent::TransferFailed {
+                                transfer_id,
+                                source_artifact_id: sa,
+                                source_pool_id: sp,
+                                dest_artifact_id: da,
+                                dest_pool_id: dp,
+                                error: format!("{:#}", e),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            });
+        }
 
         Ok(())
     }

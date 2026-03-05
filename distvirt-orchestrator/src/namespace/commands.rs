@@ -46,6 +46,7 @@ impl NamespaceStateMachine {
                         pod_id,
                         worker_id,
                         launch_timeout,
+                        ..
                     } => {
                         out.timers_cancel.push(launch_timeout.clone());
                         out.worker_commands.push((
@@ -71,7 +72,10 @@ impl NamespaceStateMachine {
                         ));
                         self.pod_map.remove(pod_id);
                     }
-                    WorkloadState::Dormant | WorkloadState::WaitingForCapacity => {}
+                    WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed => {}
+                    WorkloadState::RetryBackoff { backoff_timer } => {
+                        out.timers_cancel.push(backoff_timer.clone());
+                    }
                     WorkloadState::Suspending {
                         pod_id,
                         worker_id,
@@ -181,14 +185,27 @@ impl NamespaceStateMachine {
             });
         }
 
-        // Warn about in-place spec changes (not yet handled beyond add/remove).
+        // Detect in-place workload spec changes and dispatch SpecChanged.
         for (wl_id, new_wl_spec) in &spec.workloads {
             if let Some(old_wl_spec) = self.spec.workloads.get(wl_id) {
                 if old_wl_spec != new_wl_spec {
-                    log::warn!(
-                        "Workload {:?} spec changed in-place (not yet handled, update silently applied)",
-                        wl_id
-                    );
+                    let image_changed = old_wl_spec.containers != new_wl_spec.containers;
+                    let suspend_changed = old_wl_spec.suspend_on_idle != new_wl_spec.suspend_on_idle;
+
+                    if image_changed {
+                        if let Some(wl) = self.workloads.get_mut(wl_id) {
+                            let wl_outputs = wl.step(
+                                WorkloadInput::SpecChanged,
+                                &self.namespace_id,
+                            );
+                            self.forward_workload_outputs(wl_id, wl_outputs, placement_table, out);
+                        }
+                    }
+                    if suspend_changed {
+                        if let Some(wl) = self.workloads.get_mut(wl_id) {
+                            wl.suspend_on_idle = new_wl_spec.suspend_on_idle;
+                        }
+                    }
                 }
             }
         }
@@ -261,6 +278,9 @@ impl NamespaceStateMachine {
                             },
                         ));
                     }
+                }
+                WorkloadState::RetryBackoff { backoff_timer } => {
+                    out.timers_cancel.push(backoff_timer.clone());
                 }
                 _ => {}
             }

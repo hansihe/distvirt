@@ -70,6 +70,17 @@ impl PlacementTable {
     }
 }
 
+// --- Pending Intent ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum PendingIntent {
+    #[default]
+    None,
+    Demand,
+    Deactivate,
+    Restart, // stubbed for Task 1.3 (SpecChanged) — no input produces it yet
+}
+
 // --- Domain Enums ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -87,6 +98,7 @@ pub enum WorkloadState {
         pod_id: PodId,
         worker_id: WorkerId,
         launch_timeout: TimerKey,
+        pending: PendingIntent,
     },
     Running {
         pod_id: PodId,
@@ -98,6 +110,7 @@ pub enum WorkloadState {
         worker_id: WorkerId,
         artifact_id: ArtifactId,
         suspend_timeout: TimerKey,
+        pending: PendingIntent,
     },
     /// Pod is suspended. Artifact tracked in placement table.
     Suspended {
@@ -109,7 +122,14 @@ pub enum WorkloadState {
         worker_id: WorkerId,
         artifact_id: ArtifactId,
         resume_timeout: TimerKey,
+        pending: PendingIntent,
     },
+    /// Waiting before retrying after a pod failure.
+    RetryBackoff {
+        backoff_timer: TimerKey,
+    },
+    /// Terminal failure state after max retries exhausted.
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -165,6 +185,7 @@ pub struct WorkerState {
     pub wg_config: Option<WorkerWgConfig>,
     pub tunnel_config: Option<WorkerTunnelConfig>,
     pub conditions: std::collections::HashMap<String, WorkerCondition>,
+    pub transfer_listen_port: Option<u16>,
 }
 
 impl WorkloadState {
@@ -177,6 +198,8 @@ impl WorkloadState {
             WorkloadState::Suspending { .. } => "suspending",
             WorkloadState::Suspended { .. } => "suspended",
             WorkloadState::Resuming { .. } => "resuming",
+            WorkloadState::RetryBackoff { .. } => "retry_backoff",
+            WorkloadState::Failed => "failed",
         }
     }
 

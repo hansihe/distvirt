@@ -1,14 +1,30 @@
-name: test
-services:
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: test
+
+network:
+  subnet: 172.16.0.0/24
+
+workloads:
   web:
-    image: docker.io/library/nginx:latest
-    ports:
-      - "8080:80"
+    containers:
+      - image: docker.io/library/nginx:latest
+    services:
+      web:
+        activation:
+          activator:
+            tcp: { ports: [80] }
+          idle_timeout: 5m
+        expose:
+          - container_port: 80
+            host_port: 8080
+            protocol: tcp
 
   app:
-    image: docker.io/library/alpine:latest
-    command: ["sh", "-c", "while true; do echo hello from app; wget -qO- http://web:80 > /dev/null && echo 'reached web!'; sleep 2; done"]
-    depends_on:
-      - web
-    environment:
-      MY_VAR: "testing"
+    containers:
+      - image: docker.io/library/alpine:latest
+        args: ["sh", "-c", "while true; do echo hello from app; wget -qO- http://web:80 > /dev/null && echo 'reached web!'; sleep 2; done"]
+        env:
+          MY_VAR: "testing"

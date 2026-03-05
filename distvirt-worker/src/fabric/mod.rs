@@ -8,6 +8,17 @@ pub(crate) mod service_activator;
 pub(crate) mod switch;
 pub(crate) mod tunnel;
 
+// Lock ordering (acquire in this order to prevent deadlocks):
+//   1. service_table
+//   2. ip_port_table
+//   3. route_table
+//   4. nat_table
+//   5. ports
+//   6. tunnel_ports
+// Most paths only hold one lock at a time. The main exception is
+// dispatch_frame's DNAT path which holds service_table + ip_port_table
+// simultaneously (see forwarding.rs lookup_and_buffer).
+
 pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use route::RouteTable;
 pub use service::ServiceTable;

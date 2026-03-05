@@ -68,7 +68,6 @@ pub enum GuestMessage {
     SuspendReady,
     ContainerAdded { id: String },
     ContainerStarted { id: String, pid: u32 },
-    ContainerExited { id: String, code: i32 },
     ContainerSignaled { id: String },
     NetworkConfigured,
     ClockSet,
@@ -80,8 +79,16 @@ pub enum GuestMessage {
 #[serde(tag = "type")]
 pub enum StreamHeader {
     Control,
+    Events,
     ContainerOutput { container_id: String },
     ContainerInput { container_id: String },
+}
+
+/// Async events sent from guest to host on the dedicated event stream.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum GuestEvent {
+    ContainerExited { id: String, code: i32 },
 }
 
 /// Stream identifiers for output chunk framing.

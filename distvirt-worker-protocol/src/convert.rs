@@ -500,6 +500,10 @@ pub fn write_worker_ready(
         builder.set_has_tunnel_public_key(true);
         builder.set_tunnel_public_key(key);
     }
+    if let Some(port) = val.transfer_listen_port {
+        builder.set_has_transfer_listen_port(true);
+        builder.set_transfer_listen_port(port);
+    }
 }
 
 pub fn read_worker_ready(
@@ -518,9 +522,15 @@ pub fn read_worker_ready(
     } else {
         None
     };
+    let transfer_listen_port = if reader.get_has_transfer_listen_port() {
+        Some(reader.get_transfer_listen_port())
+    } else {
+        None
+    };
     WorkerReady {
         tunnel_listen_port,
         tunnel_public_key,
+        transfer_listen_port,
     }
 }
 
@@ -869,6 +879,25 @@ pub fn write_worker_command(
                 write_worker_peer_info(&mut list.reborrow().get(i as u32), peer);
             }
         }
+        WorkerCommand::TransferArtifact {
+            transfer_id,
+            source_artifact_id,
+            source_pool_id,
+            dest_artifact_id,
+            dest_pool_id,
+            dest_endpoint,
+        } => {
+            let mut b = builder.init_transfer_artifact();
+            b.set_transfer_id(*transfer_id);
+            b.set_source_artifact_id(source_artifact_id.as_ref());
+            b.set_source_pool_id(source_pool_id.as_ref());
+            b.set_dest_artifact_id(dest_artifact_id.as_ref());
+            b.set_dest_pool_id(dest_pool_id.as_ref());
+            match dest_endpoint {
+                Some(ep) => b.set_dest_endpoint(ep),
+                None => b.set_dest_endpoint(""),
+            }
+        }
         WorkerCommand::Shutdown => {
             builder.set_shutdown(());
         }
@@ -1080,6 +1109,19 @@ pub fn read_worker_command(
             }
             Ok(WorkerCommand::WorkerRegistrySync { workers })
         }
+        TransferArtifact(r) => {
+            let r = r?;
+            let ep = r.get_dest_endpoint()?.to_str()?;
+            let dest_endpoint = if ep.is_empty() { None } else { Some(ep.to_string()) };
+            Ok(WorkerCommand::TransferArtifact {
+                transfer_id: r.get_transfer_id(),
+                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
+                source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
+                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
+                dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
+                dest_endpoint,
+            })
+        }
         Shutdown(()) => Ok(WorkerCommand::Shutdown),
     }
 }
@@ -1267,6 +1309,38 @@ pub fn write_worker_event(
             b.set_pool_id(pool_id.as_ref());
             b.set_size_bytes(*size_bytes);
         }
+        WorkerEvent::ArtifactTransferReceived {
+            transfer_id,
+            source_artifact_id,
+            source_pool_id,
+            dest_artifact_id,
+            dest_pool_id,
+            size_bytes,
+        } => {
+            let mut b = builder.init_artifact_transfer_received();
+            b.set_transfer_id(*transfer_id);
+            b.set_source_artifact_id(source_artifact_id.as_ref());
+            b.set_source_pool_id(source_pool_id.as_ref());
+            b.set_dest_artifact_id(dest_artifact_id.as_ref());
+            b.set_dest_pool_id(dest_pool_id.as_ref());
+            b.set_size_bytes(*size_bytes);
+        }
+        WorkerEvent::TransferFailed {
+            transfer_id,
+            source_artifact_id,
+            source_pool_id,
+            dest_artifact_id,
+            dest_pool_id,
+            error,
+        } => {
+            let mut b = builder.init_transfer_failed();
+            b.set_transfer_id(*transfer_id);
+            b.set_source_artifact_id(source_artifact_id.as_ref());
+            b.set_source_pool_id(source_pool_id.as_ref());
+            b.set_dest_artifact_id(dest_artifact_id.as_ref());
+            b.set_dest_pool_id(dest_pool_id.as_ref());
+            b.set_error(error);
+        }
     }
 }
 
@@ -1426,6 +1500,28 @@ pub fn read_worker_event(
                 artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
                 size_bytes: r.get_size_bytes(),
+            })
+        }
+        ArtifactTransferReceived(r) => {
+            let r = r?;
+            Ok(WorkerEvent::ArtifactTransferReceived {
+                transfer_id: r.get_transfer_id(),
+                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
+                source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
+                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
+                dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
+                size_bytes: r.get_size_bytes(),
+            })
+        }
+        TransferFailed(r) => {
+            let r = r?;
+            Ok(WorkerEvent::TransferFailed {
+                transfer_id: r.get_transfer_id(),
+                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
+                source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
+                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
+                dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
+                error: r.get_error()?.to_string()?,
             })
         }
     }

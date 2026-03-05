@@ -393,7 +393,7 @@ Foundation — replace ad-hoc snapshot tempdir with pool-aware storage. No orche
 
 ### Phase 4: Transfers & Eviction
 
-13. [ ] `TransferArtifact` command, fabric tunnel streaming for worker-to-worker
+13. [x] `TransferArtifact` command, TCP streaming for worker-to-worker and local pool-to-pool — `TransferArtifact` worker command with `transfer_id` correlation, zerocopy `TransferHeader` + tar streaming over TCP. Worker starts a transfer listener on startup (port reported in `WorkerReady`). Source worker connects to dest, streams artifact as tar archive. Local transfers use direct file copy. Dest emits `ArtifactTransferReceived`, source emits `TransferFailed` on error. Orchestrator handles both events directly in shell (not namespace-scoped). E2E test `test_cross_worker_artifact_transfer` validates suspend → transfer → resume across two workers with separate pools.
 14. [ ] Eviction logic based on watermarks, LRU policy
 15. [ ] S3 as orchestrator-managed remote pool
 16. [ ] Export/import to external S3 as separate operations (not a managed pool)

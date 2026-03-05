@@ -172,17 +172,25 @@ async fn dispatch_frame<P: FramePort>(
                         let mut rewritten = packet.to_vec();
                         rewrite_ipv4_dst(&mut rewritten, service_ip, pod_ip);
 
-                        // Insert reverse NAT entry for return traffic.
+                        // Insert a reverse NAT entry so return traffic from the
+                        // backend can be SNATted back to the service VIP.
+                        //
+                        // The key is the *reverse* 5-tuple — what a reply packet from the
+                        // backend would look like (src=backend, dst=client, swapped ports).
+                        // When dispatch_frame sees such a packet in step 4 (local pod →
+                        // SNAT check), it matches this entry and rewrites src_ip from
+                        // backend_ip back to service_ip, making the return path transparent
+                        // to the client.
                         if let Some(fp_rw) = FabricPacket::new(&rewritten) {
                             let ip_pkt = fp_rw.ip_packet();
                             let protocol = ip_packet_protocol(ip_pkt).unwrap_or(0);
                             let (src_port, dst_port_val) = ip_packet_transport_ports(ip_pkt).unwrap_or((0, 0));
                             let reverse_key = NatFlowKey {
-                                src_ip: pod_ip,
-                                dst_ip: fp_rw.ipv4_src(),
+                                src_ip: pod_ip,         // backend is the "source" in return traffic
+                                dst_ip: fp_rw.ipv4_src(), // original client is the "destination"
                                 protocol,
-                                src_port: dst_port_val,
-                                dst_port: src_port,
+                                src_port: dst_port_val,   // backend's listening port
+                                dst_port: src_port,       // client's ephemeral port
                             };
                             let nat_entry = NatEntry {
                                 service_ip,
@@ -313,7 +321,11 @@ async fn dispatch_frame<P: FramePort>(
         }
         RouteAction::NoRoute => {
             // 6. dst_ip is the gateway itself or outside subnet → forward to gateway.
-            //    Skip if the packet already came from the gateway to avoid loops.
+            //    Avoid forwarding loops: if this packet already came from the
+            //    gateway (TUN ingress), don't send it back out to the gateway.
+            //    Without this check, packets that arrive from the host network
+            //    with an unknown destination would bounce between the gateway
+            //    ingress and egress indefinitely.
             if dst_ip == ctx.inner.gateway_ip || !ctx.inner.is_in_subnet(&dst_ip) {
                 if matches!(source, FrameSource::Gateway) {
                     log::debug!("fabric: dropping gateway-originated frame to {} (no route back)", dst_ip);

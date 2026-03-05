@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context};
 
-use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
+use distvirt_guest_protocol::{GuestEvent, GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 use distvirt_worker_protocol::ContainerConfig;
 
 use crate::io_session::IoSession;
@@ -12,13 +12,16 @@ use crate::vsock_client::GuestSession;
 
 /// A launched VM with an established yamux session.
 ///
-/// NOTE: The control protocol is strictly request-response — each method sends
-/// a command and expects the next message to be the corresponding reply.
-/// Unsolicited async events (e.g. `ContainerExited`) arriving between send and
-/// recv will cause the caller to bail. This is unlikely in practice (the guest
-/// handles commands synchronously before polling for child exits), but a proper
-/// fix would involve separating request-response from async events on the
-/// control stream (e.g. tag-based correlation or a dedicated event channel).
+/// The control stream is strictly request-response — each method sends a
+/// command and expects the next message on the control stream to be the
+/// corresponding reply. Async events (container exits) arrive on a
+/// dedicated event stream, so they never interfere with control traffic.
+///
+/// **Ordering safety**: this works because guest-init processes one command
+/// at a time on a single thread and never sends unsolicited messages on the
+/// control stream. If the guest were to send messages out-of-order, replies
+/// would be misattributed. The event stream exists precisely to keep async
+/// events (container exits) off the control stream.
 pub(crate) struct ManagedVm<I> {
     instance: I,
     session: GuestSession,
@@ -52,6 +55,10 @@ impl<I: VmInstance> ManagedVm<I> {
             }
             other => bail!("expected Ready, got {:?}", other),
         }
+
+        // Accept the event stream — the guest opens it before sending Ready,
+        // so it is the first item in the incoming stream queue.
+        session.accept_event_stream().await.context("accept event stream")?;
 
         let mut vm = Self { instance, session, started_containers: Vec::new() };
         vm.set_clock().await.context("set guest clock")?;
@@ -208,19 +215,17 @@ impl<I: VmInstance> ManagedVm<I> {
 
     /// Wait for a container to exit.
     pub async fn wait_container_exit(&mut self) -> anyhow::Result<(String, i32)> {
-        let msg: GuestMessage = self
+        let event: GuestEvent = self
             .session
-            .recv()
+            .recv_event()
             .await
-            .context("receive ContainerExited")?;
-        match msg {
-            GuestMessage::ContainerExited { id, code } => {
+            .context("receive ContainerExited event")?;
+        match event {
+            GuestEvent::ContainerExited { id, code } => {
                 log::info!("container {} exited with code {}", id, code);
                 self.started_containers.retain(|c| c != &id);
                 Ok((id, code))
             }
-            GuestMessage::Error { message } => bail!("container error: {}", message),
-            other => bail!("expected ContainerExited, got {:?}", other),
         }
     }
 
@@ -280,6 +285,10 @@ impl<I: VmInstance> ManagedVm<I> {
     /// events up to `timeout`, then sends Shutdown to the guest.
     pub async fn graceful_shutdown(&mut self, timeout: Duration) -> anyhow::Result<()> {
         // Signal all started containers with SIGTERM (best-effort).
+        // We fire-and-forget each signal because the VM may already be
+        // dying. The 500ms timeout on the ack drain is a compromise: long
+        // enough for a healthy guest to respond, short enough to not block
+        // shutdown if the guest is unresponsive.
         for id in self.started_containers.clone() {
             let _ = self.session.send(&HostMessage::SignalContainer {
                 id,
@@ -289,18 +298,16 @@ impl<I: VmInstance> ManagedVm<I> {
             let _ = tokio::time::timeout(Duration::from_millis(500), self.session.recv::<GuestMessage>()).await;
         }
 
-        // Wait for ContainerExited events until all containers are accounted for or timeout.
+        // Wait for ContainerExited events on the event stream until all
+        // containers are accounted for or timeout.
         let mut remaining = self.started_containers.len();
         if remaining > 0 {
             let deadline = tokio::time::Instant::now() + timeout;
             while remaining > 0 {
-                match tokio::time::timeout_at(deadline, self.session.recv::<GuestMessage>()).await {
-                    Ok(Ok(GuestMessage::ContainerExited { id, code })) => {
+                match tokio::time::timeout_at(deadline, self.session.recv_event::<GuestEvent>()).await {
+                    Ok(Ok(GuestEvent::ContainerExited { id, code })) => {
                         log::info!("container {} exited with code {} during graceful shutdown", id, code);
                         remaining -= 1;
-                    }
-                    Ok(Ok(other)) => {
-                        log::debug!("ignoring message during graceful shutdown: {:?}", other);
                     }
                     Ok(Err(e)) => {
                         log::warn!("recv error during graceful shutdown: {:#}", e);

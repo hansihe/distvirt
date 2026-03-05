@@ -190,9 +190,15 @@ pub async fn disconnect(mut client: Client, namespace_id: &str) -> anyhow::Resul
         .await
         .map_err(client::handle_grpc_error)?;
 
-    // Send SIGTERM to the connect process.
-    unsafe {
-        libc::kill(state.pid as i32, libc::SIGTERM);
+    // Send SIGTERM to the connect process (if still running).
+    let pid = state.pid as i32;
+    if pid > 0 {
+        let ret = unsafe { libc::kill(pid, 0) };
+        if ret == 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        } else {
+            eprintln!("warning: connect process (pid {}) is no longer running", pid);
+        }
     }
 
     // Remove state file.

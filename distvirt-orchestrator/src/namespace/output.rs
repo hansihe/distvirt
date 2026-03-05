@@ -234,6 +234,18 @@ impl NamespaceStateMachine {
                 WorkloadOutput::TimerCancel(key) => {
                     out.timers_cancel.push(key);
                 }
+                WorkloadOutput::ConditionSet { key, message } => {
+                    log::debug!(
+                        "workload {:?} condition set: {} = {}",
+                        workload_id, key, message,
+                    );
+                }
+                WorkloadOutput::ConditionClear { key } => {
+                    log::debug!(
+                        "workload {:?} condition clear: {}",
+                        workload_id, key,
+                    );
+                }
             }
         }
     }

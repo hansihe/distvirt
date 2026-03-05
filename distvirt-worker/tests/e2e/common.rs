@@ -19,10 +19,18 @@ pub fn should_run() -> bool {
     }
 }
 
+/// Result of setting up a worker, including connection and optional metadata.
+pub struct WorkerSetup {
+    pub conn: OrchestratorConnection,
+    pub handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+    pub transfer_listen_port: Option<u16>,
+}
+
 /// Spawn a worker on one half of a duplex and return the orchestrator connection
 /// along with the worker task handle.
 pub async fn setup() -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
-    setup_full(None, None, vec![]).await
+    let ws = setup_full(None, None, vec![]).await?;
+    Ok((ws.conn, ws.handle))
 }
 
 /// Like `setup()`, but with a WASM component directory for activator support.
@@ -34,7 +42,8 @@ pub async fn setup_with_activators() -> anyhow::Result<(OrchestratorConnection, 
         "WASM component directory not found at {}. Run activators/build.sh first.",
         component_dir.display()
     );
-    setup_full(Some(component_dir), None, vec![]).await
+    let ws = setup_full(Some(component_dir), None, vec![]).await?;
+    Ok((ws.conn, ws.handle))
 }
 
 /// Like `setup()`, but with pools pushed to the worker via handshake and a custom worker ID.
@@ -42,6 +51,15 @@ pub async fn setup_with_pools(
     worker_id: &str,
     pushed_pools: Vec<PoolInfo>,
 ) -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+    let ws = setup_full(None, Some(worker_id), pushed_pools).await?;
+    Ok((ws.conn, ws.handle))
+}
+
+/// Like `setup_with_pools()`, but also returns the worker's transfer listen port.
+pub async fn setup_with_pools_full(
+    worker_id: &str,
+    pushed_pools: Vec<PoolInfo>,
+) -> anyhow::Result<WorkerSetup> {
     setup_full(None, Some(worker_id), pushed_pools).await
 }
 
@@ -49,7 +67,7 @@ async fn setup_full(
     component_dir: Option<PathBuf>,
     worker_id: Option<&str>,
     pushed_pools: Vec<PoolInfo>,
-) -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+) -> anyhow::Result<WorkerSetup> {
     let _ = env_logger::try_init();
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -92,10 +110,14 @@ async fn setup_full(
     })
     .await?;
 
-    conn.recv_ready().await?;
-    eprintln!("e2e: worker '{}' handshake complete", wid);
+    let ready = conn.recv_ready().await?;
+    eprintln!("e2e: worker '{}' handshake complete (transfer_port: {:?})", wid, ready.transfer_listen_port);
 
-    Ok((conn, worker_handle))
+    Ok(WorkerSetup {
+        conn,
+        handle: worker_handle,
+        transfer_listen_port: ready.transfer_listen_port,
+    })
 }
 
 /// Accept a log stream and drain it to stderr for debugging, returning the

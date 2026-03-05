@@ -15,7 +15,9 @@
 //! When `encrypted = true`, all traffic is protected by Noise_IK (via
 //! the `snow` crate). Each peer undergoes a 1-RTT handshake before
 //! data frames flow. Initiation ordering is determined by comparing
-//! the local and remote static public keys lexicographically.
+//! the local and remote static public keys lexicographically — the
+//! peer with the "smaller" key initiates. This ensures exactly one
+//! side initiates without requiring out-of-band coordination.
 
 use std::collections::HashMap;
 use std::io;

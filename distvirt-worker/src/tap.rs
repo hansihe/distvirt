@@ -5,11 +5,11 @@ use std::os::unix::io::AsRawFd;
 
 use anyhow::{bail, Context};
 
-/// Flags and constants for TUN/TAP devices.
-const TUNSETIFF: libc::c_ulong = 0x400454ca;
-const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
-const IFF_TAP: libc::c_short = 0x0002;
-const IFF_NO_PI: libc::c_short = 0x1000;
+/// Linux TUN/TAP ioctl constants (from <linux/if_tun.h>).
+const TUNSETIFF: libc::c_ulong = 0x400454ca; // attach to a TUN/TAP device
+const TUNSETPERSIST: libc::c_ulong = 0x400454cb; // set/clear persist mode
+const IFF_TAP: libc::c_short = 0x0002; // TAP device (L2 Ethernet frames)
+const IFF_NO_PI: libc::c_short = 0x1000; // no packet info header prefix
 
 #[repr(C)]
 struct Ifreq {
@@ -193,6 +193,9 @@ pub fn open_packet_socket(tap_name: &str) -> anyhow::Result<TapDevice> {
     let ifindex = get_ifindex(tap_name).context("get TAP ifindex")?;
 
     // Create AF_PACKET, SOCK_RAW socket for all Ethernet protocols.
+    // The protocol field in sockaddr_ll must be in *network* byte order per
+    // the packet(7) man page, hence `.to_be()`. This is a kernel ABI
+    // requirement, not a general network byte order convention.
     let fd = unsafe {
         libc::socket(
             libc::AF_PACKET,

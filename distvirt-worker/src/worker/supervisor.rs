@@ -19,13 +19,22 @@ use crate::oci;
 use crate::task_handle::TaskHandle;
 use crate::vmm::{NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
 
-/// Timeout for graceful guest shutdown before force-killing.
+// Timeout escalation chain for pod shutdown. These must satisfy:
+//   GRACEFUL_SHUTDOWN_TIMEOUT < STOP_POD_TIMEOUT
+// so the graceful shutdown attempt completes before we give up waiting
+// for the supervisor. FORCE_STOP_TIMEOUT is a last-resort cleanup window
+// after the supervisor task is aborted.
+
+/// Timeout for graceful guest shutdown (SIGTERM → wait for exit) before force-killing.
 pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Outer timeout for awaiting a pod supervisor after graceful cancellation.
+/// Must be greater than GRACEFUL_SHUTDOWN_TIMEOUT to give the supervisor time
+/// to complete its graceful path before we abort it.
 pub(crate) const STOP_POD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Timeout for non-graceful (force) stop cleanup after aborting the supervisor.
+/// Short because at this point we've already given up on graceful shutdown.
 pub(crate) const FORCE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Request to suspend a running pod.
@@ -521,7 +530,13 @@ async fn pod_monitor<I: VmInstance>(
             match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
                 Ok(artifacts) => {
                     // Calculate snapshot size.
-                    let artifact_size_bytes = dir_size(&req.snapshot_dir).await.unwrap_or(0);
+                    let artifact_size_bytes = match dir_size(&req.snapshot_dir).await {
+                        Ok(size) => size,
+                        Err(e) => {
+                            log::warn!("pod '{}': failed to calculate artifact size: {:#}", pod_id, e);
+                            0
+                        }
+                    };
                     let _ = req.reply.send(Ok(artifacts));
                     // Emit ArtifactWriteCommitted now that snapshot is durable.
                     send_event(
@@ -591,14 +606,19 @@ async fn pod_monitor<I: VmInstance>(
     send_event(&event_tx, event).await;
 }
 
-/// Calculate the total size of files in a directory.
-async fn dir_size(path: &std::path::Path) -> anyhow::Result<u64> {
+/// Calculate the total size of files in a directory (recursive).
+pub(crate) async fn dir_size(path: &std::path::Path) -> anyhow::Result<u64> {
     let mut total = 0u64;
-    let mut entries = tokio::fs::read_dir(path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let meta = entry.metadata().await?;
-        if meta.is_file() {
-            total += meta.len();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let meta = entry.metadata().await?;
+            if meta.is_file() {
+                total += meta.len();
+            } else if meta.is_dir() {
+                stack.push(entry.path());
+            }
         }
     }
     Ok(total)

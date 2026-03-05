@@ -21,3 +21,5 @@ mod suspend_resume;
 mod tunnel;
 #[path = "e2e/cross_worker_resume.rs"]
 mod cross_worker_resume;
+#[path = "e2e/artifact_transfer.rs"]
+mod artifact_transfer;

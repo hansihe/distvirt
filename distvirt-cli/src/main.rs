@@ -8,11 +8,13 @@ mod config;
 mod connection;
 mod format;
 mod platform;
+mod spec;
 
 use commands::{LegacyCommands, OutputFormat};
 
 const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   up            Apply a namespace spec (create or update)
+  render        Render a spec file to resolved proto JSON
   down          Delete a namespace
   status        Show namespace/workload status
   logs          Stream logs from a namespace
@@ -78,10 +80,17 @@ enum TaskCommands {
     /// Apply a namespace spec (create or update)
     #[command(hide = true)]
     Up {
-        /// Namespace ID
-        namespace_id: String,
-        /// Path to the compose file
-        #[arg(short, long, default_value = "docker-compose.yml")]
+        /// Namespace ID (optional if spec file has metadata.name)
+        namespace_id: Option<String>,
+        /// Path to spec file (distvirt.yaml or docker-compose.yml)
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Render a spec file to resolved proto JSON (no server needed)
+    #[command(hide = true)]
+    Render {
+        /// Path to spec file
+        #[arg(short, long)]
         file: PathBuf,
     },
     /// Delete a namespace
@@ -282,6 +291,11 @@ async fn main() -> anyhow::Result<()> {
             commands::legacy::run(command).await?;
         }
 
+        // Render runs locally, no gRPC needed
+        Commands::Task(TaskCommands::Render { file }) => {
+            commands::namespace::render(&file)?;
+        }
+
         // All other commands connect to the orchestrator
         cmd => {
             let params = connection::resolve(
@@ -293,7 +307,8 @@ async fn main() -> anyhow::Result<()> {
 
             match cmd {
                 Commands::Task(TaskCommands::Up { namespace_id, file }) => {
-                    commands::namespace::up(client, &namespace_id, &file).await?;
+                    commands::namespace::up(client, namespace_id.as_deref(), file.as_deref())
+                        .await?;
                 }
                 Commands::Task(TaskCommands::Down { namespace_id }) => {
                     commands::namespace::down(client, &namespace_id).await?;
@@ -370,7 +385,8 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Auth(AuthCommands::Login { .. })
                 | Commands::Auth(AuthCommands::Context { .. })
-                | Commands::Other(OtherCommands::Legacy { .. }) => unreachable!(),
+                | Commands::Other(OtherCommands::Legacy { .. })
+                | Commands::Task(TaskCommands::Render { .. }) => unreachable!(),
             }
         }
     }

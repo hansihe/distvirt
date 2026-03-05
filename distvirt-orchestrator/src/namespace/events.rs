@@ -1,6 +1,6 @@
 use crate::service::ServiceInput;
 use crate::types::*;
-use crate::workload::WorkloadInput;
+use crate::workload::{PodGoneReason, WorkloadInput};
 
 use super::NamespaceStateMachine;
 
@@ -159,6 +159,7 @@ impl NamespaceStateMachine {
                     wl.step(
                         WorkloadInput::PodGone {
                             pod_id: pod_id.clone(),
+                            reason: Some(PodGoneReason::Exited { exit_code }),
                         },
                         &self.namespace_id,
                     )
@@ -182,13 +183,14 @@ impl NamespaceStateMachine {
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodFailed {
-                        reason: error,
+                        reason: error.clone(),
                     },
                 });
                 let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
                     wl.step(
                         WorkloadInput::PodGone {
                             pod_id: pod_id.clone(),
+                            reason: Some(PodGoneReason::Failed { error }),
                         },
                         &self.namespace_id,
                     )
@@ -321,7 +323,13 @@ impl NamespaceStateMachine {
         // Remove all artifacts placed on this worker.
         placement_table.remove_by_worker(worker_id);
         // Remove all pods on this worker and collect affected workloads.
-        let _lost_pods = self.pod_map.remove_worker_pods(worker_id);
+        let lost_pods = self.pod_map.remove_worker_pods(worker_id);
+        if !lost_pods.is_empty() {
+            log::warn!(
+                "namespace '{}': worker '{}' lost, {} pods dropped: {:?}",
+                self.namespace_id, worker_id, lost_pods.len(), lost_pods
+            );
+        }
         let affected_workloads: Vec<WorkloadId> = {
             // We already removed the pods, but we need the workload IDs.
             // Collect unique workload IDs from workloads that reference this worker.
@@ -454,6 +462,20 @@ impl NamespaceStateMachine {
                 };
                 // Clean up pod from pods map on timeout.
                 self.pod_map.remove(&pod_id);
+                self.forward_workload_outputs(&workload_id, wl_outputs, placement_table, out);
+            }
+            TimerKey::RetryBackoffTimeout { workload_id } => {
+                let workload_id = workload_id.clone();
+                let wl_outputs = if let Some(wl) = self.workloads.get_mut(&workload_id) {
+                    wl.step(
+                        WorkloadInput::TimerFired {
+                            timer_key: timer_key.clone(),
+                        },
+                        &self.namespace_id,
+                    )
+                } else {
+                    return;
+                };
                 self.forward_workload_outputs(&workload_id, wl_outputs, placement_table, out);
             }
         }

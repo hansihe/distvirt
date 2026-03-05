@@ -26,9 +26,12 @@ pub struct Port {
     async_fd: AsyncFd<OwnedFd>,
     /// The underlying TapDevice (kept alive for Drop cleanup).
     _tap: TapDevice,
-    /// Guest MAC address — used as the destination MAC when sending frames to the guest.
-    /// TCP requires `pkt_type == PACKET_HOST`; using broadcast would set PACKET_BROADCAST
-    /// and cause the guest kernel to silently drop TCP segments.
+    /// Guest MAC address — used as the destination MAC when sending frames
+    /// to the guest via the AF_PACKET socket. This sets `pkt_type` to
+    /// `PACKET_HOST` on the guest's receive path. If we used broadcast MAC
+    /// instead, the kernel would classify frames as `PACKET_BROADCAST` and
+    /// the TCP stack would silently drop TCP segments (TCP requires
+    /// PACKET_HOST for unicast delivery).
     guest_mac: [u8; 6],
 }
 
@@ -81,7 +84,9 @@ impl Port {
     const TAP_HDR_SZ: usize = Self::VNET_HDR_SZ + Self::ETH_HDR_SZ; // 24
 
     /// Fixed MAC used as the "gateway" source when sending frames to the guest.
-    /// Must not collide with any guest MAC (guests typically use 02:00:00:00:00:XX).
+    /// Locally-administered (02: prefix per IEEE 802), with 0xFB to distinguish
+    /// from guest MACs which use 02:00:00:00:00:XX. The exact value doesn't
+    /// matter as long as it doesn't collide with any guest MAC.
     const GATEWAY_MAC: [u8; 6] = [0x02, 0xFB, 0x00, 0x00, 0x00, 0x01];
 
     /// ARP constants.

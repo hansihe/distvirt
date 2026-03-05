@@ -412,6 +412,12 @@ impl OrchestratorShell {
         });
         self.process_output(output).await;
 
+        // Store transfer listen port from WorkerReady (after the SM step so
+        // the WorkerState exists).
+        if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
+            ws.transfer_listen_port = ready.transfer_listen_port;
+        }
+
         Ok(worker_id)
     }
 
@@ -622,6 +628,55 @@ impl OrchestratorShell {
                                 existing.available_bytes = new_pool.available_bytes;
                             }
                         }
+                    }
+                    return;
+                }
+
+                // Handle artifact transfer events directly (not namespace-scoped).
+                if let distvirt_worker_protocol::WorkerEvent::ArtifactTransferReceived {
+                    transfer_id,
+                    ref dest_artifact_id,
+                    ref dest_pool_id,
+                    size_bytes,
+                    ..
+                } = event
+                {
+                    log::info!(
+                        "worker {} artifact transfer received: transfer_id={} artifact={} pool={} size={}",
+                        worker_id.0, transfer_id, dest_artifact_id, dest_pool_id, size_bytes,
+                    );
+                    // Update placement from Writing to Ready.
+                    if let Some(placement) = self.orchestrator.placement_table.get_mut(dest_artifact_id) {
+                        if placement.status == ArtifactStatus::Writing {
+                            placement.status = ArtifactStatus::Ready;
+                            log::info!(
+                                "placement table: artifact {} updated to Ready",
+                                dest_artifact_id,
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                if let distvirt_worker_protocol::WorkerEvent::TransferFailed {
+                    transfer_id,
+                    ref source_artifact_id,
+                    ref dest_artifact_id,
+                    ref error,
+                    ..
+                } = event
+                {
+                    log::error!(
+                        "worker {} artifact transfer failed: transfer_id={} src={} dest={} error={}",
+                        worker_id.0, transfer_id, source_artifact_id, dest_artifact_id, error,
+                    );
+                    // Remove the Writing placement entry.
+                    if let Some(removed) = self.orchestrator.placement_table.remove(dest_artifact_id) {
+                        log::info!(
+                            "placement table: removed Writing entry for artifact {} (transfer failed)",
+                            dest_artifact_id,
+                        );
+                        let _ = removed;
                     }
                     return;
                 }
@@ -838,9 +893,11 @@ impl OrchestratorShell {
                 log::debug!("tunnel status event from worker {}", worker_id.0);
                 None
             }
-            // WorkerCondition and PoolCapacityUpdate are handled directly in handle_msg (needs &mut self).
+            // WorkerCondition, PoolCapacityUpdate, and transfer events are handled directly in handle_msg (needs &mut self).
             ProtoEvent::WorkerCondition { .. } => unreachable!(),
             ProtoEvent::PoolCapacityUpdate { .. } => unreachable!(),
+            ProtoEvent::ArtifactTransferReceived { .. } => unreachable!(),
+            ProtoEvent::TransferFailed { .. } => unreachable!(),
             // Wire-only variants — not routed to orchestrator SM.
             ProtoEvent::ShuttingDown => None,
             ProtoEvent::PodLogStreamError { .. } => None,

@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use tokio::io::unix::AsyncFd;
 
@@ -49,7 +49,10 @@ pub fn create_tun() -> anyhow::Result<(OwnedFd, String)> {
         ));
     }
 
-    // Enable checksum offloading so the kernel completes partial checksums.
+    // Enable TUN_F_CSUM so the kernel handles checksum completion for
+    // outgoing packets with VIRTIO_NET_HDR_F_NEEDS_CSUM set. Without this,
+    // packets written to the TUN with partial checksums would be sent out
+    // with invalid checksums.
     let ret = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETOFFLOAD as _, TUN_F_CSUM as libc::c_ulong) };
     if ret < 0 {
         return Err(anyhow::anyhow!(
@@ -64,9 +67,7 @@ pub fn create_tun() -> anyhow::Result<(OwnedFd, String)> {
         .map_err(|e| anyhow::anyhow!("TUN device name not utf8: {}", e))?
         .to_string();
 
-    // Convert File to OwnedFd (keep the fd open).
-    let fd = unsafe { OwnedFd::from_raw_fd(file.as_raw_fd()) };
-    std::mem::forget(file); // prevent double-close
+    let fd = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
 
     Ok((fd, name))
 }
@@ -112,6 +113,10 @@ fn set_ifaddr(
     // Build sockaddr_in.
     let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     sin.sin_family = libc::AF_INET as libc::sa_family_t;
+    // s_addr is in network byte order, but our `addr` array is already in
+    // network order ([10, 0, 0, 1] = 10.0.0.1). `from_ne_bytes` reinterprets
+    // the bytes as-is on the native platform, which is correct because the
+    // array is already in the wire format the kernel expects.
     sin.sin_addr.s_addr = u32::from_ne_bytes(addr);
 
     // Copy sockaddr_in into ifr_ifru (which is a union containing sockaddr).
@@ -238,6 +243,14 @@ impl TunEgress {
         let fabric_flags = packet[0];
         let ip_packet = &packet[FABRIC_HDR_SZ..];
 
+        // Build a 10-byte virtio-net header (struct virtio_net_hdr):
+        //   [0]      flags         — VIRTIO_NET_HDR_F_NEEDS_CSUM = 1
+        //   [1]      gso_type      — 0 (no segmentation offload)
+        //   [2..4]   hdr_len       — 0 (unused without GSO)
+        //   [4..6]   gso_size      — 0 (unused without GSO)
+        //   [6..8]   csum_start    — byte offset of transport header from packet start
+        //   [8..10]  csum_offset   — byte offset of checksum field within transport header
+        // All multi-byte fields are little-endian per virtio spec §5.1.6.
         let mut vnet_hdr = [0u8; Self::VNET_HDR_SZ];
         if fabric_flags & FLAG_NEEDS_CSUM != 0 {
             vnet_hdr[0] = 1; // VIRTIO_NET_HDR_F_NEEDS_CSUM

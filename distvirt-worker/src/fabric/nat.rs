@@ -45,7 +45,9 @@ impl NatTable {
     }
 
     /// Look up a NAT entry by the packet's forward 5-tuple.
-    /// Updates `last_seen` on hit.
+    /// Updates `last_seen` on hit to keep active connections alive during GC.
+    /// Without this, long-lived idle connections (e.g. keep-alive HTTP) would
+    /// have their NAT entries reaped and return traffic would stop working.
     pub fn lookup(&mut self, key: &NatFlowKey) -> Option<&NatEntry> {
         if let Some(entry) = self.reverse.get_mut(key) {
             entry.last_seen = Instant::now();

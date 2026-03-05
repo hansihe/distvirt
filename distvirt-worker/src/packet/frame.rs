@@ -77,6 +77,9 @@ impl<'a> FabricPacket<'a> {
         if protocol != IP_PROTO_TCP && protocol != IP_PROTO_UDP {
             return None;
         }
+        // IPv4 IHL (Internet Header Length) is the low 4 bits of the first
+        // byte, encoding the header length in 4-byte words. Multiply by 4 to
+        // get the byte offset where the transport header starts.
         let ihl = (self.raw[FABRIC_HDR_SZ] & 0x0f) as usize * 4;
         let transport_start = FABRIC_HDR_SZ + ihl;
         if self.raw.len() < transport_start + 4 {
@@ -330,13 +333,21 @@ fn update_ip_header_csum(
 
 /// Adjust the transport-layer checksum when an IP address changes.
 ///
-/// Handles two cases:
-/// 1. **NEEDS_CSUM set**: the checksum field contains a raw pseudo-header
-///    partial *sum* (not complemented). Derive csum position from IP header
-///    (IHL*4 for transport start, protocol-dependent offset for checksum field).
-///    Updated with direct one's-complement addition (`partial - old + new`).
-/// 2. **NEEDS_CSUM not set**: the checksum field contains a completed
-///    (complemented) checksum. Updated with the RFC 1624 incremental formula.
+/// Handles two distinct cases that MUST NOT be confused — using the wrong
+/// update algorithm silently produces invalid checksums:
+///
+/// 1. **NEEDS_CSUM set** (guest used checksum offload): the checksum field
+///    contains a raw pseudo-header partial *sum* (NOT one's-complement
+///    negated). This is the value the guest kernel computes from the
+///    pseudo-header (src IP, dst IP, proto, length) and leaves in the
+///    checksum field for the host to complete. Because it's a raw partial
+///    sum, we update it with direct one's-complement arithmetic:
+///    `partial - old_word + new_word` (via `incremental_partial_update`).
+///
+/// 2. **NEEDS_CSUM not set** (completed checksum): the checksum field
+///    contains a final, complemented checksum. Updated with the standard
+///    RFC 1624 incremental formula: `~(~HC + ~m + m')` (via
+///    `incremental_csum_update`).
 fn update_transport_csum_for_ip_change(
     frame: &mut [u8],
     ip_start: usize,

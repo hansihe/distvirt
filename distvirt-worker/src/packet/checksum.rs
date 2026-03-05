@@ -49,7 +49,8 @@ pub fn incremental_partial_update(old_partial: u16, old_word: u16, new_word: u16
 /// Instead of reading csum_start/csum_offset from the header (as with virtio),
 /// we derive them from the IP packet:
 /// - `csum_start = IHL * 4` (transport header offset relative to IP start)
-/// - `csum_offset` = 16 for TCP, 6 for UDP
+/// - `csum_offset` = 16 for TCP (checksum field is at TCP header byte 16),
+///   6 for UDP (checksum field is at UDP header byte 6)
 ///
 /// Must be called before stripping the fabric header for transmission outside
 /// the fabric (e.g. WireGuard, TUN egress).
@@ -88,9 +89,12 @@ pub fn complete_checksum(frame: &mut [u8]) {
         flags, csum_start, csum_offset, abs_start, abs_csum,
     );
 
-    // Do NOT zero the checksum field — the guest kernel places the TCP/UDP
-    // pseudo-header partial checksum there. The host must include it in the
-    // sum (matching Linux skb_checksum_help() behaviour).
+    // Do NOT zero the checksum field. When the guest kernel sets NEEDS_CSUM
+    // (virtio checksum offload), it places a pre-computed pseudo-header
+    // partial sum in the TCP/UDP checksum field. internet_checksum() folds
+    // this partial sum into the final result — zeroing it would discard the
+    // pseudo-header contribution and produce an incorrect checksum.
+    // This matches Linux's skb_checksum_help() behaviour.
 
     // Compute internet checksum over [abs_start..end].
     let data = &frame[abs_start..];

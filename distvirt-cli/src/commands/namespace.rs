@@ -1,20 +1,70 @@
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use distvirt_client_protocol::*;
 
 use crate::client::{self, Client};
 use crate::format;
+use crate::spec;
+
+/// Find the spec file to use. Checks distvirt.yaml, distvirt.yml, then
+/// docker-compose.yml in the current directory.
+fn find_default_file() -> anyhow::Result<std::path::PathBuf> {
+    for candidate in &["distvirt.yaml", "distvirt.yml", "docker-compose.yml"] {
+        let p = std::path::PathBuf::from(candidate);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    bail!("no spec file found (looked for distvirt.yaml, distvirt.yml, docker-compose.yml). Use -f to specify a file.")
+}
+
+/// Parse a spec file (native or compose) and return (optional namespace_id, NamespaceSpec).
+fn parse_spec_file(file: &Path) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
+    // Try native spec first
+    if let Some(native) = spec::try_parse(file)? {
+        let (ns_id, proto_spec) = spec::spec_to_namespace_spec(&native)?;
+        return Ok((ns_id, proto_spec));
+    }
+
+    // Fall back to compose
+    let deployment = distvirt_compose::parse(file)
+        .with_context(|| format!("parsing compose file '{}'", file.display()))?;
+    let proto_spec = deployment_to_spec(&deployment)?;
+    Ok((None, proto_spec))
+}
+
+/// Render a spec file to resolved proto output (no server connection needed).
+pub fn render(file: &Path) -> anyhow::Result<()> {
+    let (ns_id, proto_spec) = parse_spec_file(file)?;
+    if let Some(ref id) = ns_id {
+        println!("namespace: {}", id);
+    }
+    println!("{:#?}", proto_spec);
+    Ok(())
+}
 
 pub async fn up(
     mut client: Client,
-    namespace_id: &str,
-    file: &Path,
+    namespace_id: Option<&str>,
+    file: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let deployment = distvirt_compose::parse(file)
-        .with_context(|| format!("parsing compose file '{}'", file.display()))?;
+    let file = match file {
+        Some(f) => f.to_path_buf(),
+        None => find_default_file()?,
+    };
 
-    let spec = deployment_to_spec(&deployment)?;
+    let (spec_ns_id, spec) = parse_spec_file(&file)?;
+
+    // Determine namespace ID: CLI arg > spec metadata.name
+    let namespace_id = match namespace_id {
+        Some(id) => id.to_string(),
+        None => spec_ns_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "namespace ID required: specify as argument or set metadata.name in spec file"
+            )
+        })?,
+    };
 
     // Try create first; if it already exists, update instead
     let result = client
@@ -216,7 +266,7 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
         let workload = WorkloadSpec {
             network: Some(PodNetworkConfig { ip, mac }),
             containers: vec![container],
-            suspend_on_idle: false,
+            suspend_on_idle: true,
         };
 
         let expose: Vec<ExposeSpec> = svc
@@ -242,7 +292,7 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
                     })),
                 }),
                 buffer_policy: None,
-                idle_timeout_ms: 300_000, // 5 min default
+                idle_timeout_ms: 30_000, // 30s default (scale-to-zero)
             })
         } else {
             None

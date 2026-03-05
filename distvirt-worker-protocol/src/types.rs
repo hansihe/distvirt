@@ -207,6 +207,7 @@ pub enum AdapterConfig {
 pub struct WorkerReady {
     pub tunnel_listen_port: Option<u16>,
     pub tunnel_public_key: Option<[u8; 32]>,
+    pub transfer_listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,6 +292,14 @@ pub enum WorkerCommand {
     DeleteArtifact {
         artifact_id: ArtifactId,
         pool_id: PoolId,
+    },
+    TransferArtifact {
+        transfer_id: u64,
+        source_artifact_id: ArtifactId,
+        source_pool_id: PoolId,
+        dest_artifact_id: ArtifactId,
+        dest_pool_id: PoolId,
+        dest_endpoint: Option<String>, // None = local copy
     },
     WorkerRegistrySync {
         workers: Vec<WorkerPeerInfo>,
@@ -380,6 +389,22 @@ pub enum WorkerEvent {
         artifact_id: ArtifactId,
         pool_id: PoolId,
         size_bytes: u64,
+    },
+    ArtifactTransferReceived {
+        transfer_id: u64,
+        source_artifact_id: ArtifactId,
+        source_pool_id: PoolId,
+        dest_artifact_id: ArtifactId,
+        dest_pool_id: PoolId,
+        size_bytes: u64,
+    },
+    TransferFailed {
+        transfer_id: u64,
+        source_artifact_id: ArtifactId,
+        source_pool_id: PoolId,
+        dest_artifact_id: ArtifactId,
+        dest_pool_id: PoolId,
+        error: String,
     },
 }
 

@@ -55,6 +55,11 @@ impl<T> Future for TaskHandle<T> {
     type Output = Result<T, tokio::task::JoinError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // The Option is always Some until the future completes. Polling after
+        // Ready panics — this is the standard fused-future contract.
+        // We intentionally don't implement FusedFuture because all callers
+        // use tokio::select!, which tracks completion internally and never
+        // re-polls a completed branch.
         Pin::new(self.handle.as_mut().expect("polled after completion")).poll(cx)
     }
 }

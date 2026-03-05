@@ -17,7 +17,7 @@ use futures_lite::io::{AsyncRead, AsyncWriteExt};
 
 use container::ContainerManager;
 use distvirt_guest_protocol::{
-    GuestMessage, HostMessage, StreamHeader, VSOCK_CONTROL_PORT,
+    GuestEvent, GuestMessage, HostMessage, StreamHeader, VSOCK_CONTROL_PORT,
     STREAM_STDOUT, STREAM_STDERR, encode_output_chunk,
 };
 use std::os::unix::io::OwnedFd;
@@ -430,7 +430,56 @@ fn run() -> anyhow::Result<()> {
                 None => anyhow::bail!("yamux connection closed before control stream"),
             };
 
-            // Read the stream header and send Ready while driving the yamux connection.
+            // Read the stream header, open event stream, and send Ready while driving yamux.
+            //
+            // Phase 1: Read control stream header (drives conn via future::or).
+            {
+                let drive = async {
+                    loop {
+                        match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
+                            Some(Ok(_)) => log::warn!("unexpected inbound stream during init"),
+                            Some(Err(e)) => return Err::<(), _>(anyhow::Error::from(e)),
+                            None => return Err(anyhow::anyhow!("yamux closed during init")),
+                        }
+                    }
+                };
+                let read_header = async {
+                    let header: StreamHeader = vsock::recv_msg(&mut control_stream)
+                        .await
+                        .context("read StreamHeader on control stream")?;
+                    match header {
+                        StreamHeader::Control => log::info!("control stream established"),
+                        other => anyhow::bail!("expected StreamHeader::Control, got {:?}", other),
+                    }
+                    Ok(())
+                };
+                future::or(drive, read_header).await?;
+            }
+
+            // Phase 2: Open event stream outbound (needs conn.poll_new_outbound).
+            // Uses poll_fn to interleave driving inbound with opening outbound.
+            let mut event_stream = {
+                let mut es_opt: Option<yamux::Stream> = None;
+                std::future::poll_fn(|cx| {
+                    // Drive inbound to process yamux bookkeeping frames.
+                    loop {
+                        match conn.poll_next_inbound(cx) {
+                            Poll::Ready(Some(Ok(_))) => log::warn!("unexpected inbound during event stream open"),
+                            Poll::Ready(Some(Err(e))) => return Poll::Ready(Err::<(), _>(anyhow::Error::from(e))),
+                            Poll::Ready(None) => return Poll::Ready(Err(anyhow::anyhow!("yamux closed during event stream open"))),
+                            Poll::Pending => break,
+                        }
+                    }
+                    match conn.poll_new_outbound(cx) {
+                        Poll::Ready(Ok(s)) => { es_opt = Some(s); Poll::Ready(Ok(())) }
+                        Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow::Error::from(e))),
+                        Poll::Pending => Poll::Pending,
+                    }
+                }).await?;
+                es_opt.expect("poll_fn completed without setting event stream")
+            };
+
+            // Phase 3: Send event stream header and Ready (drives conn via future::or).
             {
                 let running_containers = containers.running_container_ids();
                 let drive = async {
@@ -442,14 +491,12 @@ fn run() -> anyhow::Result<()> {
                         }
                     }
                 };
-                let init = async {
-                    let header: StreamHeader = vsock::recv_msg(&mut control_stream)
+                let send_ready = async {
+                    vsock::send_msg(&mut event_stream, &StreamHeader::Events)
                         .await
-                        .context("read StreamHeader on control stream")?;
-                    match header {
-                        StreamHeader::Control => log::info!("control stream established"),
-                        other => anyhow::bail!("expected StreamHeader::Control, got {:?}", other),
-                    }
+                        .context("send StreamHeader::Events")?;
+                    log::info!("event stream opened");
+
                     if running_containers.is_empty() {
                         log::info!("host connected, sending Ready (cold boot)");
                     } else {
@@ -460,7 +507,7 @@ fn run() -> anyhow::Result<()> {
                     }).await?;
                     Ok(())
                 };
-                future::or(drive, init).await?;
+                future::or(drive, send_ready).await?;
             }
 
             // On resume, release packets buffered by the plug qdisc before suspend.
@@ -547,7 +594,7 @@ fn run() -> anyhow::Result<()> {
                         util::drain_signalfd(&sigfd);
 
                         let exits = containers.reap_children();
-                        let mut control_broken = false;
+                        let mut event_broken = false;
                         for exit in exits {
                             // Drive yamux connection while draining to prevent deadlock.
                             // Without this, write_all() can block waiting for window updates
@@ -561,16 +608,16 @@ fn run() -> anyhow::Result<()> {
                             stdin_streams.remove(&exit.id);
                             containers.remove(&exit.id);
 
-                            if let Err(e) = control.send(&GuestMessage::ContainerExited {
+                            if let Err(e) = vsock::send_msg(&mut event_stream, &GuestEvent::ContainerExited {
                                 id: exit.id,
                                 code: exit.code,
                             }).await {
-                                log::error!("failed to send ContainerExited: {:#}", e);
-                                control_broken = true;
+                                log::error!("failed to send ContainerExited on event stream: {:#}", e);
+                                event_broken = true;
                                 break;
                             }
                         }
-                        if control_broken {
+                        if event_broken {
                             break 'event_loop LoopExit::Disconnected;
                         }
                     }

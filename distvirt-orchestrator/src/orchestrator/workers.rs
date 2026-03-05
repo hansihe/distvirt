@@ -26,6 +26,7 @@ impl Orchestrator {
                 wg_config,
                 tunnel_config,
                 conditions: std::collections::HashMap::new(),
+                transfer_listen_port: None,
             },
         );
 
