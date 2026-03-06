@@ -295,9 +295,6 @@ pub async fn run_compose(
                     } => {
                         eprintln!("{} | log stream error ({}): {}", pod_id, phase, error);
                     }
-                    // Deprecated: these events are no longer emitted by current workers,
-                    // but the enum variants still exist for wire compatibility.
-                    WorkerEvent::FabricRouteMiss { .. } | WorkerEvent::ServiceActivation { .. } => {}
                     WorkerEvent::EndpointActivation { namespace_id: _, ip, service_id } => {
                         log::debug!("endpoint activation for {} (service: {:?})", ip, service_id);
                     }

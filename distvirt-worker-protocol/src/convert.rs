@@ -228,22 +228,6 @@ pub fn read_registry_entry(
     })
 }
 
-pub fn write_buffer_policy(
-    builder: &mut schema::buffer_policy::Builder<'_>,
-    val: &BufferPolicy,
-) {
-    builder.set_buffer_frames(val.buffer_frames);
-    builder.set_timeout_ms(val.timeout_ms);
-}
-
-pub fn read_buffer_policy(
-    reader: schema::buffer_policy::Reader<'_>,
-) -> BufferPolicy {
-    BufferPolicy {
-        buffer_frames: reader.get_buffer_frames(),
-        timeout_ms: reader.get_timeout_ms(),
-    }
-}
 
 pub fn write_activator_config(
     mut builder: schema::activator_config::Builder<'_>,
@@ -330,72 +314,6 @@ pub fn read_service_policy(
     })
 }
 
-pub fn write_service_backend(
-    builder: &mut schema::service_backend::Builder<'_>,
-    val: &ServiceBackend,
-) {
-    write_ipv4(&mut builder.reborrow().init_pod_ip(), &val.pod_ip);
-    // Write zeroed MAC for wire compatibility.
-    write_mac(&mut builder.reborrow().init_pod_mac(), &[0; 6]);
-}
-
-pub fn read_service_backend(
-    reader: schema::service_backend::Reader<'_>,
-) -> capnp::Result<ServiceBackend> {
-    Ok(ServiceBackend {
-        pod_ip: read_ipv4(reader.get_pod_ip()?),
-        // pod_mac field ignored (kept in schema for wire compatibility).
-    })
-}
-
-pub fn write_route_destination(
-    builder: schema::route_destination::Builder<'_>,
-    val: &RouteDestination,
-) {
-    match val {
-        RouteDestination::RemoteWorker { worker_id } => {
-            let mut rw = builder.init_remote_worker();
-            rw.set_worker_id(worker_id.as_ref());
-        }
-        RouteDestination::Placeholder { buffer_policy } => {
-            let mut ph = builder.init_placeholder();
-            write_buffer_policy(&mut ph.reborrow().init_buffer_policy(), buffer_policy);
-        }
-    }
-}
-
-pub fn read_route_destination(
-    reader: schema::route_destination::Reader<'_>,
-) -> capnp::Result<RouteDestination> {
-    match reader.which()? {
-        schema::route_destination::RemoteWorker(rw) => Ok(RouteDestination::RemoteWorker {
-            worker_id: WorkerId::from(rw.get_worker_id()?.to_str()?),
-        }),
-        schema::route_destination::Placeholder(ph) => Ok(RouteDestination::Placeholder {
-            buffer_policy: read_buffer_policy(ph.get_buffer_policy()?),
-        }),
-    }
-}
-
-pub fn write_fabric_route_entry(
-    builder: &mut schema::fabric_route_entry::Builder<'_>,
-    val: &FabricRouteEntry,
-) {
-    write_ipv4(&mut builder.reborrow().init_ip(), &val.ip);
-    // Write zeroed MAC for wire compatibility.
-    write_mac(&mut builder.reborrow().init_mac(), &[0; 6]);
-    write_route_destination(builder.reborrow().init_destination(), &val.destination);
-}
-
-pub fn read_fabric_route_entry(
-    reader: schema::fabric_route_entry::Reader<'_>,
-) -> capnp::Result<FabricRouteEntry> {
-    Ok(FabricRouteEntry {
-        ip: read_ipv4(reader.get_ip()?),
-        // mac field ignored (kept in schema for wire compatibility).
-        destination: read_route_destination(reader.get_destination()?)?,
-    })
-}
 
 // --- Endpoint Protocol Helpers ---
 
@@ -851,82 +769,6 @@ pub fn write_worker_command(
             b.set_pod_id(pod_id.as_ref());
             b.set_graceful(*graceful);
         }
-        WorkerCommand::FabricRouteSync {
-            namespace_id,
-            routes,
-        } => {
-            let mut b = builder.init_fabric_route_sync();
-            b.set_namespace_id(namespace_id.as_ref());
-            let mut list = b.reborrow().init_routes(routes.len() as u32);
-            for (i, entry) in routes.iter().enumerate() {
-                write_fabric_route_entry(&mut list.reborrow().get(i as u32), entry);
-            }
-        }
-        WorkerCommand::FabricRouteUpdate {
-            namespace_id,
-            added,
-            removed_ips,
-        } => {
-            let mut b = builder.init_fabric_route_update();
-            b.set_namespace_id(namespace_id.as_ref());
-            {
-                let mut list = b.reborrow().init_added(added.len() as u32);
-                for (i, entry) in added.iter().enumerate() {
-                    write_fabric_route_entry(&mut list.reborrow().get(i as u32), entry);
-                }
-            }
-            {
-                let mut list = b.reborrow().init_removed_ips(removed_ips.len() as u32);
-                for (i, ip) in removed_ips.iter().enumerate() {
-                    write_ipv4(&mut list.reborrow().get(i as u32), ip);
-                }
-            }
-        }
-        WorkerCommand::CreateService {
-            namespace_id,
-            service_id,
-            ip,
-            policy,
-        } => {
-            let mut b = builder.init_create_service();
-            b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(service_id.as_ref());
-            write_ipv4(&mut b.reborrow().init_ip(), ip);
-            write_mac(&mut b.reborrow().init_mac(), &[0; 6]);
-            write_service_policy(&mut b.reborrow().init_policy(), policy);
-        }
-        WorkerCommand::UpdateServiceBackend {
-            namespace_id,
-            service_id,
-            backend,
-        } => {
-            let mut b = builder.init_update_service_backend();
-            b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(service_id.as_ref());
-            match backend {
-                Some(be) => {
-                    b.set_has_backend(true);
-                    write_service_backend(&mut b.reborrow().init_backend(), be);
-                }
-                None => b.set_has_backend(false),
-            }
-        }
-        WorkerCommand::ServiceReady {
-            namespace_id,
-            service_id,
-        } => {
-            let mut b = builder.init_service_ready();
-            b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(service_id.as_ref());
-        }
-        WorkerCommand::DestroyService {
-            namespace_id,
-            service_id,
-        } => {
-            let mut b = builder.init_destroy_service();
-            b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(service_id.as_ref());
-        }
         WorkerCommand::AddWireGuardPeer {
             namespace_id,
             peer_public_key,
@@ -1113,72 +955,10 @@ pub fn read_worker_command(
                 graceful: r.get_graceful(),
             })
         }
-        FabricRouteSync(r) => {
-            let r = r?;
-            let routes_list = r.get_routes()?;
-            let mut routes = Vec::with_capacity(routes_list.len() as usize);
-            for i in 0..routes_list.len() {
-                routes.push(read_fabric_route_entry(routes_list.get(i))?);
-            }
-            Ok(WorkerCommand::FabricRouteSync {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                routes,
-            })
-        }
-        FabricRouteUpdate(r) => {
-            let r = r?;
-            let added_list = r.get_added()?;
-            let mut added = Vec::with_capacity(added_list.len() as usize);
-            for i in 0..added_list.len() {
-                added.push(read_fabric_route_entry(added_list.get(i))?);
-            }
-            let ips_list = r.get_removed_ips()?;
-            let mut removed_ips = Vec::with_capacity(ips_list.len() as usize);
-            for i in 0..ips_list.len() {
-                removed_ips.push(read_ipv4(ips_list.get(i)));
-            }
-            Ok(WorkerCommand::FabricRouteUpdate {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                added,
-                removed_ips,
-            })
-        }
-        CreateService(r) => {
-            let r = r?;
-            let _ = r.get_mac(); // ignore wire-compat MAC field
-            Ok(WorkerCommand::CreateService {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-                ip: read_ipv4(r.get_ip()?),
-                policy: read_service_policy(r.get_policy()?)?,
-            })
-        }
-        UpdateServiceBackend(r) => {
-            let r = r?;
-            let backend = if r.get_has_backend() {
-                Some(read_service_backend(r.get_backend()?)?)
-            } else {
-                None
-            };
-            Ok(WorkerCommand::UpdateServiceBackend {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-                backend,
-            })
-        }
-        ServiceReady(r) => {
-            let r = r?;
-            Ok(WorkerCommand::ServiceReady {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-            })
-        }
-        DestroyService(r) => {
-            let r = r?;
-            Ok(WorkerCommand::DestroyService {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-            })
+        // Deprecated command variants — removed from Rust types but still in Cap'n Proto schema.
+        FabricRouteSync(_) | FabricRouteUpdate(_) | CreateService(_)
+        | UpdateServiceBackend(_) | ServiceReady(_) | DestroyService(_) => {
+            Err(capnp::Error::failed("received deprecated command variant".into()))
         }
         AddWireGuardPeer(r) => {
             let r = r?;
@@ -1363,16 +1143,6 @@ pub fn write_worker_event(
             b.set_phase(phase);
             b.set_error(error);
         }
-        WorkerEvent::ServiceActivation {
-            namespace_id,
-            service_id,
-            dst_ip,
-        } => {
-            let mut b = builder.init_service_activation();
-            b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(service_id.as_ref());
-            write_ipv4(&mut b.reborrow().init_dst_ip(), dst_ip);
-        }
         WorkerEvent::ServiceBackendNeed {
             namespace_id,
             service_id,
@@ -1382,16 +1152,6 @@ pub fn write_worker_event(
             b.set_namespace_id(namespace_id.as_ref());
             b.set_service_id(service_id.as_ref());
             b.set_need(write_backend_need(need));
-        }
-        WorkerEvent::FabricRouteMiss {
-            namespace_id,
-            dst_ip,
-        } => {
-            let mut b = builder.init_fabric_route_miss();
-            b.set_namespace_id(namespace_id.as_ref());
-            write_ipv4(&mut b.reborrow().init_dst_ip(), dst_ip);
-            // dst_mac field retained in schema for wire compatibility but set to zero.
-            write_mac(&mut b.reborrow().init_dst_mac(), &[0; 6]);
         }
         WorkerEvent::PodSuspended {
             namespace_id,
@@ -1619,13 +1379,9 @@ pub fn read_worker_event(
                 error: r.get_error()?.to_string()?,
             })
         }
-        ServiceActivation(r) => {
-            let r = r?;
-            Ok(WorkerEvent::ServiceActivation {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
-                dst_ip: read_ipv4(r.get_dst_ip()?),
-            })
+        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
+        ServiceActivation(_) => {
+            Err(capnp::Error::failed("received deprecated event variant: ServiceActivation".into()))
         }
         ServiceBackendNeed(r) => {
             let r = r?;
@@ -1635,12 +1391,9 @@ pub fn read_worker_event(
                 need: read_backend_need(r.get_need()?)?,
             })
         }
-        FabricRouteMiss(r) => {
-            let r = r?;
-            Ok(WorkerEvent::FabricRouteMiss {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                dst_ip: read_ipv4(r.get_dst_ip()?),
-            })
+        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
+        FabricRouteMiss(_) => {
+            Err(capnp::Error::failed("received deprecated event variant: FabricRouteMiss".into()))
         }
         PodSuspended(r) => {
             let r = r?;

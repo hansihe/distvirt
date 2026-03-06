@@ -61,20 +61,6 @@ impl OrchestratorShell {
                     event: WorkerEvent::NamespaceFailed { error },
                 },
             }),
-            // DEPRECATED: Legacy ServiceActivation from older workers.
-            // Converted to EndpointActivation for backward compatibility.
-            // Remove once all workers emit EndpointActivation natively.
-            ProtoEvent::ServiceActivation {
-                namespace_id,
-                service_id,
-                dst_ip,
-            } => Some(OrchestratorInput::NamespaceInput {
-                namespace_id,
-                input: NamespaceInput::WorkerEvent {
-                    worker_id,
-                    event: WorkerEvent::EndpointActivation { ip: dst_ip, service_id: Some(service_id) },
-                },
-            }),
             ProtoEvent::ServiceBackendNeed {
                 namespace_id,
                 service_id,
@@ -117,19 +103,6 @@ impl OrchestratorShell {
                 input: NamespaceInput::WorkerEvent {
                     worker_id,
                     event: WorkerEvent::PodSuspendFailed { pod_id, error },
-                },
-            }),
-            // DEPRECATED: Legacy FabricRouteMiss from older workers.
-            // Converted to EndpointActivation for backward compatibility.
-            // Remove once all workers emit EndpointActivation natively.
-            ProtoEvent::FabricRouteMiss {
-                namespace_id,
-                dst_ip,
-            } => Some(OrchestratorInput::NamespaceInput {
-                namespace_id,
-                input: NamespaceInput::WorkerEvent {
-                    worker_id,
-                    event: WorkerEvent::EndpointActivation { ip: dst_ip, service_id: None },
                 },
             }),
             ProtoEvent::ArtifactWriteStarted {

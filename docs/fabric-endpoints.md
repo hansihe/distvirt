@@ -359,19 +359,27 @@ Completed: `ServiceTable` replaced by `EndpointTable` in `fabric/endpoint.rs` wi
 
 Completed: `RouteTable` removed (`route.rs` deleted). `EndpointBackend` now has `UnplacedPod { buffer_policy }` and `RemoteSegment { worker_id }` variants. `ServiceAction` renamed to `EndpointAction` with new variants `RemoteWorker` and `NotFound`. Route management moved to `EndpointTable` via `route_sync()`, `route_update()`, and `flush_pod_buffer()`. Shared buffer logic extracted into `try_buffer_frame()` helper. `FabricEvent` unified: `RouteMiss` and `ServiceActivation` replaced by single `EndpointActivation { dst_ip, service_id: Option<String> }`. Event bridge in `namespace.rs` maps back to protocol events (`ServiceActivation` / `FabricRouteMiss`). `FlowTracker` added in `fabric/flow.rs` (TCP-only, structural, not wired to events). `LocalPod` variant deferred — local pods use the `IpPortTable` fast path. All 123 tests pass (115 unit + 8 flow tracker).
 
-### Phase 3: Unified Protocol Commands
+### Phase 3: Unified Protocol Commands ✅
 
-- Add `EndpointSync`/`EndpointUpdate` to worker protocol
-- Implement orchestrator-side endpoint table generation
-- Implement worker-side derivation (spec → local endpoint table)
-- Wire `EndpointFlowStatus` event
-- Remove old commands (`FabricRouteSync`, `FabricRouteUpdate`, `CreateService`, `UpdateServiceBackend`, `ServiceReady`, `DestroyService`)
-- Update orchestrator demand model (remove `route_miss_wake`)
+- ~~Add `EndpointSync`/`EndpointUpdate` to worker protocol~~
+- ~~Implement orchestrator-side endpoint table generation~~
+- ~~Implement worker-side derivation (spec → local endpoint table)~~
+- ~~Wire `EndpointFlowStatus` event~~
+- ~~Remove old commands (`FabricRouteSync`, `FabricRouteUpdate`, `CreateService`, `UpdateServiceBackend`, `ServiceReady`, `DestroyService`)~~
+- ~~Update orchestrator demand model (remove `route_miss_wake`)~~
+
+Completed: `EndpointSync`/`EndpointUpdate` added to worker protocol with full Cap'n Proto serialization. Old commands removed from Rust types (deprecated stubs in schema return errors on deserialization). Orchestrator generates `EndpointSpec` via `build_endpoint_specs()` in namespace `mod.rs` and broadcasts via `emit_endpoint_sync()`/`emit_endpoint_update_for_workload()`/`emit_endpoint_update_for_service()`. Worker applies specs via `apply_endpoint_sync()`/`apply_endpoint_update()` with effect processing (`ServiceReady`, `FlushPodBuffer`). `EndpointActivation` replaces both `FabricRouteMiss` and `ServiceActivation`. `EndpointFlowStatus` wired for flow tracking. Demand model unified: `effective_demand = service_demand + route_miss` using `has_active_flows` and `route_miss_wake`. All tests migrated to new protocol, stateright model updated. Compose orchestrator uses new protocol. Known issue: `route_miss_wake` demand leak (flag not always cleared when service takes over demand), documented in `endpoint-migration-audit.md` with a `#[should_panic]` test.
 
 ### Phase 4: LocalAdapter Backend
 
 - Add `LocalAdapter` variant for WireGuard peers and splice targets
 - Unify WireGuard peer management with endpoint model
+
+### Remaining work
+
+1. **Fix `route_miss_wake`** — clear when service activates and takes over demand (item 2)
+2. **Hardcoded buffer policy** — extract UnplacedPod buffer policy to a configurable constant (item 7)
+3. **Lock ordering** — consider type-safe enforcement for fabric locks (item 7)
 
 ## Open Questions
 

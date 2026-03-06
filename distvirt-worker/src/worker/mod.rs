@@ -551,16 +551,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 })?;
                 ns.endpoint_update(&namespace_id, upserted, removed_ips, &worker_id, activator_runtime)
             }
-            // Deprecated command variants replaced by EndpointSync/EndpointUpdate.
-            WorkerCommand::FabricRouteSync { .. }
-            | WorkerCommand::FabricRouteUpdate { .. }
-            | WorkerCommand::CreateService { .. }
-            | WorkerCommand::UpdateServiceBackend { .. }
-            | WorkerCommand::ServiceReady { .. }
-            | WorkerCommand::DestroyService { .. } => {
-                log::warn!("worker: received deprecated command, ignoring");
-                Ok(())
-            }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
                 unreachable!("Shutdown handled in run()")

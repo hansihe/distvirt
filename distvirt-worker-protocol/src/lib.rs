@@ -59,11 +59,12 @@
 //!   |<───────────────────────── PodExited |  // main container exited
 //! ```
 //!
-//! ## Service-Based Communication (Recommended)
+//! ## Endpoint-Based Communication
 //!
-//! Services are stable network identities (virtual IP + MAC) on the fabric. They
+//! Endpoints are stable network identities (virtual IP) on the fabric. They
 //! decouple pod lifecycle from addressability and enable features like buffering,
-//! activation, and readiness gating.
+//! activation, and readiness gating. The orchestrator manages endpoints via
+//! [`WorkerCommand::EndpointSync`] and [`WorkerCommand::EndpointUpdate`].
 //!
 //! ```text
 //! Orchestrator                           Worker
@@ -71,31 +72,29 @@
 //!   |── CreateNamespace ─────────────────>|
 //!   |<─────────────────── NamespaceCreated |
 //!   |── RegistrySync ───────────────────>|  // DNS: "api" -> service IP
-//!   |── CreateService ──────────────────>|  // service entity on fabric
+//!   |── EndpointSync ────────────────────>|  // set up service endpoints
 //!   |── LaunchPod ──────────────────────>|  // start the backing pod
 //!   |<──────────────────────── PodRunning |
-//!   |── UpdateServiceBackend ───────────>|  // assign pod as backend
-//!   |── ServiceReady ───────────────────>|  // flush buffered traffic
+//!   |── EndpointUpdate ──────────────────>|  // assign pod as backend
 //! ```
 //!
-//! ## Scale-to-Zero with Service Activation
+//! ## Scale-to-Zero with Endpoint Activation
 //!
-//! When a service has no backend, traffic is buffered and the worker fires a
-//! [`WorkerEvent::ServiceActivation`] so the orchestrator can schedule a pod on
-//! demand.
+//! When a service endpoint has no backend, traffic is buffered and the worker
+//! fires a [`WorkerEvent::EndpointActivation`] so the orchestrator can schedule
+//! a pod on demand.
 //!
 //! ```text
 //! Orchestrator                           Worker
 //!   |                                      |
-//!   |  (service exists, no backend)        |
+//!   |  (endpoint exists, no backend)       |
 //!   |                                      |  // client pod sends traffic
 //!   |                                      |  // to service IP
-//!   |<─────────────── ServiceActivation   |  // "someone wants this service"
+//!   |<──────────── EndpointActivation     |  // "someone wants this endpoint"
 //!   |                                      |
 //!   |── LaunchPod ──────────────────────>|  // orchestrator reacts
 //!   |<──────────────────────── PodRunning |
-//!   |── UpdateServiceBackend ───────────>|
-//!   |── ServiceReady ───────────────────>|  // buffered frames flushed
+//!   |── EndpointUpdate ──────────────────>|  // assign backend, mark ready
 //! ```
 //!
 //! With a **protocol activator** (e.g., TCP), the activation is smarter — only
@@ -106,19 +105,18 @@
 //! ```text
 //! Orchestrator                           Worker
 //!   |                                      |
-//!   |── CreateService(activator: Tcp) ──>|  // TCP-aware service
+//!   |── EndpointSync(activator: Tcp) ────>|  // TCP-aware service endpoint
 //!   |                                      |
 //!   |                                      |  // TCP SYN arrives
 //!   |<───────────── ServiceBackendNeed    |  // need=Traffic
 //!   |                                      |  // (RSTs are dropped silently)
 //!   |── LaunchPod ──────────────────────>|
 //!   |<──────────────────────── PodRunning |
-//!   |── UpdateServiceBackend ───────────>|
-//!   |── ServiceReady ───────────────────>|  // SYNs replayed to backend
+//!   |── EndpointUpdate ──────────────────>|  // assign backend
 //!   |        ...traffic flows...           |
 //!   |                                      |  // no new SYNs for a while
 //!   |<───────────── ServiceBackendNeed    |  // need=None
-//!   |── UpdateServiceBackend(None) ─────>|  // release backend
+//!   |── EndpointUpdate(backend: None) ───>|  // release backend
 //!   |── StopPod ────────────────────────>|  // scale to zero
 //! ```
 //!
@@ -128,7 +126,6 @@
 //! Orchestrator                           Worker
 //!   |── StopPod (for each pod) ─────────>|  // graceful stop
 //!   |<───────────────────────── PodExited |
-//!   |── DestroyService (each) ──────────>|
 //!   |── DestroyNamespace ───────────────>|
 //!   |── Shutdown ───────────────────────>|
 //!   |<──────────────────── ShuttingDown   |

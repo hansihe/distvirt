@@ -94,6 +94,7 @@ struct WorkloadSnapshot {
     current_demand: u32,
     consecutive_failures: u32,
     route_miss_wake: bool,
+    has_active_flows: bool,
     needs_successful_boot: bool,
 }
 
@@ -147,6 +148,7 @@ impl NamespaceSnapshot {
                             current_demand: v.current_demand,
                             consecutive_failures: v.consecutive_failures,
                             route_miss_wake: v.route_miss_wake,
+                            has_active_flows: v.has_active_flows,
                             needs_successful_boot: v.needs_successful_boot,
                         },
                     )
@@ -297,8 +299,9 @@ struct ModelState {
     spec_updated: bool,
     /// Monotonic flag: set to true after AddService has been applied.
     service_added: bool,
-    /// Tracks which workers have received CreateService for which services.
-    worker_service_created: BTreeMap<WorkerId, BTreeSet<ServiceId>>,
+    /// Tracks which workers have received endpoint commands, mapping IP → ServiceId
+    /// so that removed_ips in EndpointUpdate can correctly remove stale endpoints.
+    worker_service_created: BTreeMap<WorkerId, BTreeMap<Ipv4Addr, ServiceId>>,
 }
 
 // --- Model Actions ---
@@ -327,21 +330,23 @@ fn worker_id(i: usize) -> WorkerId {
 }
 
 /// Track EndpointSync/EndpointUpdate commands to know which workers have service endpoints.
+/// Maps each worker to a set of (IP → ServiceId) entries so that `removed_ips` in
+/// EndpointUpdate can correctly remove stale endpoints.
 fn track_service_commands(
     output: &NamespaceOutput,
-    tracker: &mut BTreeMap<WorkerId, BTreeSet<ServiceId>>,
+    tracker: &mut BTreeMap<WorkerId, BTreeMap<Ipv4Addr, ServiceId>>,
 ) {
     use distvirt_worker_protocol::EndpointKind;
 
     for (wid, cmd) in &output.worker_commands {
         match cmd {
             WorkerCommand::EndpointSync { endpoints, .. } => {
-                // Full sync replaces all known services for this worker.
+                // Full sync replaces all known endpoints for this worker.
                 let entry = tracker.entry(wid.clone()).or_default();
                 entry.clear();
                 for ep in endpoints {
                     if let EndpointKind::Service { service_id, .. } = &ep.kind {
-                        entry.insert(service_id.clone());
+                        entry.insert(ep.ip, service_id.clone());
                     }
                 }
             }
@@ -349,17 +354,21 @@ fn track_service_commands(
                 let entry = tracker.entry(wid.clone()).or_default();
                 for ep in upserted {
                     if let EndpointKind::Service { service_id, .. } = &ep.kind {
-                        entry.insert(service_id.clone());
+                        entry.insert(ep.ip, service_id.clone());
                     }
                 }
-                // For removed_ips we'd need to map IP→service_id, but the property
-                // only checks that services are present, so removals don't matter
-                // for a "have all services" invariant. We can skip this.
-                let _ = removed_ips;
+                for ip in removed_ips {
+                    entry.remove(ip);
+                }
             }
             _ => {}
         }
     }
+}
+
+/// Helper: extract the set of unique ServiceIds from an endpoint tracker entry.
+fn tracked_service_ids(tracker: &BTreeMap<Ipv4Addr, ServiceId>) -> BTreeSet<ServiceId> {
+    tracker.values().cloned().collect()
 }
 
 /// Allocate the lowest free pod ID, so states converge after pod churn.
@@ -943,7 +952,7 @@ impl Model for NamespaceModel {
                     let created = state
                         .worker_service_created
                         .get(wid)
-                        .cloned()
+                        .map(|m| tracked_service_ids(m))
                         .unwrap_or_default();
                     for svc_id in &non_pending_services {
                         if !created.contains(*svc_id) {

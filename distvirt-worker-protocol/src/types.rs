@@ -120,18 +120,6 @@ pub struct ServiceBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum RouteDestination {
-    RemoteWorker { worker_id: WorkerId },
-    Placeholder { buffer_policy: BufferPolicy },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FabricRouteEntry {
-    pub ip: Ipv4Addr,
-    pub destination: RouteDestination,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EndpointPlacement {
     pub worker_id: WorkerId,
 }
@@ -269,34 +257,6 @@ pub enum WorkerCommand {
         pod_id: PodId,
         graceful: bool,
     },
-    FabricRouteSync {
-        namespace_id: NamespaceId,
-        routes: Vec<FabricRouteEntry>,
-    },
-    FabricRouteUpdate {
-        namespace_id: NamespaceId,
-        added: Vec<FabricRouteEntry>,
-        removed_ips: Vec<Ipv4Addr>,
-    },
-    CreateService {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-        ip: Ipv4Addr,
-        policy: ServicePolicy,
-    },
-    UpdateServiceBackend {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-        backend: Option<ServiceBackend>,
-    },
-    ServiceReady {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-    },
-    DestroyService {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-    },
     AddWireGuardPeer {
         namespace_id: NamespaceId,
         peer_public_key: [u8; 32],
@@ -376,15 +336,6 @@ pub enum WorkerEvent {
         container_id: String,
         phase: String,
         error: String,
-    },
-    FabricRouteMiss {
-        namespace_id: NamespaceId,
-        dst_ip: Ipv4Addr,
-    },
-    ServiceActivation {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-        dst_ip: Ipv4Addr,
     },
     ServiceBackendNeed {
         namespace_id: NamespaceId,

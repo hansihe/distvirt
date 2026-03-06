@@ -50,7 +50,7 @@ impl NamespaceStateMachine {
                 } else if has_activation {
                     // Direct state assignment (bypasses step()): initial Pending→Idle
                     // transition has no side effects to emit (no timers, no worker
-                    // commands beyond the CreateService already emitted above).
+                    // commands — endpoint state is synced via EndpointSync/EndpointUpdate).
                     self.services.get_mut(svc_id)
                         .expect("invariant: svc_id from reconcile_pair must exist in services")
                         .state = ServiceState::Idle;

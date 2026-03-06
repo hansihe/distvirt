@@ -282,6 +282,10 @@ impl EndpointTable {
                         let was_buffering = self.by_ip.get(&ip)
                             .map(|ep| ep.state == EndpointState::Buffering && !ep.buffer.is_empty())
                             .unwrap_or(false);
+                        // RemoteSegment endpoints start Ready with no buffer.
+                        // This is intentional: they are dumb forwarders that relay
+                        // frames to the remote worker; flow-control and buffer
+                        // tracking only happens on the host worker that owns the pod.
                         self.by_ip.insert(ip, Endpoint {
                             ip,
                             state: EndpointState::Ready,
