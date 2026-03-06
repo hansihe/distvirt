@@ -337,7 +337,6 @@ async fn test_remove_service_updates_demand() {
 async fn test_remove_only_active_service_drops_demand() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    let timeout = Duration::from_secs(30);
     h.create_namespace("ns", multi_service_spec()).await;
     h.converge().await;
 
@@ -358,11 +357,13 @@ async fn test_remove_only_active_service_drops_demand() {
     h.update_namespace("ns", new_spec).await;
     h.converge().await;
 
-    // With no demanding services, workload demand drops to 0.
-    // suspend_on_idle=true, so workload should suspend.
-    // Give the idle timer time to fire if needed.
-    h.advance_time(timeout + Duration::from_secs(1)).await;
-
-    // Workload should be Suspended (suspend_on_idle=true, demand=0).
-    h.assert_workload_suspended("ns", "shared");
+    // Service removal should immediately drop demand to 0 via reconciliation
+    // (no idle timer involved — the service is gone, not idling).
+    // suspend_on_idle=true → workload should begin suspending/suspended immediately.
+    let state = h.workload_state("ns", "shared");
+    assert!(
+        matches!(state, WorkloadState::Suspending { .. } | WorkloadState::Suspended { .. }),
+        "workload should begin deactivation immediately after service removal, got {:?}",
+        state,
+    );
 }

@@ -903,14 +903,14 @@ Dormant → WaitingForCapacity → Launching{pod_id, worker_id, launch_timeout, 
 
 `pending: PendingIntent` on transition states captures contradicting signals during async operations (see [Transition Intents](#transition-intents)).
 
-Fields on `WorkloadStateMachine`: `workload_id`, `state`, `current_demand`, `needs_successful_boot`, `route_miss_wake`, `suspend_on_idle`, `consecutive_failures`, `max_retries`, `last_failure_reason`.
+Fields on `WorkloadStateMachine`: `workload_id`, `state`, `current_demand`, `needs_successful_boot`, `route_miss_wake`, `suspend_on_idle`, `consecutive_failures`, `max_retries`, `last_failure_reason`, `conditions`.
 
 **ServiceState** (`types/states.rs`):
 ```
 Pending → Idle → NeedBackend → Active{pod_id, worker_id, backend_need, idle_timer}
 ```
 
-Fields on `ServiceStateMachine`: `service_id`, `state`, `workload_id`, `has_activation`, `idle_timeout`.
+Fields on `ServiceStateMachine`: `service_id`, `state`, `workload_id`, `has_activation`, `idle_timeout`, `conditions`.
 
 **TimerKey** (`types/mod.rs`):
 ```rust
@@ -955,7 +955,7 @@ Three complementary methods:
 | Activation debounce | **Done** (Task 1.6) — debounce cleared on backend removal | `distvirt-worker/src/fabric/service.rs` |
 | CLI/gRPC defaults | **Done** (Task 1.5) — `suspend_on_idle: true`, `idle_timeout_ms: 30_000` | `distvirt-cli/src/commands/namespace.rs`, `distvirt-cli/src/spec.rs` |
 | Worker conditions | Exist in protocol (`HashMap<String, WorkerCondition>` on `WorkerState`) | `types/states.rs` |
-| Workload/service conditions | **Not implemented** | — |
+| Workload/service conditions | **Done** (Tasks 2.1, 2.2) — `conditions: HashMap<String, String>` on workload/service SMs, stored by namespace output layer, included in status reports | `workload.rs`, `service.rs`, `namespace/output.rs`, `types/client.rs` |
 | Transition intents | **Implemented** (Task 1.1) — `PendingIntent` enum on transition states, `ForceDeactivate` input | `types/states.rs`, `workload.rs` |
 | Pressure scores | **Not implemented** | — |
 | Resource leases | Ad-hoc `PlacementTable.locked_by` for artifacts only | `types/states.rs` |
@@ -1061,55 +1061,37 @@ All Phase 1 tasks are now complete (1.1 ✓, 1.2 ✓, 1.3 ✓, 1.4 ✓, 1.5 ✓,
 
 ### Phase 2 — Observability & Conditions
 
-#### Task 2.1: Workload/Service Condition Model
+#### Task 2.1: Workload/Service Condition Model ✓
 
-**Problem**: Policy-relevant state is scattered. No unified observability layer for `dv status` / `dv events`.
+**Status**: Done.
 
-**Changes**:
+Added `conditions: HashMap<String, String>` field to both `WorkloadStateMachine` and `ServiceStateMachine`. Simplified from the planned `Condition { active, message, since }` struct — conditions use a simple key→message map where presence indicates active and absence indicates cleared. This matches how they're consumed (set/remove operations) without the overhead of tracking `since` timestamps or an `active` flag (inactive conditions are simply removed).
 
-Add condition tracking to workload and service SMs. Conditions are output-only — they don't affect SM transitions.
+The namespace output layer (`namespace/output.rs`) now stores conditions on the respective SMs when processing `ConditionSet`/`ConditionClear` outputs, replacing the previous debug-log-only handling. `translate_service_effects` gained a `&ServiceId` parameter so it can look up the correct service SM for condition storage.
 
-```rust
-// Already exists on WorkerState, extend to:
-pub struct WorkloadStateMachine {
-    // ... existing fields ...
-    pub conditions: HashMap<String, Condition>,
-}
-pub struct ServiceStateMachine {
-    // ... existing fields ...
-    pub conditions: HashMap<String, Condition>,
-}
+Added `ConditionSet { key, message }` and `ConditionClear { key }` variants to `ServiceOutput`. The service SM emits `activation-pending` condition: set on `ServiceActivation` (Idle → NeedBackend), cleared on `WorkloadReady` (→ Active), and cleared on `WorkloadUnready` (NeedBackend → Idle for activation services).
 
-struct Condition {
-    active: bool,
-    message: String,
-    since: Instant,  // or a monotonic counter for testability
-}
-```
+Workload conditions (`failed`, `retry-backoff`) were already emitted by Task 1.2 — this task made them stored rather than logged.
 
-Conditions are emitted as `WorkloadOutput::ConditionSet` / `ConditionClear` outputs (introduced in Task 1.2). The namespace layer collects them for status reporting and event streaming.
+**Testing**: Two new scenario tests (`test_activation_pending_condition_lifecycle`, `test_activation_pending_in_status_report`) verify the `activation-pending` condition is set during activation and cleared when the service becomes active. All existing stateright model tests pass unchanged (conditions are output-only, don't affect transitions).
 
-**Condition keys** (phase 1 + 2):
-- Workload: `failed`, `retry-backoff`, `preempted`, `snapshot-lost`
-- Service: `activation-pending`, `backend-not-ready`
-
-**Testing**: Condition outputs are asserted in existing stateright models as output checks. No new model properties needed — conditions don't affect state transitions.
-
-**Files changed**: `types/states.rs`, `workload.rs`, `service.rs`, `namespace/mod.rs` (status_report), client types.
+**Files changed**: `workload.rs` (add `conditions` field), `service.rs` (add `conditions` field, add output variants, emit `activation-pending`), `namespace/output.rs` (store conditions, add `service_id` param), `namespace/events.rs`, `namespace/reconciliation.rs`, `namespace/commands.rs` (update `translate_service_effects` call sites).
 
 **Depends on**: Task 1.2 (introduces ConditionSet/ConditionClear output variants).
 
 ---
 
-#### Task 2.2: Status Report Enhancement
+#### Task 2.2: Status Report Enhancement ✓
 
-**Problem**: `dv status` / `NamespaceStatusReport` doesn't include conditions, pressure, or failure context.
+**Status**: Done.
 
-**Changes**: Extend `NamespaceStatusReport` and `ServiceStatusReport` to include active conditions. Extend `WorkerStatusReport` to include pressure band (when available).
+Extended `ServiceStatusReport` with `workload_conditions: HashMap<String, String>` and `service_conditions: HashMap<String, String>`. Extended `WorkerStatusReport` with `conditions: HashMap<String, WorkerCondition>` (reuses existing `WorkerCondition` type from `types/states.rs`).
 
-**No SM changes.** Read-only enhancement to `namespace/mod.rs:status_report()`.
+`namespace/mod.rs:status_report()` now reads conditions from workload and service SMs and includes them in the report. `orchestrator/client.rs` now includes `ws.conditions.clone()` in `WorkerStatusReport` construction (both `ListWorkers` and `GetWorker` paths).
 
-**Files changed**: `types/client.rs`, `namespace/mod.rs`.
+**No SM changes.** Read-only enhancement.
+
+**Files changed**: `types/client.rs`, `namespace/mod.rs`, `orchestrator/client.rs`.
 
 **Depends on**: Task 2.1.
 

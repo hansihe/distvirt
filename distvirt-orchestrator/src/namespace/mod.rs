@@ -127,6 +127,9 @@ impl NamespaceStateMachine {
                 .map(|spec| spec.ip.to_string())
                 .unwrap_or_default();
 
+            let workload_conditions = wl.map(|w| w.conditions.clone()).unwrap_or_default();
+            let service_conditions = svc.conditions.clone();
+
             services.insert(
                 svc_id.clone(),
                 ServiceStatusReport {
@@ -138,6 +141,8 @@ impl NamespaceStateMachine {
                     backend_need,
                     activation_enabled: svc.has_activation,
                     ip,
+                    workload_conditions,
+                    service_conditions,
                 },
             );
         }

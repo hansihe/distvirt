@@ -520,7 +520,7 @@ impl NamespaceStateMachine {
             });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
-            self.translate_service_effects(svc_outputs, out);
+            self.translate_service_effects(&sid, svc_outputs, out);
             self.reconcile_demand(&wl_id, placement_table, out);
             deactivated_any = true;
         }

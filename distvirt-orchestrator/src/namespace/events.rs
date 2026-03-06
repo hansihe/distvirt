@@ -90,7 +90,7 @@ impl NamespaceStateMachine {
                     });
                     let svc_outputs =
                         svc.step(ServiceInput::ServiceActivation, &self.namespace_id);
-                    self.translate_service_effects(svc_outputs, out);
+                    self.translate_service_effects(&service_id, svc_outputs, out);
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }
             }
@@ -128,7 +128,7 @@ impl NamespaceStateMachine {
                         ServiceInput::ServiceBackendNeed { need },
                         &self.namespace_id,
                     );
-                    self.translate_service_effects(svc_outputs, out);
+                    self.translate_service_effects(&service_id, svc_outputs, out);
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }
             }
@@ -420,7 +420,7 @@ impl NamespaceStateMachine {
                         },
                         &self.namespace_id,
                     );
-                    self.translate_service_effects(svc_outputs, out);
+                    self.translate_service_effects(&service_id, svc_outputs, out);
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }
             }

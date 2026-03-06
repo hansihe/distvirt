@@ -72,3 +72,32 @@ suggests the worker-lost handler unconditionally sets a flag like
 
 **Fix:** Worker-lost handling during `Suspending` should check current demand.
 If demand is 0, transition to `Dormant` rather than `WaitingForCapacity`.
+
+## 6. Worker disconnect on Suspended workload creates phantom demand
+
+**Test:** `test_worker_disconnect_clears_placements`
+**Expected:** `Dormant` — **Got:** `WaitingForCapacity`
+
+When a worker disconnects while holding an artifact for a cleanly-Suspended
+workload (demand=0, service went idle), `WorkerLost` sets
+`needs_successful_boot = true` (workload.rs:671). Reconciliation then sees
+`needs_boot` is true and re-activates the idle activation service back to
+`NeedBackend` (reconciliation.rs:245), creating phantom demand that keeps the
+workload alive in `WaitingForCapacity`.
+
+`needs_successful_boot` should not be set for a workload that was cleanly
+suspended — it was never "trying to boot."
+
+**Fix:** In the `WorkerLost` handler, only set `needs_successful_boot` for
+states where the workload was actively running or booting (Launching, Running,
+Resuming), not for Suspended (which has demand=0 by definition).
+
+## 7. Service removal doesn't immediately drop demand
+
+**Test:** `test_remove_only_active_service_drops_demand`
+
+When the only active service is removed via spec update, demand should drop to
+0 immediately via reconciliation (the service is gone, not idling). The workload
+should begin suspending right after `converge()` without needing an idle timer.
+The old test used `advance_time()` which may have been masking a delay in demand
+recalculation.

@@ -166,6 +166,26 @@ impl TestHarness {
         );
     }
 
+    /// Assert that a service has a specific condition set.
+    pub fn assert_service_condition_set(&self, ns_id: &str, svc_id: &str, key: &str) {
+        let conditions = self.service_conditions(ns_id, svc_id);
+        assert!(
+            conditions.contains_key(key),
+            "service '{}/{}': expected condition '{}' to be set, but active conditions are: {:?}",
+            ns_id, svc_id, key, conditions
+        );
+    }
+
+    /// Assert that a service does NOT have a specific condition set.
+    pub fn assert_service_condition_clear(&self, ns_id: &str, svc_id: &str, key: &str) {
+        let conditions = self.service_conditions(ns_id, svc_id);
+        assert!(
+            !conditions.contains_key(key),
+            "service '{}/{}': expected condition '{}' to be clear, but it is set to: {:?}",
+            ns_id, svc_id, key, conditions.get(key)
+        );
+    }
+
     /// Assert that a worker did NOT receive any command matching the predicate.
     pub fn assert_worker_did_not_receive_command_matching(
         &self,

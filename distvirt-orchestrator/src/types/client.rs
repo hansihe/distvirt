@@ -49,6 +49,7 @@ pub struct WorkerStatusReport {
     pub max_pods: u32,
     pub available_memory_mb: u64,
     pub active_pods: u32,
+    pub conditions: HashMap<String, WorkerCondition>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,4 +87,6 @@ pub struct ServiceStatusReport {
     pub backend_need: Option<BackendNeed>,
     pub activation_enabled: bool,
     pub ip: String,
+    pub workload_conditions: HashMap<String, String>,
+    pub service_conditions: HashMap<String, String>,
 }

@@ -14,3 +14,4 @@ mod fabric_route_commands;
 mod registry_commands;
 mod worker_registry_sync;
 mod fabric_route_miss;
+mod activation_conditions;

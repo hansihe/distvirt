@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerEvent};
+use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
 
 /// Pod is Launching on worker. Worker disconnects.
 /// Workload should go WaitingForCapacity.
@@ -116,6 +116,18 @@ async fn test_worker_disconnect_during_resume() {
     // Demand > 0 (service was re-activated), but no workers available.
     // Workload should be WaitingForCapacity.
     h.assert_workload_waiting_for_capacity("ns", "web");
+
+    // Add a new worker — workload should cold-start (LaunchPod, not ResumePod)
+    // because the artifact was lost with the disconnected worker.
+    let w2 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    h.converge().await;
+    h.assert_workload_running("ns", "web");
+
+    let cmds = h.worker(&w2).commands();
+    let launch_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::LaunchPod { .. })).count();
+    let resume_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::ResumePod { .. })).count();
+    assert!(launch_count >= 1, "expected LaunchPod (cold start) after artifact loss, got 0");
+    assert_eq!(resume_count, 0, "should not attempt ResumePod from lost artifact");
 }
 
 /// Running workload, all workers disconnect. Workload goes WaitingForCapacity.
@@ -177,7 +189,9 @@ async fn test_worker_disconnect_clears_placements() {
     h.disconnect_worker(&w1);
     h.converge().await;
 
-    // After fix: suspended workload with stale artifact is notified via WorkerLost
-    // and transitions to WaitingForCapacity (no workers available).
-    h.assert_workload_waiting_for_capacity("ns", "web");
+    // BUG: needs_successful_boot is spuriously set by WorkerLost on a cleanly-Suspended
+    // workload with demand=0, causing phantom demand via reconciliation re-activation.
+    // Correct behavior: demand is 0 (service went idle), artifact is lost, workload
+    // should go Dormant (not WaitingForCapacity).
+    h.assert_workload_dormant("ns", "web");
 }

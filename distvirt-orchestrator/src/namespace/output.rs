@@ -142,19 +142,14 @@ impl NamespaceStateMachine {
                 out.timers_cancel.push(key);
             }
             WorkloadOutput::ConditionSet { key, message } => {
-                log::debug!(
-                    "workload {:?} condition set: {} = {}",
-                    workload_id,
-                    key,
-                    message,
-                );
+                if let Some(wl) = self.workloads.get_mut(workload_id) {
+                    wl.conditions.insert(key, message);
+                }
             }
             WorkloadOutput::ConditionClear { key } => {
-                log::debug!(
-                    "workload {:?} condition clear: {}",
-                    workload_id,
-                    key,
-                );
+                if let Some(wl) = self.workloads.get_mut(workload_id) {
+                    wl.conditions.remove(&key);
+                }
             }
         }
         None
@@ -163,6 +158,7 @@ impl NamespaceStateMachine {
     /// Translate service outputs into namespace-level actions.
     pub(crate) fn translate_service_effects(
         &mut self,
+        service_id: &ServiceId,
         outputs: Vec<ServiceOutput>,
         out: &mut NamespaceOutput,
     ) {
@@ -179,6 +175,16 @@ impl NamespaceStateMachine {
                 }
                 ServiceOutput::TimerCancel(key) => {
                     out.timers_cancel.push(key);
+                }
+                ServiceOutput::ConditionSet { key, message } => {
+                    if let Some(svc) = self.services.get_mut(service_id) {
+                        svc.conditions.insert(key, message);
+                    }
+                }
+                ServiceOutput::ConditionClear { key } => {
+                    if let Some(svc) = self.services.get_mut(service_id) {
+                        svc.conditions.remove(&key);
+                    }
                 }
             }
         }

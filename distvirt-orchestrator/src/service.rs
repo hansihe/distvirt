@@ -6,6 +6,8 @@ pub struct ServiceStateMachine {
     pub workload_id: WorkloadId,
     pub has_activation: bool,
     pub idle_timeout: std::time::Duration,
+    /// Active conditions for observability (key → message).
+    pub conditions: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +31,8 @@ pub enum ServiceOutput {
     BroadcastWorkerCommand(WorkerCommand),
     TimerSet(TimerKey, std::time::Duration),
     TimerCancel(TimerKey),
+    ConditionSet { key: String, message: String },
+    ConditionClear { key: String },
 }
 
 impl ServiceStateMachine {
@@ -44,6 +48,7 @@ impl ServiceStateMachine {
             workload_id,
             has_activation,
             idle_timeout,
+            conditions: std::collections::HashMap::new(),
         }
     }
 
@@ -70,6 +75,9 @@ impl ServiceStateMachine {
                             backend_need: BackendNeed::Active,
                             idle_timer: None,
                         };
+                        outputs.push(ServiceOutput::ConditionClear {
+                            key: "activation-pending".into(),
+                        });
                         outputs.push(ServiceOutput::BroadcastWorkerCommand(
                             WorkerCommand::UpdateServiceBackend {
                                 namespace_id: namespace_id.clone(),
@@ -111,6 +119,9 @@ impl ServiceStateMachine {
                         if self.has_activation {
                             // Activation service: go back to Idle, drop demand.
                             self.state = ServiceState::Idle;
+                            outputs.push(ServiceOutput::ConditionClear {
+                                key: "activation-pending".into(),
+                            });
                         } else {
                             // Always-on: stay NeedBackend, workload will retry.
                             self.state = ServiceState::NeedBackend;
@@ -125,6 +136,10 @@ impl ServiceStateMachine {
             ServiceInput::ServiceActivation => {
                 if matches!(self.state, ServiceState::Idle) {
                     self.state = ServiceState::NeedBackend;
+                    outputs.push(ServiceOutput::ConditionSet {
+                        key: "activation-pending".into(),
+                        message: "waiting for backend to become ready".into(),
+                    });
                 }
             }
             ServiceInput::ServiceBackendNeed { need } => {

@@ -228,15 +228,9 @@ async fn test_spec_change_during_launch() {
     h.converge().await;
 
     // Pending was Restart: workload stops old pod, goes Dormant, then
-    // transition_on_demand → WaitingForCapacity (demand > 0, always-on).
-    // The handler hangs on LaunchPod, so the re-launch stays in WaitingForCapacity
-    // or Launching.
-    let state = h.workload_state("ns", "echo");
-    assert!(
-        matches!(state, WorkloadState::WaitingForCapacity | WorkloadState::Launching { .. }),
-        "workload should be WaitingForCapacity or Launching after Restart intent, got {:?}",
-        state
-    );
+    // transition_on_demand → WaitingForCapacity → Launching (demand > 0, always-on,
+    // worker available). The handler hangs on LaunchPod so it stays in Launching.
+    h.assert_workload_launching("ns", "echo");
 
     // Verify StopPod was issued for the old pod
     let cmds = h.worker(&w1).commands();

@@ -43,6 +43,8 @@ pub struct WorkloadStateMachine {
     /// entering Failed (retries exhausted). This prevents demand fluctuations from
     /// aborting an in-progress boot/retry sequence.
     pub needs_successful_boot: bool,
+    /// Active conditions for observability (key → message).
+    pub conditions: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +109,7 @@ impl WorkloadStateMachine {
             max_retries: MAX_RETRIES,
             route_miss_wake: false,
             needs_successful_boot: false,
+            conditions: std::collections::HashMap::new(),
         }
     }
 
@@ -668,7 +671,17 @@ impl WorkloadStateMachine {
                     _ => false,
                 };
                 if affects_us {
-                    self.needs_successful_boot = true;
+                    // Only commit to reaching Running for states that were actively
+                    // running/booting. Suspended workloads were cleanly shut down
+                    // with demand=0 — no boot commitment needed.
+                    match &self.state {
+                        WorkloadState::Launching { .. }
+                        | WorkloadState::Running { .. }
+                        | WorkloadState::Resuming { .. } => {
+                            self.needs_successful_boot = true;
+                        }
+                        _ => {}
+                    }
                 }
                 match &self.state {
                     WorkloadState::Launching {

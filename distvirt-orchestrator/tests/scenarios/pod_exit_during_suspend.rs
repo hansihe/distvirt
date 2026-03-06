@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerEvent};
 
+use distvirt_orchestrator::types::WorkloadId;
+
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 
@@ -75,6 +77,14 @@ async fn test_pod_exit_during_suspend() {
     // A pod crash during an intentional deactivation should not count as a failure —
     // the pod was already being shut down. Workload should go Dormant.
     h.assert_workload_dormant("ns1", "web");
+
+    // Verify failure counter was NOT incremented (crash during intentional deactivation).
+    let ns = h.namespace("ns1");
+    let wl = ns.workloads.get(&WorkloadId("web".to_string())).unwrap();
+    assert_eq!(
+        wl.consecutive_failures, 0,
+        "pod crash during suspend should not increment consecutive_failures"
+    );
 }
 
 /// Test: Pod exits with exit_code during suspend (PodExited, not PodFailed).
@@ -131,4 +141,12 @@ async fn test_pod_exited_during_suspend() {
     // Demand is 0 (service went idle). Pod exiting during an intentional deactivation
     // should not count as a failure. Workload should go Dormant.
     h.assert_workload_dormant("ns1", "web");
+
+    // Verify failure counter was NOT incremented (exit during intentional deactivation).
+    let ns = h.namespace("ns1");
+    let wl = ns.workloads.get(&WorkloadId("web".to_string())).unwrap();
+    assert_eq!(
+        wl.consecutive_failures, 0,
+        "pod exit during suspend should not increment consecutive_failures"
+    );
 }

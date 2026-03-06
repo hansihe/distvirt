@@ -212,7 +212,7 @@ impl NamespaceStateMachine {
                     &self.namespace_id,
                 );
                 if !svc_outputs.is_empty() {
-                    self.translate_service_effects(svc_outputs, out);
+                    self.translate_service_effects(&sid, svc_outputs, out);
                 }
             }
         } else {
@@ -235,7 +235,7 @@ impl NamespaceStateMachine {
                     &self.namespace_id,
                 );
                 if !svc_outputs.is_empty() {
-                    self.translate_service_effects(svc_outputs, out);
+                    self.translate_service_effects(&sid, svc_outputs, out);
                 }
 
                 // If committed to booting and this activation service just went
@@ -249,7 +249,7 @@ impl NamespaceStateMachine {
                         &self.namespace_id,
                     );
                     if !svc_outputs.is_empty() {
-                        self.translate_service_effects(svc_outputs, out);
+                        self.translate_service_effects(&sid, svc_outputs, out);
                     }
                 }
             }

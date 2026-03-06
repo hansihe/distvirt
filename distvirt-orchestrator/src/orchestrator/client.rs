@@ -128,6 +128,7 @@ impl Orchestrator {
                             max_pods: ws.capabilities.max_pods,
                             available_memory_mb: ws.capabilities.available_memory_mb,
                             active_pods,
+                            conditions: ws.conditions.clone(),
                         }
                     })
                     .collect();
@@ -150,6 +151,7 @@ impl Orchestrator {
                                 max_pods: ws.capabilities.max_pods,
                                 available_memory_mb: ws.capabilities.available_memory_mb,
                                 active_pods,
+                                conditions: ws.conditions.clone(),
                             },
                         },
                     ));

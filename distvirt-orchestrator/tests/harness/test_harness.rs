@@ -171,4 +171,24 @@ impl TestHarness {
             .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
         &svc.state
     }
+
+    /// Get service conditions.
+    pub fn service_conditions(&self, ns_id: &str, svc_id: &str) -> &std::collections::HashMap<String, String> {
+        let ns = self.namespace(ns_id);
+        let svc = ns
+            .services
+            .get(&ServiceId::from(svc_id))
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
+        &svc.conditions
+    }
+
+    /// Get workload conditions.
+    pub fn workload_conditions(&self, ns_id: &str, wl_id: &str) -> &std::collections::HashMap<String, String> {
+        let ns = self.namespace(ns_id);
+        let wl = ns
+            .workloads
+            .get(&WorkloadId(wl_id.to_string()))
+            .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
+        &wl.conditions
+    }
 }
