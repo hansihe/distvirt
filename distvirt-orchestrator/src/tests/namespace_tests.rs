@@ -251,10 +251,10 @@ fn test_namespace_created_activates_namespace() {
         FabricStatus::Active
     );
 
-    // Always-on service should have been launched (CreateService + LaunchPod via scheduling).
+    // Always-on service should have been launched (EndpointSync/EndpointUpdate + LaunchPod via scheduling).
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
-        WorkerCommand::CreateService { .. }
+        WorkerCommand::EndpointSync { .. } | WorkerCommand::EndpointUpdate { .. }
     )));
     assert!(out
         .worker_commands
@@ -267,12 +267,12 @@ fn test_activation_service_lifecycle() {
     let mut ns = active_namespace(test_spec_with_activation());
     let mut pod_counter = 0u64;
 
-    // Reconcile: activation service goes Pending → Idle with CreateService on workers.
+    // Reconcile: activation service goes Pending → Idle with EndpointUpdate on workers.
     let out = reconcile_active_namespace(&mut ns, &mut pod_counter);
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
-        WorkerCommand::CreateService { .. }
+        WorkerCommand::EndpointUpdate { .. }
     )));
 
     // ServiceActivation → should request pod scheduling then launch.
@@ -314,16 +314,10 @@ fn test_activation_service_lifecycle() {
         get_service_state(&ns),
         ServiceState::Active { .. }
     ));
+    // Service became active — should have emitted EndpointUpdate for the service.
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
-        WorkerCommand::UpdateServiceBackend {
-            backend: Some(_),
-            ..
-        }
-    )));
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::ServiceReady { .. }
+        WorkerCommand::EndpointUpdate { .. }
     )));
 
     // BackendNeed::None → idle timer set.
@@ -348,7 +342,7 @@ fn test_activation_service_lifecycle() {
         .worker_commands
         .iter()
         .any(|(_, cmd)| matches!(cmd, WorkerCommand::StopPod { .. })
-            || matches!(cmd, WorkerCommand::UpdateServiceBackend { backend: None, .. })));
+            || matches!(cmd, WorkerCommand::EndpointUpdate { .. })));
 }
 
 #[test]
@@ -860,9 +854,10 @@ fn test_destroy_service_on_spec_update() {
         spec: empty_spec,
     }, &mut pt);
 
+    // Removed services should emit EndpointUpdate with removed_ips.
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
-        WorkerCommand::DestroyService { .. }
+        WorkerCommand::EndpointUpdate { removed_ips, .. } if !removed_ips.is_empty()
     )));
 }
 
@@ -1010,7 +1005,7 @@ fn test_full_activation_lifecycle_through_orchestrator() {
     ));
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
-        WorkerCommand::CreateService { .. }
+        WorkerCommand::EndpointSync { .. } | WorkerCommand::EndpointUpdate { .. }
     )));
 
     // Activation event — outer layer should schedule pod.
@@ -1058,16 +1053,10 @@ fn test_full_activation_lifecycle_through_orchestrator() {
         ns.services[&svc_id()].state,
         ServiceState::Active { .. }
     ));
+    // Service backend update should be emitted as EndpointUpdate.
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
-        WorkerCommand::UpdateServiceBackend {
-            backend: Some(_),
-            ..
-        }
-    )));
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::ServiceReady { .. }
+        WorkerCommand::EndpointUpdate { .. }
     )));
 }
 

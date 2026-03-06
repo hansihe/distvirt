@@ -24,9 +24,10 @@ mod states;
 // --- Re-exports from protocol ---
 
 pub use distvirt_worker_protocol::{
-    ActivatorConfig, ArtifactId, BackendNeed, ContainerConfig, ContainerSpec, NamespaceId,
-    NetworkConfig, PodId, PodNetworkConfig, PoolId, PoolInfo, RegistryEntry, ServiceBackend,
-    ServiceId, ServicePolicy, WorkerCommand, WorkerId,
+    ActivatorConfig, ArtifactId, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
+    EndpointPlacement, EndpointPodBackend, EndpointSpec, NamespaceId, NetworkConfig, PodId,
+    PodNetworkConfig, PoolId, PoolInfo, RegistryEntry, ServiceBackend, ServiceId, ServicePolicy,
+    WorkerCommand, WorkerId,
 };
 
 // Re-export all submodule types.

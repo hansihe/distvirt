@@ -249,6 +249,151 @@ impl NamespaceStateMachine {
         });
     }
 
+    /// Build the full set of endpoint specs for all workloads and services.
+    pub(crate) fn build_endpoint_specs(&self) -> Vec<EndpointSpec> {
+        let mut specs = Vec::new();
+
+        // Pod endpoints: one per workload.
+        for (wl_id, wl_spec) in &self.spec.workloads {
+            let placement = self
+                .pod_map
+                .iter()
+                .find(|(_, info)| info.workload_id == *wl_id)
+                .map(|(_, info)| EndpointPlacement {
+                    worker_id: info.worker_id.clone(),
+                });
+
+            specs.push(EndpointSpec {
+                ip: wl_spec.network.ip,
+                kind: EndpointKind::Pod { placement },
+            });
+        }
+
+        // Service endpoints.
+        for (svc_id, svc_spec) in &self.spec.services {
+            let backend = self.build_service_backend(svc_id);
+            specs.push(EndpointSpec {
+                ip: svc_spec.ip,
+                kind: EndpointKind::Service {
+                    service_id: svc_id.clone(),
+                    policy: svc_spec.policy.clone(),
+                    backend,
+                },
+            });
+        }
+
+        specs
+    }
+
+    /// Derive the endpoint backend for a service from its current state.
+    fn build_service_backend(&self, svc_id: &ServiceId) -> Option<EndpointPodBackend> {
+        let svc = self.services.get(svc_id)?;
+        match &svc.state {
+            ServiceState::Active {
+                worker_id, ..
+            } => {
+                let wl_spec = self.spec.workloads.get(&svc.workload_id)?;
+                Some(EndpointPodBackend {
+                    pod_ip: wl_spec.network.ip,
+                    placement: Some(EndpointPlacement {
+                        worker_id: worker_id.clone(),
+                    }),
+                    ready: true,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Broadcast a full EndpointSync to all active workers.
+    pub(crate) fn emit_endpoint_sync(&self, out: &mut NamespaceOutput) {
+        use crate::broadcast::broadcast_to_active_workers;
+        let specs = self.build_endpoint_specs();
+        let ns_id = self.namespace_id.clone();
+        broadcast_to_active_workers(&self.workers, out, |_| {
+            WorkerCommand::EndpointSync {
+                namespace_id: ns_id.clone(),
+                endpoints: specs.clone(),
+            }
+        });
+    }
+
+    /// Send a full EndpointSync to a single worker.
+    pub(crate) fn emit_endpoint_sync_to_worker(
+        &self,
+        worker_id: &WorkerId,
+        out: &mut NamespaceOutput,
+    ) {
+        use crate::broadcast::send_to_worker;
+        let specs = self.build_endpoint_specs();
+        send_to_worker(
+            worker_id,
+            out,
+            WorkerCommand::EndpointSync {
+                namespace_id: self.namespace_id.clone(),
+                endpoints: specs,
+            },
+        );
+    }
+
+    /// Broadcast an incremental endpoint update for a workload's pod endpoint.
+    pub(crate) fn emit_endpoint_update_for_workload(
+        &self,
+        workload_id: &WorkloadId,
+        out: &mut NamespaceOutput,
+    ) {
+        if let Some(wl_spec) = self.spec.workloads.get(workload_id) {
+            let placement = self
+                .pod_map
+                .iter()
+                .find(|(_, info)| info.workload_id == *workload_id)
+                .map(|(_, info)| EndpointPlacement {
+                    worker_id: info.worker_id.clone(),
+                });
+            let spec = EndpointSpec {
+                ip: wl_spec.network.ip,
+                kind: EndpointKind::Pod { placement },
+            };
+            let ns_id = self.namespace_id.clone();
+            use crate::broadcast::broadcast_to_active_workers;
+            broadcast_to_active_workers(&self.workers, out, |_| {
+                WorkerCommand::EndpointUpdate {
+                    namespace_id: ns_id.clone(),
+                    upserted: vec![spec.clone()],
+                    removed_ips: vec![],
+                }
+            });
+        }
+    }
+
+    /// Broadcast an incremental endpoint update for a service endpoint.
+    pub(crate) fn emit_endpoint_update_for_service(
+        &self,
+        service_id: &ServiceId,
+        out: &mut NamespaceOutput,
+    ) {
+        if let Some(svc_spec) = self.spec.services.get(service_id) {
+            let backend = self.build_service_backend(service_id);
+            let spec = EndpointSpec {
+                ip: svc_spec.ip,
+                kind: EndpointKind::Service {
+                    service_id: service_id.clone(),
+                    policy: svc_spec.policy.clone(),
+                    backend,
+                },
+            };
+            let ns_id = self.namespace_id.clone();
+            use crate::broadcast::broadcast_to_active_workers;
+            broadcast_to_active_workers(&self.workers, out, |_| {
+                WorkerCommand::EndpointUpdate {
+                    namespace_id: ns_id.clone(),
+                    upserted: vec![spec.clone()],
+                    removed_ips: vec![],
+                }
+            });
+        }
+    }
+
     pub(crate) fn emit_registry_sync(&self, out: &mut NamespaceOutput) {
         use crate::broadcast::broadcast_to_active_workers;
         let entries = self.build_registry_entries();

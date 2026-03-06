@@ -325,6 +325,12 @@ pub async fn run_compose(
                     WorkerEvent::PressureUpdate { .. } => {
                         log::debug!("pressure update received");
                     }
+                    WorkerEvent::EndpointActivation { namespace_id: _, ip, service_id } => {
+                        log::debug!("endpoint activation for {} (service: {:?})", ip, service_id);
+                    }
+                    WorkerEvent::EndpointFlowStatus { namespace_id: _, ip, has_active_flows } => {
+                        log::debug!("endpoint flow status for {}: active={}", ip, has_active_flows);
+                    }
                 }
             }
             Some(log_line) = log_line_rx.recv() => {

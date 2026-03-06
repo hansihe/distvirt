@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{AdapterManager, AdapterPortHandle};
 use crate::fabric::{Fabric, FabricContextInner, FabricEvent, FabricPort, DnsRegistry, FabricGateway};
+use crate::fabric::port::FramePort;
 use super::supervisor::{send_event, PodState, STOP_POD_TIMEOUT};
 use crate::task_handle::TaskHandle;
 
@@ -144,28 +145,26 @@ impl NamespaceState {
             while let Some(event) = fabric_event_rx.recv().await {
                 match event {
                     FabricEvent::EndpointActivation { dst_ip, service_id } => {
-                        match service_id {
-                            Some(svc_id) => {
-                                if let Err(e) = bridge_event_tx
-                                    .try_send(WorkerEvent::ServiceActivation {
-                                        namespace_id: bridge_ns_id.clone(),
-                                        service_id: ServiceId::from(svc_id),
-                                        dst_ip,
-                                    })
-                                {
-                                    log::warn!("worker: dropped ServiceActivation event: {}", e);
-                                }
-                            }
-                            None => {
-                                if let Err(e) = bridge_event_tx
-                                    .try_send(WorkerEvent::FabricRouteMiss {
-                                        namespace_id: bridge_ns_id.clone(),
-                                        dst_ip,
-                                    })
-                                {
-                                    log::warn!("worker: dropped FabricRouteMiss event: {}", e);
-                                }
-                            }
+                        let svc_id = service_id.map(ServiceId::from);
+                        if let Err(e) = bridge_event_tx
+                            .try_send(WorkerEvent::EndpointActivation {
+                                namespace_id: bridge_ns_id.clone(),
+                                ip: dst_ip,
+                                service_id: svc_id,
+                            })
+                        {
+                            log::warn!("worker: dropped EndpointActivation event: {}", e);
+                        }
+                    }
+                    FabricEvent::EndpointFlowStatus { ip, has_active_flows } => {
+                        if let Err(e) = bridge_event_tx
+                            .try_send(WorkerEvent::EndpointFlowStatus {
+                                namespace_id: bridge_ns_id.clone(),
+                                ip,
+                                has_active_flows,
+                            })
+                        {
+                            log::warn!("worker: dropped EndpointFlowStatus event: {}", e);
                         }
                     }
                     FabricEvent::ServiceBackendNeed { service_id, dst_ip: _, need } => {
@@ -487,6 +486,257 @@ impl NamespaceState {
             service_id, namespace_id
         );
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Endpoint protocol (unified)
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn endpoint_sync(
+        &mut self,
+        namespace_id: &NamespaceId,
+        endpoints: Vec<distvirt_worker_protocol::EndpointSpec>,
+        my_worker_id: &distvirt_worker_protocol::WorkerId,
+        activator_runtime: Option<&ActivatorRuntime>,
+    ) -> Result<(), FatalError> {
+        use crate::fabric::endpoint::EndpointSyncEffect;
+
+        let effects = {
+            let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+                FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+            })?;
+
+            let mut make_processor = |_svc_id: &str, policy: &ServicePolicy, ip: std::net::Ipv4Addr| -> ServiceProcessor {
+                Self::build_processor(policy, ip, activator_runtime)
+            };
+
+            et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor)
+        };
+
+        for effect in effects {
+            match effect {
+                EndpointSyncEffect::ServiceReady { service_id } => {
+                    let _svc_id = ServiceId::from(service_id.as_str());
+                    // Reuse service_ready logic (mark_service_ready + flush).
+                    // We call service_ready which does the locking internally,
+                    // but the lock is already released above.
+                    // Note: service_ready is async but we need to call it from sync context.
+                    // For now, do the flush inline.
+                    let flush_data = {
+                        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
+                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+                        })?;
+                        st.mark_service_ready(service_id.as_str())
+                    };
+                    if let Some(result) = flush_data {
+                        use crate::fabric::endpoint::EndpointAction;
+                        use crate::fabric::MarkReadyResult;
+                        match result {
+                            MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
+                                if !frames.is_empty() {
+                                    self.fabric.flush_service_frames(frames, backend_ip, service_ip);
+                                }
+                                // dispatch_actions is async - spawn it
+                                let fabric = Arc::clone(&self.fabric);
+                                let svc_id_str = service_id.clone();
+                                let actions_owned = actions;
+                                tokio::spawn(async move {
+                                    fabric.dispatch_actions(&actions_owned, &svc_id_str).await;
+                                });
+                            }
+                            MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
+                                self.fabric.send_l4_frames(frames);
+                                let fabric = Arc::clone(&self.fabric);
+                                let svc_id_str = service_id.clone();
+                                tokio::spawn(async move {
+                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                EndpointSyncEffect::FlushPodBuffer { ip } => {
+                    let buffered = {
+                        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+                        })?;
+                        et.flush_pod_buffer(ip)
+                    };
+                    if !buffered.is_empty() {
+                        log::info!(
+                            "worker: flushing {} buffered pod frames for {} in namespace '{}'",
+                            buffered.len(), ip, namespace_id
+                        );
+                        // The frames need to be delivered to the port for this IP.
+                        // This happens via the fabric's add_port flush path,
+                        // but here the port should already exist. Look up and send.
+                        let port = self.tables.resolve_ip(&ip);
+                        if let Some(port) = port {
+                            let count = buffered.len();
+                            tokio::spawn(async move {
+                                for frame in buffered {
+                                    if let Err(e) = port.send_frame(&frame).await {
+                                        log::warn!("fabric: flush buffered frame error: {}", e);
+                                        break;
+                                    }
+                                }
+                                log::info!("fabric: flushed {} buffered pod frames", count);
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!(
+            "worker: endpoint sync for namespace '{}'",
+            namespace_id
+        );
+        Ok(())
+    }
+
+    pub(crate) fn endpoint_update(
+        &mut self,
+        namespace_id: &NamespaceId,
+        upserted: Vec<distvirt_worker_protocol::EndpointSpec>,
+        removed_ips: Vec<std::net::Ipv4Addr>,
+        my_worker_id: &distvirt_worker_protocol::WorkerId,
+        activator_runtime: Option<&ActivatorRuntime>,
+    ) -> Result<(), FatalError> {
+        use crate::fabric::endpoint::EndpointSyncEffect;
+
+        let effects = {
+            let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+                FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+            })?;
+
+            let mut make_processor = |_svc_id: &str, policy: &ServicePolicy, ip: std::net::Ipv4Addr| -> ServiceProcessor {
+                Self::build_processor(policy, ip, activator_runtime)
+            };
+
+            et.apply_endpoint_update(upserted, removed_ips, my_worker_id.as_ref(), &mut make_processor)
+        };
+
+        // Process effects same as endpoint_sync
+        for effect in effects {
+            match effect {
+                EndpointSyncEffect::ServiceReady { service_id } => {
+                    let flush_data = {
+                        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
+                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+                        })?;
+                        st.mark_service_ready(service_id.as_str())
+                    };
+                    if let Some(result) = flush_data {
+                        use crate::fabric::endpoint::EndpointAction;
+                        use crate::fabric::MarkReadyResult;
+                        match result {
+                            MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
+                                if !frames.is_empty() {
+                                    self.fabric.flush_service_frames(frames, backend_ip, service_ip);
+                                }
+                                let fabric = Arc::clone(&self.fabric);
+                                let svc_id_str = service_id.clone();
+                                tokio::spawn(async move {
+                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
+                                });
+                            }
+                            MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
+                                self.fabric.send_l4_frames(frames);
+                                let fabric = Arc::clone(&self.fabric);
+                                let svc_id_str = service_id.clone();
+                                tokio::spawn(async move {
+                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                EndpointSyncEffect::FlushPodBuffer { ip } => {
+                    let buffered = {
+                        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+                        })?;
+                        et.flush_pod_buffer(ip)
+                    };
+                    if !buffered.is_empty() {
+                        let port = self.tables.resolve_ip(&ip);
+                        if let Some(port) = port {
+                            let count = buffered.len();
+                            tokio::spawn(async move {
+                                for frame in buffered {
+                                    if let Err(e) = port.send_frame(&frame).await {
+                                        log::warn!("fabric: flush buffered frame error: {}", e);
+                                        break;
+                                    }
+                                }
+                                log::info!("fabric: flushed {} buffered pod frames", count);
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!(
+            "worker: endpoint update for namespace '{}'",
+            namespace_id
+        );
+        Ok(())
+    }
+
+    /// Build a ServiceProcessor from a ServicePolicy.
+    fn build_processor(
+        policy: &ServicePolicy,
+        ip: std::net::Ipv4Addr,
+        activator_runtime: Option<&ActivatorRuntime>,
+    ) -> ServiceProcessor {
+        let activator = if policy.activator.is_some() {
+            if let Some(runtime) = activator_runtime {
+                let component_name = match &policy.activator {
+                    Some(ActivatorConfig::Tcp { .. }) => "tcp",
+                    Some(ActivatorConfig::Http2 { .. }) => "http2",
+                    None => unreachable!(),
+                };
+                match runtime.get_component(component_name) {
+                    Some(component) => {
+                        match ActivatorInstance::new(runtime.engine(), component) {
+                            Ok(instance) => Some(instance),
+                            Err(e) => {
+                                log::error!("failed to instantiate activator: {:#}", e);
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("activator component '{}' not found", component_name);
+                        None
+                    }
+                }
+            } else {
+                log::warn!("activator requested but runtime not available");
+                None
+            }
+        } else {
+            None
+        };
+
+        match (&policy.activator, activator) {
+            (Some(ActivatorConfig::Http2 { .. }), act) => {
+                let sm = StreamManager::new(StreamManagerConfig {
+                    service_ip: ip,
+                    listen_ports: vec![80],
+                    ..StreamManagerConfig::default()
+                });
+                ServiceProcessor::L4 { activator: act, stream_manager: sm }
+            }
+            (_, Some(act)) => {
+                ServiceProcessor::L3 { activator: act, flow_tracker: FlowTracker::new() }
+            }
+            _ => ServiceProcessor::Passthrough,
+        }
     }
 
     pub(crate) fn destroy_service(

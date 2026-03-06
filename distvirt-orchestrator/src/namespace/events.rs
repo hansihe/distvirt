@@ -51,31 +51,13 @@ impl NamespaceStateMachine {
                     if has_active {
                         self.status = NamespaceStatus::Active;
                         self.emit_registry_sync(out);
-                        self.emit_fabric_route_sync(out);
+                        self.emit_endpoint_sync(out);
                         self.reconcile_all_services(placement_table, out);
                     }
                 } else if self.status == NamespaceStatus::Active {
                     // Second+ worker joining an already-active namespace.
                     self.emit_registry_sync_to_worker(worker_id, out);
-                    self.emit_fabric_route_sync_to_worker(worker_id, out);
-
-                    // Sync existing services to the new worker.
-                    for (svc_id, svc) in &self.services {
-                        if matches!(svc.state, ServiceState::Pending) {
-                            continue;
-                        }
-                        if let Some(svc_spec) = self.spec.services.get(svc_id) {
-                            out.worker_commands.push((
-                                worker_id.clone(),
-                                WorkerCommand::CreateService {
-                                    namespace_id: self.namespace_id.clone(),
-                                    service_id: svc_id.clone(),
-                                    ip: svc_spec.ip,
-                                    policy: svc_spec.policy.clone(),
-                                },
-                            ));
-                        }
-                    }
+                    self.emit_endpoint_sync_to_worker(worker_id, out);
                 }
             }
             WorkerEvent::ServiceActivation { service_id } => {
@@ -164,7 +146,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
-                self.maybe_remove_fabric_route(&wl_id, out);
+                self.emit_endpoint_update_for_workload(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodStopped {
@@ -191,7 +173,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
-                self.maybe_remove_fabric_route(&wl_id, out);
+                self.emit_endpoint_update_for_workload(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodFailed {
@@ -236,7 +218,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
-                self.maybe_remove_fabric_route(&wl_id, out);
+                self.emit_endpoint_update_for_workload(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspended {
@@ -282,6 +264,65 @@ impl NamespaceStateMachine {
                     }
                 }
             }
+            WorkerEvent::EndpointActivation { ip, service_id } => {
+                match service_id {
+                    Some(svc_id) => {
+                        // Same as ServiceActivation handling.
+                        if let Some(svc) = self.services.get_mut(&svc_id) {
+                            let wl_id = svc.workload_id.clone();
+                            out.events.push(SmNamespaceEvent::Service {
+                                service_id: svc_id.clone(),
+                                workload_id: wl_id.clone(),
+                                event: SmServiceEvent::Activated {
+                                    trigger: ServiceActivationTrigger::Traffic,
+                                },
+                            });
+                            let svc_outputs =
+                                svc.step(ServiceInput::ServiceActivation, &self.namespace_id);
+                            self.translate_service_effects(&svc_id, svc_outputs, out);
+                            self.reconcile_demand(&wl_id, placement_table, out);
+                        }
+                    }
+                    None => {
+                        // Same as FabricRouteMiss handling.
+                        let wl_match = self
+                            .spec
+                            .workloads
+                            .iter()
+                            .find(|(_, wl_spec)| wl_spec.network.ip == ip)
+                            .map(|(wl_id, _)| wl_id.clone());
+                        if let Some(wl_id) = wl_match {
+                            let should_wake = self.workloads.get(&wl_id)
+                                .map(|wl| matches!(wl.state, WorkloadState::Dormant | WorkloadState::Suspended { .. }))
+                                .unwrap_or(false);
+                            if should_wake {
+                                if let Some(wl) = self.workloads.get_mut(&wl_id) {
+                                    wl.route_miss_wake = true;
+                                }
+                                self.reconcile_demand(&wl_id, placement_table, out);
+                            }
+                        }
+                    }
+                }
+            }
+            WorkerEvent::EndpointFlowStatus { ip, has_active_flows } => {
+                let wl_match = self
+                    .spec
+                    .workloads
+                    .iter()
+                    .find(|(_, wl_spec)| wl_spec.network.ip == ip)
+                    .map(|(wl_id, _)| wl_id.clone());
+                if let Some(wl_id) = wl_match {
+                    if let Some(wl) = self.workloads.get_mut(&wl_id) {
+                        wl.has_active_flows = has_active_flows;
+                        if !has_active_flows {
+                            wl.route_miss_wake = false;
+                        }
+                        // Drop mutable borrow before calling reconcile_demand.
+                    }
+                    self.reconcile_demand(&wl_id, placement_table, out);
+                }
+            }
             WorkerEvent::PodSuspendFailed { pod_id, error } => {
                 let pod_info = match self.pod_map.remove(&pod_id) {
                     Some(info) => info,
@@ -299,7 +340,7 @@ impl NamespaceStateMachine {
                         }
                     }
                 }
-                self.maybe_remove_fabric_route(&wl_id, out);
+                self.emit_endpoint_update_for_workload(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspendFailed {

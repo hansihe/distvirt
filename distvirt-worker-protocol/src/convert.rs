@@ -397,6 +397,114 @@ pub fn read_fabric_route_entry(
     })
 }
 
+// --- Endpoint Protocol Helpers ---
+
+pub fn write_endpoint_placement(
+    builder: &mut schema::endpoint_placement::Builder<'_>,
+    val: &EndpointPlacement,
+) {
+    builder.set_worker_id(val.worker_id.as_ref());
+}
+
+pub fn read_endpoint_placement(
+    reader: schema::endpoint_placement::Reader<'_>,
+) -> capnp::Result<EndpointPlacement> {
+    Ok(EndpointPlacement {
+        worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
+    })
+}
+
+pub fn write_endpoint_pod_backend(
+    builder: &mut schema::endpoint_pod_backend::Builder<'_>,
+    val: &EndpointPodBackend,
+) {
+    write_ipv4(&mut builder.reborrow().init_pod_ip(), &val.pod_ip);
+    builder.set_ready(val.ready);
+    match &val.placement {
+        Some(p) => {
+            builder.set_has_placement(true);
+            write_endpoint_placement(&mut builder.reborrow().init_placement(), p);
+        }
+        None => builder.set_has_placement(false),
+    }
+}
+
+pub fn read_endpoint_pod_backend(
+    reader: schema::endpoint_pod_backend::Reader<'_>,
+) -> capnp::Result<EndpointPodBackend> {
+    let placement = if reader.get_has_placement() {
+        Some(read_endpoint_placement(reader.get_placement()?)?)
+    } else {
+        None
+    };
+    Ok(EndpointPodBackend {
+        pod_ip: read_ipv4(reader.get_pod_ip()?),
+        placement,
+        ready: reader.get_ready(),
+    })
+}
+
+pub fn write_endpoint_spec(
+    builder: schema::endpoint_spec::Builder<'_>,
+    val: &EndpointSpec,
+) {
+    let mut b = builder;
+    write_ipv4(&mut b.reborrow().init_ip(), &val.ip);
+    match &val.kind {
+        EndpointKind::Service { service_id, policy, backend } => {
+            let mut svc = b.init_service();
+            svc.set_service_id(service_id.as_ref());
+            write_service_policy(&mut svc.reborrow().init_policy(), policy);
+            match backend {
+                Some(be) => {
+                    svc.set_has_backend(true);
+                    write_endpoint_pod_backend(&mut svc.reborrow().init_backend(), be);
+                }
+                None => svc.set_has_backend(false),
+            }
+        }
+        EndpointKind::Pod { placement } => {
+            let mut pod = b.init_pod();
+            match placement {
+                Some(p) => {
+                    pod.set_has_placement(true);
+                    write_endpoint_placement(&mut pod.reborrow().init_placement(), p);
+                }
+                None => pod.set_has_placement(false),
+            }
+        }
+    }
+}
+
+pub fn read_endpoint_spec(
+    reader: schema::endpoint_spec::Reader<'_>,
+) -> capnp::Result<EndpointSpec> {
+    let ip = read_ipv4(reader.get_ip()?);
+    let kind = match reader.which()? {
+        schema::endpoint_spec::Service(svc) => {
+            let backend = if svc.get_has_backend() {
+                Some(read_endpoint_pod_backend(svc.get_backend()?)?)
+            } else {
+                None
+            };
+            EndpointKind::Service {
+                service_id: ServiceId::from(svc.get_service_id()?.to_str()?),
+                policy: read_service_policy(svc.get_policy()?)?,
+                backend,
+            }
+        }
+        schema::endpoint_spec::Pod(pod) => {
+            let placement = if pod.get_has_placement() {
+                Some(read_endpoint_placement(pod.get_placement()?)?)
+            } else {
+                None
+            };
+            EndpointKind::Pod { placement }
+        }
+    };
+    Ok(EndpointSpec { ip, kind })
+}
+
 fn write_backend_need(val: &BackendNeed) -> schema::BackendNeed {
     match val {
         BackendNeed::None => schema::BackendNeed::None,
@@ -898,6 +1006,37 @@ pub fn write_worker_command(
                 None => b.set_dest_endpoint(""),
             }
         }
+        WorkerCommand::EndpointSync {
+            namespace_id,
+            endpoints,
+        } => {
+            let mut b = builder.init_endpoint_sync();
+            b.set_namespace_id(namespace_id.as_ref());
+            let mut list = b.reborrow().init_endpoints(endpoints.len() as u32);
+            for (i, spec) in endpoints.iter().enumerate() {
+                write_endpoint_spec(list.reborrow().get(i as u32), spec);
+            }
+        }
+        WorkerCommand::EndpointUpdate {
+            namespace_id,
+            upserted,
+            removed_ips,
+        } => {
+            let mut b = builder.init_endpoint_update();
+            b.set_namespace_id(namespace_id.as_ref());
+            {
+                let mut list = b.reborrow().init_upserted(upserted.len() as u32);
+                for (i, spec) in upserted.iter().enumerate() {
+                    write_endpoint_spec(list.reborrow().get(i as u32), spec);
+                }
+            }
+            {
+                let mut list = b.reborrow().init_removed_ips(removed_ips.len() as u32);
+                for (i, ip) in removed_ips.iter().enumerate() {
+                    write_ipv4(&mut list.reborrow().get(i as u32), ip);
+                }
+            }
+        }
         WorkerCommand::Shutdown => {
             builder.set_shutdown(());
         }
@@ -1120,6 +1259,36 @@ pub fn read_worker_command(
                 dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 dest_endpoint,
+            })
+        }
+        EndpointSync(r) => {
+            let r = r?;
+            let eps = r.get_endpoints()?;
+            let mut endpoints = Vec::with_capacity(eps.len() as usize);
+            for i in 0..eps.len() {
+                endpoints.push(read_endpoint_spec(eps.get(i))?);
+            }
+            Ok(WorkerCommand::EndpointSync {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                endpoints,
+            })
+        }
+        EndpointUpdate(r) => {
+            let r = r?;
+            let ups = r.get_upserted()?;
+            let mut upserted = Vec::with_capacity(ups.len() as usize);
+            for i in 0..ups.len() {
+                upserted.push(read_endpoint_spec(ups.get(i))?);
+            }
+            let ips_list = r.get_removed_ips()?;
+            let mut removed_ips = Vec::with_capacity(ips_list.len() as usize);
+            for i in 0..ips_list.len() {
+                removed_ips.push(read_ipv4(ips_list.get(i)));
+            }
+            Ok(WorkerCommand::EndpointUpdate {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                upserted,
+                removed_ips,
             })
         }
         Shutdown(()) => Ok(WorkerCommand::Shutdown),
@@ -1347,6 +1516,32 @@ pub fn write_worker_event(
             write_psi_metrics(b.reborrow().init_memory(), memory);
             write_psi_metrics(b.reborrow().init_io(), io);
         }
+        WorkerEvent::EndpointActivation {
+            namespace_id,
+            ip,
+            service_id,
+        } => {
+            let mut b = builder.init_endpoint_activation();
+            b.set_namespace_id(namespace_id.as_ref());
+            write_ipv4(&mut b.reborrow().init_ip(), ip);
+            match service_id {
+                Some(sid) => {
+                    b.set_has_service_id(true);
+                    b.set_service_id(sid.as_ref());
+                }
+                None => b.set_has_service_id(false),
+            }
+        }
+        WorkerEvent::EndpointFlowStatus {
+            namespace_id,
+            ip,
+            has_active_flows,
+        } => {
+            let mut b = builder.init_endpoint_flow_status();
+            b.set_namespace_id(namespace_id.as_ref());
+            write_ipv4(&mut b.reborrow().init_ip(), ip);
+            b.set_has_active_flows(*has_active_flows);
+        }
     }
 }
 
@@ -1552,6 +1747,27 @@ pub fn read_worker_event(
                 cpu: read_psi_metrics(r.get_cpu()?),
                 memory: read_psi_metrics(r.get_memory()?),
                 io: read_psi_metrics(r.get_io()?),
+            })
+        }
+        EndpointActivation(r) => {
+            let r = r?;
+            let service_id = if r.get_has_service_id() {
+                Some(ServiceId::from(r.get_service_id()?.to_str()?))
+            } else {
+                None
+            };
+            Ok(WorkerEvent::EndpointActivation {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                ip: read_ipv4(r.get_ip()?),
+                service_id,
+            })
+        }
+        EndpointFlowStatus(r) => {
+            let r = r?;
+            Ok(WorkerEvent::EndpointFlowStatus {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                ip: read_ipv4(r.get_ip()?),
+                has_active_flows: r.get_has_active_flows(),
             })
         }
     }

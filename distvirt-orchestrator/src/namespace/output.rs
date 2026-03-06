@@ -181,6 +181,9 @@ impl NamespaceStateMachine {
                 ServiceOutput::TimerCancel(key) => {
                     out.timers_cancel.push(key);
                 }
+                ServiceOutput::EndpointChanged => {
+                    self.emit_endpoint_update_for_service(service_id, out);
+                }
                 ServiceOutput::ConditionSet { key, message } => {
                     if let Some(svc) = self.services.get_mut(service_id) {
                         svc.conditions.insert(key, message);

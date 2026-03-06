@@ -78,4 +78,6 @@ pub enum WorkerEvent {
     ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
     FabricRouteMiss { dst_ip: std::net::Ipv4Addr },
+    EndpointActivation { ip: std::net::Ipv4Addr, service_id: Option<ServiceId> },
+    EndpointFlowStatus { ip: std::net::Ipv4Addr, has_active_flows: bool },
 }

@@ -68,6 +68,11 @@ pub enum FabricEvent {
         dst_ip: Ipv4Addr,
         service_id: Option<String>,
     },
+    /// Flow status changed for an endpoint (active flows started or stopped).
+    EndpointFlowStatus {
+        ip: Ipv4Addr,
+        has_active_flows: bool,
+    },
     /// An activator signaled a backend need level change.
     ServiceBackendNeed {
         service_id: String,

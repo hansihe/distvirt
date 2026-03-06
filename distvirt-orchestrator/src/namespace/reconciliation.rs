@@ -37,21 +37,8 @@ impl NamespaceStateMachine {
             (ServiceState::Pending, wl) => {
                 let is_running = matches!(wl, WorkloadState::Running { .. });
 
-                // Create the service on all active workers.
-                let ns_id = self.namespace_id.clone();
-                let svc_spec = self.spec.services.get(svc_id).cloned()
-                    .expect("invariant: svc_id from reconcile_pair must exist in spec.services");
-                for wid in self.active_worker_ids() {
-                    out.worker_commands.push((
-                        wid,
-                        WorkerCommand::CreateService {
-                            namespace_id: ns_id.clone(),
-                            service_id: svc_id.clone(),
-                            ip: svc_spec.ip,
-                            policy: svc_spec.policy.clone(),
-                        },
-                    ));
-                }
+                // Broadcast an endpoint update for this service.
+                self.emit_endpoint_update_for_service(svc_id, out);
 
                 if is_running {
                     // Workload already running — go straight to NeedBackend so
@@ -99,7 +86,7 @@ impl NamespaceStateMachine {
         let route_miss: u32 = self
             .workloads
             .get(workload_id)
-            .map(|wl| if wl.route_miss_wake { 1 } else { 0 })
+            .map(|wl| if wl.has_active_flows || wl.route_miss_wake { 1 } else { 0 })
             .unwrap_or(0);
 
         service_demand + route_miss

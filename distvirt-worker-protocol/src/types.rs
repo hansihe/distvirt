@@ -131,6 +131,36 @@ pub struct FabricRouteEntry {
     pub destination: RouteDestination,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EndpointPlacement {
+    pub worker_id: WorkerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EndpointPodBackend {
+    pub pod_ip: Ipv4Addr,
+    pub placement: Option<EndpointPlacement>,
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EndpointKind {
+    Service {
+        service_id: ServiceId,
+        policy: ServicePolicy,
+        backend: Option<EndpointPodBackend>,
+    },
+    Pod {
+        placement: Option<EndpointPlacement>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EndpointSpec {
+    pub ip: Ipv4Addr,
+    pub kind: EndpointKind,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputStream {
     Stdout,
@@ -304,6 +334,15 @@ pub enum WorkerCommand {
     WorkerRegistrySync {
         workers: Vec<WorkerPeerInfo>,
     },
+    EndpointSync {
+        namespace_id: NamespaceId,
+        endpoints: Vec<EndpointSpec>,
+    },
+    EndpointUpdate {
+        namespace_id: NamespaceId,
+        upserted: Vec<EndpointSpec>,
+        removed_ips: Vec<Ipv4Addr>,
+    },
     Shutdown,
 }
 
@@ -410,6 +449,16 @@ pub enum WorkerEvent {
         cpu: PsiMetrics,
         memory: PsiMetrics,
         io: PsiMetrics,
+    },
+    EndpointActivation {
+        namespace_id: NamespaceId,
+        ip: Ipv4Addr,
+        service_id: Option<ServiceId>,
+    },
+    EndpointFlowStatus {
+        namespace_id: NamespaceId,
+        ip: Ipv4Addr,
+        has_active_flows: bool,
     },
 }
 

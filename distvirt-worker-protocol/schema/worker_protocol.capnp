@@ -626,6 +626,59 @@ struct TunnelStatusEvt {
   }
 }
 
+# --- Endpoint Protocol Types ---
+
+struct EndpointPlacement {
+  workerId @0 :Text;
+}
+
+struct EndpointPodBackend {
+  podIp @0 :Ipv4Addr;
+  hasPlacement @1 :Bool;
+  placement @2 :EndpointPlacement;
+  ready @3 :Bool;
+}
+
+struct EndpointSpec {
+  ip @0 :Ipv4Addr;
+  union {
+    service :group {
+      serviceId @1 :Text;
+      policy @2 :ServicePolicy;
+      hasBackend @3 :Bool;
+      backend @4 :EndpointPodBackend;
+    }
+    pod :group {
+      hasPlacement @5 :Bool;
+      placement @6 :EndpointPlacement;
+    }
+  }
+}
+
+struct EndpointSyncCmd {
+  namespaceId @0 :Text;
+  endpoints @1 :List(EndpointSpec);
+}
+
+struct EndpointUpdateCmd {
+  namespaceId @0 :Text;
+  upserted @1 :List(EndpointSpec);
+  removedIps @2 :List(Ipv4Addr);
+}
+
+struct EndpointActivationEvt {
+  namespaceId @0 :Text;
+  ip @1 :Ipv4Addr;
+  hasServiceId @2 :Bool;
+  serviceId @3 :Text;
+}
+
+struct EndpointFlowStatusEvt {
+  namespaceId @0 :Text;
+  ip @1 :Ipv4Addr;
+  hasActiveFlows @2 :Bool;
+}
+
 # --- Control Stream: Commands (orchestrator -> worker) ---
 
 # Commands sent from the orchestrator to the worker.
@@ -670,6 +723,8 @@ struct WorkerCommand {
     # Full-state replacement of the worker peer registry for tunnel establishment.
     transferArtifact @19 :TransferArtifactCmd;
     # Transfer an artifact between pools (local or cross-worker).
+    endpointSync @20 :EndpointSyncCmd;
+    endpointUpdate @21 :EndpointUpdateCmd;
   }
 }
 
@@ -874,6 +929,8 @@ struct WorkerEvent {
     # An artifact transfer has failed.
     pressureUpdate @20 :PressureUpdateEvt;
     # Periodic PSI pressure metrics from the worker.
+    endpointActivation @21 :EndpointActivationEvt;
+    endpointFlowStatus @22 :EndpointFlowStatusEvt;
   }
 }
 

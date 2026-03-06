@@ -29,6 +29,8 @@ pub enum ServiceOutput {
     WorkerCommand(WorkerId, WorkerCommand),
     /// Emit to all active workers.
     BroadcastWorkerCommand(WorkerCommand),
+    /// The endpoint spec for this service changed; broadcast an update.
+    EndpointChanged,
     TimerSet(TimerKey, std::time::Duration),
     TimerCancel(TimerKey),
     ConditionSet { key: String, message: String },
@@ -58,14 +60,14 @@ impl ServiceStateMachine {
         matches!(self.state, ServiceState::NeedBackend | ServiceState::Active { .. })
     }
 
-    pub fn step(&mut self, input: ServiceInput, namespace_id: &NamespaceId) -> Vec<ServiceOutput> {
+    pub fn step(&mut self, input: ServiceInput, _namespace_id: &NamespaceId) -> Vec<ServiceOutput> {
         let mut outputs = Vec::new();
 
         match input {
             ServiceInput::WorkloadReady {
                 pod_id,
                 worker_id,
-                backend,
+                backend: _,
             } => {
                 match &self.state {
                     ServiceState::NeedBackend | ServiceState::Pending => {
@@ -78,19 +80,7 @@ impl ServiceStateMachine {
                         outputs.push(ServiceOutput::ConditionClear {
                             key: "activation-pending".into(),
                         });
-                        outputs.push(ServiceOutput::BroadcastWorkerCommand(
-                            WorkerCommand::UpdateServiceBackend {
-                                namespace_id: namespace_id.clone(),
-                                service_id: self.service_id.clone(),
-                                backend: Some(backend),
-                            },
-                        ));
-                        outputs.push(ServiceOutput::BroadcastWorkerCommand(
-                            WorkerCommand::ServiceReady {
-                                namespace_id: namespace_id.clone(),
-                                service_id: self.service_id.clone(),
-                            },
-                        ));
+                        outputs.push(ServiceOutput::EndpointChanged);
                     }
                     _ => {}
                 }
@@ -101,13 +91,7 @@ impl ServiceStateMachine {
                         if let Some(tk) = idle_timer {
                             outputs.push(ServiceOutput::TimerCancel(tk));
                         }
-                        outputs.push(ServiceOutput::BroadcastWorkerCommand(
-                            WorkerCommand::UpdateServiceBackend {
-                                namespace_id: namespace_id.clone(),
-                                service_id: self.service_id.clone(),
-                                backend: None,
-                            },
-                        ));
+                        outputs.push(ServiceOutput::EndpointChanged);
                         if self.has_activation {
                             self.state = ServiceState::Idle;
                         } else {
@@ -182,13 +166,7 @@ impl ServiceStateMachine {
                         && *backend_need == BackendNeed::None
                         && self.has_activation
                     {
-                        outputs.push(ServiceOutput::BroadcastWorkerCommand(
-                            WorkerCommand::UpdateServiceBackend {
-                                namespace_id: namespace_id.clone(),
-                                service_id: self.service_id.clone(),
-                                backend: None,
-                            },
-                        ));
+                        outputs.push(ServiceOutput::EndpointChanged);
                         self.state = ServiceState::Idle;
                     }
                 }
@@ -204,13 +182,7 @@ impl ServiceStateMachine {
                         if let Some(tk) = idle_timer.clone() {
                             outputs.push(ServiceOutput::TimerCancel(tk));
                         }
-                        outputs.push(ServiceOutput::BroadcastWorkerCommand(
-                            WorkerCommand::UpdateServiceBackend {
-                                namespace_id: namespace_id.clone(),
-                                service_id: self.service_id.clone(),
-                                backend: None,
-                            },
-                        ));
+                        outputs.push(ServiceOutput::EndpointChanged);
                         self.state = ServiceState::Idle;
                     } else {
                         log::debug!(

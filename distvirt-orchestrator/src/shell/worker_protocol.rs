@@ -160,6 +160,25 @@ impl OrchestratorShell {
             ProtoEvent::PressureUpdate { .. } => unreachable!(),
             ProtoEvent::ArtifactTransferReceived { .. } => unreachable!(),
             ProtoEvent::TransferFailed { .. } => unreachable!(),
+            // Unified endpoint events — routed directly to domain event handlers.
+            ProtoEvent::EndpointActivation { namespace_id, ip, service_id } => {
+                Some(OrchestratorInput::NamespaceInput {
+                    namespace_id,
+                    input: NamespaceInput::WorkerEvent {
+                        worker_id,
+                        event: WorkerEvent::EndpointActivation { ip, service_id },
+                    },
+                })
+            }
+            ProtoEvent::EndpointFlowStatus { namespace_id, ip, has_active_flows } => {
+                Some(OrchestratorInput::NamespaceInput {
+                    namespace_id,
+                    input: NamespaceInput::WorkerEvent {
+                        worker_id,
+                        event: WorkerEvent::EndpointFlowStatus { ip, has_active_flows },
+                    },
+                })
+            }
             // Wire-only variants — not routed to orchestrator SM.
             ProtoEvent::ShuttingDown => None,
             ProtoEvent::PodLogStreamError { .. } => None,

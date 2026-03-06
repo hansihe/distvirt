@@ -3,10 +3,19 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use distvirt_activator::types::Action;
-use distvirt_worker_protocol::{BufferPolicy, FabricRouteEntry, RouteDestination, ServicePolicy};
+use distvirt_worker_protocol::{BufferPolicy, EndpointKind, EndpointSpec, FabricRouteEntry, RouteDestination, ServicePolicy};
 
 use crate::packet::FabricPacket;
 use super::service_activator::ServiceProcessor;
+
+/// Side-effects from applying an endpoint sync/update.
+#[derive(Debug)]
+pub enum EndpointSyncEffect {
+    /// Service became ready — caller should flush buffered frames.
+    ServiceReady { service_id: String },
+    /// Pod buffer should be flushed (pod became locally reachable).
+    FlushPodBuffer { ip: Ipv4Addr },
+}
 
 /// What the fabric should do with a frame that matched an endpoint IP.
 #[derive(Debug)]
@@ -340,6 +349,233 @@ impl EndpointTable {
             });
             self.route_managed_ips.insert(ip);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Unified endpoint sync/update
+    // -----------------------------------------------------------------------
+
+    /// Full replacement of all endpoints from EndpointSpec list.
+    /// Each worker derives its local view from `my_worker_id`.
+    pub fn apply_endpoint_sync(
+        &mut self,
+        specs: Vec<EndpointSpec>,
+        my_worker_id: &str,
+        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    ) -> Vec<EndpointSyncEffect> {
+        let mut effects = Vec::new();
+        let new_ips: HashSet<Ipv4Addr> = specs.iter().map(|s| s.ip).collect();
+
+        // Remove endpoints whose IP is not in the new set.
+        let to_remove: Vec<Ipv4Addr> = self.by_ip.keys()
+            .filter(|ip| !new_ips.contains(ip))
+            .copied()
+            .collect();
+        for ip in to_remove {
+            // Clean up service_id_to_ip mapping if this is a service
+            if let Some(endpoint) = self.by_ip.get(&ip) {
+                if let EndpointBackend::Service { ref service_id, .. } = endpoint.backend {
+                    self.service_id_to_ip.remove(service_id);
+                }
+            }
+            self.by_ip.remove(&ip);
+            self.last_activation.remove(&ip);
+        }
+        self.route_managed_ips.clear();
+
+        // Upsert each spec.
+        for spec in specs {
+            effects.extend(self.apply_single_spec(spec, my_worker_id, make_processor));
+        }
+
+        effects
+    }
+
+    /// Incremental update: remove some IPs, upsert some specs.
+    pub fn apply_endpoint_update(
+        &mut self,
+        upserted: Vec<EndpointSpec>,
+        removed_ips: Vec<Ipv4Addr>,
+        my_worker_id: &str,
+        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    ) -> Vec<EndpointSyncEffect> {
+        let mut effects = Vec::new();
+
+        for ip in removed_ips {
+            if let Some(endpoint) = self.by_ip.get(&ip) {
+                if let EndpointBackend::Service { ref service_id, .. } = endpoint.backend {
+                    self.service_id_to_ip.remove(service_id);
+                }
+            }
+            self.by_ip.remove(&ip);
+            self.last_activation.remove(&ip);
+            self.route_managed_ips.remove(&ip);
+        }
+
+        for spec in upserted {
+            effects.extend(self.apply_single_spec(spec, my_worker_id, make_processor));
+        }
+
+        effects
+    }
+
+    /// Derive and upsert a single EndpointSpec.
+    fn apply_single_spec(
+        &mut self,
+        spec: EndpointSpec,
+        my_worker_id: &str,
+        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    ) -> Vec<EndpointSyncEffect> {
+        let mut effects = Vec::new();
+        let ip = spec.ip;
+
+        match spec.kind {
+            EndpointKind::Pod { placement } => {
+                match placement {
+                    Some(ref p) if p.worker_id.as_ref() == my_worker_id => {
+                        // Local pod — skip, handled by TAP/IpPortTable.
+                        // Remove any stale endpoint entry if it exists.
+                        if let Some(endpoint) = self.by_ip.remove(&ip) {
+                            if let EndpointBackend::Service { ref service_id, .. } = endpoint.backend {
+                                self.service_id_to_ip.remove(service_id);
+                            }
+                        }
+                        self.last_activation.remove(&ip);
+                    }
+                    Some(ref p) => {
+                        // Remote pod.
+                        let was_buffering = self.by_ip.get(&ip)
+                            .map(|ep| ep.state == EndpointState::Buffering && !ep.buffer.is_empty())
+                            .unwrap_or(false);
+                        self.by_ip.insert(ip, Endpoint {
+                            ip,
+                            state: EndpointState::Ready,
+                            buffer: VecDeque::new(),
+                            buffer_start: None,
+                            backend: EndpointBackend::RemoteSegment {
+                                worker_id: p.worker_id.0.clone(),
+                            },
+                        });
+                        if was_buffering {
+                            effects.push(EndpointSyncEffect::FlushPodBuffer { ip });
+                        }
+                    }
+                    None => {
+                        // Unplaced pod — buffer.
+                        if !self.by_ip.contains_key(&ip) {
+                            self.by_ip.insert(ip, Endpoint {
+                                ip,
+                                state: EndpointState::Buffering,
+                                buffer: VecDeque::new(),
+                                buffer_start: None,
+                                backend: EndpointBackend::UnplacedPod {
+                                    buffer_policy: BufferPolicy {
+                                        buffer_frames: 64,
+                                        timeout_ms: 30_000,
+                                    },
+                                },
+                            });
+                        }
+                        // If already exists as UnplacedPod, keep buffer intact.
+                    }
+                }
+            }
+            EndpointKind::Service { service_id, policy, backend } => {
+                let svc_id_str = service_id.0.clone();
+
+                // Determine new state and backend_ip from the backend field.
+                let (new_state, new_backend_ip) = match &backend {
+                    None => (EndpointState::Buffering, None),
+                    Some(be) if !be.ready => (EndpointState::Pending, Some(be.pod_ip)),
+                    Some(be) => (EndpointState::Ready, Some(be.pod_ip)),
+                };
+
+                // Check if service already exists and can keep its processor.
+                let existing = self.by_ip.get(&ip);
+                let can_reuse_processor = existing.map(|ep| {
+                    if let EndpointBackend::Service { service_id: ref existing_id, policy: ref existing_policy, .. } = ep.backend {
+                        existing_id == &svc_id_str && existing_policy.activator == policy.activator
+                    } else {
+                        false
+                    }
+                }).unwrap_or(false);
+
+                if can_reuse_processor {
+                    // Update existing service endpoint in place.
+                    let endpoint = self.by_ip.get_mut(&ip).unwrap();
+                    let old_state = endpoint.state;
+                    let EndpointBackend::Service {
+                        ref mut backend_ip,
+                        ref mut processor,
+                        policy: ref mut existing_policy,
+                        ..
+                    } = endpoint.backend else {
+                        unreachable!();
+                    };
+
+                    let old_backend_ip = *backend_ip;
+                    *backend_ip = new_backend_ip;
+                    *existing_policy = policy;
+                    endpoint.state = new_state;
+
+                    // Buffer preservation logic (same as update_service_backend).
+                    let should_clear = match (old_backend_ip, new_backend_ip) {
+                        (_, None) => true,
+                        (Some(old), Some(new)) if old != new => true,
+                        _ => false,
+                    };
+                    if should_clear {
+                        endpoint.buffer.clear();
+                        endpoint.buffer_start = None;
+                    }
+                    if new_backend_ip.is_none() {
+                        self.last_activation.remove(&ip);
+                    }
+
+                    processor.on_backend_update(
+                        new_backend_ip.is_some(),
+                        new_backend_ip,
+                    );
+
+                    // Check if transitioning to Ready.
+                    if new_state == EndpointState::Ready && old_state != EndpointState::Ready {
+                        effects.push(EndpointSyncEffect::ServiceReady { service_id: svc_id_str.clone() });
+                    }
+                } else {
+                    // Create new service endpoint.
+                    let processor = make_processor(&svc_id_str, &policy, ip);
+
+                    // Remove old service_id mapping if different service was at this IP.
+                    if let Some(old_ep) = self.by_ip.get(&ip) {
+                        if let EndpointBackend::Service { service_id: ref old_id, .. } = old_ep.backend {
+                            if old_id != &svc_id_str {
+                                self.service_id_to_ip.remove(old_id);
+                            }
+                        }
+                    }
+
+                    self.by_ip.insert(ip, Endpoint {
+                        ip,
+                        state: new_state,
+                        buffer: VecDeque::new(),
+                        buffer_start: None,
+                        backend: EndpointBackend::Service {
+                            service_id: svc_id_str.clone(),
+                            policy,
+                            backend_ip: new_backend_ip,
+                            processor,
+                        },
+                    });
+                    self.service_id_to_ip.insert(svc_id_str.clone(), ip);
+
+                    if new_state == EndpointState::Ready {
+                        effects.push(EndpointSyncEffect::ServiceReady { service_id: svc_id_str });
+                    }
+                }
+            }
+        }
+
+        effects
     }
 
     /// Drain buffered frames from an UnplacedPod endpoint.

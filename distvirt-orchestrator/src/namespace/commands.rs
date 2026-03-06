@@ -77,17 +77,22 @@ impl NamespaceStateMachine {
             .cloned()
             .collect();
 
+        // Collect IPs of removed services for endpoint update.
+        let mut removed_ips = Vec::new();
         for svc_id in &removed_services {
+            if let Some(svc_spec) = self.spec.services.get(svc_id) {
+                removed_ips.push(svc_spec.ip);
+            }
             self.service_workload.remove(svc_id);
             self.services.remove(svc_id);
-
-            // Emit DestroyService to all active workers.
+        }
+        if !removed_ips.is_empty() {
             let ns_id = self.namespace_id.clone();
-            let svc_id_clone = svc_id.clone();
             crate::broadcast::broadcast_to_active_workers(&self.workers, out, |_| {
-                WorkerCommand::DestroyService {
+                WorkerCommand::EndpointUpdate {
                     namespace_id: ns_id.clone(),
-                    service_id: svc_id_clone.clone(),
+                    upserted: vec![],
+                    removed_ips: removed_ips.clone(),
                 }
             });
         }
@@ -308,11 +313,8 @@ impl NamespaceStateMachine {
             },
         ));
 
-        // Emit fabric route add if multi-worker.
-        if self.workers.len() > 1 {
-            let pod_ip = wl_spec.network.ip;
-            self.emit_fabric_route_add(pod_ip, worker_id, out);
-        }
+        // Broadcast endpoint update for the newly placed workload.
+        self.emit_endpoint_update_for_workload(workload_id, out);
 
         // Emit pod launching event.
         out.events.push(SmNamespaceEvent::Workload {
@@ -408,11 +410,8 @@ impl NamespaceStateMachine {
             },
         ));
 
-        // Emit fabric route add if multi-worker.
-        if self.workers.len() > 1 {
-            let pod_ip = wl_spec.network.ip;
-            self.emit_fabric_route_add(pod_ip, worker_id, out);
-        }
+        // Broadcast endpoint update for the newly placed workload.
+        self.emit_endpoint_update_for_workload(workload_id, out);
 
         // Emit resume event.
         out.events.push(SmNamespaceEvent::Workload {

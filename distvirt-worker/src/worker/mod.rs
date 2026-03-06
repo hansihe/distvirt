@@ -13,7 +13,7 @@ use distvirt_activator::ActivatorRuntime;
 use distvirt_worker_protocol::{
     ArtifactId, ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
     PodId, PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, WorkerCapabilities,
-    WorkerCommand, WorkerConnection, WorkerEvent, WorkerHello, WorkerReady,
+    WorkerCommand, WorkerConnection, WorkerEvent, WorkerHello, WorkerId, WorkerReady,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -55,6 +55,8 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     pools: HashMap<PoolId, PathBuf>,
     /// Tunnel manager for inter-worker fabric forwarding.
     tunnel_manager: Option<TunnelManager>,
+    /// Assigned worker ID from handshake (set after WorkerAccepted).
+    worker_id: Option<WorkerId>,
 }
 
 impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
@@ -93,7 +95,12 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             public_endpoint,
             pools,
             tunnel_manager: None,
+            worker_id: None,
         }
+    }
+
+    fn my_worker_id(&self) -> &WorkerId {
+        self.worker_id.as_ref().expect("worker_id not set (handshake not completed)")
     }
 
     /// Look up a pool's root directory by ID.
@@ -152,6 +159,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             .await
             .context("handshake: recv WorkerAccepted")?;
         log::info!("worker: accepted as worker_id={}", accepted.worker_id);
+        self.worker_id = Some(accepted.worker_id.clone());
 
         // Process pools pushed by the orchestrator.
         for pool in &accepted.pools {
@@ -569,6 +577,32 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     tm.handle_registry_sync(workers);
                 }
                 Ok(())
+            }
+            WorkerCommand::EndpointSync {
+                namespace_id,
+                endpoints,
+            } => {
+                let worker_id = self.worker_id.clone()
+                    .expect("worker_id not set (handshake not completed)");
+                // Borrow separate fields to avoid conflicting mutable/immutable borrows on self.
+                let activator_runtime = self.activator_runtime.as_ref();
+                let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
+                    FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+                })?;
+                ns.endpoint_sync(&namespace_id, endpoints, &worker_id, activator_runtime)
+            }
+            WorkerCommand::EndpointUpdate {
+                namespace_id,
+                upserted,
+                removed_ips,
+            } => {
+                let worker_id = self.worker_id.clone()
+                    .expect("worker_id not set (handshake not completed)");
+                let activator_runtime = self.activator_runtime.as_ref();
+                let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
+                    FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
+                })?;
+                ns.endpoint_update(&namespace_id, upserted, removed_ips, &worker_id, activator_runtime)
             }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.
