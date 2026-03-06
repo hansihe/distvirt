@@ -20,3 +20,15 @@ pub struct OrchestratorOutput {
     pub timers_cancel: Vec<TimerKey>,
     pub namespace_outputs: Vec<(NamespaceId, NamespaceOutput)>,
 }
+
+impl OrchestratorOutput {
+    /// Merge a namespace's output into this orchestrator output.
+    pub fn merge_namespace(&mut self, namespace_id: NamespaceId, ns_out: NamespaceOutput) {
+        self.worker_commands.extend(ns_out.worker_commands.iter().cloned());
+        self.timers_set.extend(ns_out.timers_set.iter().cloned());
+        self.timers_cancel.extend(ns_out.timers_cancel.iter().cloned());
+        if ns_out != NamespaceOutput::default() {
+            self.namespace_outputs.push((namespace_id, ns_out));
+        }
+    }
+}

@@ -58,6 +58,24 @@ impl NamespaceStateMachine {
                     // Second+ worker joining an already-active namespace.
                     self.emit_registry_sync_to_worker(worker_id, out);
                     self.emit_fabric_route_sync_to_worker(worker_id, out);
+
+                    // Sync existing services to the new worker.
+                    for (svc_id, svc) in &self.services {
+                        if matches!(svc.state, ServiceState::Pending) {
+                            continue;
+                        }
+                        if let Some(svc_spec) = self.spec.services.get(svc_id) {
+                            out.worker_commands.push((
+                                worker_id.clone(),
+                                WorkerCommand::CreateService {
+                                    namespace_id: self.namespace_id.clone(),
+                                    service_id: svc_id.clone(),
+                                    ip: svc_spec.ip,
+                                    policy: svc_spec.policy.clone(),
+                                },
+                            ));
+                        }
+                    }
                 }
             }
             WorkerEvent::ServiceActivation { service_id } => {
@@ -146,12 +164,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
-                // Remove fabric route if multi-worker.
-                if self.workers.len() > 1 {
-                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
-                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
-                    }
-                }
+                self.maybe_remove_fabric_route(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodStopped {
@@ -178,12 +191,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
-                // Remove fabric route if multi-worker.
-                if self.workers.len() > 1 {
-                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
-                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
-                    }
-                }
+                self.maybe_remove_fabric_route(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodFailed {
@@ -215,6 +223,8 @@ impl NamespaceStateMachine {
                     },
                 );
             }
+            // pool_id already recorded at ArtifactWriteStarted time;
+            // size_bytes is currently unused (reserved for quota tracking).
             WorkerEvent::ArtifactWriteCommitted { artifact_id, pool_id: _, size_bytes: _ } => {
                 if let Some(placement) = placement_table.get_mut(&artifact_id) {
                     placement.status = ArtifactStatus::Ready;
@@ -226,12 +236,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
-                // Remove fabric route if multi-worker (pod no longer running).
-                if self.workers.len() > 1 {
-                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
-                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
-                    }
-                }
+                self.maybe_remove_fabric_route(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspended {
@@ -266,6 +271,10 @@ impl NamespaceStateMachine {
                         .map(|wl| matches!(wl.state, WorkloadState::Dormant | WorkloadState::Suspended { .. }))
                         .unwrap_or(false);
                     if should_wake {
+                        // Set directly on the SM field rather than via step() —
+                        // route_miss_wake is an external flag observed by reconciliation,
+                        // not an SM input. The SM has no SetRouteMissWake input because
+                        // the flag is purely a reconciliation concern.
                         if let Some(wl) = self.workloads.get_mut(&wl_id) {
                             wl.route_miss_wake = true;
                         }
@@ -290,12 +299,7 @@ impl NamespaceStateMachine {
                         }
                     }
                 }
-                // Remove fabric route if multi-worker.
-                if self.workers.len() > 1 {
-                    if let Some(wl_spec) = self.spec.workloads.get(&wl_id) {
-                        self.emit_fabric_route_remove(wl_spec.network.ip, out);
-                    }
-                }
+                self.maybe_remove_fabric_route(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodSuspendFailed {
@@ -339,8 +343,24 @@ impl NamespaceStateMachine {
                 .collect()
         };
 
+        // Suspended workloads whose artifact was removed from the placement table.
+        // These won't be caught by the worker_id() check above because Suspended
+        // has no worker_id, only an artifact_id.
+        let stale_suspended: Vec<WorkloadId> = self
+            .workloads
+            .iter()
+            .filter(|(_, wl)| {
+                if let WorkloadState::Suspended { artifact_id } = &wl.state {
+                    placement_table.get(artifact_id).is_none()
+                } else {
+                    false
+                }
+            })
+            .map(|(wl_id, _)| wl_id.clone())
+            .collect();
+
         // Forward WorkerLost to affected workloads.
-        for wl_id in affected_workloads {
+        for wl_id in affected_workloads.into_iter().chain(stale_suspended) {
             let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
                 wl.step(
                     WorkloadInput::WorkerLost {

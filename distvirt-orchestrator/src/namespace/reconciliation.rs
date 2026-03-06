@@ -34,28 +34,42 @@ impl NamespaceStateMachine {
         let wl_state = &wl.state;
 
         match (svc_state, wl_state) {
-            (ServiceState::Pending, WorkloadState::Dormant) => {
-                if has_activation {
-                    // Create the service on workers and move to Idle.
-                    let ns_id = self.namespace_id.clone();
-                    let svc_spec = self.spec.services.get(svc_id).cloned()
-                        .expect("invariant: svc_id from reconcile_pair must exist in spec.services");
-                    for wid in self.active_worker_ids() {
-                        out.worker_commands.push((
-                            wid,
-                            WorkerCommand::CreateService {
-                                namespace_id: ns_id.clone(),
-                                service_id: svc_id.clone(),
-                                ip: svc_spec.ip,
-                                policy: svc_spec.policy.clone(),
-                            },
-                        ));
-                    }
+            (ServiceState::Pending, wl) => {
+                let is_running = matches!(wl, WorkloadState::Running { .. });
+
+                // Create the service on all active workers.
+                let ns_id = self.namespace_id.clone();
+                let svc_spec = self.spec.services.get(svc_id).cloned()
+                    .expect("invariant: svc_id from reconcile_pair must exist in spec.services");
+                for wid in self.active_worker_ids() {
+                    out.worker_commands.push((
+                        wid,
+                        WorkerCommand::CreateService {
+                            namespace_id: ns_id.clone(),
+                            service_id: svc_id.clone(),
+                            ip: svc_spec.ip,
+                            policy: svc_spec.policy.clone(),
+                        },
+                    ));
+                }
+
+                if is_running {
+                    // Workload already running — go straight to NeedBackend so
+                    // reconcile_readiness (called from reconcile_demand) will
+                    // deliver WorkloadReady → Active.
+                    self.services.get_mut(svc_id)
+                        .expect("invariant: svc_id from reconcile_pair must exist in services")
+                        .state = ServiceState::NeedBackend;
+                } else if has_activation {
+                    // Direct state assignment (bypasses step()): initial Pending→Idle
+                    // transition has no side effects to emit (no timers, no worker
+                    // commands beyond the CreateService already emitted above).
                     self.services.get_mut(svc_id)
                         .expect("invariant: svc_id from reconcile_pair must exist in services")
                         .state = ServiceState::Idle;
                 } else {
-                    // Always-on: move to NeedBackend. Demand reconciliation will handle waking the workload.
+                    // Direct state assignment (bypasses step()): initial Pending→NeedBackend
+                    // transition has no side effects. Demand reconciliation handles waking.
                     self.services.get_mut(svc_id)
                         .expect("invariant: svc_id from reconcile_pair must exist in services")
                         .state = ServiceState::NeedBackend;
@@ -69,7 +83,7 @@ impl NamespaceStateMachine {
     }
 
     /// Compute effective demand for a workload: count of services with wants_backend() + route_miss_wake.
-    pub(crate) fn effective_demand(&self, workload_id: &WorkloadId) -> u32 {
+    pub fn effective_demand(&self, workload_id: &WorkloadId) -> u32 {
         let service_demand: u32 = self
             .service_workload
             .iter()
@@ -125,7 +139,7 @@ impl NamespaceStateMachine {
         }
 
         // Reconcile readiness: sync service states based on workload state.
-        self.reconcile_readiness(workload_id, placement_table, out);
+        self.reconcile_readiness(workload_id, out);
     }
 
     /// Reconcile service readiness based on workload state.
@@ -137,7 +151,6 @@ impl NamespaceStateMachine {
     fn reconcile_readiness(
         &mut self,
         workload_id: &WorkloadId,
-        _placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
         let wl = match self.workloads.get(workload_id) {

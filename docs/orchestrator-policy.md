@@ -51,10 +51,10 @@ These are described in detail in [Core Abstractions](#core-abstractions) and ref
 |---|---|
 | Workload state (Dormant/Running/Suspended/...) | WorkloadStateMachine |
 | Service state (Idle/NeedBackend/Active) | ServiceStateMachine |
-| demand_count per workload | WorkloadStateMachine |
+| current_demand per workload (derived from service states by reconciliation) | WorkloadStateMachine |
 | BackendNeed per active service | ServiceState::Active |
 | Snapshot placement (artifact → pool/worker) | PlacementTable |
-| Consecutive failure count per workload | **Not tracked** — needed for retry backoff |
+| Consecutive failure count per workload | WorkloadStateMachine (`consecutive_failures`) |
 | Worker pressure scores (compute, memory, storage) | **Not computed** — derived from above signals |
 
 ---
@@ -476,7 +476,7 @@ Priority is based on whether someone is actively waiting on the workload:
 
 **Suspend timeout edge case**: If the suspend hangs (hits `suspend_timeout`), the fallback to `StopPod` kicks in as usual. The activated workload's capacity lease is granted when the preempted pod's slot is freed — either on `PodSuspended` or on the `StopPod` fallback. The worst-case latency for the activated workload is bounded by `suspend_timeout`.
 
-From the preempted workload's perspective, this looks identical to its idle timeout firing early. No new workload states are needed — just the orchestrator injecting the same `DemandDown` or a `Preempt` input that triggers the same path.
+From the preempted workload's perspective, this looks identical to its idle timeout firing early. No new workload states are needed — just the orchestrator injecting a `ForceDeactivate` input or a `Preempt` input that triggers the same deactivation path.
 
 #### Pressure-Driven Preemption
 
@@ -491,12 +491,14 @@ Under elevated pressure (pressure score > 0.8 on any dimension), preemption can 
 1. Traffic arrives at a service IP on the fabric
 2. Protocol activator (TCP/H2/Postgres) inspects the packet
 3. Meaningful traffic (TCP SYN, H2 HEADERS) → `ServiceActivation` event
-4. Service SM: Idle → NeedBackend, emits `DemandUp` to workload
-5. Service sets `activation-pending` condition ("traffic buffered, waiting for backend")
-6. Workload SM: Dormant → WaitingForCapacity → Launching → Running
-7. Service SM: NeedBackend → Active, `UpdateServiceBackend` + `ServiceReady` sent to workers
-8. Service clears `activation-pending` condition
-9. Fabric flushes buffered packets to the now-ready backend
+4. Service SM: Idle → NeedBackend (service now `wants_backend()`)
+5. Reconciliation pass computes effective demand from service states, sends `SetDemand` to workload
+6. Service sets `activation-pending` condition ("traffic buffered, waiting for backend")
+7. Workload SM: Dormant → WaitingForCapacity → Launching → Running
+8. Reconciliation sees workload Running + service NeedBackend → sends `WorkloadReady` to service
+9. Service SM: NeedBackend → Active, `UpdateServiceBackend` + `ServiceReady` sent to workers
+10. Service clears `activation-pending` condition
+11. Fabric flushes buffered packets to the now-ready backend
 
 ### Idle Timeout
 
@@ -504,24 +506,24 @@ Under elevated pressure (pressure score > 0.8 on any dimension), preemption can 
 2. Service SM starts idle timer (configurable per-service, default 30s)
 3. Effective timeout adjusted by pressure band — see [Idle Timeout Under Pressure](#idle-timeout-under-pressure)
 4. If `BackendNeed::Traffic` or `BackendNeed::Active` arrives before timeout → cancel timer
-5. If timeout fires → `DemandDown`, `UpdateServiceBackend(None)`, service returns to Idle
-6. If this was the last demanding service (demand_count → 0):
+5. If timeout fires → `UpdateServiceBackend(None)`, service returns to Idle (no longer `wants_backend()`)
+6. Reconciliation recomputes demand — if no services want the backend (current_demand → 0):
    - `suspend_on_idle == true`: workload suspends (snapshot for fast resume)
    - `suspend_on_idle == false`: workload stops, goes Dormant (cold start on next activation)
 
 ### Shared Workload Demand
 
-Multiple services can back the same workload. The workload runs as long as any service demands it (`demand_count > 0`). This means:
+Multiple services can back the same workload. Demand is derived by reconciliation from service states — the workload runs as long as any service `wants_backend()` (`current_demand > 0`). This means:
 
-- Service A activates → workload launches → Service B (same workload) immediately gets `WorkloadReady`
-- Service A goes idle → `DemandDown` → but Service B is still active → workload stays Running
-- Only when all services go idle does demand_count reach 0 and suspend/stop triggers
+- Service A activates → reconciliation computes demand, workload launches → reconciliation sees workload Running + Service B in NeedBackend → Service B immediately gets `WorkloadReady`
+- Service A goes idle → reconciliation recomputes demand → but Service B is still active → demand unchanged → workload stays Running
+- Only when all services stop wanting a backend does current_demand reach 0 and suspend/stop triggers
 
 ### Activation Racing with Suspend (Transition Intent)
 
-If traffic arrives while a workload is mid-suspend (`Suspending` state), the `DemandUp` sets `pending = PendingIntent::Demand` on the transition intent slot. When `PodSuspended` arrives, the state machine sees the pending demand and immediately emits `ResumeRequest` — skipping the `Suspended` state entirely.
+If traffic arrives while a workload is mid-suspend (`Suspending` state), the service transitions to NeedBackend. Reconciliation computes increased demand and sends `SetDemand` to the workload, which upgrades the pending intent to `PendingIntent::Demand`. When `PodSuspended` arrives, the state machine sees the pending demand and immediately emits `ResumeRequest` — skipping the `Suspended` state entirely.
 
-This is an improvement over the current behavior (which also resumes immediately, but goes through `Suspended` first with potential unnecessary cleanup). The transition intent makes the optimization explicit and enables future improvements like aborting the suspend if the VM hasn't committed the snapshot yet.
+The transition intent makes the optimization explicit and enables future improvements like aborting the suspend if the VM hasn't committed the snapshot yet.
 
 ### Suspend Timeout Behavior
 
@@ -901,7 +903,7 @@ Dormant → WaitingForCapacity → Launching{pod_id, worker_id, launch_timeout, 
 
 `pending: PendingIntent` on transition states captures contradicting signals during async operations (see [Transition Intents](#transition-intents)).
 
-Fields on `WorkloadStateMachine`: `workload_id`, `state`, `demand_count`, `suspend_on_idle`, `last_failure_reason`.
+Fields on `WorkloadStateMachine`: `workload_id`, `state`, `current_demand`, `needs_successful_boot`, `route_miss_wake`, `suspend_on_idle`, `consecutive_failures`, `max_retries`, `last_failure_reason`.
 
 **ServiceState** (`types/states.rs`):
 ```
@@ -946,7 +948,7 @@ Three complementary methods:
 | Area | Status | Code Reference |
 |---|---|---|
 | Worker selection | Basic fewest-pods heuristic; no pressure scores, no leases | `orchestrator/workers.rs` |
-| Service activation lifecycle | Implemented (activation, idle timeout, demand tracking) | `service.rs`, `namespace/events.rs` |
+| Service activation lifecycle | Implemented (activation, idle timeout, reconciliation-based demand) | `service.rs`, `namespace/events.rs`, `namespace/reconciliation.rs` |
 | Suspend/resume | Implemented end-to-end | `workload.rs`, `namespace/events.rs`, `namespace/output.rs` |
 | Retry/backoff | **Done** (Tasks 1.2, 1.4) — exponential backoff with `Failed` terminal state, `SpecChanged`/`ManualRestart` recovery | `workload.rs`, `types/states.rs` |
 | Spec reconciliation | **Done** (Task 1.3) — image change dispatches `SpecChanged`, `suspend_on_idle` change updates field | `namespace/commands.rs` |
@@ -1279,16 +1281,15 @@ Orchestrator: Feed PSI values into pressure score computation (Task 3.1).
 
 ### Design Notes for Implementers
 
-#### `demand_count` vs `PendingIntent`
+#### `current_demand`, `needs_successful_boot`, and `PendingIntent`
 
-Both exist and serve different purposes:
+Three mechanisms work together for demand management:
 
-- **`demand_count`**: ground truth for "how many services currently want this workload?" Incremented on `DemandUp`, decremented on `DemandDown`. Used at `Running` state to decide whether to deactivate.
+- **`current_demand`**: set authoritatively by reconciliation via `SetDemand { count }`. Reconciliation derives this from service states (`wants_backend()`) plus `route_miss_wake`. No incremental DemandUp/DemandDown — demand is always consistent with actual service states.
+- **`needs_successful_boot`**: once demand goes 0→non-zero, the workload is committed to reaching Running before it can go Dormant via SetDemand(0). Also set on WorkerLost and PodGone. Cleared on PodRunning→Running or entering Failed. Prevents demand fluctuations during boot/retry from prematurely stopping the workload.
 - **`PendingIntent`**: captures contradicting signals that arrive *during transitions*. Consumed once when the transition completes.
 
-Consistency invariant: if `pending == PendingIntent::Demand`, then `demand_count > 0`. The stateright model verifies this (`pending demand implies demand count` property).
-
-As implemented in Task 1.1: `PodSuspended` completion checks the `pending` intent — `Demand` triggers immediate `ResumeRequest`, `Deactivate` stays `Suspended`, `Restart` deletes artifact and transitions on demand. `PodRunning` from `Resuming` with `pending == None` falls back to `demand_count` check. `DemandDown` to zero clears `Demand` intent on transition states to maintain the invariant.
+`PodSuspended` completion checks the `pending` intent — `Demand` triggers immediate `ResumeRequest`, `Deactivate` stays `Suspended`, `Restart` deletes artifact and transitions on demand. `PodRunning` from `Resuming` with `pending == None` falls back to `current_demand` check.
 
 #### The `Pending` Service State
 

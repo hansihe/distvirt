@@ -218,6 +218,16 @@ impl NamespaceStateMachine {
         });
     }
 
+    /// Remove fabric route for a workload's IP when multi-worker.
+    /// No-op if single-worker or workload not in spec.
+    pub(crate) fn maybe_remove_fabric_route(&self, workload_id: &WorkloadId, out: &mut NamespaceOutput) {
+        if self.workers.len() > 1 {
+            if let Some(wl_spec) = self.spec.workloads.get(workload_id) {
+                self.emit_fabric_route_remove(wl_spec.network.ip, out);
+            }
+        }
+    }
+
     pub(crate) fn emit_fabric_route_remove(
         &self,
         pod_ip: Ipv4Addr,

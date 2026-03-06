@@ -197,6 +197,11 @@ impl ServiceStateMachine {
                             },
                         ));
                         self.state = ServiceState::Idle;
+                    } else {
+                        log::debug!(
+                            "ForceDeactivate ignored for service {:?}: backend_need={:?}, has_activation={}",
+                            self.service_id, backend_need, self.has_activation,
+                        );
                     }
                 }
             }

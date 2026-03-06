@@ -15,6 +15,9 @@ struct NamespaceModel {
     enable_worker_failure: bool,
     enable_delete: bool,
     enable_spec_update: bool,
+    /// When true, allows an `AddService` action that adds a new service
+    /// to the existing workload via `UpdateSpec` while the workload is Running.
+    enable_service_addition: bool,
     /// Max retries for workload backoff in the model. Lower values
     /// reach the terminal Failed state faster, reducing state space
     /// without losing coverage (retry logic is identical per attempt).
@@ -291,6 +294,10 @@ struct ModelState {
     /// Monotonic flag: set to true after a spec update has been applied.
     /// Limits state space to at most one spec change per exploration path.
     spec_updated: bool,
+    /// Monotonic flag: set to true after AddService has been applied.
+    service_added: bool,
+    /// Tracks which workers have received CreateService for which services.
+    worker_service_created: BTreeMap<WorkerId, BTreeSet<ServiceId>>,
 }
 
 // --- Model Actions ---
@@ -309,12 +316,36 @@ enum ModelAction {
     },
     Delete,
     UpdateSpec,
+    AddService,
 }
 
 // --- Helpers ---
 
 fn worker_id(i: usize) -> WorkerId {
     WorkerId(format!("w-{}", i))
+}
+
+/// Track CreateService/DestroyService commands in output to worker_service_created map.
+fn track_service_commands(
+    output: &NamespaceOutput,
+    tracker: &mut BTreeMap<WorkerId, BTreeSet<ServiceId>>,
+) {
+    for (wid, cmd) in &output.worker_commands {
+        match cmd {
+            WorkerCommand::CreateService { service_id, .. } => {
+                tracker
+                    .entry(wid.clone())
+                    .or_default()
+                    .insert(service_id.clone());
+            }
+            WorkerCommand::DestroyService { service_id, .. } => {
+                if let Some(services) = tracker.get_mut(wid) {
+                    services.remove(service_id);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Allocate the lowest free pod ID, so states converge after pod churn.
@@ -357,6 +388,8 @@ impl Model for NamespaceModel {
             ever_launched_pod: false,
             last_output_commands_valid: true,
             spec_updated: false,
+            service_added: false,
+            worker_service_created: BTreeMap::new(),
         }]
     }
 
@@ -551,6 +584,15 @@ impl Model for NamespaceModel {
         {
             actions.push(ModelAction::UpdateSpec);
         }
+
+        // AddService action: add a new service to a running workload.
+        if self.enable_service_addition
+            && !state.service_added
+            && ns.status == NamespaceStatus::Active
+            && ns.workloads.values().any(|wl| matches!(wl.state, WorkloadState::Running { .. }))
+        {
+            actions.push(ModelAction::AddService);
+        }
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
@@ -564,6 +606,7 @@ impl Model for NamespaceModel {
         };
 
         let is_spec_update = matches!(&action, ModelAction::UpdateSpec);
+        let is_add_service = matches!(&action, ModelAction::AddService);
 
         let input = match action {
             ModelAction::WorkerEvent { worker_id, event } => {
@@ -587,12 +630,37 @@ impl Model for NamespaceModel {
                     spec: new_spec,
                 }
             }
+            ModelAction::AddService => {
+                // Add a new service pointing to the first workload.
+                let mut new_spec = sm.spec.clone();
+                let wl_id = new_spec.workloads.keys().next().cloned()
+                    .expect("AddService requires at least one workload");
+                new_spec.services.insert(
+                    ServiceId("svc-added".into()),
+                    ServiceSpec {
+                        workload_id: wl_id,
+                        ip: Ipv4Addr::new(172, 16, 0, 200),
+                        policy: test_service_policy(),
+                        activation: Some(ActivationSpec {
+                            idle_timeout: Duration::from_secs(30),
+                        }),
+                    },
+                );
+                NamespaceInput::UpdateSpec {
+                    client_id: ClientId(0),
+                    spec: new_spec,
+                }
+            }
         };
 
         // Snapshot pre-step workers for command validity check.
         let pre_step_workers: BTreeSet<WorkerId> = sm.workers.keys().cloned().collect();
 
         let output = sm.step(input, &mut placement_table);
+
+        // Track CreateService/DestroyService delivery to workers.
+        let mut worker_service_created = state.worker_service_created.clone();
+        track_service_commands(&output, &mut worker_service_created);
 
         // Check that all worker commands target workers present pre-step.
         let mut commands_valid = output
@@ -635,6 +703,7 @@ impl Model for NamespaceModel {
                     pod_id,
                 }, &mut placement_table);
 
+                track_service_commands(&launch_out, &mut worker_service_created);
                 commands_valid = commands_valid
                     && launch_out
                         .worker_commands
@@ -666,6 +735,7 @@ impl Model for NamespaceModel {
                 artifact_id: req.artifact_id.clone(),
             }, &mut placement_table);
 
+            track_service_commands(&resume_out, &mut worker_service_created);
             commands_valid = commands_valid
                 && resume_out
                     .worker_commands
@@ -679,6 +749,10 @@ impl Model for NamespaceModel {
             }
         }
 
+        // Remove workers that were lost from service tracking.
+        let active_workers: BTreeSet<WorkerId> = sm.workers.keys().cloned().collect();
+        worker_service_created.retain(|wid, _| active_workers.contains(wid));
+
         Some(ModelState {
             namespace: NamespaceSnapshot::from_state_machine(&sm),
             placement: PlacementSnapshot::from_table(&placement_table),
@@ -686,6 +760,8 @@ impl Model for NamespaceModel {
             ever_launched_pod,
             last_output_commands_valid: commands_valid,
             spec_updated: state.spec_updated || is_spec_update,
+            service_added: state.service_added || is_add_service,
+            worker_service_created,
         })
     }
 
@@ -807,6 +883,113 @@ impl Model for NamespaceModel {
                         .any(|s| matches!(s.state, ServiceState::Idle))
             }),
         ];
+
+        // Safety: current_demand always matches effective_demand.
+        props.push(Property::<Self>::always(
+            "demand consistent with effective_demand",
+            |model, state| {
+                let sm = state.namespace.to_state_machine(model.max_retries);
+                for (wl_id, wl_snap) in &state.namespace.workloads {
+                    let effective = sm.effective_demand(wl_id);
+                    if wl_snap.current_demand != effective {
+                        return false;
+                    }
+                }
+                true
+            },
+        ));
+
+        // Safety: active workers should have received CreateService for all
+        // non-Pending services.
+        {
+        props.push(Property::<Self>::always(
+            "active workers have all services created",
+            |_model, state| {
+                let ns = &state.namespace;
+                if ns.status != NamespaceStatus::Active {
+                    return true;
+                }
+                // Collect all service IDs that are not Pending.
+                let non_pending_services: BTreeSet<&ServiceId> = ns
+                    .services
+                    .iter()
+                    .filter(|(_, svc)| !matches!(svc.state, ServiceState::Pending))
+                    .map(|(sid, _)| sid)
+                    .collect();
+
+                for (wid, worker) in &ns.workers {
+                    if worker.fabric_status != FabricStatus::Active {
+                        continue;
+                    }
+                    let created = state
+                        .worker_service_created
+                        .get(wid)
+                        .cloned()
+                        .unwrap_or_default();
+                    for svc_id in &non_pending_services {
+                        if !created.contains(*svc_id) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            },
+        ));
+        }
+
+        if self.enable_service_addition {
+            // Safety: no service should be Pending when its workload is Running.
+            props.push(Property::<Self>::always(
+                "no pending service for running workload",
+                |_model, state| {
+                    let ns = &state.namespace;
+                    for (_, svc) in &ns.services {
+                        if matches!(svc.state, ServiceState::Pending) {
+                            if let Some(wl) = ns.workloads.get(&svc.workload_id) {
+                                if matches!(wl.state, WorkloadState::Running { .. }) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    true
+                },
+            ));
+            // Reachability: added service can reach Active.
+            props.push(Property::<Self>::sometimes(
+                "added service can reach active",
+                |_model, state| {
+                    state.service_added
+                        && state
+                            .namespace
+                            .services
+                            .get(&ServiceId("svc-added".into()))
+                            .map(|s| matches!(s.state, ServiceState::Active { .. }))
+                            .unwrap_or(false)
+                },
+            ));
+        }
+
+        // Reachability: both services sharing a workload can reach Active.
+        // Only relevant when spec has multiple services on the same workload.
+        {
+            let mut wl_svc_count: BTreeMap<WorkloadId, usize> = BTreeMap::new();
+            for svc_spec in self.initial_spec.services.values() {
+                *wl_svc_count.entry(svc_spec.workload_id.clone()).or_default() += 1;
+            }
+            if wl_svc_count.values().any(|&c| c > 1) {
+                props.push(Property::<Self>::sometimes(
+                    "both services can reach active",
+                    |_model, state| {
+                        state
+                            .namespace
+                            .services
+                            .values()
+                            .all(|s| matches!(s.state, ServiceState::Active { .. }))
+                    },
+                ));
+            }
+        }
 
         if self.enable_delete {
             // Fire-and-forget: destroy is immediate.
@@ -987,10 +1170,64 @@ fn two_service_spec() -> NamespaceSpec {
     }
 }
 
+/// 1 workload (`wl-1`), 2 activation services (`svc-a`, `svc-b`) both pointing
+/// to the same workload with different IPs. Exercises "Shared Workload Demand".
+fn shared_workload_spec() -> NamespaceSpec {
+    let mut workloads = HashMap::new();
+    workloads.insert(
+        WorkloadId("wl-1".into()),
+        WorkloadSpec {
+            containers: vec![test_container_spec()],
+            network: test_pod_network_config(),
+            suspend_on_idle: false,
+        },
+    );
+    let mut services = HashMap::new();
+    services.insert(
+        ServiceId("svc-a".into()),
+        ServiceSpec {
+            workload_id: WorkloadId("wl-1".into()),
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            policy: test_service_policy(),
+            activation: Some(ActivationSpec {
+                idle_timeout: Duration::from_secs(30),
+            }),
+        },
+    );
+    services.insert(
+        ServiceId("svc-b".into()),
+        ServiceSpec {
+            workload_id: WorkloadId("wl-1".into()),
+            ip: Ipv4Addr::new(172, 16, 0, 101),
+            policy: test_service_policy(),
+            activation: Some(ActivationSpec {
+                idle_timeout: Duration::from_secs(30),
+            }),
+        },
+    );
+    NamespaceSpec {
+        network: test_network_config(),
+        workloads,
+        services,
+    }
+}
+
 // --- Tests ---
 
 /// Helper to run a model check with a given depth and print results.
+/// `known_failures` lists properties expected to have counterexamples (known bugs).
+/// All other properties are asserted to hold.
 fn run_check(name: &str, model: NamespaceModel, max_depth: usize) {
+    run_check_with_known_failures(name, model, max_depth, &[]);
+}
+
+fn run_check_with_known_failures(
+    name: &str,
+    model: NamespaceModel,
+    max_depth: usize,
+    known_failures: &[&'static str],
+) {
+    use stateright::Expectation;
     let result = model
         .checker()
         .threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
@@ -998,7 +1235,27 @@ fn run_check(name: &str, model: NamespaceModel, max_depth: usize) {
         .spawn_dfs()
         .join();
 
-    result.assert_properties();
+    let properties = result.model().properties();
+    for p in &properties {
+        if known_failures.contains(&p.name) {
+            // Expect a counterexample.
+            assert!(
+                result.discovery(p.name).is_some(),
+                "{}: expected counterexample for '{}' but none found",
+                name,
+                p.name,
+            );
+        } else {
+            match p.expectation {
+                Expectation::Always | Expectation::Eventually => {
+                    result.assert_no_discovery(p.name);
+                }
+                Expectation::Sometimes => {
+                    result.assert_any_discovery(p.name);
+                }
+            }
+        }
+    }
     println!(
         "{}: {} unique states explored (depth={})",
         name,
@@ -1017,6 +1274,7 @@ fn check_single_service_activation() {
             enable_worker_failure: false,
             enable_delete: false,
             enable_spec_update: false,
+            enable_service_addition: false,
             max_retries: 2,
         },
         100,
@@ -1033,6 +1291,7 @@ fn check_two_services() {
             enable_worker_failure: false,
             enable_delete: false,
             enable_spec_update: false,
+            enable_service_addition: false,
             max_retries: 2,
         },
         100,
@@ -1049,6 +1308,7 @@ fn check_activation_with_worker_failure() {
             enable_worker_failure: true,
             enable_delete: false,
             enable_spec_update: false,
+            enable_service_addition: false,
             max_retries: 2,
         },
         50,
@@ -1065,6 +1325,7 @@ fn check_two_workers_two_services() {
             enable_worker_failure: true,
             enable_delete: false,
             enable_spec_update: false,
+            enable_service_addition: false,
             max_retries: 2,
         },
         50,
@@ -1081,6 +1342,7 @@ fn check_delete_lifecycle() {
             enable_worker_failure: false,
             enable_delete: true,
             enable_spec_update: false,
+            enable_service_addition: false,
             max_retries: 2,
         },
         100,
@@ -1097,6 +1359,7 @@ fn check_delete_with_worker_failure() {
             enable_worker_failure: true,
             enable_delete: true,
             enable_spec_update: false,
+            enable_service_addition: false,
             max_retries: 2,
         },
         50,
@@ -1113,8 +1376,79 @@ fn check_namespace_spec_update() {
             enable_worker_failure: false,
             enable_delete: false,
             enable_spec_update: true,
+            enable_service_addition: false,
             max_retries: 2,
         },
         100,
+    );
+}
+
+// --- Multi-Service-Per-Workload Bug Tests ---
+
+#[test]
+fn check_shared_workload_two_services() {
+    run_check(
+        "Shared workload two services",
+        NamespaceModel {
+            initial_spec: shared_workload_spec(),
+            worker_count: 1,
+            enable_worker_failure: false,
+            enable_delete: false,
+            enable_spec_update: false,
+            enable_service_addition: false,
+            max_retries: 2,
+        },
+        100,
+    );
+}
+
+#[test]
+fn check_shared_workload_with_worker_failure() {
+    run_check(
+        "Shared workload with worker failure",
+        NamespaceModel {
+            initial_spec: shared_workload_spec(),
+            worker_count: 2,
+            enable_worker_failure: true,
+            enable_delete: false,
+            enable_spec_update: false,
+            enable_service_addition: false,
+            max_retries: 2,
+        },
+        50,
+    );
+}
+
+#[test]
+fn check_add_service_to_running_workload() {
+    run_check(
+        "Add service to running workload",
+        NamespaceModel {
+            initial_spec: single_service_spec(),
+            worker_count: 1,
+            enable_worker_failure: false,
+            enable_delete: false,
+            enable_spec_update: false,
+            enable_service_addition: true,
+            max_retries: 2,
+        },
+        50,
+    );
+}
+
+#[test]
+fn check_late_worker_receives_create_service() {
+    run_check(
+        "Late worker receives create service",
+        NamespaceModel {
+            initial_spec: single_service_spec(),
+            worker_count: 2,
+            enable_worker_failure: false,
+            enable_delete: false,
+            enable_spec_update: false,
+            enable_service_addition: false,
+            max_retries: 2,
+        },
+        50,
     );
 }

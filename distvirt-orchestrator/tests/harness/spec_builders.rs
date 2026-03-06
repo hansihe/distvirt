@@ -247,6 +247,55 @@ pub fn activation_spec_with_segment(idle_timeout: Duration, segment_id: u16) -> 
     spec
 }
 
+/// 1 workload "shared" backed by 2 always-on services "svc-a" and "svc-b" (no activation).
+pub fn always_on_multi_service_spec() -> NamespaceSpec {
+    let wl_id = WorkloadId("shared".to_string());
+
+    let mut workloads = HashMap::new();
+    workloads.insert(
+        wl_id.clone(),
+        WorkloadSpec {
+            containers: vec![container_spec("docker.io/library/nginx:latest")],
+            network: pod_network(10),
+            suspend_on_idle: false,
+        },
+    );
+
+    let mut services = HashMap::new();
+    services.insert(
+        ServiceId::from("svc-a"),
+        ServiceSpec {
+            workload_id: wl_id.clone(),
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            policy: ServicePolicy {
+                buffer_frames: 100,
+                timeout_ms: 5000,
+                activator: None,
+            },
+            activation: None,
+        },
+    );
+    services.insert(
+        ServiceId::from("svc-b"),
+        ServiceSpec {
+            workload_id: wl_id,
+            ip: Ipv4Addr::new(172, 16, 0, 101),
+            policy: ServicePolicy {
+                buffer_frames: 100,
+                timeout_ms: 5000,
+                activator: None,
+            },
+            activation: None,
+        },
+    );
+
+    NamespaceSpec {
+        network: default_network(),
+        workloads,
+        services,
+    }
+}
+
 /// 2 independent always-on workloads "echo-a" and "echo-b" with services.
 pub fn always_on_two_workloads_spec() -> NamespaceSpec {
     let wl_a = WorkloadId("echo-a".to_string());

@@ -51,13 +51,17 @@ async fn test_fabric_route_update_on_pod_launch() {
         ),
     );
 
-    // The hosting worker should NOT have a route to its own pod.
+    // The hosting worker should NOT have a route to its own pod
+    // (neither via incremental FabricRouteUpdate nor full FabricRouteSync).
     h.assert_worker_did_not_receive_command_matching(
         &pod_worker_id,
-        "FabricRouteUpdate adding a route to self",
+        "FabricRouteUpdate or FabricRouteSync adding a route to self",
         |cmd| matches!(
             cmd,
             WorkerCommand::FabricRouteUpdate { added, .. } if !added.is_empty()
+        ) || matches!(
+            cmd,
+            WorkerCommand::FabricRouteSync { routes, .. } if !routes.is_empty()
         ),
     );
 }

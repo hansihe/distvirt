@@ -474,6 +474,7 @@ message ServiceDeactivated {
 enum ServiceDeactivationReason {
     SERVICE_DEACTIVATION_REASON_UNSPECIFIED = 0;
     SERVICE_DEACTIVATION_REASON_IDLE_TIMEOUT = 1;
+    SERVICE_DEACTIVATION_REASON_FORCE_DEACTIVATE = 2;
 }
 
 // --- Streaming (Logs, Status Watch) ---

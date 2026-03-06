@@ -41,101 +41,7 @@ impl NamespaceStateMachine {
 
         for wl_id in removed_workloads {
             if let Some(wl) = self.workloads.remove(&wl_id) {
-                match &wl.state {
-                    WorkloadState::Launching {
-                        pod_id,
-                        worker_id,
-                        launch_timeout,
-                        ..
-                    } => {
-                        out.timers_cancel.push(launch_timeout.clone());
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: false,
-                            },
-                        ));
-                        self.pod_map.remove(pod_id);
-                    }
-                    WorkloadState::Running {
-                        pod_id, worker_id, ..
-                    } => {
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: true,
-                            },
-                        ));
-                        self.pod_map.remove(pod_id);
-                    }
-                    WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed => {}
-                    WorkloadState::Transitioning => unreachable!("Transitioning in workload removal"),
-                    WorkloadState::RetryBackoff { backoff_timer } => {
-                        out.timers_cancel.push(backoff_timer.clone());
-                    }
-                    WorkloadState::Suspending {
-                        pod_id,
-                        worker_id,
-                        suspend_timeout,
-                        ..
-                    } => {
-                        out.timers_cancel.push(suspend_timeout.clone());
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: false,
-                            },
-                        ));
-                        self.pod_map.remove(pod_id);
-                    }
-                    WorkloadState::Suspended {
-                        artifact_id,
-                    } => {
-                        // Look up placement table and emit DeleteArtifact.
-                        if let Some(placement) = placement_table.remove(artifact_id) {
-                            out.worker_commands.push((
-                                placement.worker_id,
-                                WorkerCommand::DeleteArtifact {
-                                    artifact_id: artifact_id.clone(),
-                                    pool_id: placement.pool_id,
-                                },
-                            ));
-                        }
-                    }
-                    WorkloadState::Resuming {
-                        pod_id,
-                        artifact_id,
-                        resume_timeout,
-                        ..
-                    } => {
-                        out.timers_cancel.push(resume_timeout.clone());
-                        // Look up placement for the worker to stop pod on and delete snapshot.
-                        if let Some(placement) = placement_table.remove(artifact_id) {
-                            out.worker_commands.push((
-                                placement.worker_id.clone(),
-                                WorkerCommand::StopPod {
-                                    namespace_id: self.namespace_id.clone(),
-                                    pod_id: pod_id.clone(),
-                                    graceful: false,
-                                },
-                            ));
-                            out.worker_commands.push((
-                                placement.worker_id,
-                                WorkerCommand::DeleteArtifact {
-                                    artifact_id: artifact_id.clone(),
-                                    pool_id: placement.pool_id,
-                                },
-                            ));
-                        }
-                        self.pod_map.remove(pod_id);
-                    }
-                }
+                self.teardown_workload(wl, placement_table, out);
             }
         }
 
@@ -297,7 +203,9 @@ impl NamespaceStateMachine {
             }
         }
 
-        // Reset workloads and services so no stale references remain.
+        // Direct state reset (bypasses step()): workloads and services are
+        // force-reset to initial states after all cleanup outputs (timer cancels,
+        // artifact deletes) have been explicitly emitted above.
         for wl in self.workloads.values_mut() {
             wl.state = WorkloadState::Dormant;
             wl.current_demand = 0;
@@ -369,21 +277,6 @@ impl NamespaceStateMachine {
             None => return,
         };
 
-        // Find associated service to get the service spec.
-        let svc_id = self
-            .service_workload
-            .iter()
-            .find(|(_, wl_id)| *wl_id == workload_id)
-            .map(|(sid, _)| sid.clone());
-        let svc_id = match svc_id {
-            Some(id) => id,
-            None => return,
-        };
-        let svc_spec = match self.spec.services.get(&svc_id) {
-            Some(s) => s.clone(),
-            None => return,
-        };
-
         // Register pod.
         debug_assert!(
             !self.pod_map.contains(pod_id),
@@ -398,17 +291,8 @@ impl NamespaceStateMachine {
             },
         );
 
-        // Send worker commands to create the service and launch the pod.
+        // Send worker command to launch the pod.
         let ns_id = self.namespace_id.clone();
-        out.worker_commands.push((
-            worker_id.clone(),
-            WorkerCommand::CreateService {
-                namespace_id: ns_id.clone(),
-                service_id: svc_id.clone(),
-                ip: svc_spec.ip,
-                policy: svc_spec.policy.clone(),
-            },
-        ));
         // Override gateway and netmask from the namespace's network config,
         // since the workload spec may not have them populated.
         let mut pod_network = wl_spec.network.clone();
@@ -657,6 +541,108 @@ impl NamespaceStateMachine {
                     reason: "no services were in active state".to_string(),
                 },
             ));
+        }
+    }
+
+    /// Clean up a removed workload: cancel timers, stop pods, delete artifacts.
+    pub(super) fn teardown_workload(
+        &mut self,
+        wl: WorkloadStateMachine,
+        placement_table: &mut PlacementTable,
+        out: &mut NamespaceOutput,
+    ) {
+        match &wl.state {
+            WorkloadState::Launching {
+                pod_id,
+                worker_id,
+                launch_timeout,
+                ..
+            } => {
+                out.timers_cancel.push(launch_timeout.clone());
+                out.worker_commands.push((
+                    worker_id.clone(),
+                    WorkerCommand::StopPod {
+                        namespace_id: self.namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        graceful: false,
+                    },
+                ));
+                self.pod_map.remove(pod_id);
+            }
+            WorkloadState::Running {
+                pod_id, worker_id, ..
+            } => {
+                out.worker_commands.push((
+                    worker_id.clone(),
+                    WorkerCommand::StopPod {
+                        namespace_id: self.namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        graceful: true,
+                    },
+                ));
+                self.pod_map.remove(pod_id);
+            }
+            WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed => {}
+            WorkloadState::Transitioning => unreachable!("Transitioning in workload removal"),
+            WorkloadState::RetryBackoff { backoff_timer } => {
+                out.timers_cancel.push(backoff_timer.clone());
+            }
+            WorkloadState::Suspending {
+                pod_id,
+                worker_id,
+                suspend_timeout,
+                ..
+            } => {
+                out.timers_cancel.push(suspend_timeout.clone());
+                out.worker_commands.push((
+                    worker_id.clone(),
+                    WorkerCommand::StopPod {
+                        namespace_id: self.namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        graceful: false,
+                    },
+                ));
+                self.pod_map.remove(pod_id);
+            }
+            WorkloadState::Suspended {
+                artifact_id,
+            } => {
+                if let Some(placement) = placement_table.remove(artifact_id) {
+                    out.worker_commands.push((
+                        placement.worker_id,
+                        WorkerCommand::DeleteArtifact {
+                            artifact_id: artifact_id.clone(),
+                            pool_id: placement.pool_id,
+                        },
+                    ));
+                }
+            }
+            WorkloadState::Resuming {
+                pod_id,
+                artifact_id,
+                resume_timeout,
+                ..
+            } => {
+                out.timers_cancel.push(resume_timeout.clone());
+                if let Some(placement) = placement_table.remove(artifact_id) {
+                    out.worker_commands.push((
+                        placement.worker_id.clone(),
+                        WorkerCommand::StopPod {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            graceful: false,
+                        },
+                    ));
+                    out.worker_commands.push((
+                        placement.worker_id,
+                        WorkerCommand::DeleteArtifact {
+                            artifact_id: artifact_id.clone(),
+                            pool_id: placement.pool_id,
+                        },
+                    ));
+                }
+                self.pod_map.remove(pod_id);
+            }
         }
     }
 }

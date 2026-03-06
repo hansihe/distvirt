@@ -392,8 +392,8 @@ impl WorkloadStateMachine {
                                 PendingIntent::None | PendingIntent::Demand => {
                                     self.state = WorkloadState::Running { pod_id, worker_id };
                                 }
-                                PendingIntent::Deactivate | PendingIntent::Restart => {
-                                    // Admin override or restart: stop pod immediately.
+                                PendingIntent::Deactivate => {
+                                    // Admin override: stop pod immediately.
                                     outputs.push(WorkloadOutput::WorkerCommand(
                                         worker_id,
                                         WorkerCommand::StopPod {
@@ -403,6 +403,18 @@ impl WorkloadStateMachine {
                                         },
                                     ));
                                     self.state = WorkloadState::Dormant;
+                                }
+                                PendingIntent::Restart => {
+                                    // Spec changed: stop pod then relaunch based on demand.
+                                    outputs.push(WorkloadOutput::WorkerCommand(
+                                        worker_id,
+                                        WorkerCommand::StopPod {
+                                            namespace_id: namespace_id.clone(),
+                                            pod_id,
+                                            graceful: false,
+                                        },
+                                    ));
+                                    self.transition_on_demand(&mut outputs);
                                 }
                             }
                         }
@@ -423,7 +435,7 @@ impl WorkloadStateMachine {
                             });
 
                             match pending {
-                                PendingIntent::Deactivate | PendingIntent::Restart => {
+                                PendingIntent::Deactivate => {
                                     // Admin override: stop pod, go Dormant.
                                     outputs.push(WorkloadOutput::WorkerCommand(
                                         worker_id,
@@ -434,6 +446,18 @@ impl WorkloadStateMachine {
                                         },
                                     ));
                                     self.state = WorkloadState::Dormant;
+                                }
+                                PendingIntent::Restart => {
+                                    // Spec changed: stop pod then relaunch based on demand.
+                                    outputs.push(WorkloadOutput::WorkerCommand(
+                                        worker_id,
+                                        WorkerCommand::StopPod {
+                                            namespace_id: namespace_id.clone(),
+                                            pod_id,
+                                            graceful: false,
+                                        },
+                                    ));
+                                    self.transition_on_demand(&mut outputs);
                                 }
                                 PendingIntent::Demand => {
                                     // Demand is guaranteed > 0 by invariant.
@@ -542,8 +566,6 @@ impl WorkloadStateMachine {
                 if !is_suspending {
                     return outputs;
                 }
-                self.consecutive_failures += 1;
-                self.needs_successful_boot = true;
                 if let WorkloadState::Suspending {
                     suspend_timeout,
                     pending,
@@ -563,11 +585,17 @@ impl WorkloadStateMachine {
                     Some(_) => true,
                     None => true,  // Unknown reason treated as failure.
                 };
-                if is_failure {
+                let in_suspending = matches!(
+                    &self.state,
+                    WorkloadState::Suspending { pod_id: pid, .. } if *pid == pod_id
+                );
+                if is_failure && !in_suspending {
                     self.consecutive_failures += 1;
                 }
-                // Pod lost — commit to reaching Running before going dormant.
-                self.needs_successful_boot = true;
+                if !in_suspending {
+                    // Pod lost — commit to reaching Running before going dormant.
+                    self.needs_successful_boot = true;
+                }
                 match &self.state {
                     WorkloadState::Launching {
                         pod_id: pid,
@@ -635,7 +663,6 @@ impl WorkloadStateMachine {
                 let affects_us = match &self.state {
                     WorkloadState::Launching { worker_id: wid, .. }
                     | WorkloadState::Running { worker_id: wid, .. }
-                    | WorkloadState::Suspending { worker_id: wid, .. }
                     | WorkloadState::Resuming { worker_id: wid, .. } => *wid == worker_id,
                     WorkloadState::Suspended { .. } => true,
                     _ => false,

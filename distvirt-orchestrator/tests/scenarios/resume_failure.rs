@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerEvent};
+use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
@@ -72,4 +72,18 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     // relaunch via cold LaunchPod.
     h.assert_workload_retry_backoff("ns1", "web");
     h.assert_service_need_backend("ns1", "web-svc");
+
+    // Advance past the backoff timer (1s for first retry) → cold launch.
+    h.advance_time(Duration::from_secs(2)).await;
+
+    // Workload should be running again after cold launch.
+    h.assert_workload_running("ns1", "web");
+
+    // Verify a LaunchPod (cold start) was sent after the resume failure,
+    // not another ResumePod.
+    let cmds = h.worker(&w1).commands();
+    let resume_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::ResumePod { .. })).count();
+    let launch_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::LaunchPod { .. })).count();
+    assert_eq!(resume_count, 1, "expected exactly 1 ResumePod (the failed one)");
+    assert!(launch_count >= 2, "expected at least 2 LaunchPod commands (initial + cold restart), got {}", launch_count);
 }

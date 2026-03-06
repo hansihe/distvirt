@@ -59,13 +59,9 @@ async fn test_worker_disconnect_during_suspend() {
     h.disconnect_worker(&w1);
     h.converge().await;
 
-    // Workload should not panic and should transition to a safe state
-    let state = h.workload_state("ns", "web");
-    assert!(
-        !matches!(state, WorkloadState::Suspending { .. }),
-        "workload should not be stuck in Suspending after worker disconnect, got {:?}",
-        state
-    );
+    // Demand is 0 (service went idle), no workers available.
+    // Workload should transition to Dormant.
+    h.assert_workload_dormant("ns", "web");
 }
 
 /// Pod is Resuming from Suspended. Worker disconnects. Artifact may be lost.
@@ -117,13 +113,9 @@ async fn test_worker_disconnect_during_resume() {
     h.disconnect_worker(&w1);
     h.converge().await;
 
-    // Workload should transition out of Resuming
-    let state = h.workload_state("ns", "web");
-    assert!(
-        !matches!(state, WorkloadState::Resuming { .. }),
-        "workload should not be stuck in Resuming after worker disconnect, got {:?}",
-        state
-    );
+    // Demand > 0 (service was re-activated), but no workers available.
+    // Workload should be WaitingForCapacity.
+    h.assert_workload_waiting_for_capacity("ns", "web");
 }
 
 /// Running workload, all workers disconnect. Workload goes WaitingForCapacity.
@@ -146,18 +138,8 @@ async fn test_all_workers_disconnect() {
 }
 
 /// Worker holds artifacts in placement table. Disconnect.
-/// Verify placement entries for that worker are removed.
-///
-/// BUG: `handle_worker_lost` only sends WorkerLost to workloads whose `worker_id()`
-/// matches the disconnected worker. `WorkloadState::Suspended` has no worker_id
-/// (it only stores artifact_id), so suspended workloads with artifacts on the
-/// disconnected worker are never notified. The placement table entry IS removed
-/// (via `remove_by_worker`), but the workload stays in Suspended with a stale
-/// artifact_id pointing to a non-existent placement.
-///
-/// Fix: after removing placements, also check for Suspended workloads whose
-/// artifact_id was in the removed set and send them WorkerLost or transition
-/// them appropriately.
+/// Verify placement entries for that worker are removed and suspended workloads
+/// are properly notified via WorkerLost.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_worker_disconnect_clears_placements() {
     let mut h = TestHarness::new();
@@ -187,7 +169,7 @@ async fn test_worker_disconnect_clears_placements() {
 
     // Verify there's an artifact
     let _artifact_id = match h.workload_state("ns", "web") {
-        WorkloadState::Suspended { artifact_id } => artifact_id.clone(),
+        WorkloadState::Suspended { .. } => {},
         other => panic!("expected Suspended, got {:?}", other),
     };
 
@@ -195,9 +177,7 @@ async fn test_worker_disconnect_clears_placements() {
     h.disconnect_worker(&w1);
     h.converge().await;
 
-    // BUG: Workload stays in Suspended with a stale artifact_id even though the
-    // placement was removed from the table. See docstring for details.
-    // When this bug is fixed, the workload should transition to Dormant or
-    // WaitingForCapacity.
-    h.assert_workload_suspended("ns", "web");
+    // After fix: suspended workload with stale artifact is notified via WorkerLost
+    // and transitions to WaitingForCapacity (no workers available).
+    h.assert_workload_waiting_for_capacity("ns", "web");
 }

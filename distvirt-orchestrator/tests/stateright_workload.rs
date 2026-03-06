@@ -5,6 +5,9 @@ use stateright::*;
 use distvirt_orchestrator::types::*;
 use distvirt_orchestrator::workload::{WorkloadInput, WorkloadOutput, WorkloadStateMachine};
 
+/// Must match `WorkloadStateMachine::MAX_RETRIES`.
+const MAX_RETRIES: u32 = 5;
+
 // --- Model Configuration ---
 
 struct WorkloadModel {
@@ -335,27 +338,16 @@ impl Model for WorkloadModel {
             Property::<Self>::always("no transitioning state", |_model, state| {
                 !matches!(state.state, WorkloadState::Transitioning)
             }),
-            // Safety: Transitioning sentinel is the only invalid state.
-            // With needs_successful_boot and ForceDeactivate, most states are
-            // reachable with demand=0. The namespace reconciliation layer handles
-            // all transient demand mismatches in the real system.
-            Property::<Self>::always("no transitioning with zero demand", |_model, state| {
-                if state.current_demand == 0 {
-                    !matches!(state.state, WorkloadState::Transitioning)
-                } else {
-                    true
-                }
-            }),
             // Safety: consecutive failures never exceed MAX_RETRIES.
             Property::<Self>::always("consecutive failures bounded", |_model, state| {
-                state.consecutive_failures <= 5
+                state.consecutive_failures <= MAX_RETRIES
             }),
             // Safety: Failed implies max retries exhausted.
             // Note: current_demand may be 0 if demand dropped during retry while
             // needs_successful_boot kept the workload going.
             Property::<Self>::always("failed implies max retries", |_model, state| {
                 if matches!(state.state, WorkloadState::Failed) {
-                    state.consecutive_failures >= 5
+                    state.consecutive_failures >= MAX_RETRIES
                 } else {
                     true
                 }
@@ -736,6 +728,8 @@ fn workload_force_deactivate_full_chaos() {
     );
 }
 
+/// Exercises retry/backoff mechanics with 30 steps — enough to reach Failed state
+/// and verify the "can recover from failed" liveness property (guarded at max_steps < 25).
 #[test]
 fn workload_retry_backoff() {
     let result = WorkloadModel {
@@ -758,6 +752,8 @@ fn workload_retry_backoff() {
     );
 }
 
+/// Like `workload_retry_backoff` but with 35 steps to explore deeper state space,
+/// ensuring recovery paths (SpecChanged/ManualRestart) from Failed are reachable.
 #[test]
 fn workload_retry_recovery() {
     let result = WorkloadModel {

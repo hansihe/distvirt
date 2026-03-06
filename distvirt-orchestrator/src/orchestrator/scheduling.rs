@@ -9,21 +9,12 @@ impl Orchestrator {
         ns_out: NamespaceOutput,
         out: &mut OrchestratorOutput,
     ) {
-        // Merge namespace output into top-level output.
-        out.worker_commands
-            .extend(ns_out.worker_commands.iter().cloned());
-        out.timers_set.extend(ns_out.timers_set.iter().cloned());
-        out.timers_cancel
-            .extend(ns_out.timers_cancel.iter().cloned());
-
         let destroyed = ns_out.destroyed;
         let pod_requests = ns_out.pod_requests.clone();
         let resume_requests = ns_out.resume_requests.clone();
 
-        if ns_out != NamespaceOutput::default() {
-            out.namespace_outputs
-                .push((namespace_id.clone(), ns_out));
-        }
+        // Merge namespace output into top-level output.
+        out.merge_namespace(namespace_id.clone(), ns_out);
 
         // Process pod scheduling requests from the namespace.
         for req in pod_requests {
@@ -36,16 +27,7 @@ impl Orchestrator {
                         pod_id,
                     }, &mut self.placement_table);
                     // Recursively process outputs from LaunchPod (it won't emit more pod_requests).
-                    out.worker_commands
-                        .extend(launch_out.worker_commands.iter().cloned());
-                    out.timers_set
-                        .extend(launch_out.timers_set.iter().cloned());
-                    out.timers_cancel
-                        .extend(launch_out.timers_cancel.iter().cloned());
-                    if launch_out != NamespaceOutput::default() {
-                        out.namespace_outputs
-                            .push((namespace_id.clone(), launch_out));
-                    }
+                    out.merge_namespace(namespace_id.clone(), launch_out);
                 }
             }
             // If no worker available, workload stays in WaitingForCapacity.
@@ -70,16 +52,7 @@ impl Orchestrator {
                     artifact_id: req.artifact_id,
                 }, &mut self.placement_table);
                 // Recursively process outputs from ResumePod.
-                out.worker_commands
-                    .extend(resume_out.worker_commands.iter().cloned());
-                out.timers_set
-                    .extend(resume_out.timers_set.iter().cloned());
-                out.timers_cancel
-                    .extend(resume_out.timers_cancel.iter().cloned());
-                if resume_out != NamespaceOutput::default() {
-                    out.namespace_outputs
-                        .push((namespace_id.clone(), resume_out));
-                }
+                out.merge_namespace(namespace_id.clone(), resume_out);
             }
         }
 
@@ -125,16 +98,7 @@ impl Orchestrator {
                         worker_id,
                         pod_id,
                     }, &mut self.placement_table);
-                    out.worker_commands
-                        .extend(launch_out.worker_commands.iter().cloned());
-                    out.timers_set
-                        .extend(launch_out.timers_set.iter().cloned());
-                    out.timers_cancel
-                        .extend(launch_out.timers_cancel.iter().cloned());
-                    if launch_out != NamespaceOutput::default() {
-                        out.namespace_outputs
-                            .push((ns_id.clone(), launch_out));
-                    }
+                    out.merge_namespace(ns_id.clone(), launch_out);
                 }
             }
         }

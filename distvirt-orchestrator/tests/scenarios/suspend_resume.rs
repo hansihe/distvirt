@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
-use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
 
 /// Full cycle: activate → run → idle → suspend → re-activate → resume → running.
@@ -85,14 +84,9 @@ async fn test_suspend_timeout_fallback_to_stop() {
     // Advance past suspend timeout (30s)
     h.advance_time(Duration::from_secs(31)).await;
 
-    // After suspend timeout, workload should transition out of Suspending.
-    // The timeout handler issues StopPod and transitions.
-    let state = h.workload_state("ns", "web");
-    assert!(
-        !matches!(state, WorkloadState::Suspending { .. }),
-        "workload should not be Suspending after timeout, got {:?}",
-        state
-    );
+    // After suspend timeout, the orchestrator issues StopPod and the workload
+    // transitions to Dormant (demand is 0, service went idle).
+    h.assert_workload_dormant("ns", "web");
 
     // StopPod should have been issued
     let cmds = h.worker(&w1).commands();
@@ -129,13 +123,9 @@ async fn test_suspend_failure_fallback_to_stop() {
     h.converge().await;
     h.advance_time(timeout + Duration::from_secs(1)).await;
 
-    // PodSuspendFailed was injected by the handler. Workload should not be stuck in Suspending.
-    let state = h.workload_state("ns", "web");
-    assert!(
-        !matches!(state, WorkloadState::Suspending { .. }),
-        "workload should not be Suspending after PodSuspendFailed, got {:?}",
-        state
-    );
+    // PodSuspendFailed triggers StopPod fallback. With demand at 0 (service went idle),
+    // the workload transitions to Dormant.
+    h.assert_workload_dormant("ns", "web");
 }
 
 /// Use activation_no_suspend_spec. Activate → run → idle → stop (not suspend).

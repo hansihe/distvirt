@@ -227,15 +227,14 @@ async fn test_spec_change_during_launch() {
     });
     h.converge().await;
 
-    // Pending was Restart, so workload should stop old pod and go Dormant,
-    // then transition_on_demand → WaitingForCapacity.
-    // But since the handler hangs on LaunchPod, it may stay in WaitingForCapacity
-    // or be Launching again (if somehow scheduled). Let's check it's not Running
-    // with the old pod.
+    // Pending was Restart: workload stops old pod, goes Dormant, then
+    // transition_on_demand → WaitingForCapacity (demand > 0, always-on).
+    // The handler hangs on LaunchPod, so the re-launch stays in WaitingForCapacity
+    // or Launching.
     let state = h.workload_state("ns", "echo");
     assert!(
-        !matches!(state, WorkloadState::Running { .. }),
-        "workload should not be Running with old spec after SpecChanged during launch, got {:?}",
+        matches!(state, WorkloadState::WaitingForCapacity | WorkloadState::Launching { .. }),
+        "workload should be WaitingForCapacity or Launching after Restart intent, got {:?}",
         state
     );
 
@@ -308,14 +307,9 @@ async fn test_spec_change_during_suspend() {
     });
     h.converge().await;
 
-    // Pending was Restart. Workload should have deleted artifact and transitioned based on demand.
-    // Since demand dropped to 0, workload should be Dormant.
-    let state = h.workload_state("ns", "web");
-    assert!(
-        !matches!(state, WorkloadState::Suspended { .. }),
-        "workload should NOT be in Suspended after spec change during suspend, got {:?}",
-        state
-    );
+    // Pending was Restart. Workload deletes the stale artifact and transitions based on demand.
+    // Demand is 0 (service went idle before suspend), so workload should be Dormant.
+    h.assert_workload_dormant("ns", "web");
 
     // Verify DeleteArtifact was issued
     let cmds = h.worker(&w1).commands();

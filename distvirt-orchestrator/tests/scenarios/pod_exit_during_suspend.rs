@@ -71,38 +71,10 @@ async fn test_pod_exit_during_suspend() {
     });
     h.converge().await;
 
-    // Workload should NOT be stuck in Suspending.
-    let state = h.workload_state("ns1", "web");
-    assert!(
-        !matches!(state, distvirt_orchestrator::types::WorkloadState::Suspending { .. }),
-        "workload should not be stuck in Suspending after pod crash, got {:?}",
-        state
-    );
-
-    // Since demand is down (no active services), the workload should be in a
-    // non-running state. Depending on implementation, this could be Dormant,
-    // RetryBackoff, or WaitingForCapacity.
-    // The key assertion is: NOT stuck in Suspending.
-    //
-    // With the current implementation, PodFailed during Suspending triggers PodGone
-    // which should handle the transition. Let's verify the specific state:
-    let state = h.workload_state("ns1", "web");
-    match state {
-        distvirt_orchestrator::types::WorkloadState::Dormant
-        | distvirt_orchestrator::types::WorkloadState::RetryBackoff { .. } => {
-            // Both are acceptable: Dormant means clean recovery,
-            // RetryBackoff means it counted as a failure (also fine).
-        }
-        other => {
-            // Document whatever state we actually get — this test is primarily
-            // about not being stuck in Suspending.
-            panic!(
-                "unexpected workload state after pod crash during suspend: {:?}. \
-                 Expected Dormant or RetryBackoff.",
-                other
-            );
-        }
-    }
+    // Demand is 0 (service went idle before suspend was initiated).
+    // A pod crash during an intentional deactivation should not count as a failure —
+    // the pod was already being shut down. Workload should go Dormant.
+    h.assert_workload_dormant("ns1", "web");
 }
 
 /// Test: Pod exits with exit_code during suspend (PodExited, not PodFailed).
@@ -156,11 +128,7 @@ async fn test_pod_exited_during_suspend() {
     });
     h.converge().await;
 
-    // Should not be stuck in Suspending.
-    let state = h.workload_state("ns1", "web");
-    assert!(
-        !matches!(state, distvirt_orchestrator::types::WorkloadState::Suspending { .. }),
-        "workload should not be stuck in Suspending after PodExited, got {:?}",
-        state
-    );
+    // Demand is 0 (service went idle). Pod exiting during an intentional deactivation
+    // should not count as a failure. Workload should go Dormant.
+    h.assert_workload_dormant("ns1", "web");
 }
