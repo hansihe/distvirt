@@ -54,6 +54,7 @@ impl NamespaceStateMachine {
     }
 
     pub(crate) fn apply_wg_outputs(&self, outputs: Vec<WgPeerOutput>, out: &mut NamespaceOutput) {
+        let mut has_changes = false;
         for wg_out in outputs {
             match wg_out {
                 WgPeerOutput::AddPeer { peer_public_key, peer_ip } => {
@@ -68,6 +69,7 @@ impl NamespaceStateMachine {
                             },
                         ));
                     }
+                    has_changes = true;
                 }
                 WgPeerOutput::RemovePeer { peer_public_key } => {
                     for worker_id in self.active_worker_ids() {
@@ -78,8 +80,14 @@ impl NamespaceStateMachine {
                             },
                         ));
                     }
+                    has_changes = true;
                 }
             }
+        }
+        // Broadcast endpoint updates so all workers learn about the
+        // new/removed WireGuard peer routes.
+        if has_changes {
+            self.emit_endpoint_sync(out);
         }
     }
 }

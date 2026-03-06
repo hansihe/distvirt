@@ -1,9 +1,10 @@
 use super::*;
 use super::service_activator::ServiceProcessor;
-use super::endpoint::{EndpointTable, EndpointSyncEffect};
+use super::endpoint::EndpointTable;
 use crate::packet::{FabricPacket, FABRIC_HDR_SZ, with_fabric_header};
 use distvirt_worker_protocol::{
-    EndpointKind, EndpointPodBackend, EndpointSpec, ServiceId, ServicePolicy,
+    EndpointKind, EndpointPlacement, EndpointPodBackend, EndpointSpec, ServiceId, ServicePolicy,
+    WorkerId,
 };
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -89,6 +90,28 @@ fn make_test_fabric() -> Fabric<TestPort> {
     Fabric::new(TEST_SUBNET, TEST_PREFIX)
 }
 
+/// Create a LocalPod endpoint entry for an IP so that add_port_raw_with_ip can attach to it.
+fn create_local_pod_endpoint(fabric: &Fabric<TestPort>, ip: Ipv4Addr) {
+    use crate::fabric::service_activator::ServiceProcessor;
+    let tables = fabric.tables();
+    let mut et = tables.endpoint_table.lock().unwrap();
+    let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+    et.apply_endpoint_update(
+        vec![EndpointSpec {
+            ip,
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: WorkerId::from(OWN_WORKER),
+                }),
+            },
+        }],
+        vec![],
+        OWN_WORKER,
+        &mut noop,
+        None,
+    );
+}
+
 // --- L3 frame helpers ---
 
 /// Build a valid L3 fabric frame: [fabric_hdr(3)][ip_hdr(20)]
@@ -147,6 +170,8 @@ async fn ipv4_frame_routes_to_correct_port_by_ip() {
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -169,6 +194,8 @@ async fn unknown_in_subnet_ip_dropped() {
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -188,6 +215,8 @@ async fn frame_to_own_port_ip_is_delivered() {
     let (port0, handle0) = make_test_port();
     let (port1, _handle1) = make_test_port();
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -211,6 +240,8 @@ async fn external_ip_sent_to_gateway() {
     let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
     fabric.set_gateway(gw_tx, ingress_rx);
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -239,6 +270,8 @@ async fn gateway_ingress_routes_to_port_by_ip() {
     let (ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
     fabric.set_gateway(gw_tx, ingress_rx);
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -258,6 +291,8 @@ async fn runt_frame_dropped() {
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -272,7 +307,6 @@ async fn runt_frame_dropped() {
 
 #[tokio::test]
 async fn placeholder_route_buffers_instead_of_flooding() {
-    use distvirt_worker_protocol::{EndpointKind, EndpointSpec};
     use crate::fabric::service_activator::ServiceProcessor;
 
     let fabric = make_test_fabric();
@@ -285,16 +319,18 @@ async fn placeholder_route_buffers_instead_of_flooding() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
         et.apply_endpoint_sync(vec![EndpointSpec {
             ip: pod_ip,
             kind: EndpointKind::Pod { placement: None },
-        }], "local-worker", &mut noop);
+        }], "local-worker", &mut noop, None);
     }
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -321,6 +357,8 @@ async fn no_route_external_ip_goes_to_gateway() {
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
 
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -343,7 +381,6 @@ async fn no_route_external_ip_goes_to_gateway() {
 
 #[tokio::test]
 async fn buffered_frames_flushed_to_new_port() {
-    use distvirt_worker_protocol::{EndpointKind, EndpointSpec};
     use crate::fabric::service_activator::ServiceProcessor;
 
     let fabric = make_test_fabric();
@@ -354,14 +391,15 @@ async fn buffered_frames_flushed_to_new_port() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
         et.apply_endpoint_sync(vec![EndpointSpec {
             ip: pod_ip,
             kind: EndpointKind::Pod { placement: None },
-        }], "local-worker", &mut noop);
+        }], "local-worker", &mut noop, None);
     }
 
     let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     // Send 3 frames to the placeholder IP.
@@ -372,6 +410,9 @@ async fn buffered_frames_flushed_to_new_port() {
 
     // Let the port read loop process the frames.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Update pod_ip from UnplacedPod to LocalPod so attach_port works.
+    create_local_pod_endpoint(&fabric, pod_ip);
 
     // Now add a new port "for" that IP — buffered frames should be flushed to it.
     let (port_new, handle_new) = make_test_port();
@@ -386,7 +427,6 @@ async fn buffered_frames_flushed_to_new_port() {
 
 #[tokio::test]
 async fn route_miss_debounced_on_rapid_frames() {
-    use distvirt_worker_protocol::{EndpointKind, EndpointSpec};
     use crate::fabric::service_activator::ServiceProcessor;
 
     let fabric = make_test_fabric();
@@ -398,14 +438,15 @@ async fn route_miss_debounced_on_rapid_frames() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
         et.apply_endpoint_sync(vec![EndpointSpec {
             ip: pod_ip,
             kind: EndpointKind::Pod { placement: None },
-        }], "local-worker", &mut noop);
+        }], "local-worker", &mut noop, None);
     }
 
     let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     // Send multiple frames rapidly.
@@ -487,6 +528,7 @@ fn table_create_service(
         }],
         OWN_WORKER,
         make_processor,
+        None,
     );
 }
 
@@ -516,6 +558,7 @@ fn table_update_backend(
         vec![],
         OWN_WORKER,
         make_processor,
+        None,
     );
 }
 
@@ -547,6 +590,8 @@ async fn activator_tcp_syn_emits_backend_need() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -602,6 +647,8 @@ async fn activator_tcp_rst_dropped() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
@@ -659,6 +706,8 @@ async fn activator_forwards_when_ready() {
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
     // Register port 1 with POD_IP/POD_MAC so fabric can route to it.
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, POD_IP);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
@@ -696,6 +745,7 @@ async fn service_forward_without_registered_backend_port() {
 
     // Add client port (port 0).
     let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     // Send TCP SYN from client (port 0) to service VIP.
@@ -711,6 +761,7 @@ async fn service_forward_without_registered_backend_port() {
 
     // Now add the backend port with IP+MAC — triggers flush_by_backend_ip.
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
     // The buffered frame should now arrive at port 1 (backend) with DNAT applied.
@@ -746,6 +797,8 @@ async fn service_nat_dnat_rewrites_dst_ip() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    create_local_pod_endpoint(&fabric, POD_IP);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
@@ -784,6 +837,8 @@ async fn service_nat_snat_rewrites_return_traffic() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    create_local_pod_endpoint(&fabric, POD_IP);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
@@ -830,6 +885,8 @@ async fn non_natted_unicast_ip_unchanged() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, dst_ip);
+    create_local_pod_endpoint(&fabric, src_ip);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, dst_ip);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, src_ip);
 
@@ -866,6 +923,8 @@ async fn service_nat_ip_checksum_valid() {
 
     let (port0, handle0) = make_test_port();
     let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    create_local_pod_endpoint(&fabric, POD_IP);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
@@ -896,8 +955,6 @@ async fn service_nat_ip_checksum_valid() {
 
 #[tokio::test]
 async fn test_remote_worker_route_forwards_to_tunnel_port() {
-    use distvirt_worker_protocol::WorkerId;
-
     let fabric = make_test_fabric();
 
     let remote_pod_ip = Ipv4Addr::new(10, 0, 0, 50);
@@ -911,11 +968,10 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
 
     // Add a remote pod endpoint for the remote pod IP.
     {
-        use distvirt_worker_protocol::{EndpointKind, EndpointSpec, EndpointPlacement};
         use crate::fabric::service_activator::ServiceProcessor;
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
         et.apply_endpoint_sync(vec![EndpointSpec {
             ip: remote_pod_ip,
             kind: EndpointKind::Pod {
@@ -923,11 +979,12 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
                     worker_id: WorkerId::from(worker_id),
                 }),
             },
-        }], "local-worker", &mut noop);
+        }], "local-worker", &mut noop, None);
     }
 
     // Add a local port that sends a frame to the remote pod IP.
     let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
 
     let frame = make_ipv4_frame(remote_pod_ip);

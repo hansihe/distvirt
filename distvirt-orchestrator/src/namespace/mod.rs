@@ -187,6 +187,21 @@ impl NamespaceStateMachine {
             });
         }
 
+        // WireGuard peer endpoints.
+        // All peers are placed on the first active worker (the one hosting
+        // the WireGuard adapter). When no worker is active, peers are unplaced
+        // and traffic will be buffered.
+        let wg_worker = self.active_worker_ids().into_iter().next();
+        for (_pubkey, peer_info) in &self.wg_peer_manager.peers {
+            let placement = wg_worker.as_ref().map(|wid| EndpointPlacement {
+                worker_id: wid.clone(),
+            });
+            specs.push(EndpointSpec {
+                ip: peer_info.client_ip,
+                kind: EndpointKind::WireGuardPeer { placement },
+            });
+        }
+
         specs
     }
 

@@ -652,6 +652,10 @@ struct EndpointSpec {
       hasPlacement @5 :Bool;
       placement @6 :EndpointPlacement;
     }
+    wireGuardPeer :group {
+      hasPlacement @7 :Bool;
+      placement @8 :EndpointPlacement;
+    }
   }
 }
 

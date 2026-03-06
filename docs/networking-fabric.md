@@ -2,9 +2,11 @@
 
 ## Current State
 
-**Phases 1, 2, 3 (route table + packet buffering), and 4 (service entities) are implemented.** The fabric is a per-namespace userspace L3 IP router with a smoltcp-based gateway providing DNS service discovery and internet egress via TUN+NAT. Each worker creates one fabric instance per namespace. Pod TAP devices are added as ports on the router. The fabric includes a route table for destinations that aren't local — packets to placeholder destinations are buffered per policy, and route miss events propagate to the orchestrator for scale-to-zero activation. Fabric-level service entities provide readiness gating: traffic to service IPs is buffered until the orchestrator signals readiness, at which point packets are flushed to the backing pod. Protocol activators (WASM components) optionally provide protocol-aware activation on service entities — see [Protocol Activators](protocol-activators.md).
+The fabric is a per-namespace userspace L3 IP router with a smoltcp-based gateway providing DNS service discovery and internet egress via TUN+NAT. Each worker creates one fabric instance per namespace. Pod TAP devices are added as ports on the router.
 
-**Note**: Direct pod-to-pod route table buffering (via `add_port_with_ip`) still flushes immediately when the TAP port is added, without readiness gating. Service entities are the recommended path for inter-service communication where readiness gating matters.
+All destination types — services, pods, WireGuard peers — are managed through a unified **endpoint model**. An `EndpointTable` replaces the former separate `ServiceTable` and `RouteTable`. The orchestrator computes a canonical set of `EndpointSpec`s per namespace and broadcasts them to all workers. Each worker derives its local endpoint table based on its own identity (local pod, remote segment, local adapter, etc.).
+
+Protocol activators (WASM components) optionally provide protocol-aware activation on service endpoints — see [Protocol Activators](protocol-activators.md).
 
 ---
 
@@ -13,8 +15,8 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │                  Fabric (L3 router)              │
-│  Owns ports, IP table, NAT table,               │
-│  packet forwarding (DNAT/SNAT for services)     │
+│  Owns ports, NAT table, endpoint table,          │
+│  table, packet forwarding (DNAT/SNAT)           │
 ├─────────────────────────────────────────────────┤
 │              FabricGateway (smoltcp)             │
 │  DNS (service registry) · TUN egress/NAT        │
@@ -39,168 +41,277 @@ The fabric operates on IP packets with a lightweight 3-byte fabric header, not E
 
 `FabricHeader` fields:
 - `flags` (u8): `NEEDS_CSUM` bit for deferred checksum completion
-- `segment_id` (u16): for future inter-worker routing
+- `segment_id` (u16): for inter-worker routing
 
 `FabricPacket` wraps a buffer and provides accessors: `fabric_header()`, `ip_packet()`, `dst_ip()`, `src_ip()`, `protocol()`, `transport_ports()`.
 
-This replaces the previous L2 format which used a 10-byte vnet header + 14-byte Ethernet header. The 3-byte fabric header is significantly more efficient — Ethernet framing is only applied at TAP device boundaries where guest network stacks need it.
+Ethernet framing is only applied at TAP device boundaries where guest network stacks need it.
+
+---
+
+## Unified Endpoint Model
+
+### Problem Solved
+
+Previously, the fabric had two parallel systems for handling traffic to destinations that aren't locally connected:
+
+1. **Service entities** (`ServiceTable`) — rich lifecycle: buffering, activation events, readiness gating, protocol activators, NAT.
+2. **Route table** (`RouteTable`) — simple placeholder buffering with debounced route miss events for pod-to-pod traffic.
+
+These shared the same fundamental behavior but had completely different implementations. Direct pod traffic lacked idle detection, connection tracking, and readiness gating.
+
+### Design
+
+An **endpoint** is any IP destination on the fabric that needs lifecycle management. Every endpoint shares the same front-end behavior:
+
+1. **Packet arrives for destination IP**
+2. **Endpoint decides what to do** — buffer, forward to local backend, forward to remote segment
+3. **Endpoint tracks liveness** — "are there active flows to this destination?"
+
+The difference is only in the **backend strategy**: how packets reach their final destination once the endpoint is ready.
+
+### Endpoint Structure
+
+```rust
+struct Endpoint {
+    ip: Ipv4Addr,
+    state: EndpointState,
+    buffer: VecDeque<Vec<u8>>,
+    buffer_start: Option<Instant>,
+    backend: EndpointBackend,
+}
+
+enum EndpointState {
+    /// No backend available. Packets are buffered, activation events emitted.
+    Buffering,
+    /// Backend assigned but not yet ready. Packets still buffered.
+    Pending,
+    /// Backend ready. Packets forwarded.
+    Ready,
+}
+
+enum EndpointBackend {
+    /// Service with virtual IP → pod IP NAT, optional protocol activator.
+    Service {
+        service_id: String,
+        policy: ServicePolicy,
+        backend_ip: Option<Ipv4Addr>,
+        processor: ServiceProcessor,
+    },
+    /// Pod not running anywhere. Buffer + emit activation event.
+    UnplacedPod {
+        buffer_policy: BufferPolicy,
+    },
+    /// Destination reachable via another worker's fabric segment.
+    /// Used for remote pods AND remote WireGuard peers.
+    RemoteSegment {
+        worker_id: String,
+    },
+    /// Pod running on this worker. When `port_id` is `None`, the pod is
+    /// launching and frames are buffered. When `Some`, the port is attached
+    /// and frames are forwarded directly.
+    LocalPod {
+        port_id: Option<PortId>,
+    },
+    /// WireGuard peer or splice target connected locally via channel port.
+    LocalAdapter {
+        port_id: PortId,
+    },
+}
+```
+
+### EndpointTable
+
+```rust
+struct EndpointTable {
+    by_ip: HashMap<Ipv4Addr, Endpoint>,
+    service_id_to_ip: HashMap<String, Ipv4Addr>,
+    last_activation: HashMap<Ipv4Addr, Instant>,
+    activation_debounce: Duration,  // default 1s
+}
+```
+
+### Endpoint Transitions
+
+| Spec | Placement | Local Backend |
+|---|---|---|
+| Pod, local worker | `LocalPod` → Pending (launching) / Ready (port attached) | TAP port |
+| Pod, remote worker | `RemoteSegment` → Ready | — |
+| Pod, unplaced | `UnplacedPod` → Buffering | — |
+| WireGuardPeer, local | `LocalAdapter` → Ready | channel port |
+| WireGuardPeer, remote | `RemoteSegment` → Ready | — |
+| WireGuardPeer, unplaced | `UnplacedPod` → Buffering | — |
+| Service, no backend | `Service` → Buffering | — |
+| Service, backend assigned | `Service` → Pending | preserves buffer |
+| Service, marked ready | `Service` → Ready | drains buffer |
+
+### Buffer Policy
+
+- **LocalPod**: 64 frames, 30-second timeout (same as UnplacedPod)
+- **UnplacedPod**: 64 frames, 30-second timeout
+- **Service**: Configurable via `ServicePolicy.buffer_frames` and `timeout_ms`
+- **Timeout**: Entire buffer cleared when first frame exceeds timeout
+- **Capacity**: New frames dropped when buffer at max capacity
+- **Activation debounce**: One activation event per IP per second
 
 ---
 
 ## Modules (`distvirt-worker/src/fabric/`)
 
+### `endpoint.rs` — Endpoint table + lifecycle management
+
+`EndpointTable`: unified table replacing the former `ServiceTable` and `RouteTable`. Maps destination IPs to `Endpoint` structs with state, buffer, and backend variant. Indexed by IP for packet-path lookup and by service_id for command dispatch.
+
+`EndpointAction` enum — what the fabric should do with a frame matching an endpoint IP:
+- `ServiceForward { pod_ip, service_ip }` — service is ready, forward to backend (caller applies DNAT)
+- `Buffered` — frame accepted into buffer
+- `Drop` — buffer full or timed out
+- `ActivatorActions` / `L4Result` — activator processed the frame
+- `RemoteWorker { worker_id }` — forward via tunnel port
+- `LocalPod { port_id }` — deliver to local pod port
+- `LocalAdapter { port_id }` — forward via channel port
+- `NotFound` — no endpoint matches IP
+
+`EndpointSyncEffect` enum — side-effects from applying sync/update:
+- `ServiceReady { service_id }` — service became ready, flush buffers
+- `FlushPodBuffer { ip }` — pod became locally reachable
+- `FlushAdapterBuffer { ip, port_id, frames }` — adapter buffer should flush
+
+Key methods:
+- `apply_endpoint_sync(specs, my_worker_id, make_processor, adapter_port_id)` — full replacement from orchestrator spec list
+- `apply_endpoint_update(upserted, removed_ips, ...)` — incremental delta
+- `lookup_and_buffer(dst_ip, frame) -> (EndpointAction, bool)` — packet-path lookup, returns action + whether activation event should fire. Reachability is checked internally via the endpoint table.
+- `mark_service_ready(service_id) -> Option<MarkReadyResult>` — mark ready, returns buffered frames/actions (Passthrough) or L4Result
+- `attach_port(ip, port_id)` — attach a port to a LocalPod endpoint, transitioning it to Ready
+- `detach_port(port_id)` — detach a port from a LocalPod endpoint, transitioning it back to Pending
+- `get_port_id(ip)` — look up the port ID for a LocalPod endpoint by IP
+- `is_backend_reachable(ip)` — check whether an endpoint's backend is currently reachable
+- `flush_pod_buffer(ip)` — drain buffered frames from UnplacedPod endpoint
+- `flush_by_backend_ip(ip)` — drain buffers from all ready services matching a backend IP
+
+### `forwarding.rs` — Packet dispatch + action execution
+
+`FabricContextInner` struct: shared forwarding state holding `ports`, `endpoint_table`, `nat_table`, `gateway_tx`, `event_tx`, `subnet`, `prefix_len`, `gateway_ip`, and `tunnel_ports`. Wrapped in `Arc` for sharing across port read tasks.
+
+`FabricContext` wraps `Arc<FabricContextInner>`, cheap to clone.
+
+`PortGuard` provides RAII cleanup — removes port from port map and calls `endpoint_table.detach_port()` on drop.
+
+**Lock ordering**: endpoint_table → nat_table → ports → tunnel_ports.
+
+`dispatch_frame(packet, source, ctx)` — the main forwarding function:
+1. Parse packet, extract destination IP
+2. Endpoint table lookup via `lookup_and_buffer()`
+3. Route by action:
+   - `ServiceForward`: DNAT (rewrite dst IP), insert reverse NAT entry, send to backend port
+   - `Buffered`/`Drop`: Emit activation event if debounce allows
+   - `ActivatorActions`: Execute each action (replay, set backend need, log)
+   - `L4Result`: Send outgoing frames, execute actions, reschedule poll timer
+   - `RemoteWorker`: Send via tunnel port
+   - `LocalAdapter`: Send via channel port
+   - `LocalPod`: Check NAT table for SNAT (return traffic for services), deliver to port
+   - `NotFound`: If destination is gateway IP or outside subnet, forward to TUN device; otherwise drop
+
+Port read loop: spawns per-port, reads packets in a loop, calls `dispatch_frame`. `PortGuard` cleans up on exit.
+
+Gateway ingress task: reads packets from gateway channel, calls `dispatch_frame` with `PacketSource::Gateway`.
+
+### `flow.rs` — TCP flow tracking
+
+`FlowTracker`: lightweight TCP flow tracker providing "is this endpoint actively in use?" signals.
+
+`FlowKey`: 5-tuple `(src_ip, dst_ip, protocol, src_port, dst_port)`.
+
+`TcpFlowState` enum: `Opening` → `Established` → `HalfClosed` → `Closed`. Transitions on SYN, SYN+ACK, FIN, RST.
+
+Key methods:
+- `track_packet(key, tcp_flags)` — track TCP packet by flags
+- `has_active_flows() -> bool` — the demand signal to the orchestrator
+- `gc(now)` — remove expired flows
+
+Constants:
+- Idle timeout: 300 seconds (hard upper bound even without FIN/RST)
+- Closed linger: 5 seconds (allow retransmits after FIN/RST)
+
+Design decisions:
+- TCP only for now (UDP deferred — no explicit close signals)
+- Flows tracked only on the worker hosting the pod (`LocalPod` backend equivalent). `RemoteSegment` is a dumb forwarder.
+- For services with activators, the activator's `BackendNeed` signal takes precedence over flow tracking.
+
 ### `port.rs` — Async fabric port
 
 `FramePort` trait: async `recv_frame()` and `send_frame()` abstraction.
 
-`Port` struct wraps an AF_PACKET socket fd in tokio `AsyncFd` via `dup()` — the original fd stays in `TapDevice` (owns Drop cleanup for the TAP device), the dup'd fd goes into AsyncFd. Both set `O_NONBLOCK`.
+`Port` struct wraps an AF_PACKET socket fd in tokio `AsyncFd` via `dup()` — the original fd stays in `TapDevice`, the dup'd fd goes into AsyncFd.
 
-`ChannelPort` struct wraps `mpsc` channels for virtual (non-TAP) ports — used by ingress adapters (e.g. WireGuard). Returns `(port, adapter_tx, adapter_rx)` for bidirectional communication.
+`ChannelPort` struct wraps `mpsc` channels for virtual (non-TAP) ports — used by ingress adapters (WireGuard) and tests.
 
-`FabricPort` enum dispatches between `Tap(Port)` and `Virtual(ChannelPort)`, implementing `FramePort` for both.
-
-### `switch.rs` — IP-to-port table
-
-`IpPortTable`: bidirectional `HashMap<Ipv4Addr, PortId>` (`by_ip`) and `HashMap<PortId, Ipv4Addr>` (`by_port`) for IP↔port lookups. Unlike the previous MAC learning table, entries are statically configured when ports are added — no learning, no aging.
-
-Key methods:
-- `insert(ip, port)` — register an IP↔port mapping
-- `lookup(ip) -> Option<PortId>` — look up port by IP
-- `contains_ip(ip) -> bool` — check if IP is registered
-- `remove_by_port(port)` — remove mapping when port is cleaned up
-
-The gateway IP is configurable per namespace (passed to `FabricGateway`).
-
-### `route.rs` — Route table + packet buffering
-
-`RouteTable`: `HashMap<Ipv4Addr, RouteState>` mapping destination IPs to route entries with optional packet buffers. Each entry contains a `FabricRouteEntry` (from protocol types), a `VecDeque<Vec<u8>>` packet buffer, and a buffer start time for timeout tracking. Per-IP debounce tracking (default 1s window) prevents route miss event floods.
-
-`RouteAction` enum: `Buffered` (packet accepted into buffer), `Drop` (policy says drop), `RemoteWorker { worker_id }` (stub for multi-worker, log + drop), `NoRoute` (no entry, no match).
-
-Key methods:
-- `sync(entries)` — full replacement of route table
-- `update(added, removed_ips)` — incremental delta
-- `lookup_and_buffer(dst_ip, packet) -> (RouteAction, bool)` — returns action + whether miss event should fire (respecting debounce). Handles buffer limits and timeout expiry.
-- `flush_buffer(ip) -> Vec<Vec<u8>>` — drains buffered packets (called when pod activates)
-
-### `service.rs` — Service entities + service table
-
-`ServiceEntity`: holds service_id, virtual IP, `ServicePolicy` (buffer_frames, timeout_ms, optional `ActivatorConfig`), `backend_ip: Option<Ipv4Addr>`, readiness state, a `VecDeque<Vec<u8>>` packet buffer with timeout tracking, and a `ServiceProcessor` (Passthrough/L3/L4) for protocol-aware activation.
-
-`ServiceTable`: `HashMap<Ipv4Addr, ServiceEntity>` for fast packet-path lookup, plus `HashMap<String, Ipv4Addr>` for command dispatch by service_id. Per-IP activation debounce (default 1s window) prevents activation event floods.
-
-`ServiceAction` enum:
-- `Forward { pod_ip, service_ip }` — service is ready, forward to backend (caller applies DNAT)
-- `Buffered` — packet accepted into buffer
-- `Drop` — buffer full or timed out
-- `ActivatorActions { actions, service_id }` — L3 activator processed the packet, returned actions for fabric to execute
-- `L4Result { actions, frames, service_id, poll_delay }` — L4 stream manager produced outgoing packets + non-L4 actions
-
-`MarkReadyResult` enum:
-- `Passthrough { frames, backend_ip, service_ip, actions }` — buffered packets + backend info + activator actions
-- `L4(ServiceAction)` — L4 stream mode result
-
-Key methods:
-- `create(service_id, ip, policy, processor)` — register a new service entity with its processor mode
-- `destroy(service_id)` — remove a service entity
-- `update_backend(service_id, Option<Ipv4Addr>)` — assign or remove backing pod; clears readiness. Preserves buffer on first backend assignment (None → Some); clears buffer when backend removed or IP changes.
-- `mark_ready(service_id) -> Option<MarkReadyResult>` — mark ready; pushes `BackendAvailable(true)` to activator if present, returns buffered packets + actions (Passthrough) or L4 result
-- `lookup_and_buffer(dst_ip, packet, is_reachable) -> Option<(ServiceAction, bool)>` — `None` if not a service IP; `bool` is `should_activate` (debounced). Delegates to `ServiceProcessor` for L3/L4 paths.
-- `get_service_id(ip)` — returns service_id for activation events
-- `get_nat_info_by_id(service_id)` — returns `(service_ip, backend_ip)` for NAT setup
-- `flush_by_backend_ip(ip) -> Vec<ServiceFlushData>` — drain buffers for ready services matching a backend IP (called when a port is added)
+`FabricPort` enum dispatches between `Tap(Port)` and `Virtual(ChannelPort)`.
 
 ### `service_activator.rs` — Service processor (activator integration)
 
-`ServiceProcessor` enum determines how a service entity processes incoming packets:
-- `Passthrough` — no activator, pure buffer/forward (default for services with no protocol declaration)
-- `L3 { activator: ActivatorInstance, flow_tracker: FlowTracker }` — L3 packet-level processing via WASM activator. `FlowTracker` assigns stable flow IDs by 5-tuple for `packet-flow` handles.
-- `L4 { activator: Option<ActivatorInstance>, stream_manager: StreamManager }` — L4 stream-level processing. The `StreamManager` (smoltcp-backed TCP stack) handles TCP connection management; the activator operates on byte streams.
+`ServiceProcessor` enum determines how a service endpoint processes incoming packets:
+- `Passthrough` — no activator, pure buffer/forward
+- `L3 { activator, flow_tracker }` — L3 packet-level processing via WASM activator
+- `L4 { activator, stream_manager }` — L4 stream-level processing (smoltcp-backed TCP stack)
 
 Key methods:
-- `process_packet(service_id, ip_payload, raw_packet) -> Option<ServiceAction>` — parses packet, delegates to L3 (packet event) or L4 (stream manager)
-- `on_mark_ready(service_id) -> Option<ServiceAction>` — pushes `BackendAvailable(true)` event, processes activator response
+- `process_frame(service_id, ip_payload, raw_packet) -> Option<ServiceAction>` — delegates to L3 or L4 path
+- `on_mark_ready(service_id)` — pushes `BackendAvailable(true)` event
 - `on_backend_update(has_backend, backend_ip)` — pushes `BackendAvailable` event, updates stream manager
-- `handle_timeout(service_id) -> Option<ServiceAction>` — L4 only: polls stream manager for TCP timeouts
-
-For L4 mode, a bounded event loop (4 rounds max) separates L4 actions (executed by the stream manager) from non-L4 actions (returned to the fabric for dispatch).
+- `handle_timeout(service_id)` — L4 only: polls stream manager for TCP timeouts
 
 ### `nat.rs` — NAT connection tracking
 
-`NatTable`: `HashMap<NatFlowKey, NatEntry>` for reverse-direction NAT lookup. Used for service DNAT/SNAT — when a packet is forwarded from a service IP to a backend pod IP, a reverse NAT entry is inserted so return traffic from the backend can be SNATted back to the service IP.
+`NatTable`: `HashMap<NatFlowKey, NatEntry>` for reverse-direction NAT lookup. Used for service DNAT/SNAT.
 
-`NatFlowKey`: 5-tuple `(src_ip, dst_ip, protocol, src_port, dst_port)`. `NatEntry`: `(service_ip, backend_ip, last_seen)`.
+`NatFlowKey`: 5-tuple. `NatEntry`: `(service_ip, backend_ip, last_seen)`.
 
 Key methods:
-- `insert(key, entry)` — insert reverse-direction entry (key is `(backend_ip, client_ip, proto, service_port, client_port)`)
-- `lookup(key) -> Option<&NatEntry>` — look up and update `last_seen`
+- `insert(key, entry)` — insert reverse-direction entry
+- `lookup(key)` — look up and update `last_seen`
 - `gc(max_age)` — remove stale entries; runs every 60 seconds
 
-### `forwarding.rs` — Packet dispatch + action execution
+### `tunnel.rs` — Inter-worker tunnel support
 
-Contains the core packet forwarding logic, extracted from `mod.rs`.
-
-`FabricContextInner` struct: shared forwarding state holding `ports`, `ip_port_table`, `route_table`, `service_table`, `nat_table`, `gateway_tx`, `event_tx`, `subnet`, and `prefix_len`. Wrapped in `Arc` for sharing across port read tasks.
-
-`dispatch_packet(packet, source, ctx)` — the main forwarding function called by every port read loop and the gateway ingress task:
-1. Parse packet, extract destination IP
-2. Check if destination is in the fabric subnet (`is_in_subnet()`)
-3. IP table lookup → if hit: check NAT table for return traffic SNAT (rewrite src IP), then forward to port
-4. If not in IP table → `handle_unresolved_dst`
-
-`handle_unresolved_dst` — resolution order:
-- **Service table**: consult first. If ready + reachable → DNAT (rewrite dst IP from service_ip to backend_ip) + insert reverse NAT entry + forward. If activator → dispatch actions (ReplayPacket, SetBackendNeed, Log). If L4 → dispatch packets + set poll timer.
-- **Route table**: buffer/drop per policy, emit `RouteMiss` event if debounce allows
-- **No match**: drop (no flooding in L3 model)
-
-`dispatch_action(action, service_id, dst_ip, ctx)` — executes activator actions:
-- `ReplayPacket` — DNAT to backend, insert reverse NAT entry, send to backend port
-- `SetBackendNeed` — emit `ServiceBackendNeed` event
-- `Log` — log at appropriate level
-
-Port read loop: spawns per-port, reads packets in a loop, calls `dispatch_packet`. `PortGuard` provides RAII cleanup — removes port from IP table when task exits or panics.
-
-Gateway ingress task: reads packets from gateway channel, calls `dispatch_packet` with `PacketSource::Gateway`.
+`TunnelTransport` handles encapsulation for inter-worker traffic. Tunnel ports are registered via `add_tunnel_port(worker_id, port)` and looked up by worker_id when forwarding to `RemoteSegment` endpoints.
 
 ### `mod.rs` — `Fabric` struct
 
 Owns the shared context (`FabricContextInner`) and manages port/gateway lifecycle.
 
 `FabricEvent` enum:
-- `RouteMiss { dst_ip }` — packet hit a placeholder route or unknown pod IP
-- `ServiceActivation { service_id, dst_ip }` — packet hit a service with no ready backend
-- `ServiceBackendNeed { service_id, dst_ip, need }` — activator signaled a backend need level change
+- `EndpointActivation { dst_ip, service_id }` — frame hit endpoint needing activation (replaces former `RouteMiss` and `ServiceActivation`)
+- `EndpointFlowStatus { ip, has_active_flows }` — flow tracking status changed
+- `ServiceBackendNeed { service_id, dst_ip, need }` — activator signaled backend need change
 
-Events forwarded to worker via `mpsc::Sender<FabricEvent>` set with `set_event_channel(tx)`. Uses `try_send` — these are hints, silent drop under backpressure is acceptable.
+Events forwarded to worker via `mpsc::Sender<FabricEvent>`. Uses `try_send` — these are hints, silent drop under backpressure is acceptable.
 
 Key methods:
-- `add_tap_port(tap, pod_ip) -> (PortId, TaskHandle)` — wraps TAP as `FabricPort::Tap`, registers IP in ip_port_table, flushes route-table and service-table buffered packets, spawns port read loop
-- `add_port_raw(port) -> (PortId, TaskHandle)` — add a pre-constructed `FabricPort` (e.g. `Virtual` for adapters)
-- `set_gateway(egress_tx, ingress_rx)` — connect gateway; spawns gateway ingress task and 60-second GC task for NAT table
+- `new(gateway_ip, prefix_len)` — create fabric with subnet config
+- `add_tap_port(tap, pod_ip, guest_mac) -> (PortId, TaskHandle)` — register TAP, flush buffers, spawn read loop
+- `add_port_raw(port) -> (PortId, TaskHandle)` — add pre-constructed port
+- `add_tunnel_port(worker_id, port) -> (PortId, TaskHandle)` — register tunnel port for remote worker
+- `set_gateway(egress_tx, ingress_rx)` — connect gateway; spawns gateway ingress task + NAT GC
 - `set_event_channel(tx)` — set event emission channel
-- `tables()` — get `Arc<FabricContextInner>` reference for external access to tables
-- `flush_service_packets(packets, backend_ip, service_ip)` — resolves backend IP to port, applies DNAT (rewrite dst IP from service_ip to backend_ip), inserts reverse NAT entries for each packet's flow, sends via spawned async task
-- `send_l4_packets(packets)` — send packets from L4 stream manager (prepends fabric headers)
-- `dispatch_actions(actions, service_id)` — dispatch activator actions (replay, log, backend need)
-
-All packets include 3-byte fabric header before the IP packet.
+- `tables()` — get `Arc<FabricContextInner>` reference
+- `flush_service_frames(frames, backend_ip, service_ip)` — drain buffered frames with DNAT
+- `send_l4_frames(frames)` — send L4 stream manager packets
+- `dispatch_actions(actions, service_id)` — dispatch activator actions
 
 ### `gateway/mod.rs` — FabricGateway (smoltcp IP stack)
-
-The gateway provides IP services for the pod subnet:
 
 **smoltcp interface** with the pod subnet gateway IP (configurable per namespace).
 
 **DNS server** (UDP port 53):
 - Queries checked against local `DnsRegistry` (service name → IP)
 - Local hits: synthesize A-record response (TTL=60)
-- Misses: forward to upstream DNS via hickory-resolver (async, result routed back via query-ID tracking)
+- Misses: forward to upstream DNS via hickory-resolver
 - NXDOMAIN synthesized for upstream misses
 
 **Internet egress via TUN**:
-- IP packets destined outside the pod subnet are forwarded to a TUN device
-- Egress: write IP packet to TUN
-- Ingress: read from TUN, route back to correct port via IP table
+- IP packets destined outside the pod subnet forwarded to TUN device
+- Return traffic routed back via endpoint table
 
 **Checksum handling**: Fabric header `NEEDS_CSUM` flag tracks deferred checksum completion for virtio-net offload.
 
@@ -208,40 +319,164 @@ The gateway provides IP services for the pod subnet:
 
 `DnsRegistry`: `Arc<RwLock<HashMap<String, Ipv4Addr>>>`. Synced from orchestrator via `RegistrySync`/`RegistryUpdate` commands.
 
-`DnsForwarder`: wraps `DnsRegistry` + `TokioResolver` (hickory-resolver). Processes DNS queries from the smoltcp UDP socket — local registry hits get immediate synthetic responses, misses are forwarded asynchronously.
-
-`parse_qname()`: extracts domain name from wire-format DNS query (lowercased). `synthesize_a_response()`: builds minimal A-record response. `synthesize_nxdomain_response()`: builds NXDOMAIN response. Case-insensitive matching. Rejects compression pointers.
+`DnsForwarder`: wraps `DnsRegistry` + `TokioResolver`. Processes DNS queries — local registry hits get immediate synthetic responses, misses forwarded asynchronously.
 
 ### `gateway/tun.rs` — TUN device creation + async I/O
 
-Opens `/dev/net/tun` with `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`, enables `TUN_F_CSUM` offload. IP address configured via ioctls. Async read/write via tokio AsyncFd. Warns if `ip_forward` sysctl is not enabled.
-
-`TunEgress` struct: owns the TUN fd, provides `write_egress()` (write IP packet to TUN) and `read_ingress()` (read from TUN, wrap with fabric header, route back via IP table).
+Opens `/dev/net/tun` with `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`, enables `TUN_F_CSUM` offload. Async read/write via tokio AsyncFd.
 
 ### `tap.rs` — TAP device creation
 
-`create_persistent_tap()`: creates TAP device that survives fd closure (TUNSETPERSIST). `open_packet_socket()`: opens AF_PACKET socket bound to the TAP interface with `PACKET_VNET_HDR`. `TapDevice` struct with Drop impl for cleanup.
+`create_persistent_tap()`: creates TAP device that survives fd closure. `open_packet_socket()`: opens AF_PACKET socket bound to the TAP interface. `TapDevice` struct with Drop impl for cleanup.
 
 ### `tests.rs` — Fabric unit tests
 
-Comprehensive test suite using `ChannelPort` virtual ports to test IP-based forwarding, gateway forwarding, route table buffering, service table behavior, NAT/DNAT, and loopback avoidance without requiring real TAP devices.
+Test suite using `ChannelPort` virtual ports covering: IP-based forwarding, gateway forwarding, endpoint buffering, activation debouncing, service NAT (DNAT/SNAT), activator integration, and tunnel port forwarding. No real TAP devices required.
+
+---
+
+## Orchestrator Protocol
+
+### Endpoint Specification
+
+The orchestrator computes one endpoint table per namespace and broadcasts it to all workers. Each worker derives its local endpoint table from the spec using its own `worker_id`.
+
+```rust
+struct EndpointSpec {
+    ip: Ipv4Addr,
+    kind: EndpointKind,
+}
+
+enum EndpointKind {
+    Service {
+        service_id: ServiceId,
+        policy: ServicePolicy,
+        backend: Option<EndpointPodBackend>,
+    },
+    Pod {
+        placement: Option<EndpointPlacement>,
+    },
+    WireGuardPeer {
+        placement: Option<EndpointPlacement>,
+    },
+}
+
+struct EndpointPodBackend {
+    pod_ip: Ipv4Addr,
+    placement: Option<EndpointPlacement>,
+    ready: bool,
+}
+
+struct EndpointPlacement {
+    worker_id: WorkerId,
+}
+```
+
+**Same data to every worker.** Workers derive local behavior from the spec:
+
+| EndpointKind | `placement == self` | `placement == other` | `placement == None` |
+|---|---|---|---|
+| Pod | LocalPod (buffer + ready) | RemoteSegment | UnplacedPod (buffer + activate) |
+| WireGuardPeer | LocalAdapter | RemoteSegment | UnplacedPod (buffer) |
+| Service (backend local) | Service + local backend | — | — |
+| Service (backend remote) | Service + RemoteSegment | Service + RemoteSegment | — |
+| Service (no backend) | Service, buffering | Service, buffering | Service, buffering |
+
+### Commands (Orchestrator → Worker)
+
+```rust
+enum WorkerCommand {
+    /// Full endpoint table replacement. Sent on worker connect
+    /// and namespace creation.
+    EndpointSync {
+        namespace_id: NamespaceId,
+        endpoints: Vec<EndpointSpec>,
+    },
+    /// Incremental endpoint updates.
+    EndpointUpdate {
+        namespace_id: NamespaceId,
+        upserted: Vec<EndpointSpec>,
+        removed_ips: Vec<Ipv4Addr>,
+    },
+    // ... other non-endpoint commands (RegistrySync, etc.)
+}
+```
+
+### Events (Worker → Orchestrator)
+
+```rust
+enum WorkerEvent {
+    /// Endpoint received traffic but has no backend.
+    /// Replaces both former FabricRouteMiss and ServiceActivation.
+    EndpointActivation {
+        namespace_id: NamespaceId,
+        ip: Ipv4Addr,
+        service_id: Option<ServiceId>,
+    },
+    /// Flow tracking status changed for an endpoint.
+    /// Provides "is this pod in use?" signal for direct pod traffic.
+    EndpointFlowStatus {
+        namespace_id: NamespaceId,
+        ip: Ipv4Addr,
+        has_active_flows: bool,
+    },
+    /// Activator-driven backend need (services with activators only).
+    ServiceBackendNeed {
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
+        need: BackendNeed,
+    },
+}
+```
+
+### Orchestrator Endpoint Generation
+
+The orchestrator maintains the canonical endpoint table per namespace via `build_endpoint_specs()`, which produces:
+
+- **Pod endpoints**: one per workload, placement from pod_map
+- **Service endpoints**: one per service, backend derived from service state machine
+- **WireGuard peer endpoints**: one per connected peer, placement set to the hosting worker
+
+Broadcast triggers:
+- **Namespace activation**: `EndpointSync` to all workers
+- **New worker joins**: `EndpointSync` to that worker
+- **Pod state change** (running/stopped): `EndpointUpdate` for affected workload
+- **Service state change**: `EndpointUpdate` for affected service
+- **WireGuard peer add/remove**: `EndpointSync` to all workers
+
+### Demand Model
+
+The orchestrator's demand computation is uniform:
+
+```
+effective_demand = services_wanting_backend_count
+                 + (has_active_flows || route_miss_wake ? 1 : 0)
+```
+
+`EndpointActivation` replaces both former `FabricRouteMiss` and `ServiceActivation` as the wake signal. The orchestrator routes it to the correct workload/service based on whether `service_id` is present.
+
+`EndpointFlowStatus` provides the idle signal for direct pod traffic. When `has_active_flows` transitions false, the orchestrator knows the pod has no active connections.
+
+### DNS Registry
+
+`RegistrySync`/`RegistryUpdate` remain separate from endpoint sync — DNS names map to endpoint IPs but are a different concern (name resolution vs. packet handling).
 
 ---
 
 ## NAT for Service Traffic
 
-Service entities have virtual IPs separate from backend pod IPs. The fabric transparently translates between them:
+Service endpoints have virtual IPs separate from backend pod IPs. The fabric transparently translates between them:
 
 ```
 Client pod → Service IP (DNAT to Pod IP) → Backend pod
 Backend pod → Pod IP (SNAT to Service IP) → Client pod
 ```
 
-**Forward path (DNAT)**: When a packet is forwarded from a service IP to its backend pod, the fabric rewrites the destination IP from the service IP to the backend pod IP and inserts a reverse NAT entry keyed by `(backend_ip, client_ip, protocol, service_port, client_port)`.
+**Forward path (DNAT)**: When a packet is forwarded from a service IP to its backend pod, the fabric rewrites the destination IP and inserts a reverse NAT entry.
 
-**Return path (SNAT)**: When a packet is forwarded to a known port, the fabric checks the NAT table. On a hit, it rewrites the source IP from the backend pod IP back to the service IP. This makes the translation transparent to both client and backend.
+**Return path (SNAT)**: When a packet from a backend hits the NAT table, the source IP is rewritten back to the service IP.
 
-**GC**: NAT entries track `last_seen` timestamps and are garbage-collected every 60 seconds.
+**GC**: NAT entries track `last_seen` timestamps and are garbage-collected every 60 seconds (300-second idle expiry).
 
 ---
 
@@ -256,100 +491,69 @@ Backend pod → Pod IP (SNAT to Service IP) → Client pod
 6. Connect fabric ↔ gateway via channel pair
 7. Create ingress adapter virtual ports (`ChannelPort`) and plug into fabric
 8. Spawn event bridge task: maps `FabricEvent` to `WorkerEvent`:
-   - `FabricEvent::RouteMiss` → `WorkerEvent::FabricRouteMiss`
-   - `FabricEvent::ServiceActivation` → `WorkerEvent::ServiceActivation`
+   - `FabricEvent::EndpointActivation` → `WorkerEvent::EndpointActivation`
+   - `FabricEvent::EndpointFlowStatus` → `WorkerEvent::EndpointFlowStatus`
    - `FabricEvent::ServiceBackendNeed` → `WorkerEvent::ServiceBackendNeed`
-9. Store in `NamespaceState` (includes `tables`, `registry`, `_gateway_task`, `_event_bridge_task`, `_adapter_tasks`, `_adapter_ports`, `pods`)
+9. Store in `NamespaceState` (includes `tables`, `registry`, adapter tasks/ports, `pods`)
 
-**Service management** (`worker/namespace.rs`):
-- `create_service` — locks service table, creates `ServiceProcessor` based on `ActivatorConfig` (Passthrough/L3/L4), calls `create(service_id, ip, policy, processor)`
-- `update_service_backend` — locks service table, calls `update_backend(service_id, Option<Ipv4Addr>)`
-- `service_ready` — locks service table, calls `mark_ready(service_id)` → returns `MarkReadyResult::Passthrough` (flush packets with DNAT + dispatch actions) or `MarkReadyResult::L4` (dispatch L4 packets + actions)
-- `destroy_service` — locks service table, calls `destroy(service_id)`
+**Endpoint management** (`worker/namespace.rs`):
+- `endpoint_sync(namespace_id, endpoints, my_worker_id, activator_runtime)` — applies full endpoint sync, processes effects (ServiceReady, FlushPodBuffer, FlushAdapterBuffer)
+- `endpoint_update(namespace_id, upserted, removed_ips, ...)` — applies incremental update, processes effects
 
-**Route management** (`worker/namespace.rs`):
-- `route_sync` — locks route table, calls `sync(routes)` for full replacement
-- `route_update` — locks route table, calls `update(added, removed_ips)` for incremental delta
+**Effect handling** (`handle_endpoint_effects`):
+- `ServiceReady`: calls `mark_service_ready()`, flushes buffered frames with DNAT, dispatches activator actions
+- `FlushPodBuffer`: resolves IP to port, spawns async task to drain buffered frames
+- `FlushAdapterBuffer`: resolves adapter port, spawns async flush task
 
 **Pod launch** (`worker/supervisor.rs:pod_supervisor`):
 1. VM launches with TAP device (virtio-net, vhost-net backend)
 2. `take_tap()` transfers TAP ownership from VM to fabric
-3. `fabric.add_tap_port(tap, network.ip)` — registers IP in ip_port_table, flushes route-table and service-table buffered packets, spawns port read loop
-4. Guest configures interface via `ConfigureNetwork` command (IP/netmask/gateway)
+3. `fabric.add_tap_port(tap, network.ip, guest_mac)` — calls `endpoint_table.attach_port()` to transition the LocalPod endpoint to Ready, flushes buffered frames, spawns port read loop
+4. Guest configures interface via `ConfigureNetwork` command
 5. Port task monitored by pod supervisor — if it exits, the pod is failed
 
 **Pod shutdown**: Port task cleaned up automatically via RAII when supervisor exits.
 
 ---
 
-## Service Entities
+## Multi-Worker Tunneling
 
-Services are first-class network entities on the fabric with their own virtual IP, separate from backing pod IPs. A service entity is the boundary at which application-level traffic management happens — buffering, activation, readiness gating, and protocol-aware processing all live here rather than on the pod directly. See `docs/worker-protocol.md` for the full protocol design.
+For distributed mode, fabric segments on different workers communicate via UDP tunnels. `RemoteSegment` endpoints forward to tunnel ports looked up by `worker_id` in `FabricContextInner.tunnel_ports`.
 
-```
-Client pod → Service IP (virtual) → [buffer / activate / ready?] → Pod IP (real)
-```
-
-**Why this separation matters**:
-- **Clean lifecycle boundary**: Pod lifecycle (VM booted, network configured) is distinct from service readiness (application listening, health check passed).
-- **Readiness gating**: Buffered packets are only flushed to the backing pod once the orchestrator sends `ServiceReady`, not immediately at port-add time.
-- **Flexibility**: Multiple services can back the same pod. Scale-to-zero is "no backing pod assigned to service IP" rather than "pod doesn't exist."
-- **Protocol activators**: Protocol-aware logic (TCP SYN detection, HTTP/2 stream parsing) runs on the service entity via `ServiceProcessor`. See [Protocol Activators](protocol-activators.md).
-- **Transparent NAT**: DNAT/SNAT between service IPs and backend pod IPs is handled automatically by the fabric. Clients address the service IP; the backend sees its own pod IP.
-
-**Service states**: No backend (buffering + activation event) → Backend assigned, not ready (buffering) → Ready (traffic flows through, with DNAT). The orchestrator drives transitions via `CreateService`, `UpdateServiceBackend`, `ServiceReady`, `DestroyService` commands.
-
-**Coexistence with pod routes**: Pods remain directly addressable by IP. The existing route table with placeholder entries provides basic best-effort buffering for direct pod-to-pod traffic. Services get the rich activation path. Traffic resolution order: local port (IP table) → service entity → route table → drop.
-
-**IP allocation in compose mode**: Each service gets two IPs from the namespace subnet — a service IP (virtual, used for DNS and the service entity) and a pod IP (assigned to the VM network interface). Service IPs are allocated first (.2 to .N+1), pod IPs after (.N+2 to .2N+1). This limits compose deployments to 126 services per namespace (using the default /24 subnet).
-
-**Compose orchestration flow**: On `CreateNamespace`, the orchestrator sends `CreateService` for each planned service. DNS entries map names to service IPs. On `PodRunning`, the orchestrator sends `UpdateServiceBackend` (with pod IP) followed by `ServiceReady` to flush buffered packets and enable traffic flow.
-
----
-
-## Future Work
-
-### Ingress Adapters
-
-External access into the fabric for developer access, shareable URLs, and infrastructure integration. Adapters are worker-level components that demultiplex to per-namespace virtual ports on the fabric via `ChannelPort`. WireGuard (via boringtun) is the primary strategy for staging environments.
-
-See **[Ingress Adapters](ingress-adapters.md)** for the full design.
-
-### Multi-Worker Tunneling
-
-For distributed mode, fabric segments on different workers need to communicate. Each worker runs one fabric instance per namespace — when a namespace spans multiple workers, those fabric instances need a data plane link via UDP tunnels multiplexed by `segment_id`.
-
-The orchestrator pushes a **worker registry** to each worker (same pattern as DNS `RegistrySync`). Workers autonomously establish tunnels to peers with overlapping segment sets — no per-tunnel orchestrator commands needed. `TunnelTransport` (plaintext UDP, segment demux) is already implemented and unit tested; Noise encryption and control plane wiring are next.
+The orchestrator pushes a **worker registry** to each worker. Workers autonomously establish tunnels to peers with overlapping segment sets. `TunnelTransport` handles encapsulation; the `segment_id` field in the fabric header supports demux.
 
 See **[Fabric Tunnels](fabric-tunnels.md)** for the full design.
 
-### Pod Splice (Local Development)
+---
 
-Splice allows a developer to replace a running pod with their local machine, receiving and sending traffic through the fabric as if they were the pod. This reuses the existing WireGuard ingress adapter — no new data plane work required.
+## Ingress Adapters
 
-#### How It Works
+External access into the fabric for developer access, shareable URLs, and infrastructure integration. Adapters are worker-level components that demultiplex to per-namespace virtual ports on the fabric via `ChannelPort`. WireGuard peers connected locally become `LocalAdapter` endpoints; peers on remote workers become `RemoteSegment` endpoints.
 
-The developer already has a WireGuard tunnel into the fabric (via `connect`), which assigns them a peer IP on the namespace's subnet. Splicing can operate at two levels:
+See **[Ingress Adapters](ingress-adapters.md)** for the full design.
 
-**Service-level splice**: Redirect a service's backend to the developer's machine.
-1. Orchestrator calls `UpdateServiceBackend(service_id, Some(wireguard_peer_ip))` — pointing the service at the developer's WireGuard peer IP instead of the original pod
-2. Orchestrator calls `ServiceReady(service_id)` — flushes any buffered packets toward the developer
-3. DNAT/SNAT between the service IP and the WireGuard peer IP works identically to a pod backend
+---
 
-**Pod-level splice**: Redirect direct pod-to-pod traffic to the developer's machine. Since pods are directly addressable by IP on the fabric, this is even simpler — just update the route table so the pod's IP resolves to the worker hosting the WireGuard peer. No service entity involvement needed.
+## Pod Splice (Local Development)
 
-From the fabric's perspective, nothing is special in either case — the WireGuard `ChannelPort` is just another `FabricPort::Virtual`.
+Splice allows a developer to replace a running pod with their local machine, receiving and sending traffic through the fabric as if they were the pod. This reuses the existing WireGuard ingress adapter.
 
-#### Routing Considerations
+**Service-level splice**: Redirect a service's backend to the developer's WireGuard peer IP via `EndpointUpdate`. DNAT/SNAT works identically.
 
-The orchestrator must ensure the worker hosting the WireGuard adapter has routes for traffic destined to the spliced service. If the service was previously on a different worker, `FabricRouteSync`/`FabricRouteUpdate` directs traffic to the correct worker via the multi-worker tunnel.
+**Pod-level splice**: Update the endpoint spec so the pod's IP resolves to the worker hosting the WireGuard peer.
 
-#### CLI Side (Platform-Specific)
+From the fabric's perspective, nothing is special — the WireGuard `ChannelPort` is just another `FabricPort::Virtual`.
 
-The CLI is responsible for setting up the developer's machine to send and receive traffic:
+---
 
-- **WireGuard tunnel**: established via the existing `connect` flow
-- **Route setup**: routes for the namespace subnet through the WireGuard interface (platform-specific — `ip route` on Linux, `route` on macOS, etc.)
-- **Local process**: developer runs their service locally, listening on the expected port
+## Known Issues & Remaining Work
 
-The splice operation is symmetrical with unsplice — the orchestrator points `UpdateServiceBackend` back at the original pod IP and marks it ready again.
+1. **`route_miss_wake` demand leak** — flag not always cleared when service takes over demand. Documented with a `#[should_panic]` test.
+2. **Hardcoded buffer policy** — UnplacedPod buffer policy (64 frames, 30s) should be configurable.
+3. **Lock ordering** — consider type-safe enforcement for fabric locks.
+4. **Flow tracker memory bounds** — with many concurrent connections the flow tracker could grow large. Per-endpoint flow limits or LRU eviction may be needed for production.
+
+## Open Design Questions
+
+1. **UDP flow tracking** — TCP has explicit close signals. UDP needs idle timeouts. Per-endpoint configuration or single default? Deferred.
+2. **DNS registry derivation** — could be derived from endpoint table, but kept separate to avoid coupling. Only services have DNS names.

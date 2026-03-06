@@ -48,6 +48,9 @@ pub(crate) struct NamespaceState {
     pub(crate) registry: DnsRegistry,
     pub(crate) pods: HashMap<PodId, PodState>,
     pub(crate) segment_id: Option<u16>,
+    /// Port ID of the adapter channel port (WireGuard, etc.) on this fabric.
+    /// Used to create LocalAdapter endpoints for WireGuard peers.
+    pub(crate) adapter_port_id: Option<usize>,
     pub(crate) token: CancellationToken,
 }
 
@@ -75,6 +78,7 @@ impl NamespaceState {
             registry,
             pods,
             segment_id: None,
+            adapter_port_id: None,
             token,
         }
     }
@@ -187,8 +191,13 @@ impl NamespaceState {
             .create_namespace_ports(namespace_id.as_ref());
         let mut adapter_handles = Vec::new();
         let mut adapter_tasks = Vec::new();
+        let mut adapter_port_id = None;
         for (channel_port, handle) in adapter_ports_result {
-            let (_port_id, task) = fabric.add_port_raw(FabricPort::Virtual(channel_port));
+            let (port_id, task) = fabric.add_port_raw(FabricPort::Virtual(channel_port));
+            // Store the first adapter port ID for LocalAdapter endpoint routing.
+            if adapter_port_id.is_none() {
+                adapter_port_id = Some(port_id);
+            }
             adapter_handles.push(handle);
             adapter_tasks.push(task);
         }
@@ -208,6 +217,7 @@ impl NamespaceState {
             registry,
             pods: HashMap::new(),
             segment_id: network.segment_id,
+            adapter_port_id,
             token: ns_token,
         };
 
@@ -390,6 +400,31 @@ impl NamespaceState {
                         }
                     }
                 }
+                EndpointSyncEffect::FlushAdapterBuffer { ip, port_id, frames } => {
+                    if !frames.is_empty() {
+                        log::info!(
+                            "worker: flushing {} buffered adapter frames for {} to port {} in namespace '{}'",
+                            frames.len(), ip, port_id, namespace_id
+                        );
+                        let port = {
+                            self.tables.ports.lock().expect("poisoned").get(&port_id).cloned()
+                        };
+                        if let Some(port) = port {
+                            let count = frames.len();
+                            tokio::spawn(async move {
+                                for frame in frames {
+                                    if let Err(e) = port.send_frame(&frame).await {
+                                        log::warn!("fabric: flush adapter frame error: {}", e);
+                                        break;
+                                    }
+                                }
+                                log::info!("fabric: flushed {} adapter frames to port {}", count, port_id);
+                            });
+                        } else {
+                            log::warn!("fabric: adapter port {} not found for flush at {}", port_id, ip);
+                        }
+                    }
+                }
             }
         }
 
@@ -412,7 +447,7 @@ impl NamespaceState {
                 Self::build_processor(policy, ip, activator_runtime)
             };
 
-            et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor)
+            et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor, self.adapter_port_id)
         };
 
         self.handle_endpoint_effects(namespace_id, effects)?;
@@ -441,7 +476,7 @@ impl NamespaceState {
                 Self::build_processor(policy, ip, activator_runtime)
             };
 
-            et.apply_endpoint_update(upserted, removed_ips, my_worker_id.as_ref(), &mut make_processor)
+            et.apply_endpoint_update(upserted, removed_ips, my_worker_id.as_ref(), &mut make_processor, self.adapter_port_id)
         };
 
         self.handle_endpoint_effects(namespace_id, effects)?;
@@ -537,6 +572,7 @@ mod tests {
             registry: Arc::new(RwLock::new(HashMap::new())),
             pods: HashMap::new(),
             segment_id: None,
+            adapter_port_id: None,
             token: ns_token,
         };
         (ns, worker_token)

@@ -141,6 +141,11 @@ pub enum EndpointKind {
     Pod {
         placement: Option<EndpointPlacement>,
     },
+    /// WireGuard peer endpoint. Placement indicates which worker hosts the
+    /// WireGuard adapter for this peer.
+    WireGuardPeer {
+        placement: Option<EndpointPlacement>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

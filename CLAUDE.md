@@ -1,25 +1,28 @@
 # distvirt
 
-## Testing
+## Components
 
-### E2E tests (distvirt-worker)
+### distvirt-orchestrator
+Orchestrator manages the distvirt cluster. Distvirt is meant for staging environments, there is a singular orchestrator. If lost, the cluster loses all state.
 
-E2E tests require root privileges (TUN devices, bind mounts, KVM access).
+Orchestrator has a few layers of tests:
+* Unit tests
+* Integration tests
+* `stateright` model tests
+* Scenario tests, tests full orchestrator with a harness
 
-Run via the wrapper script which handles sudo with a GUI askpass dialog:
+### distvirt-worker
+Multiple workers can connect to an orchestrator. Workers are fairly dumb, they execute commands from the orchestrator.
 
-```sh
-./distvirt-worker/tests/run-e2e.sh
-```
+They host containers (in microvms) and the userspace network fabric.
 
-Extra args are forwarded to `cargo test`:
+Worker has a few layers of tests:
+* Unit tests
+* Integration tests
+* E2E tests. Since these spin up VMs, they require root to run
 
-```sh
-./distvirt-worker/tests/run-e2e.sh -- test_launch_pod_echo
-```
+### distvirt-*-protocol
+Contains protocol definitions for communication between the different components.
 
-Prerequisites:
-- `firecracker` binary (or `FIRECRACKER_BIN` env var)
-- Running containerd (or `CONTAINERD_SOCKET` env var)
-- Built kernel at `guest-image/result-kernel/bzImage`
-- Built rootfs at `guest-image/result-rootfs`
+## Guidelines
+* If you want to check and test your code, just run the test command. Running the test command also compiles the code, no need for both.

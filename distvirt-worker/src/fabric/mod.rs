@@ -5,18 +5,14 @@ pub(crate) mod nat;
 pub(crate) mod port;
 pub(crate) mod endpoint;
 pub(crate) mod service_activator;
-pub(crate) mod switch;
 pub(crate) mod tunnel;
 
 // Lock ordering (acquire in this order to prevent deadlocks):
 //   1. endpoint_table
-//   2. ip_port_table
-//   3. nat_table
-//   4. ports
-//   5. tunnel_ports
-// Most paths only hold one lock at a time. The main exception is
-// dispatch_frame's DNAT path which holds endpoint_table + ip_port_table
-// simultaneously (see forwarding.rs lookup_and_buffer).
+//   2. nat_table
+//   3. ports
+//   4. tunnel_ports
+// Most paths only hold one lock at a time.
 
 pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use endpoint::EndpointTable;
@@ -37,7 +33,6 @@ use crate::task_handle::TaskHandle;
 use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
 use crate::packet::{FabricPacket, ip_packet_src, ip_packet_protocol, ip_packet_transport_ports, rewrite_ipv4_dst};
 use forwarding::{FabricContext, port_read_loop, gateway_ingress_task};
-use switch::IpPortTable;
 
 /// Convert activator BackendNeed to protocol BackendNeed.
 pub(crate) fn convert_backend_need(need: &ActivatorBackendNeed) -> distvirt_worker_protocol::BackendNeed {
@@ -140,7 +135,6 @@ impl<P: FramePort> Fabric<P> {
             ctx: FabricContext {
                 inner: Arc::new(FabricContextInner {
                     ports: Mutex::new(HashMap::new()),
-                    ip_port_table: Mutex::new(IpPortTable::new()),
                     endpoint_table: Mutex::new(EndpointTable::new()),
                     nat_table: Mutex::new(nat::NatTable::new()),
                     gateway_tx: OnceLock::new(),
@@ -184,20 +178,17 @@ impl<P: FramePort> Fabric<P> {
             ports.insert(port_id, Arc::clone(&port));
         }
 
-        // Pre-register IP so the fabric can route to this port immediately.
+        // Attach port to endpoint table and flush buffers.
         if let Some(ip) = pod_ip {
-            let mut table = self.ctx.inner.ip_port_table.lock().expect("poisoned");
-            table.insert(ip, port_id);
-        }
-
-        // Flush service table buffers for any ready service whose backend IP
-        // matches this port's IP. This handles the case where frames were
-        // buffered because the backend IP wasn't reachable yet.
-        if let Some(ip) = pod_ip {
-            let service_flushes = {
-                let mut st = self.ctx.inner.endpoint_table.lock().expect("poisoned");
-                st.flush_by_backend_ip(&ip)
+            let (pod_buffered, service_flushes) = {
+                let mut et = self.ctx.inner.endpoint_table.lock().expect("poisoned");
+                // Attach port to LocalPod endpoint, getting buffered frames.
+                let pod_buffered = et.attach_port(ip, port_id);
+                // Also flush service buffers whose backend IP matches.
+                let service_flushes = et.flush_by_backend_ip(&ip);
+                (pod_buffered, service_flushes)
             };
+
             if !service_flushes.is_empty() {
                 log::info!(
                     "fabric: add_port_inner: flushing {} service(s) for IP {}",
@@ -211,19 +202,12 @@ impl<P: FramePort> Fabric<P> {
                     flush_data.service_ip,
                 );
             }
-        }
 
-        // Flush buffered pod frames if an IP was provided.
-        if let Some(pod_ip) = pod_ip {
-            let buffered = {
-                let mut et = self.ctx.inner.endpoint_table.lock().expect("poisoned");
-                et.flush_pod_buffer(pod_ip)
-            };
-            if !buffered.is_empty() {
+            if !pod_buffered.is_empty() {
                 let flush_port = Arc::clone(&port);
-                let count = buffered.len();
+                let count = pod_buffered.len();
                 tokio::spawn(async move {
-                    for frame in buffered {
+                    for frame in pod_buffered {
                         if let Err(e) = flush_port.send_frame(&frame).await {
                             log::warn!("fabric: flush buffered frame error: {}", e);
                             break;
@@ -265,7 +249,7 @@ impl<P: FramePort> Fabric<P> {
             self.ctx.clone(),
         )));
 
-        // Spawn periodic NAT table GC task.
+        // Spawn periodic NAT + flow tracker GC task.
         {
             let inner = Arc::clone(&self.ctx.inner);
             let gc_task = TaskHandle::spawn(async move {
@@ -275,6 +259,19 @@ impl<P: FramePort> Fabric<P> {
                     {
                         let mut nat = inner.nat_table.lock().expect("poisoned");
                         nat.gc(std::time::Duration::from_secs(300));
+                    }
+                    // GC flow trackers and emit status changes for expired flows.
+                    let flow_changes = {
+                        let mut et = inner.endpoint_table.lock().expect("poisoned");
+                        et.gc_flow_trackers()
+                    };
+                    if let Some(tx) = inner.event_tx.get() {
+                        for change in flow_changes {
+                            let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
+                                ip: change.ip,
+                                has_active_flows: change.has_active_flows,
+                            });
+                        }
                     }
                 }
             });
@@ -346,7 +343,7 @@ impl<P: FramePort> Fabric<P> {
 
     /// Flush buffered service frames to the backend port.
     ///
-    /// Looks up the backend IP in the ip_port_table to find the port,
+    /// Resolves the backend IP to a port via endpoint_table,
     /// rewrites the IP (DNAT) in each frame, and sends them.
     pub fn flush_service_frames(
         &self,

@@ -1,5 +1,3 @@
-#![allow(dead_code, reason = "structural addition, not wired to events until Phase 3")]
-
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -45,8 +43,6 @@ const CLOSED_LINGER: Duration = Duration::from_secs(5);
 ///
 /// Tracks TCP connections by observing SYN/FIN/RST flags. Provides
 /// `has_active_flows()` as a demand signal to the orchestrator.
-///
-/// Not wired to events yet — Phase 3 will emit `EndpointFlowStatus`.
 #[derive(Debug)]
 pub struct FlowTracker {
     flows: HashMap<FlowKey, FlowState>,

@@ -391,6 +391,16 @@ pub fn write_endpoint_spec(
                 None => pod.set_has_placement(false),
             }
         }
+        EndpointKind::WireGuardPeer { placement } => {
+            let mut wg = b.init_wire_guard_peer();
+            match placement {
+                Some(p) => {
+                    wg.set_has_placement(true);
+                    write_endpoint_placement(&mut wg.reborrow().init_placement(), p);
+                }
+                None => wg.set_has_placement(false),
+            }
+        }
     }
 }
 
@@ -418,6 +428,14 @@ pub fn read_endpoint_spec(
                 None
             };
             EndpointKind::Pod { placement }
+        }
+        schema::endpoint_spec::WireGuardPeer(wg) => {
+            let placement = if wg.get_has_placement() {
+                Some(read_endpoint_placement(wg.get_placement()?)?)
+            } else {
+                None
+            };
+            EndpointKind::WireGuardPeer { placement }
         }
     };
     Ok(EndpointSpec { ip, kind })
