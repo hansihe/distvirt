@@ -143,25 +143,29 @@ impl NamespaceState {
         let event_bridge_task = TaskHandle::spawn(async move {
             while let Some(event) = fabric_event_rx.recv().await {
                 match event {
-                    FabricEvent::RouteMiss { dst_ip } => {
-                        if let Err(e) = bridge_event_tx
-                            .try_send(WorkerEvent::FabricRouteMiss {
-                                namespace_id: bridge_ns_id.clone(),
-                                dst_ip,
-                            })
-                        {
-                            log::warn!("worker: dropped FabricRouteMiss event: {}", e);
-                        }
-                    }
-                    FabricEvent::ServiceActivation { service_id, dst_ip } => {
-                        if let Err(e) = bridge_event_tx
-                            .try_send(WorkerEvent::ServiceActivation {
-                                namespace_id: bridge_ns_id.clone(),
-                                service_id: ServiceId::from(service_id),
-                                dst_ip,
-                            })
-                        {
-                            log::warn!("worker: dropped ServiceActivation event: {}", e);
+                    FabricEvent::EndpointActivation { dst_ip, service_id } => {
+                        match service_id {
+                            Some(svc_id) => {
+                                if let Err(e) = bridge_event_tx
+                                    .try_send(WorkerEvent::ServiceActivation {
+                                        namespace_id: bridge_ns_id.clone(),
+                                        service_id: ServiceId::from(svc_id),
+                                        dst_ip,
+                                    })
+                                {
+                                    log::warn!("worker: dropped ServiceActivation event: {}", e);
+                                }
+                            }
+                            None => {
+                                if let Err(e) = bridge_event_tx
+                                    .try_send(WorkerEvent::FabricRouteMiss {
+                                        namespace_id: bridge_ns_id.clone(),
+                                        dst_ip,
+                                    })
+                                {
+                                    log::warn!("worker: dropped FabricRouteMiss event: {}", e);
+                                }
+                            }
                         }
                     }
                     FabricEvent::ServiceBackendNeed { service_id, dst_ip: _, need } => {
@@ -315,10 +319,10 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         routes: Vec<distvirt_worker_protocol::FabricRouteEntry>,
     ) -> Result<(), FatalError> {
-        let mut rt = self.tables.route_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("route table lock poisoned: {}", e))
+        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
         })?;
-        rt.sync(routes);
+        et.route_sync(routes);
 
         log::info!(
             "worker: synced fabric routes for namespace '{}'",
@@ -333,10 +337,10 @@ impl NamespaceState {
         added: Vec<distvirt_worker_protocol::FabricRouteEntry>,
         removed_ips: Vec<std::net::Ipv4Addr>,
     ) -> Result<(), FatalError> {
-        let mut rt = self.tables.route_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("route table lock poisoned: {}", e))
+        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
         })?;
-        rt.update(added, removed_ips);
+        et.route_update(added, removed_ips);
 
         log::info!(
             "worker: updated fabric routes for namespace '{}'",
@@ -403,10 +407,10 @@ impl NamespaceState {
             _ => ServiceProcessor::Passthrough,
         };
 
-        let mut st = self.tables.service_table.lock().map_err(|e| {
+        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        st.create(service_id.0.clone(), ip, policy, processor);
+        st.create_service(service_id.0.clone(), ip, policy, processor);
 
         log::info!(
             "worker: created service '{}' with ip {} in namespace '{}'",
@@ -421,11 +425,11 @@ impl NamespaceState {
         service_id: &ServiceId,
         backend: Option<distvirt_worker_protocol::ServiceBackend>,
     ) -> Result<(), FatalError> {
-        let mut st = self.tables.service_table.lock().map_err(|e| {
+        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
         let backend_ip = backend.map(|b| b.pod_ip);
-        st.update_backend(service_id.as_ref(), backend_ip);
+        st.update_service_backend(service_id.as_ref(), backend_ip);
 
         log::info!(
             "worker: updated service backend '{}' in namespace '{}'",
@@ -440,14 +444,15 @@ impl NamespaceState {
         service_id: &ServiceId,
     ) -> Result<(), FatalError> {
         let flush_data = {
-            let mut st = self.tables.service_table.lock().map_err(|e| {
+            let mut st = self.tables.endpoint_table.lock().map_err(|e| {
                 FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
             })?;
-            st.mark_ready(service_id.as_ref())
+            st.mark_service_ready(service_id.as_ref())
         };
 
         if let Some(result) = flush_data {
-            use crate::fabric::{MarkReadyResult, ServiceAction};
+            use crate::fabric::endpoint::EndpointAction;
+            use crate::fabric::MarkReadyResult;
             match &result {
                 MarkReadyResult::Passthrough { frames, actions, backend_ip, .. } => {
                     log::info!(
@@ -469,7 +474,7 @@ impl NamespaceState {
                     }
                     self.fabric.dispatch_actions(&actions, service_id.as_ref()).await;
                 }
-                MarkReadyResult::L4(ServiceAction::L4Result { actions, frames, .. }) => {
+                MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
                     self.fabric.send_l4_frames(frames);
                     self.fabric.dispatch_actions(&actions, service_id.as_ref()).await;
                 }
@@ -489,10 +494,10 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         service_id: &ServiceId,
     ) -> Result<(), FatalError> {
-        let mut st = self.tables.service_table.lock().map_err(|e| {
+        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
             FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
         })?;
-        st.destroy(service_id.as_ref());
+        st.destroy_service(service_id.as_ref());
 
         log::info!(
             "worker: destroyed service '{}' in namespace '{}'",
@@ -621,12 +626,12 @@ mod tests {
 
         ns.route_sync(&ns_id, routes).unwrap();
 
-        // Verify via lookup_and_buffer (requires &mut).
-        let mut rt = ns.tables.route_table.lock().unwrap();
-        let (action, _) = rt.lookup_and_buffer(Ipv4Addr::new(172, 16, 0, 10), &[0xDE, 0xAD]);
+        // Verify via lookup_and_buffer on endpoint_table.
+        let mut et = ns.tables.endpoint_table.lock().unwrap();
+        let (action, _) = et.lookup_and_buffer(Ipv4Addr::new(172, 16, 0, 10), &[0xDE, 0xAD], |_| true);
         assert!(
-            !matches!(action, crate::fabric::route::RouteAction::NoRoute),
-            "expected a route entry, got NoRoute"
+            !matches!(action, crate::fabric::endpoint::EndpointAction::NotFound),
+            "expected a route entry, got NotFound"
         );
     }
 
@@ -683,9 +688,9 @@ mod tests {
 
         // Verify service exists by checking the service table.
         {
-            let st = ns.tables.service_table.lock().unwrap();
+            let st = ns.tables.endpoint_table.lock().unwrap();
             assert_eq!(
-                st.get_ip_by_id("svc1"),
+                st.get_service_ip("svc1"),
                 Some(Ipv4Addr::new(172, 16, 0, 100))
             );
         }
@@ -694,8 +699,8 @@ mod tests {
         ns.destroy_service(&ns_id, &svc_id).unwrap();
 
         {
-            let st = ns.tables.service_table.lock().unwrap();
-            assert_eq!(st.get_ip_by_id("svc1"), None);
+            let st = ns.tables.endpoint_table.lock().unwrap();
+            assert_eq!(st.get_service_ip("svc1"), None);
         }
     }
 

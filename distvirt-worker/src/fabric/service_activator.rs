@@ -6,7 +6,7 @@ use distvirt_activator::{
 };
 use distvirt_activator::types::Event;
 
-use super::service::ServiceAction;
+use super::endpoint::EndpointAction;
 
 /// Processing mode for a service entity.
 pub(crate) enum ServiceProcessor {
@@ -33,7 +33,7 @@ impl ServiceProcessor {
         service_id: &str,
         ip_packet: &[u8],
         raw_frame: &[u8],
-    ) -> Option<ServiceAction> {
+    ) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::Passthrough => None,
             ServiceProcessor::L4 { activator, stream_manager } => {
@@ -49,7 +49,7 @@ impl ServiceProcessor {
                     activator.push_event(Event::Packet(packet_info));
                 }
                 match activator.process_events() {
-                    Ok(actions) => Some(ServiceAction::ActivatorActions {
+                    Ok(actions) => Some(EndpointAction::ActivatorActions {
                         actions,
                         service_id: service_id.to_owned(),
                     }),
@@ -69,7 +69,7 @@ impl ServiceProcessor {
     /// Handle mark_ready: push BackendAvailable and process pending events.
     ///
     /// Returns `None` for `Passthrough`.
-    pub fn on_mark_ready(&mut self, service_id: &str) -> Option<ServiceAction> {
+    pub fn on_mark_ready(&mut self, service_id: &str) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::Passthrough => None,
             ServiceProcessor::L4 { activator, stream_manager } => {
@@ -93,7 +93,7 @@ impl ServiceProcessor {
                         Vec::new()
                     }
                 };
-                Some(ServiceAction::ActivatorActions {
+                Some(EndpointAction::ActivatorActions {
                     actions,
                     service_id: service_id.to_owned(),
                 })
@@ -122,7 +122,7 @@ impl ServiceProcessor {
     }
 
     /// Handle a smoltcp timeout (L4 only).
-    pub fn handle_timeout(&mut self, service_id: &str) -> Option<ServiceAction> {
+    pub fn handle_timeout(&mut self, service_id: &str) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::L4 { activator, stream_manager } => {
                 let sm_output = stream_manager.handle_timeout();
@@ -146,7 +146,7 @@ fn process_l4_output(
     activator: Option<&mut ActivatorInstance>,
     stream_manager: &mut StreamManager,
     mut sm_output: StreamManagerOutput,
-) -> ServiceAction {
+) -> EndpointAction {
     let mut all_non_l4_actions = Vec::new();
 
     if let Some(activator) = activator {
@@ -191,7 +191,7 @@ fn process_l4_output(
     }
 
     let poll_delay = stream_manager.poll_delay();
-    ServiceAction::L4Result {
+    EndpointAction::L4Result {
         actions: all_non_l4_actions,
         frames: sm_output.frames,
         service_id: service_id.to_owned(),

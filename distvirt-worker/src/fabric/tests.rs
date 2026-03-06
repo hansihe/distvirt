@@ -281,8 +281,8 @@ async fn placeholder_route_buffers_instead_of_flooding() {
     // Add a placeholder route for pod_ip.
     {
         let tables = fabric.tables();
-        let mut rt = tables.route_table.lock().unwrap();
-        rt.sync(vec![FabricRouteEntry {
+        let mut et = tables.endpoint_table.lock().unwrap();
+        et.route_sync(vec![FabricRouteEntry {
             ip: pod_ip,
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
@@ -306,9 +306,9 @@ async fn placeholder_route_buffers_instead_of_flooding() {
     // Port 1 should NOT receive the frame (it was buffered, not flooded).
     assert_no_frame(&handle1).await;
 
-    // A route miss event should have been emitted.
+    // An endpoint activation event (route miss) should have been emitted.
     let event = try_recv_event(&mut event_rx).await;
-    assert!(matches!(event, Some(FabricEvent::RouteMiss { dst_ip: ip, .. }) if ip == pod_ip));
+    assert!(matches!(event, Some(FabricEvent::EndpointActivation { dst_ip: ip, service_id: None, .. }) if ip == pod_ip));
 }
 
 #[tokio::test]
@@ -355,8 +355,8 @@ async fn buffered_frames_flushed_to_new_port() {
     // Add a placeholder route.
     {
         let tables = fabric.tables();
-        let mut rt = tables.route_table.lock().unwrap();
-        rt.sync(vec![FabricRouteEntry {
+        let mut et = tables.endpoint_table.lock().unwrap();
+        et.route_sync(vec![FabricRouteEntry {
             ip: pod_ip,
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
@@ -404,8 +404,8 @@ async fn route_miss_debounced_on_rapid_frames() {
 
     {
         let tables = fabric.tables();
-        let mut rt = tables.route_table.lock().unwrap();
-        rt.sync(vec![FabricRouteEntry {
+        let mut et = tables.endpoint_table.lock().unwrap();
+        et.route_sync(vec![FabricRouteEntry {
             ip: pod_ip,
             destination: RouteDestination::Placeholder {
                 buffer_policy: BufferPolicy {
@@ -428,13 +428,13 @@ async fn route_miss_debounced_on_rapid_frames() {
     // Wait for processing.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Should get exactly one miss event (debounced).
+    // Should get exactly one activation event (debounced).
     let event1 = try_recv_event(&mut event_rx).await;
-    assert!(event1.is_some(), "should get one route miss event");
+    assert!(event1.is_some(), "should get one endpoint activation event");
 
     // No second event within debounce window.
     let event2 = try_recv_event(&mut event_rx).await;
-    assert!(event2.is_none(), "second miss should be debounced");
+    assert!(event2.is_none(), "second activation should be debounced");
 }
 
 // --- Activator integration tests ---
@@ -466,8 +466,8 @@ async fn activator_tcp_syn_emits_backend_need() {
     // Create service with TCP activator.
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-tcp".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -528,8 +528,8 @@ async fn activator_tcp_rst_dropped() {
 
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-tcp".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -589,8 +589,8 @@ async fn activator_forwards_when_ready() {
     // Create service with TCP activator.
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-tcp".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -608,8 +608,8 @@ async fn activator_forwards_when_ready() {
             },
         );
         // Set backend and mark ready.
-        st.update_backend("svc-tcp", Some(POD_IP));
-        st.mark_ready("svc-tcp");
+        st.update_service_backend("svc-tcp", Some(POD_IP));
+        st.mark_service_ready("svc-tcp");
     }
 
     let (port0, handle0) = make_test_port();
@@ -644,8 +644,8 @@ async fn service_forward_without_registered_backend_port() {
     // Create a service with backend, mark ready (no activator — pure L3 passthrough).
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-fwd".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -655,8 +655,8 @@ async fn service_forward_without_registered_backend_port() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-fwd", Some(POD_IP));
-        st.mark_ready("svc-fwd");
+        st.update_service_backend("svc-fwd", Some(POD_IP));
+        st.mark_service_ready("svc-fwd");
     }
 
     // Add client port (port 0).
@@ -703,8 +703,8 @@ async fn service_nat_dnat_rewrites_dst_ip() {
     // Create a service with backend, mark ready.
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-nat".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -714,8 +714,8 @@ async fn service_nat_dnat_rewrites_dst_ip() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-nat", Some(POD_IP));
-        st.mark_ready("svc-nat");
+        st.update_service_backend("svc-nat", Some(POD_IP));
+        st.mark_service_ready("svc-nat");
     }
 
     let (port0, handle0) = make_test_port();
@@ -750,8 +750,8 @@ async fn service_nat_snat_rewrites_return_traffic() {
     // Create a service with backend, mark ready.
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-nat".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -761,8 +761,8 @@ async fn service_nat_snat_rewrites_return_traffic() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-nat", Some(POD_IP));
-        st.mark_ready("svc-nat");
+        st.update_service_backend("svc-nat", Some(POD_IP));
+        st.mark_service_ready("svc-nat");
     }
 
     let (port0, handle0) = make_test_port();
@@ -841,8 +841,8 @@ async fn service_nat_ip_checksum_valid() {
 
     {
         let tables = fabric.tables();
-        let mut st = tables.service_table.lock().unwrap();
-        st.create(
+        let mut st = tables.endpoint_table.lock().unwrap();
+        st.create_service(
             "svc-nat".into(),
             SVC_IP,
             distvirt_worker_protocol::ServicePolicy {
@@ -852,8 +852,8 @@ async fn service_nat_ip_checksum_valid() {
             },
             ServiceProcessor::Passthrough,
         );
-        st.update_backend("svc-nat", Some(POD_IP));
-        st.mark_ready("svc-nat");
+        st.update_service_backend("svc-nat", Some(POD_IP));
+        st.mark_service_ready("svc-nat");
     }
 
     let (port0, handle0) = make_test_port();
@@ -904,8 +904,8 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
     // Add a RemoteWorker route for the remote pod IP.
     {
         let tables = fabric.tables();
-        let mut rt = tables.route_table.lock().unwrap();
-        rt.sync(vec![FabricRouteEntry {
+        let mut et = tables.endpoint_table.lock().unwrap();
+        et.route_sync(vec![FabricRouteEntry {
             ip: remote_pod_ip,
             destination: RouteDestination::RemoteWorker {
                 worker_id: WorkerId::from(worker_id),

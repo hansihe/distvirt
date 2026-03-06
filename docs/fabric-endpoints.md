@@ -339,21 +339,25 @@ WireGuard peers connected locally are `LocalAdapter` endpoints. Peers on remote 
 
 ## Migration Path
 
-### Phase 1: Introduce EndpointTable with Service Backend
+### Phase 1: Introduce EndpointTable with Service Backend ✅
 
-- Create `EndpointTable` alongside existing `ServiceTable`
-- Implement `Endpoint` struct with `Service` backend variant
-- Migrate service creation/update/ready/destroy to operate on `EndpointTable`
-- Remove `ServiceTable`
-- Verify service tests pass with the new structure
+- ~~Create `EndpointTable` alongside existing `ServiceTable`~~
+- ~~Implement `Endpoint` struct with `Service` backend variant~~
+- ~~Migrate service creation/update/ready/destroy to operate on `EndpointTable`~~
+- ~~Remove `ServiceTable`~~
+- ~~Verify service tests pass with the new structure~~
 
-### Phase 2: Add Pod Backend Variants
+Completed: `ServiceTable` replaced by `EndpointTable` in `fabric/endpoint.rs` with `EndpointState` enum (`Buffering`/`Pending`/`Ready`), `EndpointBackend::Service` variant (exhaustive match ensures Phase 2 gets compile errors), and shared buffer on the `Endpoint` struct. All 117 tests pass. `service.rs` deleted.
 
-- Add `UnplacedPod`, `LocalPod`, `RemoteSegment` backend variants
-- Migrate route table entries to endpoints
-- Add flow tracking (shared implementation)
-- Remove `RouteTable`
-- Wire `EndpointActivation` event (replaces both `FabricRouteMiss` and `ServiceActivation`)
+### Phase 2: Add Pod Backend Variants ✅
+
+- ~~Add `UnplacedPod`, `RemoteSegment` backend variants~~
+- ~~Migrate route table entries to endpoints~~
+- ~~Add flow tracking (shared implementation)~~
+- ~~Remove `RouteTable`~~
+- ~~Wire `EndpointActivation` event (replaces both `FabricRouteMiss` and `ServiceActivation`)~~
+
+Completed: `RouteTable` removed (`route.rs` deleted). `EndpointBackend` now has `UnplacedPod { buffer_policy }` and `RemoteSegment { worker_id }` variants. `ServiceAction` renamed to `EndpointAction` with new variants `RemoteWorker` and `NotFound`. Route management moved to `EndpointTable` via `route_sync()`, `route_update()`, and `flush_pod_buffer()`. Shared buffer logic extracted into `try_buffer_frame()` helper. `FabricEvent` unified: `RouteMiss` and `ServiceActivation` replaced by single `EndpointActivation { dst_ip, service_id: Option<String> }`. Event bridge in `namespace.rs` maps back to protocol events (`ServiceActivation` / `FabricRouteMiss`). `FlowTracker` added in `fabric/flow.rs` (TCP-only, structural, not wired to events). `LocalPod` variant deferred — local pods use the `IpPortTable` fast path. All 123 tests pass (115 unit + 8 flow tracker).
 
 ### Phase 3: Unified Protocol Commands
 

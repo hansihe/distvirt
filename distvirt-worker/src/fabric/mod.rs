@@ -1,30 +1,28 @@
+pub(crate) mod flow;
 mod forwarding;
 pub(crate) mod gateway;
 pub(crate) mod nat;
 pub(crate) mod port;
-pub(crate) mod route;
-pub(crate) mod service;
+pub(crate) mod endpoint;
 pub(crate) mod service_activator;
 pub(crate) mod switch;
 pub(crate) mod tunnel;
 
 // Lock ordering (acquire in this order to prevent deadlocks):
-//   1. service_table
+//   1. endpoint_table
 //   2. ip_port_table
-//   3. route_table
-//   4. nat_table
-//   5. ports
-//   6. tunnel_ports
+//   3. nat_table
+//   4. ports
+//   5. tunnel_ports
 // Most paths only hold one lock at a time. The main exception is
-// dispatch_frame's DNAT path which holds service_table + ip_port_table
+// dispatch_frame's DNAT path which holds endpoint_table + ip_port_table
 // simultaneously (see forwarding.rs lookup_and_buffer).
 
 pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
-pub use route::RouteTable;
-pub use service::ServiceTable;
+pub use endpoint::EndpointTable;
 pub use tunnel::{TunnelTransport, TunnelPortHandle};
 pub(crate) use forwarding::FabricContextInner;
-pub(crate) use service::{MarkReadyResult, ServiceAction};
+pub(crate) use endpoint::MarkReadyResult;
 pub(crate) use service_activator::ServiceProcessor;
 pub(crate) use gateway::{DnsRegistry, FabricGateway};
 
@@ -62,15 +60,14 @@ pub(crate) fn handle_log_action(service_id: &str, log_action: &LogAction) {
     }
 }
 
-/// Fabric-internal event emitted when the route table or service table is consulted.
+/// Fabric-internal event emitted when the endpoint table is consulted.
 #[derive(Debug, Clone)]
 pub enum FabricEvent {
-    /// A frame hit a placeholder route or no route was found for a routed IP.
-    RouteMiss {
+    /// A frame hit an endpoint that needs activation (service or unplaced pod).
+    EndpointActivation {
         dst_ip: Ipv4Addr,
+        service_id: Option<String>,
     },
-    /// A frame hit a service IP that has no ready backend.
-    ServiceActivation { service_id: String, dst_ip: Ipv4Addr },
     /// An activator signaled a backend need level change.
     ServiceBackendNeed {
         service_id: String,
@@ -139,8 +136,7 @@ impl<P: FramePort> Fabric<P> {
                 inner: Arc::new(FabricContextInner {
                     ports: Mutex::new(HashMap::new()),
                     ip_port_table: Mutex::new(IpPortTable::new()),
-                    route_table: Mutex::new(RouteTable::new()),
-                    service_table: Mutex::new(ServiceTable::new()),
+                    endpoint_table: Mutex::new(EndpointTable::new()),
                     nat_table: Mutex::new(nat::NatTable::new()),
                     gateway_tx: OnceLock::new(),
                     event_tx: OnceLock::new(),
@@ -194,7 +190,7 @@ impl<P: FramePort> Fabric<P> {
         // buffered because the backend IP wasn't reachable yet.
         if let Some(ip) = pod_ip {
             let service_flushes = {
-                let mut st = self.ctx.inner.service_table.lock().expect("poisoned");
+                let mut st = self.ctx.inner.endpoint_table.lock().expect("poisoned");
                 st.flush_by_backend_ip(&ip)
             };
             if !service_flushes.is_empty() {
@@ -212,11 +208,11 @@ impl<P: FramePort> Fabric<P> {
             }
         }
 
-        // Flush buffered frames if an IP was provided.
+        // Flush buffered pod frames if an IP was provided.
         if let Some(pod_ip) = pod_ip {
             let buffered = {
-                let mut rt = self.ctx.inner.route_table.lock().expect("poisoned");
-                rt.flush_buffer(pod_ip)
+                let mut et = self.ctx.inner.endpoint_table.lock().expect("poisoned");
+                et.flush_pod_buffer(pod_ip)
             };
             if !buffered.is_empty() {
                 let flush_port = Arc::clone(&port);
@@ -332,8 +328,8 @@ impl<P: FramePort> Fabric<P> {
         service_id: &str,
     ) {
         let dst_ip = {
-            let st = self.ctx.inner.service_table.lock().expect("poisoned");
-            st.get_ip_by_id(service_id)
+            let st = self.ctx.inner.endpoint_table.lock().expect("poisoned");
+            st.get_service_ip(service_id)
                 .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
         };
         for action in actions {
