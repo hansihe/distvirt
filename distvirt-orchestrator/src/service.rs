@@ -7,7 +7,7 @@ pub struct ServiceStateMachine {
     pub has_activation: bool,
     pub idle_timeout: std::time::Duration,
     /// Active conditions for observability (key → message).
-    pub conditions: std::collections::HashMap<String, String>,
+    pub conditions: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,7 +48,7 @@ impl ServiceStateMachine {
             workload_id,
             has_activation,
             idle_timeout,
-            conditions: std::collections::HashMap::new(),
+            conditions: std::collections::BTreeMap::new(),
         }
     }
 

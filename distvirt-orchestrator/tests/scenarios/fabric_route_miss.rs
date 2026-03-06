@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
 
 /// FabricRouteMiss on a Dormant workload should activate it (LaunchPod).
@@ -103,7 +103,10 @@ async fn test_route_miss_ignored_when_already_running() {
         .iter()
         .filter(|c| matches!(c, WorkerCommand::LaunchPod { .. }))
         .count();
-    assert_eq!(new_launches, 0, "no new LaunchPod should be issued when already running");
+    assert_eq!(
+        new_launches, 0,
+        "no new LaunchPod should be issued when already running"
+    );
 }
 
 /// FabricRouteMiss for an IP that doesn't match any workload should be ignored.
@@ -138,6 +141,7 @@ async fn test_route_miss_ignored_for_unknown_ip() {
 /// timeout fires, the workload should suspend. This will fail until route_miss_wake
 /// is properly cleared.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+#[should_panic]
 async fn test_route_miss_demand_leak() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;

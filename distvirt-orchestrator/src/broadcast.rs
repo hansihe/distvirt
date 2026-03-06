@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::types::*;
 
 pub fn broadcast_to_active_workers(
-    workers: &HashMap<WorkerId, NamespaceWorkerState>,
+    workers: &BTreeMap<WorkerId, NamespaceWorkerState>,
     out: &mut NamespaceOutput,
     make_cmd: impl Fn(&WorkerId) -> WorkerCommand,
 ) {
@@ -15,7 +15,7 @@ pub fn broadcast_to_active_workers(
 }
 
 pub fn broadcast_to_active_workers_except(
-    workers: &HashMap<WorkerId, NamespaceWorkerState>,
+    workers: &BTreeMap<WorkerId, NamespaceWorkerState>,
     exclude: &WorkerId,
     out: &mut NamespaceOutput,
     make_cmd: impl Fn(&WorkerId) -> WorkerCommand,
@@ -44,7 +44,7 @@ mod tests {
         WorkerId(s.into())
     }
 
-    fn make_workers(entries: &[(&str, FabricStatus)]) -> HashMap<WorkerId, NamespaceWorkerState> {
+    fn make_workers(entries: &[(&str, FabricStatus)]) -> BTreeMap<WorkerId, NamespaceWorkerState> {
         entries
             .iter()
             .map(|(id, status)| {
@@ -53,6 +53,7 @@ mod tests {
                     NamespaceWorkerState {
                         fabric_status: status.clone(),
                         primary_pool_id: None,
+                        pressure_band: PressureBand::Normal,
                     },
                 )
             })
@@ -103,7 +104,7 @@ mod tests {
 
     #[test]
     fn broadcast_empty_workers() {
-        let workers = HashMap::new();
+        let workers = BTreeMap::new();
         let mut out = NamespaceOutput::default();
         broadcast_to_active_workers(&workers, &mut out, dummy_cmd);
         assert_eq!(out.worker_commands.len(), 0);

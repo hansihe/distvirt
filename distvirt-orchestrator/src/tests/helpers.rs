@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use crate::namespace::NamespaceStateMachine;
@@ -51,7 +51,7 @@ pub(super) fn test_container_spec() -> ContainerSpec {
 }
 
 pub(super) fn test_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc1".into()),
         WorkloadSpec {
@@ -60,7 +60,7 @@ pub(super) fn test_spec() -> NamespaceSpec {
             suspend_on_idle: false,
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
@@ -78,7 +78,7 @@ pub(super) fn test_spec() -> NamespaceSpec {
 }
 
 pub(super) fn test_spec_with_activation() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc1".into()),
         WorkloadSpec {
@@ -87,7 +87,7 @@ pub(super) fn test_spec_with_activation() -> NamespaceSpec {
             suspend_on_idle: false,
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
@@ -159,6 +159,7 @@ pub(super) fn active_namespace(spec: NamespaceSpec) -> NamespaceStateMachine {
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
             primary_pool_id: None,
+            pressure_band: PressureBand::Normal,
         },
     );
     ns.status = NamespaceStatus::Active;

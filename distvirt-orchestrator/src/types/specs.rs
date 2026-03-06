@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -9,8 +9,8 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSpec {
     pub network: NetworkConfig,
-    pub workloads: HashMap<WorkloadId, WorkloadSpec>,
-    pub services: HashMap<ServiceId, ServiceSpec>,
+    pub workloads: BTreeMap<WorkloadId, WorkloadSpec>,
+    pub services: BTreeMap<ServiceId, ServiceSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

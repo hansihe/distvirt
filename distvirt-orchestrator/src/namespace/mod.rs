@@ -4,7 +4,7 @@ mod output;
 mod reconciliation;
 mod wireguard;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use crate::pod_map::PodMap;
@@ -28,20 +28,20 @@ pub struct NamespaceStateMachine {
     pub spec: NamespaceSpec,
     pub status: NamespaceStatus,
     pub segment_id: u16,
-    pub workloads: HashMap<WorkloadId, WorkloadStateMachine>,
-    pub services: HashMap<ServiceId, ServiceStateMachine>,
-    pub service_workload: HashMap<ServiceId, WorkloadId>,
+    pub workloads: BTreeMap<WorkloadId, WorkloadStateMachine>,
+    pub services: BTreeMap<ServiceId, ServiceStateMachine>,
+    pub service_workload: BTreeMap<ServiceId, WorkloadId>,
     pub pod_map: PodMap,
-    pub workers: HashMap<WorkerId, NamespaceWorkerState>,
+    pub workers: BTreeMap<WorkerId, NamespaceWorkerState>,
     /// WireGuard peer IP allocation and tracking.
     pub wg_peer_manager: WireGuardPeerManager,
 }
 
 impl NamespaceStateMachine {
     pub fn new(namespace_id: NamespaceId, spec: NamespaceSpec, segment_id: u16) -> Self {
-        let mut workloads = HashMap::new();
-        let mut services = HashMap::new();
-        let mut service_workload = HashMap::new();
+        let mut workloads = BTreeMap::new();
+        let mut services = BTreeMap::new();
+        let mut service_workload = BTreeMap::new();
 
         for (wl_id, wl_spec) in &spec.workloads {
             workloads.insert(
@@ -82,7 +82,7 @@ impl NamespaceStateMachine {
             services,
             service_workload,
             pod_map: PodMap::new(),
-            workers: HashMap::new(),
+            workers: BTreeMap::new(),
             wg_peer_manager,
         }
     }
@@ -108,7 +108,7 @@ impl NamespaceStateMachine {
     }
 
     pub fn status_report(&self) -> NamespaceStatusReport {
-        let mut services = HashMap::new();
+        let mut services = BTreeMap::new();
         for (svc_id, svc) in &self.services {
             let wl_id = &svc.workload_id;
             let wl = self.workloads.get(wl_id);

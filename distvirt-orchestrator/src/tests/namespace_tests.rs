@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::namespace::NamespaceStateMachine;
 use crate::orchestrator::Orchestrator;
@@ -64,6 +64,7 @@ fn test_namespace_worker_lost_removes_worker() {
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
             primary_pool_id: None,
+            pressure_band: PressureBand::Normal,
         },
     );
 
@@ -172,8 +173,8 @@ fn test_update_spec_removes_service() {
     // Update spec with no services/workloads — svc1 should be removed.
     let empty_spec = NamespaceSpec {
         network: test_network_config(),
-        workloads: HashMap::new(),
-        services: HashMap::new(),
+        workloads: BTreeMap::new(),
+        services: BTreeMap::new(),
     };
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
@@ -202,8 +203,8 @@ fn test_update_spec_removes_launching_service() {
     // Update spec with no services — should stop the launching pod and cancel the launch timer.
     let empty_spec = NamespaceSpec {
         network: test_network_config(),
-        workloads: HashMap::new(),
-        services: HashMap::new(),
+        workloads: BTreeMap::new(),
+        services: BTreeMap::new(),
     };
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
@@ -230,6 +231,7 @@ fn test_namespace_created_activates_namespace() {
         NamespaceWorkerState {
             fabric_status: FabricStatus::Creating,
             primary_pool_id: None,
+            pressure_band: PressureBand::Normal,
         },
     );
     let mut pod_counter = 0u64;
@@ -527,6 +529,7 @@ fn test_delete_multi_worker_stateful() {
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
             primary_pool_id: None,
+            pressure_band: PressureBand::Normal,
         },
     );
 
@@ -849,8 +852,8 @@ fn test_destroy_service_on_spec_update() {
     // Update spec with no services — should emit DestroyService.
     let empty_spec = NamespaceSpec {
         network: test_network_config(),
-        workloads: HashMap::new(),
-        services: HashMap::new(),
+        workloads: BTreeMap::new(),
+        services: BTreeMap::new(),
     };
     let out = ns.step(NamespaceInput::UpdateSpec {
         client_id: client_id(1),
@@ -874,6 +877,7 @@ fn test_registry_sync_on_namespace_active() {
         NamespaceWorkerState {
             fabric_status: FabricStatus::Creating,
             primary_pool_id: None,
+            pressure_band: PressureBand::Normal,
         },
     );
 
@@ -951,6 +955,7 @@ fn test_waiting_for_capacity_no_workers() {
         NamespaceWorkerState {
             fabric_status: FabricStatus::Active,
             primary_pool_id: None,
+            pressure_band: PressureBand::Normal,
         },
     );
     let pod_id = PodId("pod-0".into());

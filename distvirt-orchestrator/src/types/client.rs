@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::*;
 
@@ -49,7 +49,7 @@ pub struct WorkerStatusReport {
     pub max_pods: u32,
     pub available_memory_mb: u64,
     pub active_pods: u32,
-    pub conditions: HashMap<String, WorkerCondition>,
+    pub conditions: BTreeMap<String, WorkerCondition>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +74,7 @@ pub enum PodStatus {
 pub struct NamespaceStatusReport {
     pub namespace_id: NamespaceId,
     pub status: NamespaceStatus,
-    pub services: HashMap<ServiceId, ServiceStatusReport>,
+    pub services: BTreeMap<ServiceId, ServiceStatusReport>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +87,6 @@ pub struct ServiceStatusReport {
     pub backend_need: Option<BackendNeed>,
     pub activation_enabled: bool,
     pub ip: String,
-    pub workload_conditions: HashMap<String, String>,
-    pub service_conditions: HashMap<String, String>,
+    pub workload_conditions: BTreeMap<String, String>,
+    pub service_conditions: BTreeMap<String, String>,
 }

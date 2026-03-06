@@ -61,6 +61,9 @@ impl Orchestrator {
         // WaitingForCapacity and may be schedulable on other workers), etc.
         self.schedule_waiting_pods(out);
 
+        // Recompute pressure for all workers after pod count may have changed.
+        self.recompute_all_worker_pressure();
+
         // If namespace is fully destroyed, remove it and clean up worker references.
         if destroyed {
             if let Some(ns) = self.namespaces.remove(&namespace_id) {
@@ -77,6 +80,7 @@ impl Orchestrator {
     pub(crate) fn schedule_waiting_pods(&mut self, out: &mut OrchestratorOutput) {
         // Collect (namespace_id, workload_id) pairs for workloads waiting for capacity.
         // Skip namespaces in Destroying state.
+        // BTreeMap iteration is sorted, so the result is deterministic.
         let waiting: Vec<(NamespaceId, WorkloadId)> = self
             .namespaces
             .iter()
@@ -114,8 +118,212 @@ impl Orchestrator {
         let ns = self.namespaces.get(namespace_id)?;
         ns.workers
             .iter()
-            .filter(|(_, ws)| ws.fabric_status == FabricStatus::Active)
-            .min_by_key(|(wid, _)| ns.pod_map.worker_pod_count(wid))
+            // Hard constraints: must be active, must not be at High or Critical pressure.
+            .filter(|(wid, ws)| {
+                if ws.fabric_status != FabricStatus::Active {
+                    return false;
+                }
+                // Check global worker pressure bands.
+                if let Some(global_ws) = self.workers.get(*wid) {
+                    global_ws.pressure_bands.max_band() < PressureBand::High
+                } else {
+                    false
+                }
+            })
+            // Soft preferences: lowest pressure band first, then fewest pods, then WorkerId for determinism.
+            .min_by_key(|(wid, _)| {
+                let band = self.workers.get(*wid)
+                    .map(|ws| ws.pressure_bands.max_band())
+                    .unwrap_or(PressureBand::Critical);
+                (band, ns.pod_map.worker_pod_count(wid), (*wid).clone())
+            })
             .map(|(wid, _)| wid.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::namespace::NamespaceStateMachine;
+    use crate::pod_map::PodMap;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::net::Ipv4Addr;
+
+    fn test_ns_spec() -> NamespaceSpec {
+        NamespaceSpec {
+            network: NetworkConfig {
+                subnet: Ipv4Addr::new(172, 16, 0, 0),
+                gateway: Ipv4Addr::new(172, 16, 0, 1),
+                prefix_len: 24,
+                segment_id: None,
+            },
+            workloads: BTreeMap::new(),
+            services: BTreeMap::new(),
+        }
+    }
+
+    fn test_worker_state(ns_id: &NamespaceId) -> WorkerState {
+        let mut namespaces = BTreeSet::new();
+        namespaces.insert(ns_id.clone());
+        WorkerState {
+            capabilities: WorkerCapabilities {
+                max_pods: 10,
+                available_memory_mb: 1024,
+                public_endpoint: String::new(),
+                pools: vec![],
+            },
+            namespaces,
+            wg_config: None,
+            tunnel_config: None,
+            conditions: BTreeMap::new(),
+            transfer_listen_port: None,
+            pressure: WorkerPressure::default(),
+            pressure_bands: PressureBands::default(),
+        }
+    }
+
+    fn setup_orchestrator(worker_count: usize) -> (Orchestrator, NamespaceId, Vec<WorkerId>) {
+        let ns_id = NamespaceId::from("test-ns");
+        let mut orch = Orchestrator::new();
+
+        let mut ns = NamespaceStateMachine::new(ns_id.clone(), test_ns_spec(), 1);
+        let mut worker_ids = Vec::new();
+
+        for i in 0..worker_count {
+            let wid = WorkerId(format!("w-{}", i));
+            ns.workers.insert(wid.clone(), NamespaceWorkerState {
+                fabric_status: FabricStatus::Active,
+                primary_pool_id: None,
+                pressure_band: PressureBand::Normal,
+            });
+            orch.workers.insert(wid.clone(), test_worker_state(&ns_id));
+            worker_ids.push(wid);
+        }
+
+        orch.namespaces.insert(ns_id.clone(), ns);
+        (orch, ns_id, worker_ids)
+    }
+
+    fn insert_pods(pod_map: &mut PodMap, count: usize, prefix: &str, worker_id: &WorkerId) {
+        for i in 0..count {
+            pod_map.insert(
+                PodId(format!("{}-{}", prefix, i)),
+                PodInfo {
+                    workload_id: WorkloadId("wl".into()),
+                    worker_id: worker_id.clone(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn test_select_worker_prefers_normal_over_elevated() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: Elevated memory pressure
+        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::Elevated;
+        // w-1: Normal (default)
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "should prefer Normal over Elevated");
+    }
+
+    #[test]
+    fn test_select_worker_excludes_high_pressure() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: High memory pressure
+        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::High;
+        // w-1: Normal
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "should exclude High pressure worker");
+    }
+
+    #[test]
+    fn test_select_worker_excludes_critical_pressure() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: Critical storage pressure
+        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.storage = PressureBand::Critical;
+        // w-1: Normal
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "should exclude Critical pressure worker");
+    }
+
+    #[test]
+    fn test_select_worker_none_when_all_high() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // Both workers at High pressure
+        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::High;
+        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.compute = PressureBand::Critical;
+
+        let selected = orch.select_worker_for_pod(&ns_id);
+        assert!(selected.is_none(), "should return None when all workers are at High+ pressure");
+    }
+
+    #[test]
+    fn test_select_worker_elevated_is_fallback() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: High (excluded), w-1: Elevated (allowed)
+        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::High;
+        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.memory = PressureBand::Elevated;
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "Elevated worker should be selected when High is excluded");
+    }
+
+    #[test]
+    fn test_select_worker_pod_count_tiebreaker() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // Both Normal pressure, but w-0 has 3 pods, w-1 has 1 pod
+        let ns = orch.namespaces.get_mut(&ns_id).unwrap();
+        insert_pods(&mut ns.pod_map, 3, "a", &workers[0]);
+        insert_pods(&mut ns.pod_map, 1, "b", &workers[1]);
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "should prefer worker with fewer pods at same pressure");
+    }
+
+    #[test]
+    fn test_select_worker_pressure_trumps_pod_count() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: Normal pressure, 5 pods
+        // w-1: Elevated pressure, 0 pods
+        let ns = orch.namespaces.get_mut(&ns_id).unwrap();
+        insert_pods(&mut ns.pod_map, 5, "a", &workers[0]);
+        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.memory = PressureBand::Elevated;
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[0], "should prefer Normal worker even with more pods over Elevated");
+    }
+
+    #[test]
+    fn test_select_worker_skips_inactive() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0 is not active
+        let ns = orch.namespaces.get_mut(&ns_id).unwrap();
+        ns.workers.get_mut(&workers[0]).unwrap().fabric_status = FabricStatus::Creating;
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "should skip inactive worker");
+    }
+
+    #[test]
+    fn test_select_worker_max_band_across_dimensions() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: Normal on all dimensions
+        // w-1: Normal memory but High on storage -> max_band is High -> excluded
+        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.storage = PressureBand::High;
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[0], "High on any dimension should exclude the worker");
     }
 }

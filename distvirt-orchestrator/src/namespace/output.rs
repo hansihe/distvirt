@@ -171,7 +171,12 @@ impl NamespaceStateMachine {
                     broadcast_to_active_workers(&self.workers, out, |_| cmd.clone());
                 }
                 ServiceOutput::TimerSet(key, duration) => {
-                    out.timers_set.push((key, duration));
+                    let adjusted = if matches!(key, TimerKey::IdleTimeout { .. }) {
+                        self.pressure_adjusted_idle_timeout(service_id, duration)
+                    } else {
+                        duration
+                    };
+                    out.timers_set.push((key, adjusted));
                 }
                 ServiceOutput::TimerCancel(key) => {
                     out.timers_cancel.push(key);
@@ -188,5 +193,27 @@ impl NamespaceStateMachine {
                 }
             }
         }
+    }
+
+    /// Look up the pressure band for a service's hosting worker and adjust the timeout.
+    fn pressure_adjusted_idle_timeout(
+        &self,
+        service_id: &ServiceId,
+        configured: std::time::Duration,
+    ) -> std::time::Duration {
+        let band = self
+            .services
+            .get(service_id)
+            .and_then(|svc| {
+                if let ServiceState::Active { ref worker_id, .. } = svc.state {
+                    Some(worker_id)
+                } else {
+                    None
+                }
+            })
+            .and_then(|wid| self.workers.get(wid))
+            .map(|nws| nws.pressure_band)
+            .unwrap_or(PressureBand::Normal);
+        band.adjust_idle_timeout(configured)
     }
 }

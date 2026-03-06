@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -81,7 +81,7 @@ fn test_spec() -> NamespaceSpec {
     let wl_id = WorkloadId("echo".to_string());
     let svc_id = ServiceId::from("echo-svc");
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_id.clone(),
         WorkloadSpec {
@@ -110,7 +110,7 @@ fn test_spec() -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         svc_id,
         ServiceSpec {

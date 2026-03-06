@@ -1,15 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::types::{PodId, PodInfo, WorkerId};
 
 /// Bidirectional pod↔worker tracking.
 ///
-/// Maintains both `pods: HashMap<PodId, PodInfo>` and
-/// `worker_pods: HashMap<WorkerId, HashSet<PodId>>` in sync.
+/// Maintains both `pods: BTreeMap<PodId, PodInfo>` and
+/// `worker_pods: BTreeMap<WorkerId, BTreeSet<PodId>>` in sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodMap {
-    pods: HashMap<PodId, PodInfo>,
-    worker_pods: HashMap<WorkerId, HashSet<PodId>>,
+    pods: BTreeMap<PodId, PodInfo>,
+    worker_pods: BTreeMap<WorkerId, BTreeSet<PodId>>,
 }
 
 impl Default for PodMap {
@@ -21,8 +21,8 @@ impl Default for PodMap {
 impl PodMap {
     pub fn new() -> Self {
         PodMap {
-            pods: HashMap::new(),
-            worker_pods: HashMap::new(),
+            pods: BTreeMap::new(),
+            worker_pods: BTreeMap::new(),
         }
     }
 
@@ -133,7 +133,7 @@ mod tests {
         }
 
         // Per-worker counts from iterating pods must match worker_pods set sizes.
-        let mut counts: HashMap<WorkerId, usize> = HashMap::new();
+        let mut counts: BTreeMap<WorkerId, usize> = BTreeMap::new();
         for (_pid, pod_info) in &map.pods {
             *counts.entry(pod_info.worker_id.clone()).or_default() += 1;
         }
@@ -226,8 +226,7 @@ mod tests {
         m.insert(pid("p1"), info("w1", "wl1"));
         m.insert(pid("p2"), info("w1", "wl2"));
         m.insert(pid("p3"), info("w2", "wl3"));
-        let mut removed = m.remove_worker_pods(&wid("w1"));
-        removed.sort();
+        let removed = m.remove_worker_pods(&wid("w1"));
         assert_eq!(removed, vec![pid("p1"), pid("p2")]);
         assert_eq!(m.len(), 1);
         assert_eq!(m.worker_pod_count(&wid("w1")), 0);

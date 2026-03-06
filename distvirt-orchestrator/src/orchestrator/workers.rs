@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::types::*;
 
@@ -22,11 +22,13 @@ impl Orchestrator {
             worker_id.clone(),
             WorkerState {
                 capabilities,
-                namespaces: HashSet::new(),
+                namespaces: BTreeSet::new(),
                 wg_config,
                 tunnel_config,
-                conditions: std::collections::HashMap::new(),
+                conditions: std::collections::BTreeMap::new(),
                 transfer_listen_port: None,
+                pressure: WorkerPressure::default(),
+                pressure_bands: PressureBands::default(),
             },
         );
 
@@ -56,8 +58,10 @@ impl Orchestrator {
         let worker_state = self.workers.remove(&worker_id);
 
         // Fan out WorkerLost to every namespace that had this worker.
+        // BTreeSet iteration is sorted, so fan-out order is deterministic.
         if let Some(ws) = worker_state {
-            for ns_id in ws.namespaces {
+            let ns_ids: Vec<_> = ws.namespaces.into_iter().collect();
+            for ns_id in ns_ids {
                 self.route_namespace_input(
                     ns_id,
                     NamespaceInput::WorkerLost {

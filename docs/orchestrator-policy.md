@@ -947,7 +947,7 @@ Three complementary methods:
 
 | Area | Status | Code Reference |
 |---|---|---|
-| Worker selection | Basic fewest-pods heuristic; no pressure scores, no leases | `orchestrator/workers.rs` |
+| Worker selection | **Done** (Task 3.2) — Two-phase pressure-aware selection: Hard constraints (Active + pressure < High), soft preferences (lowest band, then fewest pods) | `orchestrator/scheduling.rs` |
 | Service activation lifecycle | Implemented (activation, idle timeout, reconciliation-based demand) | `service.rs`, `namespace/events.rs`, `namespace/reconciliation.rs` |
 | Suspend/resume | Implemented end-to-end | `workload.rs`, `namespace/events.rs`, `namespace/output.rs` |
 | Retry/backoff | **Done** (Tasks 1.2, 1.4) — exponential backoff with `Failed` terminal state, `SpecChanged`/`ManualRestart` recovery | `workload.rs`, `types/states.rs` |
@@ -957,7 +957,7 @@ Three complementary methods:
 | Worker conditions | Exist in protocol (`HashMap<String, WorkerCondition>` on `WorkerState`) | `types/states.rs` |
 | Workload/service conditions | **Done** (Tasks 2.1, 2.2) — `conditions: HashMap<String, String>` on workload/service SMs, stored by namespace output layer, included in status reports | `workload.rs`, `service.rs`, `namespace/output.rs`, `types/client.rs` |
 | Transition intents | **Implemented** (Task 1.1) — `PendingIntent` enum on transition states, `ForceDeactivate` input | `types/states.rs`, `workload.rs` |
-| Pressure scores | **Not implemented** | — |
+| Pressure scores | **Done** (Task 3.1) — `WorkerPressure` + `PressureBands` with hysteresis on `WorkerState`, recomputed on pool updates and pod changes | `types/states.rs`, `orchestrator/mod.rs`, `orchestrator/scheduling.rs`, `shell/mod.rs` |
 | Resource leases | Ad-hoc `PlacementTable.locked_by` for artifacts only | `types/states.rs` |
 | PSI integration | **Not implemented** | — |
 | Preemption | **Not implemented** | — |
@@ -1099,68 +1099,49 @@ Extended `ServiceStatusReport` with `workload_conditions: HashMap<String, String
 
 ### Phase 3 — Capacity Management
 
-#### Task 3.1: Worker Pressure Score
+#### Task 3.1: Worker Pressure Score ✓
 
-**Problem**: N signals × M policy decisions creates an unmanageable threshold matrix. Need a single normalized score.
+**Status**: Done.
 
-**Changes**:
+Added `WorkerPressure` struct (per-dimension 0.0–1.0 scores), `PressureBand` enum (`Normal`, `Elevated`, `High`, `Critical`) with `Ord`-based ordering, `PressureBands` struct (per-dimension band tracking with hysteresis), and `compute_band_with_hysteresis()` function. Added `pressure: WorkerPressure` and `pressure_bands: PressureBands` fields to `WorkerState`. Added `recompute_pressure(pod_memory_committed_mb)` method on `WorkerState`.
 
-Add `WorkerPressure` to `WorkerState`:
-
-```rust
-struct WorkerPressure {
-    compute: f32,
-    memory: f32,
-    storage: f32,
-    network: f32,
-}
-
-enum PressureBand { Normal, Elevated, High, Critical }
-
-struct WorkerState {
-    // ... existing fields ...
-    pub pressure: WorkerPressure,
-    pub pressure_band: PressureBand,  // max across dimensions, with hysteresis
-}
-```
-
-Pressure is recomputed on:
-- `PoolCapacityUpdate` events (existing, every 30s)
-- `PressureUpdate` events (new — when PSI integration lands)
-- Pod start/stop (pod count changes)
-
-Initially, without PSI, pressure uses only static accounting:
-- `memory_pressure = pods_memory_committed / available_memory_mb`
-- `storage_pressure = pool_used / pool_capacity`
-- `compute_pressure = 0.0` (no data without PSI)
-
-**Hysteresis** (per dimension): enter band at upper threshold, leave at lower:
+Hysteresis per dimension — enter band at upper threshold, leave at lower:
 | Band | Enter | Leave |
 |---|---|---|
 | Elevated | 0.50 | 0.40 |
 | High | 0.80 | 0.70 |
 | Critical | 0.95 | 0.85 |
 
-**Testing**: Unit tests for pressure computation and hysteresis. No stateright model — pressure is a derived value, not a state machine.
+Initially, without PSI, pressure uses static accounting: `memory_pressure = pods_memory_committed / available_memory_mb`, `storage_pressure = max(1 - available/capacity)` across all pools, `compute_pressure = 0.0` (no data without PSI). `DEFAULT_POD_MEMORY_MB = 128` constant for pod memory until per-pod resource sizing is implemented.
 
-**Files changed**: `types/states.rs`, `orchestrator/workers.rs`.
+Added `recompute_worker_pressure(worker_id)` and `recompute_all_worker_pressure()` methods on `Orchestrator`. Pressure is recomputed on:
+- `PoolCapacityUpdate` events (shell layer, after updating pool data)
+- Pod count changes (via `recompute_all_worker_pressure()` at end of `process_namespace_output`)
+
+13 unit tests covering band transitions, hysteresis enter/leave behavior, `max_band()`, `update_bands()`, memory pressure computation, and storage pressure computation.
+
+**Files changed**: `types/states.rs`, `orchestrator/mod.rs`, `orchestrator/scheduling.rs`, `orchestrator/workers.rs`, `shell/mod.rs`.
 
 **Depends on**: Nothing.
 
 ---
 
-#### Task 3.2: Pressure-Aware Scheduling
+#### Task 3.2: Pressure-Aware Scheduling ✓
 
-**Problem**: Current `select_worker_for_pod` uses only pod count. Need to incorporate pressure scores.
+**Status**: Done.
 
-**Changes**: Two-phase selection in `orchestrator/workers.rs`:
+Two-phase worker selection in `select_worker_for_pod`:
 
-1. **Hard constraints** (filter): `fabric_status == Active`, not draining, pressure below Critical on all dimensions
-2. **Soft preferences** (rank): lowest pressure score (weighted: memory > compute > storage), snapshot locality (prefer worker holding the artifact for resume), pool locality
+1. **Hard constraints** (filter): `fabric_status == Active`, global worker pressure `max_band() < High` (excludes High and Critical workers)
+2. **Soft preferences** (rank by tuple): `(max_band, pod_count)` — lowest pressure band first, fewest pods as tiebreaker within the same band
 
-**Testing**: Unit tests with mock workers at various pressure levels. Extend namespace stateright model with configurable worker pressure to verify scheduling exclusion at High/Critical.
+This means Normal workers are always preferred over Elevated, and Elevated workers are still eligible (deprioritized) while High/Critical are excluded entirely. When all workers are at High+ pressure, `select_worker_for_pod` returns `None` and the workload stays in `WaitingForCapacity`.
 
-**Files changed**: `orchestrator/workers.rs`, `orchestrator/mod.rs`.
+Snapshot locality and pool locality are deferred — currently resume is pinned to the artifact-holding worker (handled separately in `process_namespace_output`'s resume path). Draining exclusion is deferred to Task 4.3.
+
+9 unit tests covering: Normal vs Elevated preference, High/Critical exclusion, all-high returns None, Elevated as fallback, pod count tiebreaker, pressure trumps pod count, inactive worker skip, max-band across dimensions.
+
+**Files changed**: `orchestrator/scheduling.rs`.
 
 **Depends on**: Task 3.1.
 

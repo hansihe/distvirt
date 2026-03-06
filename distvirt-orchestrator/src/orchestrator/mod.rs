@@ -3,18 +3,18 @@ mod networking;
 mod scheduling;
 mod workers;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::namespace::NamespaceStateMachine;
 use crate::types::*;
 
 pub struct Orchestrator {
-    pub namespaces: HashMap<NamespaceId, NamespaceStateMachine>,
-    pub workers: HashMap<WorkerId, WorkerState>,
-    pub clients: HashSet<ClientId>,
+    pub namespaces: BTreeMap<NamespaceId, NamespaceStateMachine>,
+    pub workers: BTreeMap<WorkerId, WorkerState>,
+    pub clients: BTreeSet<ClientId>,
     pub next_pod_id: u64,
     pub next_segment_id: u16,
-    pub active_segment_ids: HashSet<u16>,
+    pub active_segment_ids: BTreeSet<u16>,
     /// Global artifact placement table tracking where artifacts are stored across the cluster.
     ///
     /// Currently a simple data structure passed by `&mut` reference to namespace state machines.
@@ -35,12 +35,12 @@ impl Default for Orchestrator {
 impl Orchestrator {
     pub fn new() -> Self {
         Orchestrator {
-            namespaces: HashMap::new(),
-            workers: HashMap::new(),
-            clients: HashSet::new(),
+            namespaces: BTreeMap::new(),
+            workers: BTreeMap::new(),
+            clients: BTreeSet::new(),
             next_pod_id: 0,
             next_segment_id: 1,
-            active_segment_ids: HashSet::new(),
+            active_segment_ids: BTreeSet::new(),
             placement_table: PlacementTable::default(),
         }
     }
@@ -134,6 +134,39 @@ impl Orchestrator {
                     ns_id,
                 );
             }
+        }
+    }
+
+    /// Recompute pressure scores for a specific worker based on pod counts across all namespaces.
+    pub fn recompute_worker_pressure(&mut self, worker_id: &WorkerId) {
+        let pod_count: usize = self.namespaces.values()
+            .map(|ns| ns.pod_map.worker_pod_count(worker_id))
+            .sum();
+        let committed_mb = pod_count as u64 * DEFAULT_POD_MEMORY_MB;
+        if let Some(ws) = self.workers.get_mut(worker_id) {
+            ws.recompute_pressure(committed_mb);
+        }
+        self.propagate_pressure_to_namespaces(worker_id);
+    }
+
+    /// Propagate a worker's max pressure band to all namespace worker states for that worker.
+    fn propagate_pressure_to_namespaces(&mut self, worker_id: &WorkerId) {
+        let band = match self.workers.get(worker_id) {
+            Some(ws) => ws.pressure_bands.max_band(),
+            None => return,
+        };
+        for ns in self.namespaces.values_mut() {
+            if let Some(nws) = ns.workers.get_mut(worker_id) {
+                nws.pressure_band = band;
+            }
+        }
+    }
+
+    /// Recompute pressure scores for all connected workers.
+    pub fn recompute_all_worker_pressure(&mut self) {
+        let worker_ids: Vec<WorkerId> = self.workers.keys().cloned().collect();
+        for wid in worker_ids {
+            self.recompute_worker_pressure(&wid);
         }
     }
 

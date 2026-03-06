@@ -114,6 +114,7 @@ impl Orchestrator {
                         .get(worker_id)
                         .and_then(|ws| ws.capabilities.pools.first())
                         .map(|p| p.pool_id.clone()),
+                    pressure_band: PressureBand::Normal,
                 },
             );
         }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -208,7 +208,7 @@ impl NamespaceSnapshot {
                 .collect(),
         };
 
-        let mut workloads = HashMap::new();
+        let mut workloads = BTreeMap::new();
         for (wl_id, wl_snap) in &self.workloads {
             let suspend_on_idle = self.spec.workloads.get(wl_id).map_or(false, |w| w.suspend_on_idle);
             let mut wl = distvirt_orchestrator::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle);
@@ -220,7 +220,7 @@ impl NamespaceSnapshot {
             workloads.insert(wl_id.clone(), wl);
         }
 
-        let mut services = HashMap::new();
+        let mut services = BTreeMap::new();
         for (svc_id, svc_snap) in &self.services {
             let svc_spec = spec.services.get(svc_id);
             let idle_timeout = svc_spec
@@ -237,7 +237,7 @@ impl NamespaceSnapshot {
             services.insert(svc_id.clone(), svc);
         }
 
-        let service_workload: HashMap<ServiceId, WorkloadId> = self
+        let service_workload: BTreeMap<ServiceId, WorkloadId> = self
             .service_workload
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -266,6 +266,7 @@ impl NamespaceSnapshot {
                         NamespaceWorkerState {
                             fabric_status: v.fabric_status.clone(),
                             primary_pool_id: None,
+                            pressure_band: PressureBand::Normal,
                         },
                     )
                 })
@@ -376,6 +377,7 @@ impl Model for NamespaceModel {
                 NamespaceWorkerState {
                     fabric_status: FabricStatus::Creating,
                     primary_pool_id: None,
+                    pressure_band: PressureBand::Normal,
                 },
             );
         }
@@ -1089,7 +1091,7 @@ fn test_container_spec() -> ContainerSpec {
 }
 
 fn single_service_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc-1".into()),
         WorkloadSpec {
@@ -1098,7 +1100,7 @@ fn single_service_spec() -> NamespaceSpec {
             suspend_on_idle: false,
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc-1".into()),
         ServiceSpec {
@@ -1119,7 +1121,7 @@ fn single_service_spec() -> NamespaceSpec {
 }
 
 fn two_service_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc-1".into()),
         WorkloadSpec {
@@ -1141,7 +1143,7 @@ fn two_service_spec() -> NamespaceSpec {
             },
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc-1".into()),
         ServiceSpec {
@@ -1173,7 +1175,7 @@ fn two_service_spec() -> NamespaceSpec {
 /// 1 workload (`wl-1`), 2 activation services (`svc-a`, `svc-b`) both pointing
 /// to the same workload with different IPs. Exercises "Shared Workload Demand".
 fn shared_workload_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("wl-1".into()),
         WorkloadSpec {
@@ -1182,7 +1184,7 @@ fn shared_workload_spec() -> NamespaceSpec {
             suspend_on_idle: false,
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc-a".into()),
         ServiceSpec {

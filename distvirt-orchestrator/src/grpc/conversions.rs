@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -16,12 +16,12 @@ pub(super) fn convert_proto_spec(spec: proto::NamespaceSpec) -> Result<Namespace
         .ok_or_else(|| Status::invalid_argument("missing network config"))?;
     let network = parse_network_config(&network.subnet)?;
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     for (id, wl) in spec.workloads {
         workloads.insert(WorkloadId(id), convert_proto_workload_spec(wl)?);
     }
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     for (id, svc) in spec.services {
         services.insert(ServiceId(id), convert_proto_service_spec(svc)?);
     }

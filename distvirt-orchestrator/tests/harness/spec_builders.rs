@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -48,7 +48,7 @@ pub fn always_on_spec() -> NamespaceSpec {
     let wl_id = WorkloadId("echo".to_string());
     let svc_id = ServiceId::from("echo-svc");
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_id.clone(),
         WorkloadSpec {
@@ -58,7 +58,7 @@ pub fn always_on_spec() -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         svc_id,
         ServiceSpec {
@@ -85,7 +85,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
     let wl_id = WorkloadId("web".to_string());
     let svc_id = ServiceId::from("web-svc");
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_id.clone(),
         WorkloadSpec {
@@ -95,7 +95,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         svc_id,
         ServiceSpec {
@@ -126,7 +126,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
     let wl_id = WorkloadId("web".to_string());
     let svc_id = ServiceId::from("web-svc");
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_id.clone(),
         WorkloadSpec {
@@ -136,7 +136,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         svc_id,
         ServiceSpec {
@@ -166,7 +166,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
 pub fn multi_service_spec() -> NamespaceSpec {
     let wl_id = WorkloadId("shared".to_string());
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_id.clone(),
         WorkloadSpec {
@@ -176,7 +176,7 @@ pub fn multi_service_spec() -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId::from("svc-a"),
         ServiceSpec {
@@ -251,7 +251,7 @@ pub fn activation_spec_with_segment(idle_timeout: Duration, segment_id: u16) -> 
 pub fn always_on_multi_service_spec() -> NamespaceSpec {
     let wl_id = WorkloadId("shared".to_string());
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_id.clone(),
         WorkloadSpec {
@@ -261,7 +261,7 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId::from("svc-a"),
         ServiceSpec {
@@ -301,7 +301,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
     let wl_a = WorkloadId("echo-a".to_string());
     let wl_b = WorkloadId("echo-b".to_string());
 
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         wl_a.clone(),
         WorkloadSpec {
@@ -319,7 +319,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
         },
     );
 
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId::from("svc-a"),
         ServiceSpec {

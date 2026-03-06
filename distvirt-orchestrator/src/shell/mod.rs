@@ -409,6 +409,11 @@ impl OrchestratorShell {
         &self.orchestrator
     }
 
+    /// Mutable access to the orchestrator state (for test setup).
+    pub fn orchestrator_mut(&mut self) -> &mut Orchestrator {
+        &mut self.orchestrator
+    }
+
     /// Process one pending message. Returns false if no more messages.
     pub async fn step(&mut self) -> bool {
         match self.msg_rx.try_recv() {
@@ -544,6 +549,8 @@ impl OrchestratorShell {
                             }
                         }
                     }
+                    // Recompute pressure after pool capacity change.
+                    self.orchestrator.recompute_worker_pressure(&worker_id);
                     return;
                 }
 

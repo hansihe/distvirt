@@ -140,6 +140,11 @@ impl TestHarness {
         self.shell.orchestrator()
     }
 
+    /// Mutable access to the orchestrator state (for test setup, e.g. injecting pressure).
+    pub fn orchestrator_mut(&mut self) -> &mut distvirt_orchestrator::orchestrator::Orchestrator {
+        self.shell.orchestrator_mut()
+    }
+
     /// Get namespace state machine.
     pub fn namespace(
         &self,
@@ -173,7 +178,7 @@ impl TestHarness {
     }
 
     /// Get service conditions.
-    pub fn service_conditions(&self, ns_id: &str, svc_id: &str) -> &std::collections::HashMap<String, String> {
+    pub fn service_conditions(&self, ns_id: &str, svc_id: &str) -> &std::collections::BTreeMap<String, String> {
         let ns = self.namespace(ns_id);
         let svc = ns
             .services
@@ -183,7 +188,7 @@ impl TestHarness {
     }
 
     /// Get workload conditions.
-    pub fn workload_conditions(&self, ns_id: &str, wl_id: &str) -> &std::collections::HashMap<String, String> {
+    pub fn workload_conditions(&self, ns_id: &str, wl_id: &str) -> &std::collections::BTreeMap<String, String> {
         let ns = self.namespace(ns_id);
         let wl = ns
             .workloads

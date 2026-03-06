@@ -44,7 +44,7 @@ pub struct WorkloadStateMachine {
     /// aborting an in-progress boot/retry sequence.
     pub needs_successful_boot: bool,
     /// Active conditions for observability (key → message).
-    pub conditions: std::collections::HashMap<String, String>,
+    pub conditions: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,7 +109,7 @@ impl WorkloadStateMachine {
             max_retries: MAX_RETRIES,
             route_miss_wake: false,
             needs_successful_boot: false,
-            conditions: std::collections::HashMap::new(),
+            conditions: std::collections::BTreeMap::new(),
         }
     }
 

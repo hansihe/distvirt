@@ -151,6 +151,29 @@ impl MockWorkerConfig {
         }
     }
 
+    /// Config with a local storage pool and limited memory.
+    /// Useful for pressure tests: with DEFAULT_POD_MEMORY_MB=128,
+    /// one pod on a 256MB worker → 0.5 pressure → Elevated.
+    pub fn with_pool_and_memory(available_memory_mb: u64) -> Self {
+        MockWorkerConfig {
+            handler: None,
+            capabilities: WorkerCapabilities {
+                has_kvm: true,
+                has_containerd: true,
+                available_adapters: vec![],
+                max_pods: 10,
+                available_memory_mb,
+                public_endpoint: String::new(),
+                pools: vec![PoolInfo {
+                    pool_id: PoolId::from("local"),
+                    path: "/tmp/pool".to_string(),
+                    capacity_bytes: 1024 * 1024 * 1024,
+                    available_bytes: 1024 * 1024 * 1024,
+                }],
+            },
+        }
+    }
+
     /// Config with tunnel capabilities (public_endpoint, pool, etc.).
     pub fn with_tunnel(endpoint: &str, _public_key: [u8; 32]) -> Self {
         MockWorkerConfig {

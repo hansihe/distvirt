@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -169,7 +169,7 @@ fn test_container_spec() -> ContainerSpec {
 }
 
 fn single_service_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc1".into()),
         WorkloadSpec {
@@ -178,7 +178,7 @@ fn single_service_spec() -> NamespaceSpec {
             suspend_on_idle: false,
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
@@ -197,7 +197,7 @@ fn single_service_spec() -> NamespaceSpec {
 }
 
 fn multi_service_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc1".into()),
         WorkloadSpec {
@@ -219,7 +219,7 @@ fn multi_service_spec() -> NamespaceSpec {
             },
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
@@ -248,7 +248,7 @@ fn multi_service_spec() -> NamespaceSpec {
 }
 
 fn activation_only_spec() -> NamespaceSpec {
-    let mut workloads = HashMap::new();
+    let mut workloads = BTreeMap::new();
     workloads.insert(
         WorkloadId("svc1".into()),
         WorkloadSpec {
@@ -257,7 +257,7 @@ fn activation_only_spec() -> NamespaceSpec {
             suspend_on_idle: false,
         },
     );
-    let mut services = HashMap::new();
+    let mut services = BTreeMap::new();
     services.insert(
         ServiceId("svc1".into()),
         ServiceSpec {
