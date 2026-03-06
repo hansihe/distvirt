@@ -1,16 +1,15 @@
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerEvent};
+use distvirt_worker_protocol::ServiceId;
 
 /// Verify that the `activation-pending` condition is set when a service
 /// transitions to NeedBackend (on activation) and cleared when it becomes Active.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_activation_pending_condition_lifecycle() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let _w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
     let timeout = Duration::from_secs(30);
     h.create_namespace("ns", activation_spec(timeout)).await;
     h.converge().await;
@@ -19,42 +18,18 @@ async fn test_activation_pending_condition_lifecycle() {
     h.assert_service_idle("ns", "web-svc");
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 
-    // Trigger activation and fully converge — the mock worker auto-responds,
-    // so the service goes NeedBackend → Active in one converge cycle.
-    // After converge, activation-pending should be cleared (it was set then cleared).
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
-    h.assert_service_active("ns", "web-svc");
+    // Activate and fully converge — after converge, activation-pending should be cleared.
+    h.activate_service("ns", "web-svc").await;
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 
     // Idle timeout → back to Idle, condition still clear.
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    h.deactivate_service("ns", "web-svc").await;
+    h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_service_idle("ns", "web-svc");
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 
-    // Re-activate — this time disconnect the worker before pod launches
-    // so the service stays in NeedBackend and we can observe the condition.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    // Process just the activation event without fully converging through pod launch.
-    // After activation, condition should be set.
-    h.converge().await;
-    // The workload will be running again after converge, but let's verify conditions
-    // are correct at the end state.
+    // Re-activate — verify conditions are correct at the end state.
+    h.activate_service("ns", "web-svc").await;
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 }
 
@@ -62,7 +37,7 @@ async fn test_activation_pending_condition_lifecycle() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_activation_pending_in_status_report() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let _w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
     let timeout = Duration::from_secs(30);
     h.create_namespace("ns", activation_spec(timeout)).await;
     h.converge().await;
@@ -73,12 +48,7 @@ async fn test_activation_pending_in_status_report() {
     assert!(svc_report.service_conditions.is_empty());
 
     // Activate and converge.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
+    h.activate_service("ns", "web-svc").await;
 
     // After converge, service is active and condition should be cleared.
     let report = h.namespace("ns").status_report();

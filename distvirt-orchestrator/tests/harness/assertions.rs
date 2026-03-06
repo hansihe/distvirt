@@ -186,6 +186,33 @@ impl TestHarness {
         );
     }
 
+    /// Count commands matching a predicate on a given worker.
+    pub fn worker_command_count(
+        &self,
+        worker_id: &WorkerId,
+        predicate: impl Fn(&distvirt_worker_protocol::WorkerCommand) -> bool,
+    ) -> usize {
+        let handle = self.workers.get(worker_id)
+            .unwrap_or_else(|| panic!("worker {:?} not found in harness", worker_id));
+        handle.commands().iter().filter(|cmd| predicate(cmd)).count()
+    }
+
+    /// Assert that a worker received exactly `expected` commands matching a predicate.
+    pub fn assert_worker_command_count(
+        &self,
+        worker_id: &WorkerId,
+        description: &str,
+        expected: usize,
+        predicate: impl Fn(&distvirt_worker_protocol::WorkerCommand) -> bool,
+    ) {
+        let actual = self.worker_command_count(worker_id, predicate);
+        assert_eq!(
+            actual, expected,
+            "worker {:?}: expected {} '{}' commands, got {}",
+            worker_id, expected, description, actual
+        );
+    }
+
     /// Assert that a worker did NOT receive any command matching the predicate.
     pub fn assert_worker_did_not_receive_command_matching(
         &self,

@@ -1,24 +1,14 @@
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{ServiceId, WorkerCommand, WorkerEvent};
 
 /// Workload is Suspending (handler suppresses SuspendPod response).
 /// Inject ServiceActivation (DemandUp). Then inject PodSuspended.
 /// Workload SHOULD go directly to Resuming (not through Dormant).
-///
-/// BUG: In workload.rs PodSuspended handler, when pending=Demand, the workload's
-/// state was set to Dormant by `mem::replace` and is never updated to Suspended.
-/// The ResumeRequest output is emitted, but `handle_resume_pod` checks for
-/// `WorkloadState::Suspended` → finds Dormant → returns early. The workload gets
-/// stuck in Dormant with demand > 0.
-///
-/// Fix: in the `PendingIntent::Demand` and `PendingIntent::None` (with demand > 0)
-/// branches of PodSuspended, set `self.state = WorkloadState::Suspended { artifact_id }`
-/// before emitting `ResumeRequest`.
+// Low-level: tests mid-state-transition event injection with specific state dependencies
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_demand_during_suspend_immediate_resume() {
     let config = MockWorkerConfig::with_suspend_hang().add_pool();
@@ -28,23 +18,10 @@ async fn test_demand_during_suspend_immediate_resume() {
     h.create_namespace("ns", activation_spec(timeout)).await;
     h.converge().await;
 
-    // Activate → running
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
-
-    // Idle → begin suspending
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    // Activate → running → idle → begin suspending
+    h.activate_service("ns", "web-svc").await;
+    h.deactivate_service("ns", "web-svc").await;
+    h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_workload_suspending("ns", "web");
 
     // Capture the pod_id and artifact_id from suspending state
@@ -53,18 +30,19 @@ async fn test_demand_during_suspend_immediate_resume() {
         other => panic!("expected Suspending, got {:?}", other),
     };
 
-    // Inject demand (ServiceActivation) while suspending
+    // Low-level: inject demand (ServiceActivation) while suspending
+    let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
         namespace_id: "ns".into(),
         service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        dst_ip: svc_ip,
     });
     h.converge().await;
 
     // Still suspending but with Demand pending
     h.assert_workload_suspending("ns", "web");
 
-    // Inject artifact events + PodSuspended
+    // Low-level: inject artifact events + PodSuspended
     h.worker(&w1).send_event(WorkerEvent::ArtifactWriteStarted {
         namespace_id: "ns".into(),
         artifact_id: artifact_id.clone(),
@@ -96,6 +74,7 @@ async fn test_demand_during_suspend_immediate_resume() {
 
 /// Start launching (handler suppresses LaunchPod response). Inject DemandDown (ForceDeactivate).
 /// Then inject PodRunning. Workload should immediately begin deactivation.
+// Low-level: tests mid-state-transition event injection
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_force_deactivate_during_launch() {
     let config = MockWorkerConfig::with_launch_hang();
@@ -113,19 +92,18 @@ async fn test_force_deactivate_during_launch() {
     h.delete_namespace("ns").await;
     h.converge().await;
 
-    // Inject PodRunning (from the previous launch)
+    // Low-level: inject PodRunning (from the previous launch)
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
         namespace_id: "ns".into(),
         pod_id,
     });
     h.converge().await;
 
-    // Namespace should be gone (destroyed)
     h.assert_namespace_absent("ns");
 }
 
 /// Workload is Resuming. Inject DemandUp (second service). Then PodRunning arrives.
-/// Workload should be Running (demand is already satisfied — no-op pending).
+// Low-level: tests mid-state-transition event injection with specific state dependencies
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_demand_up_during_resume() {
     // Use a handler that hangs on ResumePod
@@ -144,44 +122,31 @@ async fn test_demand_up_during_resume() {
     h.assert_workload_dormant("ns", "shared");
 
     // Activate via svc-a → running (default handler responds to LaunchPod)
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "shared");
+    h.activate_service("ns", "svc-a").await;
 
     // Idle svc-a → suspending/suspended
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
+    h.deactivate_service("ns", "svc-a").await;
     h.advance_time(timeout + Duration::from_secs(1)).await;
-
-    // Need the workload to actually become Suspended first (default SuspendPod handler works).
-    // But our handler only hangs ResumePod. The default SuspendPod handler should kick in.
-    // Actually let me check - the handler returns None for SuspendPod, so default_handle takes over.
     h.assert_workload_suspended("ns", "shared");
 
-    // Activate via svc-a → triggers resume (but handler hangs on ResumePod)
+    // Low-level: activate via svc-a → triggers resume (but handler hangs on ResumePod)
+    let svc_a_ip = h.service_ip("ns", "svc-a");
     h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
         namespace_id: "ns".into(),
         service_id: ServiceId::from("svc-a"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        dst_ip: svc_a_ip,
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "shared");
 
     let pod_id = h.workload_state("ns", "shared").pod_id().unwrap().clone();
 
-    // Now activate svc-b too (second demand while resuming)
+    // Low-level: activate svc-b too (second demand while resuming)
+    let svc_b_ip = h.service_ip("ns", "svc-b");
     h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
         namespace_id: "ns".into(),
         service_id: ServiceId::from("svc-b"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 101),
+        dst_ip: svc_b_ip,
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "shared");
@@ -198,7 +163,7 @@ async fn test_demand_up_during_resume() {
 }
 
 /// Workload is Launching. Update spec with new image (SpecChanged → PendingIntent::Restart).
-/// Then PodRunning arrives. Workload should stop old pod and relaunch with new image.
+// Low-level: tests mid-state-transition event injection
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_spec_change_during_launch() {
     let config = MockWorkerConfig::with_launch_hang();
@@ -220,26 +185,22 @@ async fn test_spec_change_during_launch() {
     // Still launching (pending Restart)
     h.assert_workload_launching("ns", "echo");
 
-    // Inject PodRunning from the old launch
+    // Low-level: inject PodRunning from the old launch
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
         namespace_id: "ns".into(),
         pod_id,
     });
     h.converge().await;
 
-    // Pending was Restart: workload stops old pod, goes Dormant, then
-    // transition_on_demand → WaitingForCapacity → Launching (demand > 0, always-on,
-    // worker available). The handler hangs on LaunchPod so it stays in Launching.
     h.assert_workload_launching("ns", "echo");
 
     // Verify StopPod was issued for the old pod
-    let cmds = h.worker(&w1).commands();
-    let stop_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::StopPod { .. })).count();
+    let stop_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::StopPod { .. }));
     assert!(stop_count >= 1, "expected StopPod for old pod after PodRunning with Restart pending");
 }
 
 /// Workload is Suspending. Update spec with new image. PodSuspended arrives.
-/// Workload should NOT resume with old snapshot — should delete artifact and relaunch.
+// Low-level: tests mid-state-transition event injection with specific state dependencies
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_spec_change_during_suspend() {
     let config = MockWorkerConfig::with_suspend_hang().add_pool();
@@ -249,23 +210,10 @@ async fn test_spec_change_during_suspend() {
     h.create_namespace("ns", activation_spec(timeout)).await;
     h.converge().await;
 
-    // Activate → running
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
-
-    // Idle → begin suspending
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    // Activate → running → idle → begin suspending
+    h.activate_service("ns", "web-svc").await;
+    h.deactivate_service("ns", "web-svc").await;
+    h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_workload_suspending("ns", "web");
 
     let (pod_id, artifact_id) = match h.workload_state("ns", "web") {
@@ -280,7 +228,7 @@ async fn test_spec_change_during_suspend() {
     h.update_namespace("ns", new_spec).await;
     h.converge().await;
 
-    // Inject artifact events + PodSuspended
+    // Low-level: inject artifact events + PodSuspended
     h.worker(&w1).send_event(WorkerEvent::ArtifactWriteStarted {
         namespace_id: "ns".into(),
         artifact_id: artifact_id.clone(),
@@ -301,12 +249,9 @@ async fn test_spec_change_during_suspend() {
     });
     h.converge().await;
 
-    // Pending was Restart. Workload deletes the stale artifact and transitions based on demand.
-    // Demand is 0 (service went idle before suspend), so workload should be Dormant.
     h.assert_workload_dormant("ns", "web");
 
     // Verify DeleteArtifact was issued
-    let cmds = h.worker(&w1).commands();
-    let delete_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::DeleteArtifact { .. })).count();
+    let delete_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::DeleteArtifact { .. }));
     assert!(delete_count >= 1, "expected DeleteArtifact for old snapshot after spec change");
 }

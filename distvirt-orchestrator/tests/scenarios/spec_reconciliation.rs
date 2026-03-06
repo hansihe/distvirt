@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{ServiceId, WorkerCommand};
 
 /// Running workload. Update spec with different image. Workload stops and relaunches.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -41,22 +41,7 @@ async fn test_image_change_on_suspended_workload() {
     h.converge().await;
 
     // Activate → running → idle → suspended
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
-
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
-    h.assert_workload_suspended("ns", "web");
+    h.run_activation_suspend_cycle("ns", "web-svc", "web").await;
 
     // Update spec with new image
     let mut new_spec = activation_spec(timeout);
@@ -69,25 +54,15 @@ async fn test_image_change_on_suspended_workload() {
     h.assert_workload_dormant("ns", "web");
 
     // Verify DeleteArtifact was issued
-    let cmds = h.worker(&w1).commands();
-    let delete_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::DeleteArtifact { .. })).count();
+    let delete_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::DeleteArtifact { .. }));
     assert!(delete_count >= 1, "expected DeleteArtifact for old snapshot");
 
     // Re-activate → cold start (LaunchPod, not ResumePod)
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
+    h.activate_service("ns", "web-svc").await;
 
     // Verify LaunchPod was used (count: 2 = first launch + this launch)
-    let cmds = h.worker(&w1).commands();
-    let launch_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::LaunchPod { .. })).count();
-    let resume_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::ResumePod { .. })).count();
-    assert_eq!(launch_count, 2, "expected 2 LaunchPod commands (not resume)");
-    assert_eq!(resume_count, 0, "expected 0 ResumePod commands after image change");
+    h.assert_worker_command_count(&w1, "LaunchPod", 2, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
+    h.assert_worker_command_count(&w1, "ResumePod", 0, |c| matches!(c, WorkerCommand::ResumePod { .. }));
 }
 
 /// Namespace running. Add a new workload via spec update. New workload should start.
@@ -150,7 +125,6 @@ async fn test_remove_workload_from_namespace() {
 
     // echo-a should still be running, echo-b should be gone
     h.assert_workload_running("ns", "echo-a");
-    // echo-b should not exist in workloads map
     let ns = h.namespace("ns");
     assert!(
         !ns.workloads.contains_key(&WorkloadId("echo-b".to_string())),
@@ -158,8 +132,7 @@ async fn test_remove_workload_from_namespace() {
     );
 
     // Verify StopPod was issued for echo-b
-    let cmds = h.worker(&w1).commands();
-    let stop_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::StopPod { .. })).count();
+    let stop_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::StopPod { .. }));
     assert!(stop_count >= 1, "expected StopPod for removed workload");
 }
 
@@ -174,13 +147,7 @@ async fn test_suspend_on_idle_flag_change() {
     h.converge().await;
 
     // Activate → running
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
+    h.activate_service("ns", "web-svc").await;
 
     // Verify suspend_on_idle is currently true
     let ns = h.namespace("ns");
@@ -200,21 +167,14 @@ async fn test_suspend_on_idle_flag_change() {
     assert!(!wl.suspend_on_idle, "should now have suspend_on_idle=false");
 
     // Idle → should stop (not suspend)
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    h.deactivate_service("ns", "web-svc").await;
+    h.advance_past_idle_timeout("ns", "web-svc").await;
 
     // Should be Dormant (stopped), not Suspended
     h.assert_workload_dormant("ns", "web");
 
     // Verify StopPod was issued (not SuspendPod)
-    let cmds = h.worker(&w1).commands();
-    let suspend_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::SuspendPod { .. })).count();
-    let stop_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::StopPod { .. })).count();
-    assert_eq!(suspend_count, 0, "should not have issued SuspendPod");
+    h.assert_worker_command_count(&w1, "SuspendPod", 0, |c| matches!(c, WorkerCommand::SuspendPod { .. }));
+    let stop_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::StopPod { .. }));
     assert!(stop_count >= 1, "should have issued StopPod");
 }

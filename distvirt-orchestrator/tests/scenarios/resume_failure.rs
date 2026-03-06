@@ -1,21 +1,11 @@
-use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::WorkerCommand;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 
 /// Test: ResumePod fails, orchestrator should fall back to cold launch.
-///
-/// Flow:
-/// 1. Activate → run → idle → suspend (full happy-path cycle)
-/// 2. Re-activate → ResumePod sent → worker returns PodFailed
-/// 3. Expected: workload enters RetryBackoff → cold launch via LaunchPod
-///
-/// Previously buggy: readiness changes triggered DemandDown which zeroed demand_count
-/// before retry logic could run. Fixed by reconciliation-based readiness syncing
-/// that observes workload state directly.
 #[tokio::test(start_paused = true)]
 async fn test_resume_failure_falls_back_to_cold_launch() {
     let mut h = TestHarness::new();
@@ -34,40 +24,20 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     h.assert_workload_dormant("ns1", "web");
     h.assert_service_idle("ns1", "web-svc");
 
-    // Activate via ServiceActivation (initial activation from Idle state).
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns1".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-
-    // Workload should be running.
-    h.assert_workload_running("ns1", "web");
-    h.assert_service_active("ns1", "web-svc");
-
-    // Signal no more traffic to start idle timer.
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns1".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-
-    // Advance past idle timeout → suspend.
-    h.advance_time(Duration::from_secs(31)).await;
-    h.assert_workload_suspended("ns1", "web");
+    // Activate → running → idle → suspended
+    h.run_activation_suspend_cycle("ns1", "web-svc", "web").await;
     h.assert_service_idle("ns1", "web-svc");
 
-    // Re-activate via ServiceActivation.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    // Re-activate via ServiceActivation — resume will fail.
+    let svc_ip = h.service_ip("ns1", "web-svc");
+    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::ServiceActivation {
         namespace_id: "ns1".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: distvirt_worker_protocol::ServiceId::from("web-svc"),
+        dst_ip: svc_ip,
     });
     h.converge().await;
 
-    // Fixed: Reconciliation-based readiness syncing ensures demand is preserved
+    // Reconciliation-based readiness syncing ensures demand is preserved
     // through retry. The workload should enter RetryBackoff, then after backoff,
     // relaunch via cold LaunchPod.
     h.assert_workload_retry_backoff("ns1", "web");
@@ -79,11 +49,8 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     // Workload should be running again after cold launch.
     h.assert_workload_running("ns1", "web");
 
-    // Verify a LaunchPod (cold start) was sent after the resume failure,
-    // not another ResumePod.
-    let cmds = h.worker(&w1).commands();
-    let resume_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::ResumePod { .. })).count();
-    let launch_count = cmds.iter().filter(|c| matches!(c, WorkerCommand::LaunchPod { .. })).count();
-    assert_eq!(resume_count, 1, "expected exactly 1 ResumePod (the failed one)");
+    // Verify command counts
+    h.assert_worker_command_count(&w1, "ResumePod", 1, |c| matches!(c, WorkerCommand::ResumePod { .. }));
+    let launch_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
     assert!(launch_count >= 2, "expected at least 2 LaunchPod commands (initial + cold restart), got {}", launch_count);
 }

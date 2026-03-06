@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use distvirt_orchestrator::shell::OrchestratorShell;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::OrchestratorConnection;
+use distvirt_worker_protocol::{BackendNeed, OrchestratorConnection, WorkerEvent};
 
 use super::mock_worker::{MockWorkerConfig, MockWorkerHandle, spawn_mock_worker};
 
@@ -195,5 +195,138 @@ impl TestHarness {
             .get(&WorkloadId(wl_id.to_string()))
             .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
         &wl.conditions
+    }
+
+    /// Activate a service, deactivate it, advance past idle timeout, assert suspended.
+    /// For activation specs with suspend_on_idle=true.
+    pub async fn run_activation_suspend_cycle(&mut self, ns_id: &str, svc_id: &str, wl_id: &str) {
+        self.activate_service(ns_id, svc_id).await;
+        self.deactivate_service(ns_id, svc_id).await;
+        self.advance_past_idle_timeout(ns_id, svc_id).await;
+        self.assert_workload_suspended(ns_id, wl_id);
+    }
+
+    /// Same as run_activation_suspend_cycle but asserts dormant (for suspend_on_idle=false specs).
+    pub async fn run_activation_stop_cycle(&mut self, ns_id: &str, svc_id: &str, wl_id: &str) {
+        self.activate_service(ns_id, svc_id).await;
+        self.deactivate_service(ns_id, svc_id).await;
+        self.advance_past_idle_timeout(ns_id, svc_id).await;
+        self.assert_workload_dormant(ns_id, wl_id);
+    }
+
+    /// Get the service IP from the namespace spec.
+    pub fn service_ip(&self, ns_id: &str, svc_id: &str) -> std::net::Ipv4Addr {
+        let ns = self.namespace(ns_id);
+        ns.spec
+            .services
+            .get(&ServiceId::from(svc_id))
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}' spec", svc_id, ns_id))
+            .ip
+    }
+
+    /// Send an event to the worker hosting a workload. Panics if workload has no worker.
+    pub fn send_event_to_workload(&self, ns_id: &str, wl_id: &str, event: WorkerEvent) {
+        let worker_id = self
+            .workload_state(ns_id, wl_id)
+            .worker_id()
+            .unwrap_or_else(|| {
+                panic!(
+                    "workload '{}/{}' has no worker (state: {:?})",
+                    ns_id,
+                    wl_id,
+                    self.workload_state(ns_id, wl_id)
+                )
+            })
+            .clone();
+        self.worker(&worker_id).send_event(event);
+    }
+
+    /// Send an event to the worker hosting a service's workload.
+    pub fn send_event_to_service_worker(&self, ns_id: &str, svc_id: &str, event: WorkerEvent) {
+        let ns = self.namespace(ns_id);
+        let svc = ns
+            .services
+            .get(&ServiceId::from(svc_id))
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
+        let wl_id = svc.workload_id.0.clone();
+        self.send_event_to_workload(ns_id, &wl_id, event);
+    }
+
+    /// Activate a service: send ServiceActivation with the correct IP, converge,
+    /// assert workload running and service active.
+    pub async fn activate_service(&mut self, ns_id: &str, svc_id: &str) {
+        let svc_ip = self.service_ip(ns_id, svc_id);
+        let ns = self.namespace(ns_id);
+        let svc = ns
+            .services
+            .get(&ServiceId::from(svc_id))
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
+        let wl_id = svc.workload_id.0.clone();
+
+        // Find target worker: workload's worker if assigned, otherwise first worker
+        // with FabricStatus::Active for this namespace.
+        let worker_id = if let Some(wid) = self.workload_state(ns_id, &wl_id).worker_id() {
+            wid.clone()
+        } else {
+            let ns = self.namespace(ns_id);
+            ns.workers
+                .iter()
+                .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
+                .map(|(wid, _)| wid.clone())
+                .unwrap_or_else(|| {
+                    // Fall back to first worker in harness
+                    self.workers
+                        .keys()
+                        .next()
+                        .expect("no workers in harness")
+                        .clone()
+                })
+        };
+
+        self.worker(&worker_id).send_event(WorkerEvent::ServiceActivation {
+            namespace_id: ns_id.into(),
+            service_id: ServiceId::from(svc_id),
+            dst_ip: svc_ip,
+        });
+        self.converge().await;
+        self.assert_workload_running(ns_id, &wl_id);
+        self.assert_service_active(ns_id, svc_id);
+    }
+
+    /// Deactivate a service: send ServiceBackendNeed::None to workload's worker, converge.
+    /// Does NOT advance time (caller handles idle timeout if needed).
+    pub async fn deactivate_service(&mut self, ns_id: &str, svc_id: &str) {
+        self.send_event_to_service_worker(
+            ns_id,
+            svc_id,
+            WorkerEvent::ServiceBackendNeed {
+                namespace_id: ns_id.into(),
+                service_id: ServiceId::from(svc_id),
+                need: BackendNeed::None,
+            },
+        );
+        self.converge().await;
+    }
+
+    /// Advance time past the service's configured idle timeout, then converge.
+    /// Panics if service has no activation spec.
+    pub async fn advance_past_idle_timeout(&mut self, ns_id: &str, svc_id: &str) {
+        let ns = self.namespace(ns_id);
+        let svc_spec = ns
+            .spec
+            .services
+            .get(&ServiceId::from(svc_id))
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}' spec", svc_id, ns_id));
+        let timeout = svc_spec
+            .activation
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "service '{}/{}' has no activation spec (needed for idle timeout)",
+                    ns_id, svc_id
+                )
+            })
+            .idle_timeout;
+        self.advance_time(timeout + Duration::from_secs(1)).await;
     }
 }

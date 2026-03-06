@@ -1,11 +1,27 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{
     ActivatorConfig, ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, ServicePolicy,
 };
+
+static POD_OCTET: AtomicU8 = AtomicU8::new(10);
+static SERVICE_OCTET: AtomicU8 = AtomicU8::new(100);
+
+/// Auto-allocate a unique pod network config (for multi-namespace tests).
+pub fn next_pod_network() -> PodNetworkConfig {
+    let octet = POD_OCTET.fetch_add(1, Ordering::Relaxed);
+    pod_network(octet)
+}
+
+/// Auto-allocate a unique service IP (for multi-namespace tests).
+pub fn next_service_ip() -> Ipv4Addr {
+    let octet = SERVICE_OCTET.fetch_add(1, Ordering::Relaxed);
+    Ipv4Addr::new(172, 16, 0, octet)
+}
 
 pub fn default_network() -> NetworkConfig {
     NetworkConfig {

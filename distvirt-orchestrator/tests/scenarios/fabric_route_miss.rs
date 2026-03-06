@@ -15,7 +15,7 @@ async fn test_route_miss_activates_dormant_workload() {
     h.converge().await;
     h.assert_workload_dormant("ns", "web");
 
-    // Send FabricRouteMiss targeting the workload's pod IP
+    // Low-level: FabricRouteMiss targets the pod IP (not service IP), must use explicit IP
     h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
         namespace_id: "ns".into(),
         dst_ip: Ipv4Addr::new(172, 16, 0, 10),
@@ -39,24 +39,12 @@ async fn test_route_miss_activates_suspended_workload() {
     h.assert_workload_dormant("ns", "web");
 
     // Activate via service → run → idle → suspend
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
-
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        need: BackendNeed::None,
-    });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    h.activate_service("ns", "web-svc").await;
+    h.deactivate_service("ns", "web-svc").await;
+    h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_workload_suspended("ns", "web");
 
-    // Now send FabricRouteMiss while suspended
+    // Low-level: FabricRouteMiss targets the pod IP (not service IP)
     h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
         namespace_id: "ns".into(),
         dst_ip: Ipv4Addr::new(172, 16, 0, 10),
@@ -79,17 +67,11 @@ async fn test_route_miss_ignored_when_already_running() {
     h.converge().await;
 
     // Activate via service first
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
-        namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
-    });
-    h.converge().await;
-    h.assert_workload_running("ns", "web");
+    h.activate_service("ns", "web-svc").await;
 
+    // Low-level: command window slicing to verify no new commands after route miss
     let cmds_before = h.worker(&w1).commands().len();
 
-    // Send FabricRouteMiss while already running
     h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
         namespace_id: "ns".into(),
         dst_ip: Ipv4Addr::new(172, 16, 0, 10),
@@ -97,7 +79,6 @@ async fn test_route_miss_ignored_when_already_running() {
     h.converge().await;
 
     h.assert_workload_running("ns", "web");
-    // No new LaunchPod should have been issued
     let cmds_after = h.worker(&w1).commands();
     let new_launches = cmds_after[cmds_before..]
         .iter()
@@ -119,27 +100,17 @@ async fn test_route_miss_ignored_for_unknown_ip() {
     h.converge().await;
     h.assert_workload_dormant("ns", "web");
 
-    // Send FabricRouteMiss for an IP that doesn't match any workload
+    // Low-level: testing with an IP that doesn't match any workload
     h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
         namespace_id: "ns".into(),
         dst_ip: Ipv4Addr::new(172, 16, 0, 99),
     });
     h.converge().await;
 
-    // Workload should remain dormant
     h.assert_workload_dormant("ns", "web");
 }
 
 /// BUG: `route_miss_wake` flag is never cleared, causing a demand leak.
-///
-/// FabricRouteMiss sets `route_miss_wake`, contributing +1 to effective_demand.
-/// Once a service takes over demand, `route_miss_wake` should be cleared.
-/// But it isn't — so even after all services go idle and their demand drops to 0,
-/// the workload stays running due to the stale route_miss_wake demand.
-///
-/// This test asserts CORRECT behavior: after the service goes idle and the idle
-/// timeout fires, the workload should suspend. This will fail until route_miss_wake
-/// is properly cleared.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[should_panic]
 async fn test_route_miss_demand_leak() {
@@ -150,6 +121,7 @@ async fn test_route_miss_demand_leak() {
     h.converge().await;
     h.assert_workload_dormant("ns", "web");
 
+    // Low-level: testing exact demand leak behavior with route miss + service activation interaction
     // Step 1: FabricRouteMiss activates the workload.
     h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
         namespace_id: "ns".into(),
@@ -159,10 +131,11 @@ async fn test_route_miss_demand_leak() {
     h.assert_workload_running("ns", "web");
 
     // Step 2: ServiceActivation arrives (real traffic hits the service IP).
+    let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
         namespace_id: "ns".into(),
         service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        dst_ip: svc_ip,
     });
     h.converge().await;
     h.assert_workload_running("ns", "web");
@@ -176,9 +149,8 @@ async fn test_route_miss_demand_leak() {
     });
     h.converge().await;
 
-    // Step 4: Advance past idle timeout. Service goes idle, demand should drop to 0.
-    // Correct behavior: workload suspends (suspend_on_idle=true, no services want backend).
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    // Step 4: Advance past idle timeout.
+    h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_service_idle("ns", "web-svc");
     h.assert_workload_suspended("ns", "web");
 }
