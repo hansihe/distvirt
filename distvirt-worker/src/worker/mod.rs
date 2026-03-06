@@ -1,5 +1,6 @@
 pub(crate) mod artifact_transfer;
 pub(crate) mod namespace;
+pub(crate) mod resources;
 pub(crate) mod supervisor;
 pub(crate) mod tunnel_manager;
 
@@ -24,96 +25,7 @@ use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor
 use tunnel_manager::TunnelManager;
 use crate::task_handle::TaskHandle;
 use crate::vmm::Vmm;
-
-/// Query filesystem stats for a pool path, returning (capacity_bytes, available_bytes).
-/// Creates the directory if needed. Returns (0, 0) on any error.
-fn pool_disk_stats(path: &std::path::Path) -> (u64, u64) {
-    let _ = std::fs::create_dir_all(path);
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = match CString::new(path.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return (0, 0),
-        };
-        unsafe {
-            let mut stat: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-                let capacity = stat.f_blocks as u64 * stat.f_frsize as u64;
-                let available = stat.f_bavail as u64 * stat.f_frsize as u64;
-                (capacity, available)
-            } else {
-                (0, 0)
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        (0, 0)
-    }
-}
-
-/// Parse PSI content string into `PsiMetrics`.
-///
-/// Format: `some avg10=X.XX avg60=X.XX avg300=X.XX total=N\nfull avg10=...`
-/// The `cpu` file only has a `some` line (no `full`).
-fn parse_psi(content: &str) -> PsiMetrics {
-    let mut some_avg10 = 0.0;
-    let mut some_avg60 = 0.0;
-    let mut full_avg10 = 0.0;
-    let mut full_avg60 = 0.0;
-
-    for line in content.lines() {
-        let is_some = line.starts_with("some ");
-        let is_full = line.starts_with("full ");
-        if !is_some && !is_full {
-            continue;
-        }
-        for part in line.split_whitespace() {
-            if let Some(val) = part.strip_prefix("avg10=") {
-                if let Ok(v) = val.parse::<f64>() {
-                    if is_some { some_avg10 = v; } else { full_avg10 = v; }
-                }
-            } else if let Some(val) = part.strip_prefix("avg60=") {
-                if let Ok(v) = val.parse::<f64>() {
-                    if is_some { some_avg60 = v; } else { full_avg60 = v; }
-                }
-            }
-        }
-    }
-
-    PsiMetrics { some_avg10, some_avg60, full_avg10, full_avg60 }
-}
-
-/// Read and parse a single `/proc/pressure/{cpu,memory,io}` file.
-fn read_psi_file(path: &str) -> Option<PsiMetrics> {
-    let content = std::fs::read_to_string(path).ok()?;
-    Some(parse_psi(&content))
-}
-
-/// Read PSI metrics for all three resource dimensions.
-/// Returns `None` on non-Linux or if `/proc/pressure/` is unavailable.
-fn read_all_psi() -> Option<(PsiMetrics, PsiMetrics, PsiMetrics)> {
-    let cpu = read_psi_file("/proc/pressure/cpu")?;
-    let memory = read_psi_file("/proc/pressure/memory")?;
-    let io = read_psi_file("/proc/pressure/io")?;
-    Some((cpu, memory, io))
-}
-
-/// Check if any avg10 value changed by more than 1 percentage point.
-fn psi_changed_significantly(
-    old: &(PsiMetrics, PsiMetrics, PsiMetrics),
-    new: &(PsiMetrics, PsiMetrics, PsiMetrics),
-) -> bool {
-    fn delta(a: f64, b: f64) -> bool { (a - b).abs() > 1.0 }
-    delta(old.0.some_avg10, new.0.some_avg10)
-        || delta(old.1.some_avg10, new.1.some_avg10)
-        || delta(old.2.some_avg10, new.2.some_avg10)
-        || delta(old.0.full_avg10, new.0.full_avg10)
-        || delta(old.1.full_avg10, new.1.full_avg10)
-        || delta(old.2.full_avg10, new.2.full_avg10)
-}
+use resources::*;
 
 /// The worker: sits between the orchestrator and the raw VM/fabric primitives.
 ///
@@ -215,7 +127,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             has_containerd,
             available_adapters: vec!["wireguard".to_string()],
             max_pods: 10,
-            available_memory_mb: 1024,
+            available_memory_mb: detect_host_memory_mb(),
             public_endpoint: self.public_endpoint.clone(),
             pools,
         }

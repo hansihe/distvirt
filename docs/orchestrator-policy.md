@@ -24,7 +24,7 @@ These are described in detail in [Core Abstractions](#core-abstractions) and ref
 | Worker capabilities (available_memory_mb) | WorkerHello handshake |
 | Pool info (pool_id, capacity, available) | WorkerHello + periodic PoolCapacityUpdate |
 | Pool watermark events (soft 85%, hard 95%) | WorkerCondition events |
-| PSI pressure (cpu, memory, io) | **Not implemented** — planned |
+| PSI pressure (cpu, memory, io) | `WorkerEvent::PressureUpdate` (10s periodic) |
 | Pod count per worker | PodMap tracking |
 | ServiceActivation (first traffic to idle service) | Fabric → worker → orchestrator |
 | ServiceBackendNeed (None/Traffic/Active) | Protocol activator → worker → orchestrator |
@@ -55,7 +55,7 @@ These are described in detail in [Core Abstractions](#core-abstractions) and ref
 | BackendNeed per active service | ServiceState::Active |
 | Snapshot placement (artifact → pool/worker) | PlacementTable |
 | Consecutive failure count per workload | WorkloadStateMachine (`consecutive_failures`) |
-| Worker pressure scores (compute, memory, storage) | **Not computed** — derived from above signals |
+| Worker pressure scores (compute, memory, storage) | `WorkerState` — recomputed from PSI + static accounting |
 
 ---
 
@@ -828,15 +828,7 @@ The policy is primarily spec-driven and signal-driven, but operators need escape
 
 Issues promoted from open questions because they are correctness bugs or high-priority DX gaps that should be fixed, not design choices to deliberate.
 
-### ~~1. Activation Debounce is Wall-Clock, Not State-Aware~~ (Fixed — Task 1.6)
-
-`ServiceTable::update_backend()` now clears the per-IP `last_activation` debounce entry when the backend is removed (`backend: None`). This ensures that when a service returns to idle, the next packet triggers a `ServiceActivation` immediately rather than being suppressed by the stale debounce timestamp.
-
-### ~~2. Image Change Does Not Restart Workload~~ (Fixed — Task 1.3)
-
-`handle_update_spec` now detects in-place workload spec changes before applying the new spec. When container images change, it dispatches `WorkloadInput::SpecChanged` to the workload SM, which handles all states (stops running pods, sets `PendingIntent::Restart` on in-flight transitions, deletes stale artifacts from suspended workloads, recovers from `Failed`/`RetryBackoff`). When `suspend_on_idle` changes, the workload field is updated directly.
-
-### 3. No Application Readiness Signal
+### 1. No Application Readiness Signal
 
 `PodRunning` means VM booted + guest agent connected. The application inside may not be ready to handle traffic. Traffic forwarded during app startup causes connection refused / 502 errors.
 
@@ -845,41 +837,41 @@ Issues promoted from open questions because they are correctness bugs or high-pr
 2. **Protocol activator implicit check** — the activator detects upstream health (only works if activator can probe the backend). Limited applicability.
 3. **Defer to application** — rely on retry-aware clients. Poor DX for the "feels like a slow first request" contract.
 
-### 4. ~~CLI/gRPC Defaults Are Wrong for Scale-to-Zero~~ (Fixed — Task 1.5)
-
-Both the compose conversion path (`namespace.rs`) and native spec conversion path (`spec.rs`) now default to `suspend_on_idle: true` and `idle_timeout_ms: 30_000` (30s).
-
-### 5. No Worker Heartbeat / Liveness Detection
+### 2. No Worker Heartbeat / Liveness Detection
 
 The worker protocol has no heartbeat mechanism. Worker loss is detected only by TCP connection drop. A hung worker (not disconnected, but not processing) is invisible to the orchestrator — PSI updates stop, but there's no deadline on them.
 
 **Fix**: Use the periodic `PoolCapacityUpdate` (30s interval) as an implicit heartbeat. If no message arrives within 2× the interval (60s), the orchestrator should treat the worker as unhealthy (set `unresponsive` condition, exclude from scheduling). After a further timeout, treat as disconnected.
 
-### ~~6. Infinite Retry Loop on Persistent Failures~~ (Fixed — Task 1.2)
-
-Exponential backoff with `Failed` terminal state is now implemented. After 5 consecutive failures, the workload enters `Failed` and stops retrying. Recovery via `SpecChanged` (spec update clears failure) or `ManualRestart`. During backoff, the `RetryBackoff` state holds a timer. `PodRunning` resets the failure counter.
-
-### 7. No Pool Degradation Handling
+### 3. No Pool Degradation Handling
 
 A worker's storage pool can become degraded (read-only filesystem, IO errors, disk corruption) while the worker itself remains healthy and connected. Currently there is no mechanism to detect or respond to this — suspend operations will fail, burning the suspend timeout before falling back to stop.
 
 **Fix**: Workers should report pool health via conditions (`pool/<id>/degraded`). The orchestrator uses this to: (a) exclude the worker from suspend-target selection (use another worker's pool or fall back to stop immediately, don't wait for the suspend timeout), (b) surface the degradation in `dv status`, (c) optionally trigger proactive snapshot migration off the degraded pool if another worker has healthy storage at Normal pressure.
 
-### 8. Static Resource Declarations Are Fictional
+### 4. Hardcoded Per-Pod Resource Sizing
 
-Worker capabilities are hardcoded: `available_memory_mb=1024`, `vcpus=1/pod`, `memory=128MB/pod`. These don't reflect actual host resources. At minimum, `available_memory_mb` should be derived from actual host memory. PSI integration will provide real pressure feedback for compute, replacing the need for static pod count limits.
+`available_memory_mb` is derived from actual host memory via `/proc/meminfo`. However, `vcpus=1/pod` and `memory=128MB/pod` (`DEFAULT_POD_MEMORY_MB`) are still hardcoded. PSI integration provides real pressure feedback for compute, but static capacity accounting (used for scheduling admission and memory pressure fallback) operates on these fictional per-pod sizes. Resource leases (Task 4.1) will have limited value until per-pod resource requests exist in the spec.
+
+### 5. `route_miss_wake` Demand Leak
+
+`FabricRouteMiss` sets `route_miss_wake = true` on the workload, contributing +1 to `effective_demand()` in reconciliation. This flag is **never cleared** — once set, it persists indefinitely, preventing the workload from going idle even after a service takes over demand and subsequently goes idle itself. The workload stays `Running` when it should suspend to `Suspended`.
+
+**Fix**: Clear `route_miss_wake` once a service activates and takes over demand (i.e., when reconciliation sees at least one service with `wants_backend()` for this workload). This is a correctness bug that should be fixed before implementing preemption (Task 4.2), since it prevents workloads from appearing idle and thus preemptable.
+
+### 6. `PlacementTable.locked_by` is Dead Code
+
+`ArtifactPlacement.locked_by` is set during `handle_resume_pod` but never read for any gating decision. The `unlock()` method has zero call sites. The actual guard against double-resume is the `Suspended → Resuming` state transition, not the lock. This field should be removed (clean slate for Task 4.1 Resource Leases) or actually wired to gate scheduling decisions.
 
 ---
 
 ## State Machine Architecture
 
-This section documents the current state machine hierarchy, the specific changes required by the policy design, and the testing strategy for each change. Each task is self-contained and ordered so that earlier tasks don't depend on later ones.
-
-### Current Hierarchy
+### Hierarchy
 
 ```
 Orchestrator
- ├── WorkerState (passive — capabilities, conditions, tunnel config)
+ ├── WorkerState (passive — capabilities, conditions, pressure, PSI, tunnel config)
  └── NamespaceStateMachine (per namespace)
       ├── WorkloadStateMachine (per workload)
       ├── ServiceStateMachine (per service)
@@ -889,7 +881,7 @@ Orchestrator
 
 All state machines use a pure `step(input) → Vec<Output>` pattern with no I/O side effects. The namespace SM composes the lower-level SMs and forwards outputs between them. The shell/gRPC layer handles I/O, timers, and wire formats.
 
-### Current State Definitions
+### State Definitions
 
 **WorkloadState** (`types/states.rs`):
 ```
@@ -899,6 +891,8 @@ Dormant → WaitingForCapacity → Launching{pod_id, worker_id, launch_timeout, 
                                             → Suspended{artifact_id}
                                                 → Resuming{pod_id, worker_id, artifact_id, resume_timeout, pending}
                                                     → Running
+                              → RetryBackoff{backoff_timer}
+                              → Failed
 ```
 
 `pending: PendingIntent` on transition states captures contradicting signals during async operations (see [Transition Intents](#transition-intents)).
@@ -919,25 +913,50 @@ enum TimerKey {
     LaunchTimeout { workload_id, pod_id },
     SuspendTimeout { workload_id, pod_id },
     ResumeTimeout { workload_id, pod_id },
+    RetryBackoffTimeout { workload_id },
 }
 ```
 
-### Current Testing Infrastructure
+### Two-Layer Worker State
+
+Worker state is split between two levels, each serving a different purpose:
+
+**`WorkerState`** (global, in `Orchestrator.workers`) — cluster-scoped:
+- Capabilities (`available_memory_mb`, pools, public endpoint)
+- WireGuard and tunnel config
+- Worker conditions (from protocol events)
+- `pressure: WorkerPressure` — raw normalized scores per dimension
+- `pressure_bands: PressureBands` — hysteresis state per dimension
+- `psi: Option<WorkerPsi>` — cached PSI metrics from last `PressureUpdate`
+
+**`NamespaceWorkerState`** (namespace-scoped, in `NamespaceStateMachine.workers`):
+- `fabric_status: FabricStatus` — Creating/Active/Destroying for this namespace
+- `primary_pool_id: Option<PoolId>` — resolved at assignment time for suspend operations
+- `pressure_band: PressureBand` — **propagated** from global `WorkerState.pressure_bands.max_band()`
+
+Propagation is one-directional (global → namespace) via `propagate_pressure_to_namespaces()` after each pressure recomputation. The namespace SM never writes back to global state.
+
+**Scheduling reads global state** (`select_worker_for_pod` reads `Orchestrator.workers`). **Idle timeout reads namespace state** (`pressure_adjusted_idle_timeout` reads `NamespaceWorkerState.pressure_band`). This is consistent but means Phase 4 additions must decide which layer owns new fields — see [Phase 4 Architectural Considerations](#phase-4-architectural-considerations).
+
+### Testing Infrastructure
 
 Three complementary methods:
 
 1. **Stateright model checking** — exhaustive DFS exploration of reachable states
-   - `stateright_workload.rs`: 11 scenarios, verifies timer consistency, demand bounds, pending intent invariants, reachability
-   - `stateright_service.rs`: 4 scenarios, verifies idle timer consistency, activation reachability
-   - `stateright_model.rs` (namespace): 7 scenarios, verifies referential integrity, multi-SM coordination, spec update restart
+   - `stateright_workload.rs`: 15 scenarios — timer consistency, demand bounds, pending intent invariants, retry/failure reachability, ForceDeactivate
+   - `stateright_service.rs`: 4 scenarios — idle timer consistency, activation reachability
+   - `stateright_model.rs` (namespace): 11 scenarios — referential integrity, multi-SM coordination, spec update restart, worker loss
 
 2. **Proptest** — randomized input sequences with invariant checking
    - `proptest.rs`: PodMap shadow consistency, namespace invariant fuzzing, orchestrator panic testing
 
-3. **Shell integration** — mock workers over real protocol stack
-   - `shell_integration.rs`: end-to-end lifecycle with yamux/capnp handshake
+3. **Scenario tests** — mock workers over real shell/protocol stack with paused time
+   - ~60 scenario tests across: activation, suspend/resume, failure recovery, fabric routing, pressure, registry, worker lifecycle, multi-service, snapshot placement, spec reconciliation, transition intents
 
-**Methodology**: Write stateright model properties first, then implement SM changes to satisfy them. Proptest catches edge cases the model's action space doesn't cover.
+4. **Shell integration** — end-to-end lifecycle with yamux/capnp handshake
+   - `shell_integration.rs`: full protocol roundtrip
+
+**Methodology**: Write stateright model properties first, then implement SM changes to satisfy them. Proptest catches edge cases the model's action space doesn't cover. Scenario tests verify the full stack (shell + orchestrator + namespace + workload/service SMs).
 
 ---
 
@@ -947,268 +966,85 @@ Three complementary methods:
 
 | Area | Status | Code Reference |
 |---|---|---|
-| Worker selection | **Done** (Task 3.2) — Two-phase pressure-aware selection: Hard constraints (Active + pressure < High), soft preferences (lowest band, then fewest pods) | `orchestrator/scheduling.rs` |
-| Service activation lifecycle | Implemented (activation, idle timeout, reconciliation-based demand) | `service.rs`, `namespace/events.rs`, `namespace/reconciliation.rs` |
-| Suspend/resume | Implemented end-to-end | `workload.rs`, `namespace/events.rs`, `namespace/output.rs` |
-| Retry/backoff | **Done** (Tasks 1.2, 1.4) — exponential backoff with `Failed` terminal state, `SpecChanged`/`ManualRestart` recovery | `workload.rs`, `types/states.rs` |
-| Spec reconciliation | **Done** (Task 1.3) — image change dispatches `SpecChanged`, `suspend_on_idle` change updates field | `namespace/commands.rs` |
-| Activation debounce | **Done** (Task 1.6) — debounce cleared on backend removal | `distvirt-worker/src/fabric/service.rs` |
-| CLI/gRPC defaults | **Done** (Task 1.5) — `suspend_on_idle: true`, `idle_timeout_ms: 30_000` | `distvirt-cli/src/commands/namespace.rs`, `distvirt-cli/src/spec.rs` |
-| Worker conditions | Exist in protocol (`HashMap<String, WorkerCondition>` on `WorkerState`) | `types/states.rs` |
-| Workload/service conditions | **Done** (Tasks 2.1, 2.2) — `conditions: HashMap<String, String>` on workload/service SMs, stored by namespace output layer, included in status reports | `workload.rs`, `service.rs`, `namespace/output.rs`, `types/client.rs` |
-| Transition intents | **Implemented** (Task 1.1) — `PendingIntent` enum on transition states, `ForceDeactivate` input | `types/states.rs`, `workload.rs` |
-| Pressure scores | **Done** (Task 3.1) — `WorkerPressure` + `PressureBands` with hysteresis on `WorkerState`, recomputed on pool updates and pod changes | `types/states.rs`, `orchestrator/mod.rs`, `orchestrator/scheduling.rs`, `shell/mod.rs` |
-| Resource leases | Ad-hoc `PlacementTable.locked_by` for artifacts only | `types/states.rs` |
-| PSI integration | **Not implemented** | — |
+| Worker selection | Done — two-phase pressure-aware: hard constraints (Active + pressure < High), soft (lowest band, then fewest pods) | `orchestrator/scheduling.rs` |
+| Service activation lifecycle | Done — activation, idle timeout, reconciliation-based demand | `service.rs`, `namespace/events.rs`, `namespace/reconciliation.rs` |
+| Suspend/resume | Done — end-to-end with artifact tracking | `workload.rs`, `namespace/events.rs`, `namespace/output.rs` |
+| Transition intents | Done — `PendingIntent` enum on transition states, `ForceDeactivate` input | `types/states.rs`, `workload.rs` |
+| Retry/backoff | Done — exponential backoff with `Failed` terminal state, recovery via `SpecChanged`/`ManualRestart` | `workload.rs`, `types/states.rs` |
+| Spec reconciliation | Done — image change dispatches `SpecChanged`, `suspend_on_idle` change updates field | `namespace/commands.rs` |
+| Activation debounce | Done — debounce cleared on backend removal | `distvirt-worker/src/fabric/service.rs` |
+| CLI/gRPC defaults | Done — `suspend_on_idle: true`, `idle_timeout_ms: 30_000` | `distvirt-cli/` |
+| Condition model | Done — `conditions: HashMap<String, String>` on workload/service SMs, included in status reports | `workload.rs`, `service.rs`, `namespace/output.rs`, `types/client.rs` |
+| Pressure scores | Done — `WorkerPressure` + `PressureBands` with hysteresis, recomputed on pool updates and pod changes | `types/states.rs`, `orchestrator/mod.rs`, `shell/mod.rs` |
+| PSI integration | Done — workers read `/proc/pressure/` every 10s, orchestrator feeds into pressure scores | `worker/mod.rs`, `types/states.rs`, `shell/mod.rs` |
+| Pressure-driven idle timeout | Done — namespace layer adjusts `IdleTimeout` by pressure band (75%/25%/5s floor) | `namespace/output.rs` |
+| Real memory detection | Done — `/proc/meminfo` at startup, fallback 1024 MB | `worker/mod.rs` |
+| Resource leases | **Not implemented** — `PlacementTable.locked_by` exists but is dead code (see [Known Issues](#known-issues) #6) | `types/states.rs` |
 | Preemption | **Not implemented** | — |
+| Worker drain | **Not implemented** | — |
 | Worker heartbeat | **Not implemented** — loss detected only by TCP drop | — |
 | Imperative commands | **Not implemented** | — |
 
-### Phase 1 — Correctness & DX
-
-These tasks fix correctness bugs and DX gaps. No new abstractions — just extending existing SMs.
-
-#### Task 1.1: PendingIntent on Workload Transitions ✓
-
-**Status**: Done.
-
-Added `PendingIntent` enum (`None`, `Demand`, `Deactivate`, `Restart`) with `Ord`-based priority ordering and `Default` impl. Added `pending: PendingIntent` field to `Launching`, `Suspending`, `Resuming` variants. Added `ForceDeactivate` variant to `WorkloadInput`. Added `upgrade_pending()` and `transition_on_intent()` helpers to `WorkloadStateMachine`.
-
-Transition completion points (`PodRunning` from Launching/Resuming, `PodSuspended`, all error/abort paths) now extract and resolve the pending intent. `DemandUp` during transitions upgrades intent to `Demand`. `DemandDown` to zero clears `Demand` intent (maintains `pending == Demand` implies `demand_count > 0` invariant). `ForceDeactivate` from `Running` suspends with `pending: Deactivate` (or stops if `suspend_on_idle` is false); from transition states, upgrades intent; from `Suspended`, goes `Dormant`.
-
-`Restart` variant is stubbed — no input produces it yet (reserved for Task 1.3 `SpecChanged`).
-
-Stateright model updated: `ForceDeactivate` action (configurable via `enable_force_deactivate`), `pending_demand_implies_demand_count` safety property, `can_reach_suspended_via_deactivate` reachability property. Three new test scenarios (`workload_force_deactivate`, `workload_force_deactivate_no_suspend`, `workload_force_deactivate_full_chaos`). All 11 workload model tests pass with exhaustive state space exploration.
-
-**Files changed**: `types/states.rs`, `workload.rs`, `namespace/commands.rs` (pattern fix), `stateright_workload.rs`.
+Phases 1–3 are complete. See git history for detailed per-task changelogs.
 
 ---
 
-#### Task 1.2: Retry Backoff + Failed State ✓
+### Pre-Phase-4 Cleanup
 
-**Status**: Done.
+Issues that should be addressed before starting Phase 4 tasks. These are not feature work — they fix existing bugs and remove dead code that would cause confusion or incorrect behavior in Phase 4.
 
-Added `consecutive_failures: u32`, `last_failure_reason: Option<PodGoneReason>`, and `max_retries: u32` fields to `WorkloadStateMachine`. Added `RetryBackoff { backoff_timer }` and `Failed` state variants. Added `RetryBackoffTimeout { workload_id }` to `TimerKey`. Added `SpecChanged` and `ManualRestart` variants to `WorkloadInput`.
+#### Fix `route_miss_wake` demand leak (Known Issue #5)
 
-`transition_on_demand()` now implements exponential backoff: `consecutive_failures >= max_retries` → `Failed` state; `consecutive_failures > 0` → `RetryBackoff` with timer (1s, 2s, 4s, 8s, capped at 32s); `== 0` → normal `WaitingForCapacity` + `PodRequest`. `PodRunning` resets `consecutive_failures` to 0. `PodGone`/`PodSuspendFailed` increments the counter. `SpecChanged`/`ManualRestart` clear the counter and recover from `Failed`/`RetryBackoff` states. `DemandDown` to zero from `Failed` clears to `Dormant`. `PendingIntent::Restart` at transition completion resets `consecutive_failures`.
+**Priority**: High — blocks preemption correctness.
 
-Namespace layer (`events.rs`) handles `RetryBackoffTimeout` timer forwarding. `PodGoneReason` propagated from `PodExited`/`PodFailed` events.
+`route_miss_wake` is set by `FabricRouteMiss` but never cleared. This makes demand artificially sticky: once a route miss triggers activation, the workload can never go idle again, preventing suspension. Preemption (Task 4.2) depends on identifying idle workloads — this bug makes them invisible.
 
-Stateright model updated: `consecutive_failures` tracked in model state, `SpecChanged`/`ManualRestart` actions added. Six new safety properties (`consecutive_failures` bounded, `Failed` implies max retries + demand, `RetryBackoff` has timer, `Failed` has no timers, `Running` resets failures). Two new reachability properties (can reach `Failed`, can recover from `Failed`). Three new test scenarios (`workload_retry_backoff`, `workload_retry_recovery`, `workload_retry_with_suspend`). Namespace model also updated with `max_retries` config and `consecutive_failures` in snapshot state. All 14 workload model tests and 6 namespace model tests pass.
+**Fix**: Clear `route_miss_wake` in reconciliation once a service activates and takes over demand (`wants_backend()` is true for the workload).
 
-**Files changed**: `types/states.rs`, `types/mod.rs` (TimerKey), `workload.rs`, `namespace/events.rs`, `stateright_workload.rs`, `stateright_model.rs`.
+**Scope**: `namespace/reconciliation.rs` (clear logic), `workload.rs` (remove Bug 6 comment), `fabric_routing.rs` (fix `#[should_panic]` test).
 
----
+#### Remove dead `PlacementTable.locked_by` (Known Issue #6)
 
-#### Task 1.3: Image Change → Restart ✓
+**Priority**: Low — cleanup before Task 4.1.
 
-**Status**: Done.
+Remove `locked_by: Option<PodId>`, `lock()`, and `unlock()` from `ArtifactPlacement`. The field is set but never read for gating. The actual double-resume guard is the `Suspended → Resuming` state transition. Clean removal gives Task 4.1 (Resource Leases) a clean slate.
 
-Replaced the `log::warn!` for in-place workload spec changes in `handle_update_spec` with actual reconciliation. Container image changes dispatch `WorkloadInput::SpecChanged` to the workload SM (which handles all states via `PendingIntent::Restart` for in-flight transitions, `StopPod` for running, artifact deletion for suspended, and recovery from `Failed`/`RetryBackoff`). `suspend_on_idle` changes update the workload field directly. The reconciliation block runs before `self.spec = spec;` so it can compare old vs new spec.
+**Scope**: `types/states.rs` (remove field + methods), `namespace/commands.rs` (remove `lock()` call), `stateright_model.rs` (remove from snapshot state).
 
-Stateright namespace model updated: `UpdateSpec` action with changed container image, `spec_updated` monotonic flag to limit state space to one spec change per path, `enable_spec_update` config. Safety property: spec contains updated image after update. Reachability property: can reach a state where spec was updated and a pod was launched. New test scenario `check_namespace_spec_update`. All 7 namespace model tests pass.
+#### Fix stale `PendingIntent::Restart` comment
 
-**Files changed**: `namespace/commands.rs`, `stateright_model.rs`.
+**Priority**: Trivial.
 
-**Depends on**: Task 1.1 (PendingIntent), Task 1.2 (Failed state, SpecChanged input).
-
----
-
-#### Task 1.4: PodGone Failure Reason Propagation ✓
-
-**Status**: Done.
-
-Added `PodGoneReason` enum (`Exited`, `Failed`, `WorkerLost`, `Timeout`) with `Display` impl. Extended `WorkloadInput::PodGone` with `reason: Option<PodGoneReason>`. Added `last_failure_reason` field to `WorkloadStateMachine` (stored on `PodGone`, cleared on `PodRunning`). Namespace layer now passes `PodGoneReason::Exited` from `PodExited` and `PodGoneReason::Failed` from `PodFailed`. Stateright model updated.
-
-**Files changed**: `workload.rs`, `namespace/events.rs`, `stateright_workload.rs`.
-
----
-
-#### Task 1.5: CLI/gRPC Default Fixes ✓
-
-**Status**: Done.
-
-Flipped defaults in both compose path (`distvirt-cli/src/commands/namespace.rs`) and native spec path (`distvirt-cli/src/spec.rs`): `suspend_on_idle: true`, `idle_timeout_ms: 30_000`.
-
-**Files changed**: `distvirt-cli/src/commands/namespace.rs`, `distvirt-cli/src/spec.rs`.
-
----
-
-#### Task 1.6: Activation Debounce Fix ✓
-
-**Status**: Done.
-
-`ServiceTable::update_backend()` now clears the per-IP `last_activation` debounce entry when the backend is removed (`backend: None`). This ensures that when a service returns to idle (backend removed), the next packet triggers a `ServiceActivation` immediately rather than being suppressed by the stale debounce timestamp from the previous active period.
-
-**Files changed**: `distvirt-worker/src/fabric/service.rs`.
-
----
-
-### Phase 1 Task Dependencies
-
-```
-Task 1.4 (PodGone reason)  ──┐
-                              ├──→ Task 1.2 (Retry backoff) ──┐
-Task 1.1 (PendingIntent)  ───┤                                ├──→ Task 1.3 (Image change restart)
-                              │                                │
-Task 1.5 (CLI defaults)      │  (independent)                 │
-Task 1.6 (Debounce fix)      │  (independent)                 │
-```
-
-All Phase 1 tasks are now complete (1.1 ✓, 1.2 ✓, 1.3 ✓, 1.4 ✓, 1.5 ✓, 1.6 ✓).
-
----
-
-### Phase 2 — Observability & Conditions
-
-#### Task 2.1: Workload/Service Condition Model ✓
-
-**Status**: Done.
-
-Added `conditions: HashMap<String, String>` field to both `WorkloadStateMachine` and `ServiceStateMachine`. Simplified from the planned `Condition { active, message, since }` struct — conditions use a simple key→message map where presence indicates active and absence indicates cleared. This matches how they're consumed (set/remove operations) without the overhead of tracking `since` timestamps or an `active` flag (inactive conditions are simply removed).
-
-The namespace output layer (`namespace/output.rs`) now stores conditions on the respective SMs when processing `ConditionSet`/`ConditionClear` outputs, replacing the previous debug-log-only handling. `translate_service_effects` gained a `&ServiceId` parameter so it can look up the correct service SM for condition storage.
-
-Added `ConditionSet { key, message }` and `ConditionClear { key }` variants to `ServiceOutput`. The service SM emits `activation-pending` condition: set on `ServiceActivation` (Idle → NeedBackend), cleared on `WorkloadReady` (→ Active), and cleared on `WorkloadUnready` (NeedBackend → Idle for activation services).
-
-Workload conditions (`failed`, `retry-backoff`) were already emitted by Task 1.2 — this task made them stored rather than logged.
-
-**Testing**: Two new scenario tests (`test_activation_pending_condition_lifecycle`, `test_activation_pending_in_status_report`) verify the `activation-pending` condition is set during activation and cleared when the service becomes active. All existing stateright model tests pass unchanged (conditions are output-only, don't affect transitions).
-
-**Files changed**: `workload.rs` (add `conditions` field), `service.rs` (add `conditions` field, add output variants, emit `activation-pending`), `namespace/output.rs` (store conditions, add `service_id` param), `namespace/events.rs`, `namespace/reconciliation.rs`, `namespace/commands.rs` (update `translate_service_effects` call sites).
-
-**Depends on**: Task 1.2 (introduces ConditionSet/ConditionClear output variants).
-
----
-
-#### Task 2.2: Status Report Enhancement ✓
-
-**Status**: Done.
-
-Extended `ServiceStatusReport` with `workload_conditions: HashMap<String, String>` and `service_conditions: HashMap<String, String>`. Extended `WorkerStatusReport` with `conditions: HashMap<String, WorkerCondition>` (reuses existing `WorkerCondition` type from `types/states.rs`).
-
-`namespace/mod.rs:status_report()` now reads conditions from workload and service SMs and includes them in the report. `orchestrator/client.rs` now includes `ws.conditions.clone()` in `WorkerStatusReport` construction (both `ListWorkers` and `GetWorker` paths).
-
-**No SM changes.** Read-only enhancement.
-
-**Files changed**: `types/client.rs`, `namespace/mod.rs`, `orchestrator/client.rs`.
-
-**Depends on**: Task 2.1.
-
----
-
-### Phase 3 — Capacity Management
-
-#### Task 3.1: Worker Pressure Score ✓
-
-**Status**: Done.
-
-Added `WorkerPressure` struct (per-dimension 0.0–1.0 scores), `PressureBand` enum (`Normal`, `Elevated`, `High`, `Critical`) with `Ord`-based ordering, `PressureBands` struct (per-dimension band tracking with hysteresis), and `compute_band_with_hysteresis()` function. Added `pressure: WorkerPressure` and `pressure_bands: PressureBands` fields to `WorkerState`. Added `recompute_pressure(pod_memory_committed_mb)` method on `WorkerState`.
-
-Hysteresis per dimension — enter band at upper threshold, leave at lower:
-| Band | Enter | Leave |
-|---|---|---|
-| Elevated | 0.50 | 0.40 |
-| High | 0.80 | 0.70 |
-| Critical | 0.95 | 0.85 |
-
-Initially, without PSI, pressure uses static accounting: `memory_pressure = pods_memory_committed / available_memory_mb`, `storage_pressure = max(1 - available/capacity)` across all pools, `compute_pressure = 0.0` (no data without PSI). `DEFAULT_POD_MEMORY_MB = 128` constant for pod memory until per-pod resource sizing is implemented.
-
-Added `recompute_worker_pressure(worker_id)` and `recompute_all_worker_pressure()` methods on `Orchestrator`. Pressure is recomputed on:
-- `PoolCapacityUpdate` events (shell layer, after updating pool data)
-- Pod count changes (via `recompute_all_worker_pressure()` at end of `process_namespace_output`)
-
-13 unit tests covering band transitions, hysteresis enter/leave behavior, `max_band()`, `update_bands()`, memory pressure computation, and storage pressure computation.
-
-**Files changed**: `types/states.rs`, `orchestrator/mod.rs`, `orchestrator/scheduling.rs`, `orchestrator/workers.rs`, `shell/mod.rs`.
-
-**Depends on**: Nothing.
-
----
-
-#### Task 3.2: Pressure-Aware Scheduling ✓
-
-**Status**: Done.
-
-Two-phase worker selection in `select_worker_for_pod`:
-
-1. **Hard constraints** (filter): `fabric_status == Active`, global worker pressure `max_band() < High` (excludes High and Critical workers)
-2. **Soft preferences** (rank by tuple): `(max_band, pod_count)` — lowest pressure band first, fewest pods as tiebreaker within the same band
-
-This means Normal workers are always preferred over Elevated, and Elevated workers are still eligible (deprioritized) while High/Critical are excluded entirely. When all workers are at High+ pressure, `select_worker_for_pod` returns `None` and the workload stays in `WaitingForCapacity`.
-
-Snapshot locality and pool locality are deferred — currently resume is pinned to the artifact-holding worker (handled separately in `process_namespace_output`'s resume path). Draining exclusion is deferred to Task 4.3.
-
-9 unit tests covering: Normal vs Elevated preference, High/Critical exclusion, all-high returns None, Elevated as fallback, pod count tiebreaker, pressure trumps pod count, inactive worker skip, max-band across dimensions.
-
-**Files changed**: `orchestrator/scheduling.rs`.
-
-**Depends on**: Task 3.1.
-
----
-
-#### Task 3.3: Pressure-Driven Idle Timeout
-
-**Problem**: Idle timeout is static. Under pressure, workloads should deactivate faster.
-
-**Changes**: The namespace layer adjusts the effective idle timeout based on the worker's pressure band before passing it to the service SM:
-
-| Band | Effective Timeout |
-|---|---|
-| Normal | Configured |
-| Elevated | 75% of configured |
-| High | 25% of configured (min 5s) |
-| Critical | 5s (floor) |
-
-Implementation: Add `UpdateIdleTimeout { duration }` input to `ServiceStateMachine`, or have the namespace layer pass the effective timeout when the service sets its timer. The simpler approach: when `ServiceOutput::TimerSet` is being forwarded for an idle timeout, the namespace layer adjusts the duration based on the worker's current pressure band.
-
-**Testing**: Extend namespace stateright model to verify that idle timeouts shorten under elevated pressure.
-
-**Files changed**: `namespace/output.rs` (timer adjustment), `service.rs` (if adding UpdateIdleTimeout input).
-
-**Depends on**: Task 3.1, Task 3.2.
-
----
-
-#### Task 3.4: PSI Integration
-
-**Problem**: Without PSI, compute pressure is always 0.0 and memory/storage pressure relies on static accounting.
-
-**Changes**:
-
-Worker-side: read `/proc/pressure/{cpu,memory,io}` periodically (10s), report via new `WorkerEvent::PressureUpdate`.
-
-Protocol: Add `PressureUpdate` to the worker protocol schema.
-
-Orchestrator: Feed PSI values into pressure score computation (Task 3.1).
-
-**Files changed**: `distvirt-worker-protocol/schema/worker_protocol.capnp`, `distvirt-worker-protocol/src/types.rs`, `distvirt-worker/src/worker/mod.rs`, `orchestrator/workers.rs`.
-
-**Depends on**: Task 3.1.
-
----
-
-#### Task 3.5: Real Memory Detection
-
-**Problem**: `available_memory_mb` is hardcoded to 1024. Pressure score based on fictional data is meaningless.
-
-**Changes**: Worker reads actual host memory at startup, reports in `WorkerHello`.
-
-**Files changed**: `distvirt-worker/src/worker/mod.rs`.
-
-**Depends on**: Nothing.
+`types/states.rs` comment on `Restart` says "stubbed — no input produces it yet" but `WorkloadInput::SpecChanged` has produced it since Task 1.3.
 
 ---
 
 ### Phase 4 — Advanced Policy
 
+#### Phase 4 Architectural Considerations
+
+Several cross-cutting concerns affect multiple Phase 4 tasks:
+
+**Two-layer worker state boundary**: Scheduling (`select_worker_for_pod`) runs at the orchestrator level and reads `Orchestrator.workers` (global). But worker drain (Task 4.3) adds `draining: bool` to `NamespaceWorkerState` (namespace-scoped per the policy design). The drain check in scheduling needs access to namespace-level state. Options:
+1. Pass drain state up to the orchestrator level (add `draining` to global `WorkerState` or to scheduling context)
+2. Move the drain check into the namespace layer — emit `PodRequest` only for non-draining workers, so `select_worker_for_pod` never sees them
+3. Make drain a global worker-level concept (simpler, but prevents per-namespace drain)
+
+Recommendation: Option 1 — drain is rare enough that global scope is fine for v1.
+
+**Timer routing for heartbeat**: The shell's `timer_ns: HashMap<TimerKey, NamespaceId>` only handles namespace-scoped timers. Worker heartbeat (Task 4.4) is cluster-scoped. The policy doc's recommendation (use `PoolCapacityUpdate` as implicit heartbeat, track `last_message_at` in the shell layer) avoids SM timers entirely. Implement as a periodic sweep in the shell rather than per-worker SM timers.
+
+**Priority field**: Preemption (Task 4.2) needs a priority hierarchy, but `WorkloadSpec` has no priority field. The policy doc defines priority based on runtime state (activated > active-with-traffic > idle > always-on > suspended), not spec-declared priority. This means preemption can work without a spec change — priority is derived from workload/service state at preemption time.
+
 #### Task 4.1: Resource Leases
 
 **Problem**: Resources (pod slots, memory, artifact entries) are claimed during async operations that can fail. On failure, resources are "leaked" until ad-hoc cleanup runs.
 
-**Changes**: Introduce `Lease<T>` abstraction with automatic expiry (see [Resource Leases](#resource-leases) section). Subsumes `PlacementTable.locked_by`. Prevents overcommit during concurrent scheduling.
+**Changes**: Introduce `Lease<T>` abstraction with automatic expiry (see [Resource Leases](#resource-leases) section). Prevents overcommit during concurrent scheduling.
 
-**Depends on**: Task 3.1 (meaningful capacity data), Task 3.5 (real memory).
+**Note**: With `DEFAULT_POD_MEMORY_MB = 128` still hardcoded for all pods, leases primarily prevent pod *slot* overcommit (two concurrent scheduling decisions racing past the same capacity). Memory-based lease value is limited until per-pod resource requests exist in the spec. Consider implementing slot-only leases first (simpler, still useful) and adding memory reservation when per-pod sizing lands.
+
+**Depends on**: Pre-Phase-4 cleanup (remove dead `locked_by`).
 
 ---
 
@@ -1216,9 +1052,17 @@ Orchestrator: Feed PSI values into pressure score computation (Task 3.1).
 
 **Problem**: When no worker has capacity for an activated workload, it waits forever in `WaitingForCapacity`.
 
-**Changes**: See [Preemption](#preemption) section. Uses priority hierarchy, pressure scores, and leases to select preemption targets.
+**Changes**: See [Preemption](#preemption) section. Priority is derived from runtime state (not spec-declared). `ForceDeactivate` input serves as the preemption mechanism — no new SM input needed.
 
-**Depends on**: Task 3.2 (pressure-aware scheduling), Task 4.1 (leases).
+**Implementation sketch**:
+1. `select_worker_for_pod` returns `None` (all workers High+ or at capacity)
+2. New `find_preemption_target(namespace_id)` scans workloads for preemptable candidates (priority 3–4: idle or always-on-no-traffic)
+3. Select lowest-priority, longest-idle workload on the best-fit worker
+4. Dispatch `ForceDeactivate` to the target workload
+5. Set `preempted` condition on the target
+6. After target's pod slot frees (on `PodSuspended`/`PodExited`), `schedule_waiting_pods` naturally retries the waiting workload
+
+**Depends on**: Pre-Phase-4 cleanup (fix `route_miss_wake` — idle workloads must actually appear idle), Task 3.2 (pressure-aware scheduling).
 
 ---
 
@@ -1226,9 +1070,16 @@ Orchestrator: Feed PSI values into pressure score computation (Task 3.1).
 
 **Problem**: No mechanism to gracefully drain a worker before maintenance.
 
-**Changes**: Add `draining: bool` to `NamespaceWorkerState` (see [Worker Drain as an Intent](#worker-drain-as-an-intent)). Scheduling excludes draining workers. Existing pods deactivate on idle.
+**Changes**: Add `draining: bool` to worker state (see [Architectural Considerations](#phase-4-architectural-considerations) for layer decision). Scheduling excludes draining workers. Existing pods deactivate on their normal idle timeout. Once pod count reaches zero, the worker is safe to disconnect.
 
-**Depends on**: Task 1.1 (PendingIntent pattern).
+**Implementation sketch**:
+1. Add `DrainWorker { worker_id }` / `UndrainWorker { worker_id }` to `OrchestratorInput` (client command)
+2. Add `draining: bool` to `WorkerState` (global level — simplest for v1)
+3. `select_worker_for_pod` adds `!draining` to hard constraints
+4. Set `draining` condition on the worker (visible in `dv status`)
+5. No active eviction — pods drain naturally via idle timeouts
+
+**Depends on**: Nothing (self-contained). Can be implemented first as a warm-up for Phase 4.
 
 ---
 
@@ -1236,11 +1087,46 @@ Orchestrator: Feed PSI values into pressure score computation (Task 3.1).
 
 **Problem**: Hung workers (connected but unresponsive) are invisible to the orchestrator.
 
-**Changes**: Use `PoolCapacityUpdate` (30s interval) as implicit heartbeat. After 2× interval (60s) with no messages, set `unresponsive` condition and exclude from scheduling.
+**Changes**: Use existing message flow as implicit heartbeat. Track `last_message_at: Instant` per worker in the shell layer. Periodic sweep (every 30s) checks for workers exceeding the 60s deadline.
 
-**Depends on**: Task 2.1 (condition model).
+**Implementation sketch**:
+1. Add `last_message_at: Instant` to shell-level worker tracking (not SM state)
+2. Update on any message from the worker (events, capacity updates, PSI)
+3. Add a periodic sweep (30s interval) that checks all workers
+4. Workers exceeding 60s deadline: set `unresponsive` condition, exclude from scheduling
+5. Workers exceeding a further deadline (e.g., 120s): treat as disconnected (trigger `WorkerDisconnected`)
+
+**Depends on**: Nothing (self-contained). Does not require SM timer changes.
 
 ---
+
+#### Phase 4 Task Dependencies & Recommended Order
+
+```
+Pre-Phase-4 cleanup (route_miss_wake fix, locked_by removal)
+    │
+    ├──→ Task 4.3 (Worker Drain) ← simplest, self-contained warm-up
+    │
+    ├──→ Task 4.4 (Worker Heartbeat) ← self-contained, shell-layer only
+    │
+    ├──→ Task 4.1 (Resource Leases) ← needs clean PlacementTable
+    │         │
+    │         └──→ Task 4.2 (Preemption) ← needs route_miss_wake fix + leases
+    │
+```
+
+Recommended implementation order: cleanup → 4.3 → 4.4 → 4.1 → 4.2. Tasks 4.3 and 4.4 can be done in parallel since they're independent.
+
+#### Test Harness Additions for Phase 4
+
+The existing test harness (mock workers, paused time, event injection, command inspection) is structurally ready. Minor additions needed:
+
+| Phase 4 Task | Harness Addition |
+|---|---|
+| Worker Drain | `drain_worker(id)` helper, `assert_worker_draining()` assertion |
+| Worker Heartbeat | `MockWorkerConfig::with_silent()` (connects but sends no events), `assert_worker_unresponsive()` |
+| Preemption | `assert_workload_preempted()` (checks condition) |
+| Resource Leases | Existing snapshot_placement tests cover the semantic outcome; add lease expiry/cleanup tests |
 
 ### Design Notes for Implementers
 
@@ -1258,47 +1144,11 @@ Three mechanisms work together for demand management:
 
 `ServiceState::Pending` serves dual duty: initial state (pre-reconciliation) and temporary placeholder during `mem::replace`. This is fragile but not worth splitting until the service SM gets more complex. The reconciliation logic (`reconciliation.rs`) only matches on `(Pending, Dormant)` — it should also handle `(Pending, Suspended)` for correctness after worker loss.
 
-#### Output Typing
-
-Currently all outputs go into `Vec<WorkloadOutput>`. With conditions and events being added, consider splitting:
-
-```rust
-struct WorkloadStepResult {
-    outputs: Vec<WorkloadOutput>,     // commands, timer ops, signals
-    conditions: Vec<ConditionUpdate>, // set/clear conditions
-    events: Vec<SmWorkloadEvent>,     // observability events
-}
-```
-
-This is a **refactor, not a functional change** — do it when convenient, not as a blocker.
-
 #### Suspend Timeout and `snapshot-lost`
 
 The policy says: when suspend times out and the workload had a prior snapshot (was previously Suspended, resumed, and now re-suspend failed), set `snapshot-lost` condition. The SM doesn't track prior snapshot existence. The `Suspending` state carries `artifact_id` — but this is the *new* artifact being written, not the prior one. The prior artifact was deleted on successful resume (`workload.rs`). So suspend timeout after resume never has a prior snapshot to lose — the condition only applies to first-suspend failures where a prior snapshot existed from a *different* suspend cycle that was somehow preserved.
 
 In practice: `snapshot-lost` matters for the eviction case (storage pressure deletes a `Suspended` workload's artifact), not the suspend-timeout case. The suspend-timeout path already handles this correctly — the workload goes `Dormant` and cold-starts next time.
-
-#### Stateright Model Sizing
-
-Current step bounds: 12-20 per test. After adding `PendingIntent` (4 variants × 3 transition states), the state space grew modestly — the existing step bounds remain sufficient. Adding `RetryBackoff` + `Failed` (Task 1.2) will roughly double the state space again. The DFS with dedup handles this well — Stateright is bounded by unique states, not path length.
-
-#### Pressure Testing: Capacity vs Runtime Pressure
-
-The current pressure tests derive pressure indirectly by choosing `available_memory_mb` values on mock workers and relying on `pod_count × DEFAULT_POD_MEMORY_MB / available_memory_mb`. This conflates two concerns that should be independent:
-
-1. **Capacity accounting** — "does this pod fit?" — needs resource requests/limits, is about **planning and scheduling admission**. This is orchestrator-side bookkeeping.
-2. **Runtime pressure** — "is this worker stressed?" — needs PSI or similar observed metrics, is about **reactive policy decisions** (idle timeout adjustment, eviction priority). This is worker-reported.
-
-Currently both are derived from the same static formula because it's the only signal available. The tests reverse-engineer memory sizes to hit specific pressure bands (e.g., 160 MB worker → `128/160 = 0.8` → High), which is fragile if `DEFAULT_POD_MEMORY_MB` or band thresholds change.
-
-**When PSI lands (Task 3.4), refactor the test harness:**
-
-- Mock workers gain a `report_pressure(PsiMetrics)` method (or `report_pressure_band(PressureBand)` for convenience) that sends a `PressureUpdate` event.
-- **Pressure-response tests** (idle timeout shortening, eviction, preemption) use reported pressure directly — no reverse-engineering memory sizes.
-- **Scheduling/capacity tests** use pod memory requests vs worker capacity — pure arithmetic, no pressure bands involved.
-- **Static accounting fallback** (`pods_memory_committed / available_mb`) becomes a degraded-mode path tested in isolation (non-Linux workers without PSI), not the foundation for all pressure tests.
-
-This matches the policy design: PSI is the primary signal, static accounting is the fallback. Tests should reflect that hierarchy. The split also makes tests resilient to changes in pod sizing (per-pod resource requests replace `DEFAULT_POD_MEMORY_MB`) and pressure band thresholds.
 
 ---
 

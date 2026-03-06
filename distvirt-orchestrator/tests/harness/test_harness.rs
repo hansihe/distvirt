@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use distvirt_orchestrator::shell::OrchestratorShell;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed, OrchestratorConnection, WorkerEvent};
+use distvirt_worker_protocol::{BackendNeed, OrchestratorConnection, PsiMetrics, WorkerEvent};
 
 use super::mock_worker::{MockWorkerConfig, MockWorkerHandle, spawn_mock_worker};
 
@@ -250,6 +250,20 @@ impl TestHarness {
             .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
         let wl_id = svc.workload_id.0.clone();
         self.send_event_to_workload(ns_id, &wl_id, event);
+    }
+
+    /// Send a PressureUpdate event from a worker with the given memory PSI some_avg10 value,
+    /// then converge. CPU and IO PSI default to 0.
+    pub async fn send_pressure_update(&mut self, worker_id: &WorkerId, memory_psi_pct: f64) {
+        self.worker(worker_id).send_event(WorkerEvent::PressureUpdate {
+            cpu: PsiMetrics::default(),
+            memory: PsiMetrics {
+                some_avg10: memory_psi_pct,
+                ..Default::default()
+            },
+            io: PsiMetrics::default(),
+        });
+        self.converge().await;
     }
 
     /// Activate a service: send ServiceActivation with the correct IP, converge,
