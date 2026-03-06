@@ -1282,6 +1282,24 @@ In practice: `snapshot-lost` matters for the eviction case (storage pressure del
 
 Current step bounds: 12-20 per test. After adding `PendingIntent` (4 variants × 3 transition states), the state space grew modestly — the existing step bounds remain sufficient. Adding `RetryBackoff` + `Failed` (Task 1.2) will roughly double the state space again. The DFS with dedup handles this well — Stateright is bounded by unique states, not path length.
 
+#### Pressure Testing: Capacity vs Runtime Pressure
+
+The current pressure tests derive pressure indirectly by choosing `available_memory_mb` values on mock workers and relying on `pod_count × DEFAULT_POD_MEMORY_MB / available_memory_mb`. This conflates two concerns that should be independent:
+
+1. **Capacity accounting** — "does this pod fit?" — needs resource requests/limits, is about **planning and scheduling admission**. This is orchestrator-side bookkeeping.
+2. **Runtime pressure** — "is this worker stressed?" — needs PSI or similar observed metrics, is about **reactive policy decisions** (idle timeout adjustment, eviction priority). This is worker-reported.
+
+Currently both are derived from the same static formula because it's the only signal available. The tests reverse-engineer memory sizes to hit specific pressure bands (e.g., 160 MB worker → `128/160 = 0.8` → High), which is fragile if `DEFAULT_POD_MEMORY_MB` or band thresholds change.
+
+**When PSI lands (Task 3.4), refactor the test harness:**
+
+- Mock workers gain a `report_pressure(PsiMetrics)` method (or `report_pressure_band(PressureBand)` for convenience) that sends a `PressureUpdate` event.
+- **Pressure-response tests** (idle timeout shortening, eviction, preemption) use reported pressure directly — no reverse-engineering memory sizes.
+- **Scheduling/capacity tests** use pod memory requests vs worker capacity — pure arithmetic, no pressure bands involved.
+- **Static accounting fallback** (`pods_memory_committed / available_mb`) becomes a degraded-mode path tested in isolation (non-Linux workers without PSI), not the foundation for all pressure tests.
+
+This matches the policy design: PSI is the primary signal, static accounting is the fallback. Tests should reflect that hierarchy. The split also makes tests resilient to changes in pod sizing (per-pod resource requests replace `DEFAULT_POD_MEMORY_MB`) and pressure band thresholds.
+
 ---
 
 ## Open Questions

@@ -206,19 +206,30 @@ impl WorkerPressure {
 /// Default memory per pod in MB (hardcoded until per-pod resource sizing is implemented).
 pub const DEFAULT_POD_MEMORY_MB: u64 = 128;
 
+/// Cached PSI metrics from the worker, used to compute pressure scores.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerPsi {
+    pub cpu: distvirt_worker_protocol::PsiMetrics,
+    pub memory: distvirt_worker_protocol::PsiMetrics,
+    pub io: distvirt_worker_protocol::PsiMetrics,
+}
+
 impl WorkerState {
     /// Recompute pressure scores from current capabilities and pod count.
     /// `pod_memory_committed_mb` is the total memory committed by active pods on this worker.
+    ///
+    /// When PSI data is available, it is used as the primary signal (max of PSI and static
+    /// accounting). Without PSI (non-Linux), falls back to static accounting only.
     pub fn recompute_pressure(&mut self, pod_memory_committed_mb: u64) {
-        // Memory pressure: committed / available (static accounting fallback).
-        let memory = if self.capabilities.available_memory_mb > 0 {
+        // Static accounting fallback for memory.
+        let memory_static = if self.capabilities.available_memory_mb > 0 {
             (pod_memory_committed_mb as f32 / self.capabilities.available_memory_mb as f32).min(1.0)
         } else {
             0.0
         };
 
-        // Storage pressure: max pool utilization across all pools.
-        let storage = self.capabilities.pools.iter()
+        // Static accounting fallback for storage: max pool utilization.
+        let storage_static = self.capabilities.pools.iter()
             .map(|p| {
                 if p.capacity_bytes > 0 {
                     1.0 - (p.available_bytes as f32 / p.capacity_bytes as f32)
@@ -228,8 +239,24 @@ impl WorkerState {
             })
             .fold(0.0f32, f32::max);
 
-        // Compute pressure: 0.0 without PSI data.
-        let compute = 0.0;
+        let (compute, memory, storage) = if let Some(ref psi) = self.psi {
+            // PSI available: use max(PSI, static) for memory/storage.
+            // Compute has no static fallback — PSI is the only signal.
+            let compute = (psi.cpu.some_avg10 as f32 / 100.0).clamp(0.0, 1.0);
+            let memory = f32::max(
+                (psi.memory.some_avg10 as f32 / 100.0).clamp(0.0, 1.0),
+                memory_static,
+            );
+            let storage = f32::max(
+                (psi.io.some_avg10 as f32 / 100.0).clamp(0.0, 1.0),
+                storage_static,
+            );
+            (compute, memory, storage)
+        } else {
+            // No PSI: static accounting only, compute unknown (0.0).
+            (0.0, memory_static, storage_static)
+        };
+
         // Network pressure: 0.0 (future extension).
         let network = 0.0;
 
@@ -342,6 +369,7 @@ mod pressure_tests {
             transfer_listen_port: None,
             pressure: WorkerPressure::default(),
             pressure_bands: PressureBands::default(),
+            psi: None,
         };
 
         // 512 MB committed out of 1024 → 0.5 → Elevated.
@@ -376,6 +404,7 @@ mod pressure_tests {
             transfer_listen_port: None,
             pressure: WorkerPressure::default(),
             pressure_bands: PressureBands::default(),
+            psi: None,
         };
 
         ws.recompute_pressure(0);
@@ -430,6 +459,103 @@ mod pressure_tests {
             PressureBand::Elevated.adjust_idle_timeout(d),
             std::time::Duration::from_secs(5),
         );
+    }
+
+    #[test]
+    fn test_psi_compute_pressure() {
+        let mut ws = WorkerState {
+            capabilities: WorkerCapabilities {
+                max_pods: 10,
+                available_memory_mb: 1024,
+                public_endpoint: String::new(),
+                pools: vec![],
+            },
+            namespaces: std::collections::BTreeSet::new(),
+            wg_config: None,
+            tunnel_config: None,
+            conditions: std::collections::BTreeMap::new(),
+            transfer_listen_port: None,
+            pressure: WorkerPressure::default(),
+            pressure_bands: PressureBands::default(),
+            psi: Some(WorkerPsi {
+                cpu: distvirt_worker_protocol::PsiMetrics {
+                    some_avg10: 60.0, // 60% → 0.6 → Elevated
+                    some_avg60: 40.0,
+                    full_avg10: 0.0,
+                    full_avg60: 0.0,
+                },
+                memory: distvirt_worker_protocol::PsiMetrics::default(),
+                io: distvirt_worker_protocol::PsiMetrics::default(),
+            }),
+        };
+
+        ws.recompute_pressure(0);
+        assert!((ws.pressure.compute - 0.6).abs() < 0.001);
+        assert_eq!(ws.pressure_bands.compute, PressureBand::Elevated);
+    }
+
+    #[test]
+    fn test_psi_memory_max_with_static() {
+        let mut ws = WorkerState {
+            capabilities: WorkerCapabilities {
+                max_pods: 10,
+                available_memory_mb: 1024,
+                public_endpoint: String::new(),
+                pools: vec![],
+            },
+            namespaces: std::collections::BTreeSet::new(),
+            wg_config: None,
+            tunnel_config: None,
+            conditions: std::collections::BTreeMap::new(),
+            transfer_listen_port: None,
+            pressure: WorkerPressure::default(),
+            pressure_bands: PressureBands::default(),
+            psi: Some(WorkerPsi {
+                cpu: distvirt_worker_protocol::PsiMetrics::default(),
+                memory: distvirt_worker_protocol::PsiMetrics {
+                    some_avg10: 10.0, // 10% PSI
+                    some_avg60: 5.0,
+                    full_avg10: 0.0,
+                    full_avg60: 0.0,
+                },
+                io: distvirt_worker_protocol::PsiMetrics::default(),
+            }),
+        };
+
+        // Static accounting: 800/1024 ≈ 0.78 > PSI 0.10 → static wins.
+        ws.recompute_pressure(800);
+        assert!((ws.pressure.memory - 0.78125).abs() < 0.001);
+
+        // Now PSI is higher: 90% PSI > 0.78 static → PSI wins.
+        ws.psi.as_mut().unwrap().memory.some_avg10 = 90.0;
+        ws.recompute_pressure(800);
+        assert!((ws.pressure.memory - 0.9).abs() < 0.001);
+        assert_eq!(ws.pressure_bands.memory, PressureBand::High);
+    }
+
+    #[test]
+    fn test_no_psi_fallback_unchanged() {
+        // Without PSI, compute is 0.0 (unchanged from before).
+        let mut ws = WorkerState {
+            capabilities: WorkerCapabilities {
+                max_pods: 10,
+                available_memory_mb: 1024,
+                public_endpoint: String::new(),
+                pools: vec![],
+            },
+            namespaces: std::collections::BTreeSet::new(),
+            wg_config: None,
+            tunnel_config: None,
+            conditions: std::collections::BTreeMap::new(),
+            transfer_listen_port: None,
+            pressure: WorkerPressure::default(),
+            pressure_bands: PressureBands::default(),
+            psi: None,
+        };
+
+        ws.recompute_pressure(512);
+        assert_eq!(ws.pressure.compute, 0.0);
+        assert!((ws.pressure.memory - 0.5).abs() < 0.001);
     }
 }
 
@@ -556,6 +682,7 @@ pub struct WorkerState {
     pub transfer_listen_port: Option<u16>,
     pub pressure: WorkerPressure,
     pub pressure_bands: PressureBands,
+    pub psi: Option<WorkerPsi>,
 }
 
 impl WorkloadState {

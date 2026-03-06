@@ -1341,6 +1341,28 @@ pub fn write_worker_event(
             b.set_dest_pool_id(dest_pool_id.as_ref());
             b.set_error(error);
         }
+        WorkerEvent::PressureUpdate { cpu, memory, io } => {
+            let mut b = builder.init_pressure_update();
+            write_psi_metrics(b.reborrow().init_cpu(), cpu);
+            write_psi_metrics(b.reborrow().init_memory(), memory);
+            write_psi_metrics(b.reborrow().init_io(), io);
+        }
+    }
+}
+
+fn write_psi_metrics(mut b: schema::psi_metrics::Builder<'_>, m: &PsiMetrics) {
+    b.set_some_avg10(m.some_avg10);
+    b.set_some_avg60(m.some_avg60);
+    b.set_full_avg10(m.full_avg10);
+    b.set_full_avg60(m.full_avg60);
+}
+
+fn read_psi_metrics(r: schema::psi_metrics::Reader<'_>) -> PsiMetrics {
+    PsiMetrics {
+        some_avg10: r.get_some_avg10(),
+        some_avg60: r.get_some_avg60(),
+        full_avg10: r.get_full_avg10(),
+        full_avg60: r.get_full_avg60(),
     }
 }
 
@@ -1522,6 +1544,14 @@ pub fn read_worker_event(
                 dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 error: r.get_error()?.to_string()?,
+            })
+        }
+        PressureUpdate(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PressureUpdate {
+                cpu: read_psi_metrics(r.get_cpu()?),
+                memory: read_psi_metrics(r.get_memory()?),
+                io: read_psi_metrics(r.get_io()?),
             })
         }
     }

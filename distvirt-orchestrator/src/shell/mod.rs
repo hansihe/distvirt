@@ -530,7 +530,32 @@ impl OrchestratorShell {
 
         let input = match msg {
             ShellMsg::WorkerEvent { worker_id, event } => {
-                // Handle worker-scoped conditions directly (not routed to namespace SM).
+                // Handle worker-scoped events directly (not routed to namespace SM).
+                // Handle PSI pressure updates.
+                if let distvirt_worker_protocol::WorkerEvent::PressureUpdate {
+                    ref cpu,
+                    ref memory,
+                    ref io,
+                } = event
+                {
+                    if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
+                        log::debug!(
+                            "worker {} pressure update: cpu={:.1} mem={:.1} io={:.1}",
+                            worker_id.0,
+                            cpu.some_avg10,
+                            memory.some_avg10,
+                            io.some_avg10,
+                        );
+                        ws.psi = Some(crate::types::WorkerPsi {
+                            cpu: cpu.clone(),
+                            memory: memory.clone(),
+                            io: io.clone(),
+                        });
+                    }
+                    self.orchestrator.recompute_worker_pressure(&worker_id);
+                    return;
+                }
+
                 // Handle pool capacity updates directly (worker-scoped, not routed to namespace SM).
                 if let distvirt_worker_protocol::WorkerEvent::PoolCapacityUpdate {
                     ref pools,

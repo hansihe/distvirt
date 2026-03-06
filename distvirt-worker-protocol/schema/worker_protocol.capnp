@@ -872,6 +872,8 @@ struct WorkerEvent {
     # An artifact transfer has been received and written to disk.
     transferFailed @19 :TransferFailedEvt;
     # An artifact transfer has failed.
+    pressureUpdate @20 :PressureUpdateEvt;
+    # Periodic PSI pressure metrics from the worker.
   }
 }
 
@@ -947,6 +949,33 @@ struct TransferFailedEvt {
   destArtifactId @3 :Text;
   destPoolId @4 :Text;
   error @5 :Text;
+}
+
+# PSI (Pressure Stall Information) metrics for a single resource dimension.
+#
+# Values are percentages (0.0–100.0) representing the fraction of time
+# tasks were stalled waiting for the resource over the given averaging window.
+struct PsiMetrics {
+  someAvg10 @0 :Float64;
+  # Partial stall percentage, 10-second rolling average.
+  someAvg60 @1 :Float64;
+  # Partial stall percentage, 60-second rolling average.
+  fullAvg10 @2 :Float64;
+  # Full stall percentage, 10-second rolling average.
+  fullAvg60 @3 :Float64;
+  # Full stall percentage, 60-second rolling average.
+}
+
+# Periodic PSI pressure metrics from the worker.
+#
+# Sent every 10 seconds (or on threshold crossings) so the orchestrator
+# can compute real pressure scores. Only sent on Linux workers with PSI
+# support; non-Linux workers never send this event, and the orchestrator
+# falls back to static accounting.
+struct PressureUpdateEvt {
+  cpu @0 :PsiMetrics;
+  memory @1 :PsiMetrics;
+  io @2 :PsiMetrics;
 }
 
 # --- Log Stream Header ---

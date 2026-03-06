@@ -11,8 +11,8 @@ use anyhow::Context;
 use distvirt_activator::ActivatorRuntime;
 use distvirt_worker_protocol::{
     ArtifactId, ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
-    PodId, PodNetworkConfig, PoolId, PoolInfo, WorkerCapabilities, WorkerCommand,
-    WorkerConnection, WorkerEvent, WorkerHello, WorkerReady,
+    PodId, PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, WorkerCapabilities,
+    WorkerCommand, WorkerConnection, WorkerEvent, WorkerHello, WorkerReady,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -52,6 +52,67 @@ fn pool_disk_stats(path: &std::path::Path) -> (u64, u64) {
     {
         (0, 0)
     }
+}
+
+/// Parse PSI content string into `PsiMetrics`.
+///
+/// Format: `some avg10=X.XX avg60=X.XX avg300=X.XX total=N\nfull avg10=...`
+/// The `cpu` file only has a `some` line (no `full`).
+fn parse_psi(content: &str) -> PsiMetrics {
+    let mut some_avg10 = 0.0;
+    let mut some_avg60 = 0.0;
+    let mut full_avg10 = 0.0;
+    let mut full_avg60 = 0.0;
+
+    for line in content.lines() {
+        let is_some = line.starts_with("some ");
+        let is_full = line.starts_with("full ");
+        if !is_some && !is_full {
+            continue;
+        }
+        for part in line.split_whitespace() {
+            if let Some(val) = part.strip_prefix("avg10=") {
+                if let Ok(v) = val.parse::<f64>() {
+                    if is_some { some_avg10 = v; } else { full_avg10 = v; }
+                }
+            } else if let Some(val) = part.strip_prefix("avg60=") {
+                if let Ok(v) = val.parse::<f64>() {
+                    if is_some { some_avg60 = v; } else { full_avg60 = v; }
+                }
+            }
+        }
+    }
+
+    PsiMetrics { some_avg10, some_avg60, full_avg10, full_avg60 }
+}
+
+/// Read and parse a single `/proc/pressure/{cpu,memory,io}` file.
+fn read_psi_file(path: &str) -> Option<PsiMetrics> {
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(parse_psi(&content))
+}
+
+/// Read PSI metrics for all three resource dimensions.
+/// Returns `None` on non-Linux or if `/proc/pressure/` is unavailable.
+fn read_all_psi() -> Option<(PsiMetrics, PsiMetrics, PsiMetrics)> {
+    let cpu = read_psi_file("/proc/pressure/cpu")?;
+    let memory = read_psi_file("/proc/pressure/memory")?;
+    let io = read_psi_file("/proc/pressure/io")?;
+    Some((cpu, memory, io))
+}
+
+/// Check if any avg10 value changed by more than 1 percentage point.
+fn psi_changed_significantly(
+    old: &(PsiMetrics, PsiMetrics, PsiMetrics),
+    new: &(PsiMetrics, PsiMetrics, PsiMetrics),
+) -> bool {
+    fn delta(a: f64, b: f64) -> bool { (a - b).abs() > 1.0 }
+    delta(old.0.some_avg10, new.0.some_avg10)
+        || delta(old.1.some_avg10, new.1.some_avg10)
+        || delta(old.2.some_avg10, new.2.some_avg10)
+        || delta(old.0.full_avg10, new.0.full_avg10)
+        || delta(old.1.full_avg10, new.1.full_avg10)
+        || delta(old.2.full_avg10, new.2.full_avg10)
 }
 
 /// The worker: sits between the orchestrator and the raw VM/fabric primitives.
@@ -244,6 +305,15 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         capacity_interval.tick().await; // consume the immediate first tick
         let mut last_pools: Vec<PoolInfo> = Vec::new();
 
+        // PSI pressure reporting (10s interval, Linux only).
+        let psi_available = read_all_psi().is_some();
+        if !psi_available {
+            log::info!("worker: PSI not available, pressure will use static accounting only");
+        }
+        let mut psi_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        psi_interval.tick().await; // consume the immediate first tick
+        let mut last_psi: Option<(PsiMetrics, PsiMetrics, PsiMetrics)> = None;
+
         let result = 'result: loop {
             tokio::select! {
                 cmd_result = conn.recv_command() => {
@@ -361,6 +431,25 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                             break 'result Err(e);
                         }
                         last_pools = pools;
+                    }
+                }
+                _ = psi_interval.tick(), if psi_available => {
+                    if let Some(psi) = read_all_psi() {
+                        let should_send = match &last_psi {
+                            Some(old) => psi_changed_significantly(old, &psi),
+                            None => true,
+                        };
+                        if should_send {
+                            if let Err(e) = conn.send_event(&WorkerEvent::PressureUpdate {
+                                cpu: psi.0.clone(),
+                                memory: psi.1.clone(),
+                                io: psi.2.clone(),
+                            }).await {
+                                log::error!("worker: failed to send pressure update: {:#}", e);
+                                break 'result Err(e);
+                            }
+                            last_psi = Some(psi);
+                        }
                     }
                 }
             }

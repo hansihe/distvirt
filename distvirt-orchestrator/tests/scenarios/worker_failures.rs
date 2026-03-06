@@ -128,11 +128,14 @@ async fn test_worker_disconnect_clears_placements() {
     // Activate → running → idle → suspended (creates an artifact placement)
     h.run_activation_suspend_cycle("ns", "web-svc", "web").await;
 
-    // Verify there's an artifact
+    // Verify there's an artifact and placement exists for w1
     match h.workload_state("ns", "web") {
         WorkloadState::Suspended { .. } => {},
         other => panic!("expected Suspended, got {:?}", other),
     };
+    let has_placement = h.orchestrator().placement_table.iter()
+        .any(|(_, p)| p.worker_id == w1);
+    assert!(has_placement, "expected placement on worker before disconnect");
 
     // Disconnect worker
     h.disconnect_worker(&w1);
@@ -140,4 +143,10 @@ async fn test_worker_disconnect_clears_placements() {
 
     // Demand is 0 (service went idle), artifact is lost, workload should go Dormant.
     h.assert_workload_dormant("ns", "web");
+
+    // Verify no placements remain for the disconnected worker.
+    let remaining = h.orchestrator().placement_table.iter()
+        .filter(|(_, p)| p.worker_id == w1)
+        .count();
+    assert_eq!(remaining, 0, "expected all placements cleared after worker disconnect");
 }

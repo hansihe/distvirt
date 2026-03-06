@@ -322,6 +322,9 @@ pub async fn run_compose(
                     WorkerEvent::TransferFailed { transfer_id, error, .. } => {
                         log::error!("artifact transfer failed: transfer_id={} error={}", transfer_id, error);
                     }
+                    WorkerEvent::PressureUpdate { .. } => {
+                        log::debug!("pressure update received");
+                    }
                 }
             }
             Some(log_line) = log_line_rx.recv() => {

@@ -154,9 +154,10 @@ impl OrchestratorShell {
                 log::debug!("tunnel status event from worker {}", worker_id.0);
                 None
             }
-            // WorkerCondition, PoolCapacityUpdate, and transfer events are handled directly in handle_msg (needs &mut self).
+            // WorkerCondition, PoolCapacityUpdate, PressureUpdate, and transfer events are handled directly in handle_msg (needs &mut self).
             ProtoEvent::WorkerCondition { .. } => unreachable!(),
             ProtoEvent::PoolCapacityUpdate { .. } => unreachable!(),
+            ProtoEvent::PressureUpdate { .. } => unreachable!(),
             ProtoEvent::ArtifactTransferReceived { .. } => unreachable!(),
             ProtoEvent::TransferFailed { .. } => unreachable!(),
             // Wire-only variants — not routed to orchestrator SM.

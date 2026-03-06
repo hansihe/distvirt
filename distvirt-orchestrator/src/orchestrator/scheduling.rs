@@ -179,6 +179,7 @@ mod tests {
             transfer_listen_port: None,
             pressure: WorkerPressure::default(),
             pressure_bands: PressureBands::default(),
+            psi: None,
         }
     }
 

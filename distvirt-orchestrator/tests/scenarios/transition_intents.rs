@@ -160,6 +160,8 @@ async fn test_demand_up_during_resume() {
 
     // Should be Running with both services active
     h.assert_workload_running("ns", "shared");
+    h.assert_service_active("ns", "svc-a");
+    h.assert_service_active("ns", "svc-b");
 }
 
 /// Workload is Launching. Update spec with new image (SpecChanged → PendingIntent::Restart).

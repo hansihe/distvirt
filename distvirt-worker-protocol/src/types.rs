@@ -406,6 +406,21 @@ pub enum WorkerEvent {
         dest_pool_id: PoolId,
         error: String,
     },
+    PressureUpdate {
+        cpu: PsiMetrics,
+        memory: PsiMetrics,
+        io: PsiMetrics,
+    },
+}
+
+/// PSI (Pressure Stall Information) metrics for a single resource dimension.
+/// Values are percentages (0.0–100.0).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PsiMetrics {
+    pub some_avg10: f64,
+    pub some_avg60: f64,
+    pub full_avg10: f64,
+    pub full_avg60: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
