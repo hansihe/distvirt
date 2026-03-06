@@ -177,6 +177,17 @@ pub async fn shutdown_worker(
     }
 }
 
+/// Abort the worker task immediately without graceful shutdown.
+///
+/// Use this in tests that don't need to validate the shutdown path and want
+/// fast teardown (e.g. when pods are running long-lived processes like `sleep`).
+pub async fn force_shutdown_worker(
+    worker_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    worker_handle.abort();
+    let _ = worker_handle.await;
+}
+
 pub fn test_network_config() -> NetworkConfig {
     NetworkConfig {
         subnet: Ipv4Addr::new(10, 0, 0, 0),

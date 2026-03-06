@@ -277,9 +277,9 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
 
     eprintln!("e2e: cross-worker tunnel ping succeeded!");
 
-    // --- Shutdown both workers ---
-    shutdown_worker(&mut conn_a, handle_a).await?;
-    shutdown_worker(&mut conn_b, handle_b).await?;
+    // --- Teardown: force-kill both workers (no need for graceful shutdown in this test) ---
+    force_shutdown_worker(handle_a).await;
+    force_shutdown_worker(handle_b).await;
 
     Ok(())
 }

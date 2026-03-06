@@ -2,10 +2,17 @@ use std::future::poll_fn;
 
 use anyhow::{bail, Context};
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::task_handle::TaskHandle;
+
+/// Receiver that fires when the yamux driver task exits.
+///
+/// The value is `Ok(())` for a clean close or `Err(msg)` if the driver
+/// encountered an error. `pod_monitor` selects on this without moving the
+/// `TaskHandle` out of `ManagedVm`, so `drain_yamux_driver` always works.
+pub type DriverExitSignal = oneshot::Receiver<Result<(), String>>;
 
 use distvirt_guest_protocol::StreamHeader;
 
@@ -28,7 +35,7 @@ impl GuestSession {
     /// Opens the control stream, sends `StreamHeader::Control`, and spawns
     /// a background task that drives the yamux connection and collects
     /// incoming streams from the guest.
-    pub async fn new(socket: tokio::net::UnixStream) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>)> {
+    pub async fn new(socket: tokio::net::UnixStream) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>, DriverExitSignal)> {
         // Convert tokio socket to futures-io compatible.
         let compat_socket = socket.compat();
 
@@ -91,24 +98,27 @@ impl GuestSession {
             let _ = incoming_tx.send(stream);
         }
 
+        let (exit_tx, exit_rx) = oneshot::channel::<Result<(), String>>();
         let yamux_driver = TaskHandle::spawn(async move {
-            loop {
+            let result = loop {
                 match poll_fn(|cx| conn.poll_next_inbound(cx)).await {
                     Some(Ok(stream)) => {
                         if incoming_tx.send(stream).is_err() {
-                            return Ok(()); // receiver dropped
+                            break Ok(()); // receiver dropped
                         }
                     }
                     Some(Err(e)) => {
-                        log::error!("yamux connection error: {}", e);
-                        return Err(anyhow::anyhow!("yamux connection error: {}", e));
+                        log::debug!("yamux connection error: {}", e);
+                        break Err(anyhow::anyhow!("yamux connection error: {}", e));
                     }
                     None => {
                         log::info!("yamux connection closed by guest");
-                        return Ok(());
+                        break Ok(());
                     }
                 }
-            }
+            };
+            let _ = exit_tx.send(result.as_ref().map(|_| ()).map_err(|e| format!("{}", e)));
+            result
         });
 
         // Write the stream header. The driver task is now running and
@@ -130,7 +140,7 @@ impl GuestSession {
             control,
             events: None,
             incoming_rx,
-        }, yamux_driver))
+        }, yamux_driver, exit_rx))
     }
 
     /// Send a length-prefixed JSON message on the control stream.

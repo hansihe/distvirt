@@ -42,6 +42,7 @@ use std::future::poll_fn;
 
 use anyhow::Context;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::codec;
@@ -51,6 +52,17 @@ use crate::types::{
 
 type YamuxStream = yamux::Stream;
 
+/// A handle that aborts its task on drop.
+struct DriverHandle(Option<JoinHandle<()>>);
+
+impl Drop for DriverHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Orchestrator-side connection to a worker over yamux.
 ///
 /// The orchestrator is the yamux Server — it accepts the control stream
@@ -59,6 +71,7 @@ type YamuxStream = yamux::Stream;
 pub struct OrchestratorConnection {
     control: YamuxStream,
     incoming_rx: mpsc::UnboundedReceiver<YamuxStream>,
+    _driver: DriverHandle,
 }
 
 impl OrchestratorConnection {
@@ -83,7 +96,7 @@ impl OrchestratorConnection {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 
         // Spawn driver task.
-        tokio::spawn(async move {
+        let driver = tokio::spawn(async move {
             loop {
                 match poll_fn(|cx| conn.poll_next_inbound(cx)).await {
                     Some(Ok(stream)) => {
@@ -106,6 +119,7 @@ impl OrchestratorConnection {
         Ok(OrchestratorConnection {
             control,
             incoming_rx,
+            _driver: DriverHandle(Some(driver)),
         })
     }
 
@@ -279,6 +293,7 @@ impl LogStreamOpener {
 pub struct WorkerConnection {
     control: YamuxStream,
     conn_tx: mpsc::UnboundedSender<NewStreamRequest>,
+    _driver: DriverHandle,
 }
 
 struct NewStreamRequest {
@@ -337,7 +352,7 @@ impl WorkerConnection {
         let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<NewStreamRequest>();
 
         // Spawn driver task that handles both inbound polling and outbound stream requests.
-        tokio::spawn(async move {
+        let driver = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     inbound = poll_fn(|cx| conn.poll_next_inbound(cx)) => {
@@ -369,7 +384,7 @@ impl WorkerConnection {
             }
         });
 
-        Ok(WorkerConnection { control, conn_tx })
+        Ok(WorkerConnection { control, conn_tx, _driver: DriverHandle(Some(driver)) })
     }
 
     // --- Handshake methods (worker side) ---

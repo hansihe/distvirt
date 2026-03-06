@@ -235,7 +235,13 @@ async fn handle_message(
                 log::warn!("failed to install plug qdisc: {:#}", e);
             }
             control.send(&GuestMessage::SuspendReady).await?;
-            log::info!("sent SuspendReady, closing connection for suspend");
+            log::info!("sent SuspendReady, flushing yamux and closing connection");
+            // Drive the yamux connection to flush the SuspendReady message
+            // through to the underlying transport. Without this, the message
+            // sits in yamux's internal buffer and gets lost when the
+            // connection is dropped, causing the host to see EOF.
+            std::future::poll_fn(|cx| conn.poll_close(cx)).await
+                .map_err(|e| anyhow::anyhow!("yamux close after SuspendReady: {}", e))?;
             // Close the connection now so that after snapshot restore the guest
             // is already back in the accept() loop, ready for the new host
             // connection. The host doesn't read from this connection after
@@ -705,6 +711,13 @@ fn run() -> anyhow::Result<()> {
                                 containers.remove(&exit.id);
                             }
                         }
+                    }
+
+                    // Close yamux cleanly so the host-side driver sees a
+                    // clean close rather than a broken pipe from VM death.
+                    log::info!("flushing yamux and closing connection before shutdown");
+                    if let Err(e) = std::future::poll_fn(|cx| conn.poll_close(cx)).await {
+                        log::warn!("yamux close during shutdown: {}", e);
                     }
 
                     // Brief sleep to let virtio-net flush outgoing packets.

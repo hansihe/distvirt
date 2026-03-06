@@ -8,7 +8,7 @@ use distvirt_worker_protocol::ContainerConfig;
 use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, SnapshotArtifacts, VmInstance};
 use crate::task_handle::TaskHandle;
-use crate::vsock_client::GuestSession;
+use crate::vsock_client::{DriverExitSignal, GuestSession};
 
 /// A launched VM with an established yamux session.
 ///
@@ -25,6 +25,8 @@ use crate::vsock_client::GuestSession;
 pub(crate) struct ManagedVm<I> {
     instance: I,
     session: GuestSession,
+    yamux_driver: Option<TaskHandle<anyhow::Result<()>>>,
+    driver_exit_signal: Option<DriverExitSignal>,
     started_containers: Vec<String>,
 }
 
@@ -33,14 +35,14 @@ impl<I: VmInstance> ManagedVm<I> {
     ///
     /// Connects to the guest over vsock, establishes a yamux session,
     /// and waits for the Ready message.
-    pub async fn connect(instance: I) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>)> {
+    pub async fn connect(instance: I) -> anyhow::Result<Self> {
         log::info!("connecting vsock");
         let stream = instance
             .connect_vsock(VSOCK_CONTROL_PORT)
             .await
             .context("connect vsock")?;
 
-        let (mut session, yamux_driver) = GuestSession::new(stream)
+        let (mut session, yamux_driver, driver_exit_signal) = GuestSession::new(stream)
             .await
             .context("establish yamux session")?;
 
@@ -60,9 +62,18 @@ impl<I: VmInstance> ManagedVm<I> {
         // so it is the first item in the incoming stream queue.
         session.accept_event_stream().await.context("accept event stream")?;
 
-        let mut vm = Self { instance, session, started_containers: Vec::new() };
+        let mut vm = Self { instance, session, yamux_driver: Some(yamux_driver), driver_exit_signal: Some(driver_exit_signal), started_containers: Vec::new() };
         vm.set_clock().await.context("set guest clock")?;
-        Ok((vm, yamux_driver))
+        Ok(vm)
+    }
+
+    /// Take the driver exit signal out of the VM.
+    ///
+    /// Used by callers (e.g. pod_monitor) that need to select on driver
+    /// death concurrently with other VM operations. The `TaskHandle` stays
+    /// inside `ManagedVm` so `drain_yamux_driver` always works.
+    pub fn take_driver_exit_signal(&mut self) -> Option<DriverExitSignal> {
+        self.driver_exit_signal.take()
     }
 
     /// Set the guest's system clock to the host's current wall-clock time.
@@ -276,6 +287,9 @@ impl<I: VmInstance> ManagedVm<I> {
         // 4. Kill the VM process.
         self.instance.kill().await.context("kill VM after snapshot")?;
 
+        // 5. Abort the yamux driver now that the VM is dead.
+        self.drain_yamux_driver();
+
         Ok(artifacts)
     }
 
@@ -331,11 +345,26 @@ impl<I: VmInstance> ManagedVm<I> {
             .await
             .context("send Shutdown")?;
         self.instance.wait().await.context("wait for VM")?;
+        // Abort the yamux driver now that the VM is dead.
+        self.drain_yamux_driver();
         Ok(())
     }
 
     /// Forcibly kill the VM process.
     pub async fn force_kill(&mut self) -> anyhow::Result<()> {
-        self.instance.kill().await.context("kill VM")
+        self.instance.kill().await.context("kill VM")?;
+        self.drain_yamux_driver();
+        Ok(())
+    }
+
+    /// Abort the yamux driver task.
+    ///
+    /// Called after the VM is dead — the underlying socket is gone so
+    /// there is nothing useful for the driver to do. Abort immediately
+    /// instead of waiting for it to notice the broken socket.
+    fn drain_yamux_driver(&mut self) {
+        if let Some(driver) = self.yamux_driver.take() {
+            driver.abort();
+        }
     }
 }

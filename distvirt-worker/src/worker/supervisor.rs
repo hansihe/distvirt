@@ -94,7 +94,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
     )
     .await
     {
-        Ok((vm, yamux_driver, io_session, port_task)) => {
+        Ok((vm, io_session, port_task)) => {
             // Emit PodRunning event.
             send_event(
                 &event_tx,
@@ -104,7 +104,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
                 },
             )
             .await;
-            pod_monitor(vm, yamux_driver, io_session, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
+            pod_monitor(vm, io_session, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
         }
         Err(e) => {
             if cancel.is_cancelled() {
@@ -160,7 +160,7 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
     )
     .await
     {
-        Ok((vm, yamux_driver, port_task)) => {
+        Ok((vm, port_task)) => {
             send_event(
                 &event_tx,
                 WorkerEvent::PodRunning {
@@ -169,7 +169,7 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
                 },
             )
             .await;
-            pod_monitor(vm, yamux_driver, None, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
+            pod_monitor(vm, None, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
         }
         Err(e) => {
             if cancel.is_cancelled() {
@@ -212,7 +212,6 @@ async fn pod_restore<V: Vmm + 'static>(
     cancel: &CancellationToken,
 ) -> anyhow::Result<(
     ManagedVm<V::Instance>,
-    TaskHandle<anyhow::Result<()>>,
     Option<TaskHandle<()>>,
 )> {
     let net_config = NetConfig {
@@ -243,14 +242,14 @@ async fn pod_restore<V: Vmm + 'static>(
         None
     };
 
-    let (vm, yamux_driver) = tokio::select! {
+    let vm = tokio::select! {
         result = ManagedVm::connect(instance) => { result? }
         _ = cancel.cancelled() => {
             anyhow::bail!("cancelled during VM connect after restore");
         }
     };
 
-    Ok((vm, yamux_driver, port_task))
+    Ok((vm, port_task))
 }
 
 /// Perform all fallible pod setup: image prep, VM launch, vsock connect,
@@ -270,7 +269,6 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     cancel: &CancellationToken,
 ) -> anyhow::Result<(
     ManagedVm<V::Instance>,
-    TaskHandle<anyhow::Result<()>>,
     Option<(crate::io_session::IoSession, yamux::Stream)>,
     Option<TaskHandle<()>>,
 )> {
@@ -332,7 +330,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         None
     };
 
-    let (mut vm, yamux_driver) = tokio::select! {
+    let mut vm = tokio::select! {
         result = ManagedVm::connect(instance) => { result? }
         _ = cancel.cancelled() => {
             // instance is moved into connect(); on cancel, connect() is dropped,
@@ -399,7 +397,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         None
     };
 
-    Ok((vm, yamux_driver, io_session, port_task))
+    Ok((vm, io_session, port_task))
 }
 
 /// Timeout for suspend handshake with guest.
@@ -411,7 +409,6 @@ const SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// yamux driver health, log streaming, suspend requests, and cancellation.
 async fn pod_monitor<I: VmInstance>(
     mut vm: ManagedVm<I>,
-    mut yamux_driver: TaskHandle<anyhow::Result<()>>,
     io_session: Option<(crate::io_session::IoSession, yamux::Stream)>,
     port_task: Option<TaskHandle<()>>,
     cancel: CancellationToken,
@@ -441,6 +438,16 @@ async fn pod_monitor<I: VmInstance>(
             }
             let _ = log_stream.close().await;
         })
+    });
+
+    // Take the driver exit signal so we can select on driver death without
+    // moving the TaskHandle out of vm. drain_yamux_driver() still works.
+    let mut driver_exit = vm.take_driver_exit_signal();
+    let mut driver_exit_fut = std::pin::pin!(async {
+        match driver_exit.as_mut() {
+            Some(rx) => rx.await,
+            None => std::future::pending().await,
+        }
     });
 
     // Create a future that completes when the port task exits, or pends forever if there is none.
@@ -488,11 +495,11 @@ async fn pod_monitor<I: VmInstance>(
         }
 
         // Fatal: yamux driver died unexpectedly.
-        result = &mut yamux_driver => {
+        result = &mut driver_exit_fut => {
             let error = match result {
                 Ok(Ok(())) => "yamux driver exited unexpectedly".to_string(),
-                Ok(Err(e)) => format!("yamux driver error: {:#}", e),
-                Err(e) => format!("yamux driver task panicked: {}", e),
+                Ok(Err(msg)) => format!("yamux driver error: {}", msg),
+                Err(_) => "yamux driver task dropped exit signal".to_string(),
             };
             log::error!("pod '{}': {}", pod_id, error);
             let _ = vm.force_kill().await;
