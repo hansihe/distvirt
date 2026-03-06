@@ -232,10 +232,10 @@ async fn test_delete_during_resume() {
     // Re-activate → should start resume (which will hang).
     // Low-level: need to trigger resume without asserting Running (it hangs)
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: distvirt_worker_protocol::ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "web");
@@ -295,10 +295,10 @@ async fn test_spec_change_during_resume() {
     // Re-activate → Resuming (hangs).
     // Low-level: need to trigger resume without asserting Running (it hangs)
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: distvirt_worker_protocol::ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "web");

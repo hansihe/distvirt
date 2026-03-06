@@ -309,219 +309,23 @@ impl NamespaceState {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Fabric routes
-    // -----------------------------------------------------------------------
-
-    pub(crate) fn route_sync(
-        &mut self,
-        namespace_id: &NamespaceId,
-        routes: Vec<distvirt_worker_protocol::FabricRouteEntry>,
-    ) -> Result<(), FatalError> {
-        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
-        })?;
-        et.route_sync(routes);
-
-        log::info!(
-            "worker: synced fabric routes for namespace '{}'",
-            namespace_id
-        );
-        Ok(())
-    }
-
-    pub(crate) fn route_update(
-        &mut self,
-        namespace_id: &NamespaceId,
-        added: Vec<distvirt_worker_protocol::FabricRouteEntry>,
-        removed_ips: Vec<std::net::Ipv4Addr>,
-    ) -> Result<(), FatalError> {
-        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
-        })?;
-        et.route_update(added, removed_ips);
-
-        log::info!(
-            "worker: updated fabric routes for namespace '{}'",
-            namespace_id
-        );
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Services
-    // -----------------------------------------------------------------------
-
-    pub(crate) fn create_service(
-        &mut self,
-        namespace_id: &NamespaceId,
-        service_id: &ServiceId,
-        ip: std::net::Ipv4Addr,
-        policy: ServicePolicy,
-        activator_runtime: Option<&ActivatorRuntime>,
-    ) -> Result<(), FatalError> {
-        let activator = if policy.activator.is_some() {
-            if let Some(runtime) = activator_runtime {
-                let component_name = match &policy.activator {
-                    Some(ActivatorConfig::Tcp { .. }) => "tcp",
-                    Some(ActivatorConfig::Http2 { .. }) => "http2",
-                    None => unreachable!(),
-                };
-                match runtime.get_component(component_name) {
-                    Some(component) => {
-                        match ActivatorInstance::new(runtime.engine(), component) {
-                            Ok(instance) => Some(instance),
-                            Err(e) => {
-                                log::error!("failed to instantiate activator: {:#}", e);
-                                None
-                            }
-                        }
-                    }
-                    None => {
-                        log::warn!("activator component '{}' not found", component_name);
-                        None
-                    }
-                }
-            } else {
-                log::warn!("activator requested but runtime not available");
-                None
-            }
-        } else {
-            None
-        };
-
-        // Build the processor variant based on activator config.
-        let processor = match (&policy.activator, activator) {
-            (Some(ActivatorConfig::Http2 { .. }), act) => {
-                let sm = StreamManager::new(StreamManagerConfig {
-                    service_ip: ip,
-                    listen_ports: vec![80],
-                    ..StreamManagerConfig::default()
-                });
-                ServiceProcessor::L4 { activator: act, stream_manager: sm }
-            }
-            (_, Some(act)) => {
-                ServiceProcessor::L3 { activator: act, flow_tracker: FlowTracker::new() }
-            }
-            _ => ServiceProcessor::Passthrough,
-        };
-
-        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
-        })?;
-        st.create_service(service_id.0.clone(), ip, policy, processor);
-
-        log::info!(
-            "worker: created service '{}' with ip {} in namespace '{}'",
-            service_id, ip, namespace_id
-        );
-        Ok(())
-    }
-
-    pub(crate) fn update_service_backend(
-        &mut self,
-        namespace_id: &NamespaceId,
-        service_id: &ServiceId,
-        backend: Option<distvirt_worker_protocol::ServiceBackend>,
-    ) -> Result<(), FatalError> {
-        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
-        })?;
-        let backend_ip = backend.map(|b| b.pod_ip);
-        st.update_service_backend(service_id.as_ref(), backend_ip);
-
-        log::info!(
-            "worker: updated service backend '{}' in namespace '{}'",
-            service_id, namespace_id
-        );
-        Ok(())
-    }
-
-    pub(crate) async fn service_ready(
-        &mut self,
-        namespace_id: &NamespaceId,
-        service_id: &ServiceId,
-    ) -> Result<(), FatalError> {
-        let flush_data = {
-            let mut st = self.tables.endpoint_table.lock().map_err(|e| {
-                FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
-            })?;
-            st.mark_service_ready(service_id.as_ref())
-        };
-
-        if let Some(result) = flush_data {
-            use crate::fabric::endpoint::EndpointAction;
-            use crate::fabric::MarkReadyResult;
-            match &result {
-                MarkReadyResult::Passthrough { frames, actions, backend_ip, .. } => {
-                    log::info!(
-                        "worker: service '{}' mark_ready returned Passthrough: {} buffered frames, {} actions, backend_ip={}",
-                        service_id, frames.len(), actions.len(), backend_ip,
-                    );
-                }
-                MarkReadyResult::L4(action) => {
-                    log::info!(
-                        "worker: service '{}' mark_ready returned L4: {:?}",
-                        service_id, std::mem::discriminant(action)
-                    );
-                }
-            }
-            match result {
-                MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
-                    if !frames.is_empty() {
-                        self.fabric.flush_service_frames(frames, backend_ip, service_ip);
-                    }
-                    self.fabric.dispatch_actions(&actions, service_id.as_ref()).await;
-                }
-                MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
-                    self.fabric.send_l4_frames(frames);
-                    self.fabric.dispatch_actions(&actions, service_id.as_ref()).await;
-                }
-                _ => {}
-            }
-        }
-
-        log::info!(
-            "worker: service '{}' marked ready in namespace '{}'",
-            service_id, namespace_id
-        );
-        Ok(())
-    }
 
     // -----------------------------------------------------------------------
     // Endpoint protocol (unified)
     // -----------------------------------------------------------------------
 
-    pub(crate) fn endpoint_sync(
-        &mut self,
+    /// Shared helper to process endpoint sync effects (ServiceReady / FlushPodBuffer).
+    fn handle_endpoint_effects(
+        &self,
         namespace_id: &NamespaceId,
-        endpoints: Vec<distvirt_worker_protocol::EndpointSpec>,
-        my_worker_id: &distvirt_worker_protocol::WorkerId,
-        activator_runtime: Option<&ActivatorRuntime>,
+        effects: Vec<crate::fabric::endpoint::EndpointSyncEffect>,
     ) -> Result<(), FatalError> {
-        use crate::fabric::endpoint::EndpointSyncEffect;
-
-        let effects = {
-            let mut et = self.tables.endpoint_table.lock().map_err(|e| {
-                FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
-            })?;
-
-            let mut make_processor = |_svc_id: &str, policy: &ServicePolicy, ip: std::net::Ipv4Addr| -> ServiceProcessor {
-                Self::build_processor(policy, ip, activator_runtime)
-            };
-
-            et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor)
-        };
+        use crate::fabric::endpoint::{EndpointSyncEffect, EndpointAction};
+        use crate::fabric::MarkReadyResult;
 
         for effect in effects {
             match effect {
                 EndpointSyncEffect::ServiceReady { service_id } => {
-                    let _svc_id = ServiceId::from(service_id.as_str());
-                    // Reuse service_ready logic (mark_service_ready + flush).
-                    // We call service_ready which does the locking internally,
-                    // but the lock is already released above.
-                    // Note: service_ready is async but we need to call it from sync context.
-                    // For now, do the flush inline.
                     let flush_data = {
                         let mut st = self.tables.endpoint_table.lock().map_err(|e| {
                             FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
@@ -529,19 +333,15 @@ impl NamespaceState {
                         st.mark_service_ready(service_id.as_str())
                     };
                     if let Some(result) = flush_data {
-                        use crate::fabric::endpoint::EndpointAction;
-                        use crate::fabric::MarkReadyResult;
                         match result {
                             MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
                                 if !frames.is_empty() {
                                     self.fabric.flush_service_frames(frames, backend_ip, service_ip);
                                 }
-                                // dispatch_actions is async - spawn it
                                 let fabric = Arc::clone(&self.fabric);
                                 let svc_id_str = service_id.clone();
-                                let actions_owned = actions;
                                 tokio::spawn(async move {
-                                    fabric.dispatch_actions(&actions_owned, &svc_id_str).await;
+                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
                                 });
                             }
                             MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
@@ -552,7 +352,12 @@ impl NamespaceState {
                                     fabric.dispatch_actions(&actions, &svc_id_str).await;
                                 });
                             }
-                            _ => {}
+                            other => {
+                                log::debug!(
+                                    "worker: unexpected MarkReadyResult variant {:?} for service '{}' in namespace '{}'",
+                                    other, service_id, namespace_id
+                                );
+                            }
                         }
                     }
                 }
@@ -568,9 +373,6 @@ impl NamespaceState {
                             "worker: flushing {} buffered pod frames for {} in namespace '{}'",
                             buffered.len(), ip, namespace_id
                         );
-                        // The frames need to be delivered to the port for this IP.
-                        // This happens via the fabric's add_port flush path,
-                        // but here the port should already exist. Look up and send.
                         let port = self.tables.resolve_ip(&ip);
                         if let Some(port) = port {
                             let count = buffered.len();
@@ -583,11 +385,37 @@ impl NamespaceState {
                                 }
                                 log::info!("fabric: flushed {} buffered pod frames", count);
                             });
+                        } else {
+                            log::warn!("fabric: could not resolve port for buffered frames at {}", ip);
                         }
                     }
                 }
             }
         }
+
+        Ok(())
+    }
+
+    pub(crate) fn endpoint_sync(
+        &mut self,
+        namespace_id: &NamespaceId,
+        endpoints: Vec<distvirt_worker_protocol::EndpointSpec>,
+        my_worker_id: &distvirt_worker_protocol::WorkerId,
+        activator_runtime: Option<&ActivatorRuntime>,
+    ) -> Result<(), FatalError> {
+        let effects = {
+            let mut et = self.tables.endpoint_table.lock().map_err(|e| {
+                FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+            })?;
+
+            let mut make_processor = |_svc_id: &str, policy: &ServicePolicy, ip: std::net::Ipv4Addr| -> ServiceProcessor {
+                Self::build_processor(policy, ip, activator_runtime)
+            };
+
+            et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor)
+        };
+
+        self.handle_endpoint_effects(namespace_id, effects)?;
 
         log::info!(
             "worker: endpoint sync for namespace '{}'",
@@ -604,8 +432,6 @@ impl NamespaceState {
         my_worker_id: &distvirt_worker_protocol::WorkerId,
         activator_runtime: Option<&ActivatorRuntime>,
     ) -> Result<(), FatalError> {
-        use crate::fabric::endpoint::EndpointSyncEffect;
-
         let effects = {
             let mut et = self.tables.endpoint_table.lock().map_err(|e| {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
@@ -618,67 +444,7 @@ impl NamespaceState {
             et.apply_endpoint_update(upserted, removed_ips, my_worker_id.as_ref(), &mut make_processor)
         };
 
-        // Process effects same as endpoint_sync
-        for effect in effects {
-            match effect {
-                EndpointSyncEffect::ServiceReady { service_id } => {
-                    let flush_data = {
-                        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
-                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
-                        })?;
-                        st.mark_service_ready(service_id.as_str())
-                    };
-                    if let Some(result) = flush_data {
-                        use crate::fabric::endpoint::EndpointAction;
-                        use crate::fabric::MarkReadyResult;
-                        match result {
-                            MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
-                                if !frames.is_empty() {
-                                    self.fabric.flush_service_frames(frames, backend_ip, service_ip);
-                                }
-                                let fabric = Arc::clone(&self.fabric);
-                                let svc_id_str = service_id.clone();
-                                tokio::spawn(async move {
-                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
-                                });
-                            }
-                            MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
-                                self.fabric.send_l4_frames(frames);
-                                let fabric = Arc::clone(&self.fabric);
-                                let svc_id_str = service_id.clone();
-                                tokio::spawn(async move {
-                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                EndpointSyncEffect::FlushPodBuffer { ip } => {
-                    let buffered = {
-                        let mut et = self.tables.endpoint_table.lock().map_err(|e| {
-                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
-                        })?;
-                        et.flush_pod_buffer(ip)
-                    };
-                    if !buffered.is_empty() {
-                        let port = self.tables.resolve_ip(&ip);
-                        if let Some(port) = port {
-                            let count = buffered.len();
-                            tokio::spawn(async move {
-                                for frame in buffered {
-                                    if let Err(e) = port.send_frame(&frame).await {
-                                        log::warn!("fabric: flush buffered frame error: {}", e);
-                                        break;
-                                    }
-                                }
-                                log::info!("fabric: flushed {} buffered pod frames", count);
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        self.handle_endpoint_effects(namespace_id, effects)?;
 
         log::info!(
             "worker: endpoint update for namespace '{}'",
@@ -739,22 +505,6 @@ impl NamespaceState {
         }
     }
 
-    pub(crate) fn destroy_service(
-        &mut self,
-        namespace_id: &NamespaceId,
-        service_id: &ServiceId,
-    ) -> Result<(), FatalError> {
-        let mut st = self.tables.endpoint_table.lock().map_err(|e| {
-            FatalError::InternalInvariant(format!("service table lock poisoned: {}", e))
-        })?;
-        st.destroy_service(service_id.as_ref());
-
-        log::info!(
-            "worker: destroyed service '{}' in namespace '{}'",
-            service_id, namespace_id
-        );
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -762,24 +512,13 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    use distvirt_worker_protocol::{
-        BufferPolicy, FabricRouteEntry, RegistryEntry, RouteDestination,
-        ServiceBackend, ServicePolicy,
-    };
+    use distvirt_worker_protocol::RegistryEntry;
 
     use crate::fabric::{Fabric, FabricPort};
 
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
-
-    fn default_policy() -> ServicePolicy {
-        ServicePolicy {
-            buffer_frames: 10,
-            timeout_ms: 5000,
-            activator: None,
-        }
-    }
 
     /// Create a minimal NamespaceState for testing (no gateway, no adapter ports).
     fn make_namespace() -> (NamespaceState, CancellationToken) {
@@ -855,160 +594,4 @@ mod tests {
         assert_eq!(map.get("web"), Some(&Ipv4Addr::new(172, 16, 0, 20)));
     }
 
-    // -----------------------------------------------------------------------
-    // Fabric route tests
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn fabric_route_sync_populates_routes() {
-        let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
-
-        let routes = vec![FabricRouteEntry {
-            ip: Ipv4Addr::new(172, 16, 0, 10),
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy {
-                    buffer_frames: 10,
-                    timeout_ms: 5000,
-                },
-            },
-        }];
-
-        ns.route_sync(&ns_id, routes).unwrap();
-
-        // Verify via lookup_and_buffer on endpoint_table.
-        let mut et = ns.tables.endpoint_table.lock().unwrap();
-        let (action, _) = et.lookup_and_buffer(Ipv4Addr::new(172, 16, 0, 10), &[0xDE, 0xAD], |_| true);
-        assert!(
-            !matches!(action, crate::fabric::endpoint::EndpointAction::NotFound),
-            "expected a route entry, got NotFound"
-        );
-    }
-
-    #[tokio::test]
-    async fn fabric_route_update_adds_and_removes() {
-        let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
-
-        // Sync initial route.
-        let routes = vec![FabricRouteEntry {
-            ip: Ipv4Addr::new(172, 16, 0, 10),
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy {
-                    buffer_frames: 5,
-                    timeout_ms: 5000,
-                },
-            },
-        }];
-        ns.route_sync(&ns_id, routes).unwrap();
-
-        // Update: add a new route, remove the old one.
-        let added = vec![FabricRouteEntry {
-            ip: Ipv4Addr::new(172, 16, 0, 20),
-            destination: RouteDestination::RemoteWorker {
-                worker_id: "w2".to_string().into(),
-            },
-        }];
-        ns.route_update(
-            &ns_id,
-            added,
-            vec![Ipv4Addr::new(172, 16, 0, 10)],
-        )
-        .unwrap();
-    }
-
-    // -----------------------------------------------------------------------
-    // Service lifecycle tests
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn service_create_and_destroy() {
-        let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
-        let svc_id = ServiceId::from("svc1");
-
-        ns.create_service(
-            &ns_id,
-            &svc_id,
-            Ipv4Addr::new(172, 16, 0, 100),
-            default_policy(),
-            None,
-        )
-        .unwrap();
-
-        // Verify service exists by checking the service table.
-        {
-            let st = ns.tables.endpoint_table.lock().unwrap();
-            assert_eq!(
-                st.get_service_ip("svc1"),
-                Some(Ipv4Addr::new(172, 16, 0, 100))
-            );
-        }
-
-        // Destroy.
-        ns.destroy_service(&ns_id, &svc_id).unwrap();
-
-        {
-            let st = ns.tables.endpoint_table.lock().unwrap();
-            assert_eq!(st.get_service_ip("svc1"), None);
-        }
-    }
-
-    #[tokio::test]
-    async fn service_update_backend() {
-        let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
-        let svc_id = ServiceId::from("svc1");
-
-        ns.create_service(
-            &ns_id,
-            &svc_id,
-            Ipv4Addr::new(172, 16, 0, 100),
-            default_policy(),
-            None,
-        )
-        .unwrap();
-
-        // Assign backend.
-        ns.update_service_backend(
-            &ns_id,
-            &svc_id,
-            Some(ServiceBackend {
-                pod_ip: Ipv4Addr::new(172, 16, 0, 10),
-            }),
-        )
-        .unwrap();
-
-        // Remove backend.
-        ns.update_service_backend(&ns_id, &svc_id, None)
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn service_ready_on_existing_service() {
-        let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
-        let svc_id = ServiceId::from("svc1");
-
-        ns.create_service(
-            &ns_id,
-            &svc_id,
-            Ipv4Addr::new(172, 16, 0, 100),
-            default_policy(),
-            None,
-        )
-        .unwrap();
-
-        ns.update_service_backend(
-            &ns_id,
-            &svc_id,
-            Some(ServiceBackend {
-                pod_ip: Ipv4Addr::new(172, 16, 0, 10),
-            }),
-        )
-        .unwrap();
-
-        // ServiceReady should succeed (no buffered frames, so no flush).
-        ns.service_ready(&ns_id, &svc_id).await.unwrap();
-    }
 }

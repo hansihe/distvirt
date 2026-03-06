@@ -266,7 +266,7 @@ impl TestHarness {
         self.converge().await;
     }
 
-    /// Activate a service: send ServiceActivation with the correct IP, converge,
+    /// Activate a service: send EndpointActivation with the correct IP, converge,
     /// assert workload running and service active.
     pub async fn activate_service(&mut self, ns_id: &str, svc_id: &str) {
         let svc_ip = self.service_ip(ns_id, svc_id);
@@ -297,10 +297,10 @@ impl TestHarness {
                 })
         };
 
-        self.worker(&worker_id).send_event(WorkerEvent::ServiceActivation {
+        self.worker(&worker_id).send_event(WorkerEvent::EndpointActivation {
             namespace_id: ns_id.into(),
-            service_id: ServiceId::from(svc_id),
-            dst_ip: svc_ip,
+            ip: svc_ip,
+            service_id: Some(ServiceId::from(svc_id)),
         });
         self.converge().await;
         self.assert_workload_running(ns_id, &wl_id);

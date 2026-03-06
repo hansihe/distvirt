@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
 
 use crate::namespace::NamespaceStateMachine;
 use crate::orchestrator::Orchestrator;
@@ -275,13 +276,14 @@ fn test_activation_service_lifecycle() {
         WorkerCommand::EndpointUpdate { .. }
     )));
 
-    // ServiceActivation → should request pod scheduling then launch.
+    // EndpointActivation (service) → should request pod scheduling then launch.
     let out = step_with_scheduling(
         &mut ns,
         NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
         &mut pod_counter,
@@ -406,8 +408,9 @@ fn test_worker_loss_during_active_service() {
         &mut ns,
         NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
         &mut pod_counter,
@@ -447,8 +450,9 @@ fn test_launch_timeout() {
         &mut ns,
         NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
         &mut pod_counter,
@@ -606,8 +610,9 @@ fn test_idle_timer_cancelled_on_traffic() {
         &mut ns,
         NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
         &mut pod_counter,
@@ -663,8 +668,9 @@ fn test_destroying_namespace_ignores_activation() {
     // Activation events during Destroying are ignored.
     let out = ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
-        event: WorkerEvent::ServiceActivation {
-            service_id: svc_id(),
+        event: WorkerEvent::EndpointActivation {
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            service_id: Some(svc_id()),
         },
     }, &mut pt);
     assert!(out.pod_requests.is_empty());
@@ -800,8 +806,9 @@ fn test_namespace_failed_treats_like_worker_loss() {
         &mut ns,
         NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
         &mut pod_counter,
@@ -1013,8 +1020,9 @@ fn test_full_activation_lifecycle_through_orchestrator() {
         namespace_id: ns_id("ns1"),
         input: NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
     });

@@ -95,10 +95,10 @@ async fn test_worker_disconnect_during_resume() {
     // Re-activate → resuming (hangs)
     // Low-level: must send event directly to trigger resume on the specific worker with hang handler
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: distvirt_worker_protocol::ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "web");

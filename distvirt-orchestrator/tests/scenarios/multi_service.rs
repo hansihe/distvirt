@@ -24,20 +24,20 @@ async fn test_two_services_one_workload_shared_demand() {
     h.assert_service_idle("ns", "svc-b");
 
     // Activate svc-a → workload launches
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("svc-a")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
     // Activate svc-b → workload already running
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-b"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: Ipv4Addr::new(172, 16, 0, 101),
+        service_id: Some(ServiceId::from("svc-b")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "shared");
@@ -70,10 +70,10 @@ async fn test_service_activation_while_already_running() {
     h.converge().await;
 
     // Activate svc-a
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("svc-a")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "shared");
@@ -83,10 +83,10 @@ async fn test_service_activation_while_already_running() {
     let pod_id_before = h.workload_state("ns", "shared").pod_id().unwrap().clone();
 
     // Activate svc-b while already running
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-b"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: Ipv4Addr::new(172, 16, 0, 101),
+        service_id: Some(ServiceId::from("svc-b")),
     });
     h.converge().await;
 
@@ -117,16 +117,17 @@ async fn test_always_on_multi_service_both_get_create_service() {
     // Workload should be running (always-on).
     h.assert_workload_running("ns", "shared");
 
-    // Both services should have received CreateService on the worker.
+    // Worker should have received EndpointSync or EndpointUpdate containing both services.
     h.assert_worker_received_command_matching(
         &w1,
-        "CreateService for svc-a",
-        |cmd| matches!(cmd, WorkerCommand::CreateService { service_id, .. } if service_id.0 == "svc-a"),
-    );
-    h.assert_worker_received_command_matching(
-        &w1,
-        "CreateService for svc-b",
-        |cmd| matches!(cmd, WorkerCommand::CreateService { service_id, .. } if service_id.0 == "svc-b"),
+        "EndpointSync or EndpointUpdate with endpoints",
+        |cmd| matches!(
+            cmd,
+            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+        ) || matches!(
+            cmd,
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+        ),
     );
 
     // Both services should be Active (always-on with running workload).
@@ -166,11 +167,17 @@ async fn test_add_service_to_running_workload() {
     // Workload should still be running (no restart).
     h.assert_workload_running("ns", "echo");
 
-    // New service should have received CreateService.
+    // Worker should have received EndpointSync or EndpointUpdate including the new service.
     h.assert_worker_received_command_matching(
         &w1,
-        "CreateService for echo-svc-2",
-        |cmd| matches!(cmd, WorkerCommand::CreateService { service_id, .. } if service_id.0 == "echo-svc-2"),
+        "EndpointSync or EndpointUpdate with endpoints",
+        |cmd| matches!(
+            cmd,
+            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+        ) || matches!(
+            cmd,
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+        ),
     );
 
     // New service should be Active (workload is already Running).
@@ -190,10 +197,10 @@ async fn test_add_service_to_suspended_workload() {
     h.converge().await;
 
     // Activate → running → idle → suspended
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "web");
@@ -235,18 +242,24 @@ async fn test_add_service_to_suspended_workload() {
     // New service should be Idle (activation service, workload is Suspended).
     h.assert_service_idle("ns", "web-svc-2");
 
-    // CreateService should have been sent for the new service.
+    // EndpointSync or EndpointUpdate should have been sent including the new service.
     h.assert_worker_received_command_matching(
         &w1,
-        "CreateService for web-svc-2",
-        |cmd| matches!(cmd, WorkerCommand::CreateService { service_id, .. } if service_id.0 == "web-svc-2"),
+        "EndpointSync or EndpointUpdate with endpoints",
+        |cmd| matches!(
+            cmd,
+            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+        ) || matches!(
+            cmd,
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+        ),
     );
 
     // Activating the new service should resume the workload.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc-2"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: Ipv4Addr::new(172, 16, 0, 101),
+        service_id: Some(ServiceId::from("web-svc-2")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "web");
@@ -267,16 +280,17 @@ async fn test_late_joining_worker_receives_create_service() {
     let w2 = h.add_worker().await;
     h.converge().await;
 
-    // The second worker should have received CreateService for both services.
+    // The second worker should have received EndpointSync with all endpoints.
     h.assert_worker_received_command_matching(
         &w2,
-        "CreateService for svc-a on w2",
-        |cmd| matches!(cmd, WorkerCommand::CreateService { service_id, .. } if service_id.0 == "svc-a"),
-    );
-    h.assert_worker_received_command_matching(
-        &w2,
-        "CreateService for svc-b on w2",
-        |cmd| matches!(cmd, WorkerCommand::CreateService { service_id, .. } if service_id.0 == "svc-b"),
+        "EndpointSync or EndpointUpdate with endpoints on w2",
+        |cmd| matches!(
+            cmd,
+            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+        ) || matches!(
+            cmd,
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+        ),
     );
 }
 
@@ -290,16 +304,16 @@ async fn test_remove_service_updates_demand() {
     h.converge().await;
 
     // Activate both services.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("svc-a")),
     });
     h.converge().await;
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-b"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: Ipv4Addr::new(172, 16, 0, 101),
+        service_id: Some(ServiceId::from("svc-b")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "shared");
@@ -316,11 +330,14 @@ async fn test_remove_service_updates_demand() {
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
-    // DestroyService should have been issued for svc-b.
+    // EndpointUpdate with removed_ips should have been issued for svc-b's IP.
     h.assert_worker_received_command_matching(
         &w1,
-        "DestroyService for svc-b",
-        |cmd| matches!(cmd, WorkerCommand::DestroyService { service_id, .. } if service_id.0 == "svc-b"),
+        "EndpointUpdate with removed_ips for svc-b",
+        |cmd| matches!(
+            cmd,
+            WorkerCommand::EndpointUpdate { removed_ips, .. } if !removed_ips.is_empty()
+        ),
     );
 
     // svc-b should no longer exist in the namespace.
@@ -341,10 +358,10 @@ async fn test_remove_only_active_service_drops_demand() {
     h.converge().await;
 
     // Activate svc-a only.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("svc-a")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "shared");

@@ -61,7 +61,7 @@ pub struct ResumeRequest {
 // --- Orchestrator-domain WorkerEvent ---
 // This is the orchestrator's view of worker events. It omits `namespace_id`
 // (the shell/router strips it) and wire-only variants like `ShuttingDown`,
-// `PodLogStreamError`, `FabricRouteMiss`.
+// `PodLogStreamError`.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkerEvent {
@@ -75,9 +75,7 @@ pub enum WorkerEvent {
     PodSuspendFailed { pod_id: PodId, error: String },
     ArtifactWriteStarted { artifact_id: ArtifactId, pool_id: PoolId },
     ArtifactWriteCommitted { artifact_id: ArtifactId, pool_id: PoolId, size_bytes: u64 },
-    ServiceActivation { service_id: ServiceId },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
-    FabricRouteMiss { dst_ip: std::net::Ipv4Addr },
     EndpointActivation { ip: std::net::Ipv4Addr, service_id: Option<ServiceId> },
     EndpointFlowStatus { ip: std::net::Ipv4Addr, has_active_flows: bool },
 }

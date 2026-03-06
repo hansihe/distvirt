@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use distvirt_activator::types::Action;
-use distvirt_worker_protocol::{BufferPolicy, EndpointKind, EndpointSpec, FabricRouteEntry, RouteDestination, ServicePolicy};
+use distvirt_worker_protocol::{BufferPolicy, EndpointKind, EndpointSpec, ServicePolicy};
 
 use crate::packet::FabricPacket;
 use super::service_activator::ServiceProcessor;
@@ -109,8 +109,6 @@ struct Endpoint {
 pub struct EndpointTable {
     by_ip: HashMap<Ipv4Addr, Endpoint>,
     service_id_to_ip: HashMap<String, Ipv4Addr>,
-    /// IPs managed by route_sync/route_update (not services).
-    route_managed_ips: HashSet<Ipv4Addr>,
     last_activation: HashMap<Ipv4Addr, Instant>,
     activation_debounce: Duration,
 }
@@ -120,106 +118,8 @@ impl EndpointTable {
         EndpointTable {
             by_ip: HashMap::new(),
             service_id_to_ip: HashMap::new(),
-            route_managed_ips: HashSet::new(),
             last_activation: HashMap::new(),
             activation_debounce: Duration::from_secs(1),
-        }
-    }
-
-    /// Register a new service endpoint.
-    pub fn create_service(
-        &mut self,
-        service_id: String,
-        ip: Ipv4Addr,
-        policy: ServicePolicy,
-        processor: ServiceProcessor,
-    ) {
-        let endpoint = Endpoint {
-            ip,
-            state: EndpointState::Buffering,
-            buffer: VecDeque::new(),
-            buffer_start: None,
-            backend: EndpointBackend::Service {
-                service_id: service_id.clone(),
-                policy,
-                backend_ip: None,
-                processor,
-            },
-        };
-        self.by_ip.insert(ip, endpoint);
-        self.service_id_to_ip.insert(service_id, ip);
-    }
-
-    /// Remove a service endpoint, returning true if it existed.
-    pub fn destroy_service(&mut self, service_id: &str) -> bool {
-        if let Some(ip) = self.service_id_to_ip.remove(service_id) {
-            self.by_ip.remove(&ip);
-            self.last_activation.remove(&ip);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Update the backend for a service. Clears readiness.
-    ///
-    /// Buffer preservation is critical to the activation flow:
-    ///   1. Traffic arrives → frames buffered, activation event fires
-    ///   2. Orchestrator assigns a backend → `update_service_backend(Some(ip))`
-    ///   3. Backend reports ready → `mark_service_ready()` flushes buffered frames
-    ///
-    /// If `update_service_backend` cleared the buffer in step 2, the frames that
-    /// triggered activation would be lost. So we only clear the buffer when
-    /// the backend is *removed* or *changes* to a different pod (meaning the
-    /// old buffered frames are stale).
-    pub fn update_service_backend(&mut self, service_id: &str, backend: Option<Ipv4Addr>) {
-        let ip = match self.service_id_to_ip.get(service_id) {
-            Some(ip) => *ip,
-            None => return,
-        };
-        if let Some(endpoint) = self.by_ip.get_mut(&ip) {
-            let EndpointBackend::Service {
-                backend_ip,
-                processor,
-                ..
-            } = &mut endpoint.backend else {
-                return;
-            };
-
-            let old_backend_ip = *backend_ip;
-            let has_backend = backend.is_some();
-            *backend_ip = backend;
-
-            // Transition state based on backend presence.
-            endpoint.state = if backend.is_some() {
-                EndpointState::Pending
-            } else {
-                EndpointState::Buffering
-            };
-
-            // Clear buffer when backend is removed or IP changes to a
-            // different pod. When setting a backend for the first time
-            // (None → Some), preserve the buffer.
-            let should_clear = match (old_backend_ip, *backend_ip) {
-                (_, None) => true,                          // backend removed
-                (Some(old), Some(new)) if old != new => true, // IP changed
-                _ => false,                                 // None → Some: keep buffer
-            };
-            if should_clear {
-                endpoint.buffer.clear();
-                endpoint.buffer_start = None;
-            }
-            // When the backend is removed (service returns to idle), clear the
-            // per-IP activation debounce timer. Without this, a rapid
-            // idle→activate→idle→activate cycle can suppress the second
-            // activation event.
-            if backend.is_none() {
-                self.last_activation.remove(&ip);
-            }
-            processor.on_backend_update(
-                has_backend,
-                *backend_ip,
-            );
         }
     }
 
@@ -289,69 +189,6 @@ impl EndpointTable {
     }
 
     // -----------------------------------------------------------------------
-    // Route management
-    // -----------------------------------------------------------------------
-
-    /// Full replacement of route-managed endpoints. Services are untouched.
-    pub fn route_sync(&mut self, entries: Vec<FabricRouteEntry>) {
-        // Remove all existing route-managed endpoints.
-        for ip in self.route_managed_ips.drain() {
-            self.by_ip.remove(&ip);
-            self.last_activation.remove(&ip);
-        }
-
-        // Insert new route entries.
-        for entry in entries {
-            let ip = entry.ip;
-            let (state, backend) = match entry.destination {
-                RouteDestination::Placeholder { buffer_policy } => {
-                    (EndpointState::Buffering, EndpointBackend::UnplacedPod { buffer_policy })
-                }
-                RouteDestination::RemoteWorker { worker_id } => {
-                    (EndpointState::Ready, EndpointBackend::RemoteSegment { worker_id: worker_id.0 })
-                }
-            };
-            self.by_ip.insert(ip, Endpoint {
-                ip,
-                state,
-                buffer: VecDeque::new(),
-                buffer_start: None,
-                backend,
-            });
-            self.route_managed_ips.insert(ip);
-        }
-    }
-
-    /// Incremental delta update for route-managed endpoints. Services untouched.
-    pub fn route_update(&mut self, added: Vec<FabricRouteEntry>, removed_ips: Vec<Ipv4Addr>) {
-        for ip in removed_ips {
-            if self.route_managed_ips.remove(&ip) {
-                self.by_ip.remove(&ip);
-                self.last_activation.remove(&ip);
-            }
-        }
-        for entry in added {
-            let ip = entry.ip;
-            let (state, backend) = match entry.destination {
-                RouteDestination::Placeholder { buffer_policy } => {
-                    (EndpointState::Buffering, EndpointBackend::UnplacedPod { buffer_policy })
-                }
-                RouteDestination::RemoteWorker { worker_id } => {
-                    (EndpointState::Ready, EndpointBackend::RemoteSegment { worker_id: worker_id.0 })
-                }
-            };
-            self.by_ip.insert(ip, Endpoint {
-                ip,
-                state,
-                buffer: VecDeque::new(),
-                buffer_start: None,
-                backend,
-            });
-            self.route_managed_ips.insert(ip);
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Unified endpoint sync/update
     // -----------------------------------------------------------------------
 
@@ -381,7 +218,6 @@ impl EndpointTable {
             self.by_ip.remove(&ip);
             self.last_activation.remove(&ip);
         }
-        self.route_managed_ips.clear();
 
         // Upsert each spec.
         for spec in specs {
@@ -409,7 +245,6 @@ impl EndpointTable {
             }
             self.by_ip.remove(&ip);
             self.last_activation.remove(&ip);
-            self.route_managed_ips.remove(&ip);
         }
 
         for spec in upserted {
@@ -518,7 +353,7 @@ impl EndpointTable {
                     *existing_policy = policy;
                     endpoint.state = new_state;
 
-                    // Buffer preservation logic (same as update_service_backend).
+                    // Buffer preservation logic: clear when backend is removed or IP changes.
                     let should_clear = match (old_backend_ip, new_backend_ip) {
                         (_, None) => true,
                         (Some(old), Some(new)) if old != new => true,
@@ -817,10 +652,12 @@ enum BufferResult {
 mod tests {
     use super::*;
     use crate::packet::with_fabric_header;
+    use distvirt_worker_protocol::{EndpointKind, EndpointPodBackend, EndpointSpec, ServiceId};
 
     const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 2);
     const POD_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 130);
     const FRAME: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    const OWN_WORKER: &str = "test-worker";
 
     fn default_policy() -> ServicePolicy {
         ServicePolicy {
@@ -828,6 +665,71 @@ mod tests {
             timeout_ms: 30000,
             activator: None,
         }
+    }
+
+    /// Default make_processor that returns Passthrough for all services.
+    fn passthrough_processor(_: &str, _: &ServicePolicy, _: Ipv4Addr) -> ServiceProcessor {
+        ServiceProcessor::Passthrough
+    }
+
+    /// Create a service endpoint with no backend (Buffering state) via apply_endpoint_sync.
+    fn sync_create_service(
+        table: &mut EndpointTable,
+        service_id: &str,
+        ip: Ipv4Addr,
+        policy: ServicePolicy,
+        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    ) -> Vec<EndpointSyncEffect> {
+        table.apply_endpoint_sync(
+            vec![EndpointSpec {
+                ip,
+                kind: EndpointKind::Service {
+                    service_id: ServiceId::from(service_id),
+                    policy,
+                    backend: None,
+                },
+            }],
+            OWN_WORKER,
+            make_processor,
+        )
+    }
+
+    /// Update a service's backend via apply_endpoint_update (sets Pending or Buffering).
+    fn sync_update_backend(
+        table: &mut EndpointTable,
+        service_id: &str,
+        ip: Ipv4Addr,
+        policy: ServicePolicy,
+        backend_ip: Option<Ipv4Addr>,
+        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    ) -> Vec<EndpointSyncEffect> {
+        let backend = backend_ip.map(|pod_ip| EndpointPodBackend {
+            pod_ip,
+            placement: None,
+            ready: false,
+        });
+        table.apply_endpoint_update(
+            vec![EndpointSpec {
+                ip,
+                kind: EndpointKind::Service {
+                    service_id: ServiceId::from(service_id),
+                    policy,
+                    backend,
+                },
+            }],
+            vec![],
+            OWN_WORKER,
+            make_processor,
+        )
+    }
+
+    /// Remove a service by IP via apply_endpoint_update.
+    fn sync_remove_service(
+        table: &mut EndpointTable,
+        ip: Ipv4Addr,
+        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    ) -> Vec<EndpointSyncEffect> {
+        table.apply_endpoint_update(vec![], vec![ip], OWN_WORKER, make_processor)
     }
 
     #[test]
@@ -840,7 +742,7 @@ mod tests {
     #[test]
     fn buffers_when_not_ready() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
         let (action, activate) = table.lookup_and_buffer(SVC_IP, FRAME, |_ip| true);
         assert!(matches!(action, EndpointAction::Buffered { service_id: Some(_) }));
@@ -850,8 +752,8 @@ mod tests {
     #[test]
     fn forwards_when_ready() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
-        table.update_service_backend("svc1", Some(POD_IP));
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
+        sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(POD_IP), &mut passthrough_processor);
         table.mark_service_ready("svc1");
 
         let (action, activate) = table.lookup_and_buffer(SVC_IP, FRAME, |_ip| true);
@@ -866,13 +768,15 @@ mod tests {
     #[test]
     fn mark_ready_returns_buffered_frames() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
-        table.update_service_backend("svc1", Some(POD_IP));
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
-        // Buffer some frames.
+        // Buffer some frames (no backend yet).
         for _ in 0..3 {
             table.lookup_and_buffer(SVC_IP, FRAME, |_ip| true);
         }
+
+        // Set backend (Pending) — preserves buffer since None→Some.
+        sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(POD_IP), &mut passthrough_processor);
 
         let result = table.mark_service_ready("svc1");
         match result.unwrap() {
@@ -887,12 +791,12 @@ mod tests {
     #[test]
     fn update_backend_clears_ready_and_buffer() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
-        table.update_service_backend("svc1", Some(POD_IP));
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
+        sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(POD_IP), &mut passthrough_processor);
         table.mark_service_ready("svc1");
 
-        // Service is ready — now update backend clears readiness.
-        table.update_service_backend("svc1", None);
+        // Service is ready — now remove backend (Buffering state).
+        sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), None, &mut passthrough_processor);
 
         let (action, _) = table.lookup_and_buffer(SVC_IP, FRAME, |_ip| true);
         assert!(matches!(action, EndpointAction::Buffered { .. }));
@@ -901,8 +805,8 @@ mod tests {
     #[test]
     fn destroy_removes_service() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
-        assert!(table.destroy_service("svc1"));
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
+        sync_remove_service(&mut table, SVC_IP, &mut passthrough_processor);
         let (action, _) = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(matches!(action, EndpointAction::NotFound));
     }
@@ -910,7 +814,7 @@ mod tests {
     #[test]
     fn activation_debounced() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
         let (_, activate1) = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
         assert!(activate1);
@@ -921,17 +825,13 @@ mod tests {
 
     #[test]
     fn buffer_capacity_drops_excess() {
+        let policy = ServicePolicy {
+            buffer_frames: 2,
+            timeout_ms: 30000,
+            activator: None,
+        };
         let mut table = EndpointTable::new();
-        table.create_service(
-            "svc1".into(),
-            SVC_IP,
-            ServicePolicy {
-                buffer_frames: 2,
-                timeout_ms: 30000,
-                activator: None,
-            },
-            ServiceProcessor::Passthrough,
-        );
+        sync_create_service(&mut table, "svc1", SVC_IP, policy, &mut passthrough_processor);
 
         table.lookup_and_buffer(SVC_IP, FRAME, |_ip| true);
         table.lookup_and_buffer(SVC_IP, FRAME, |_ip| true);
@@ -939,11 +839,11 @@ mod tests {
         assert!(matches!(action, EndpointAction::Drop { .. }));
     }
 
-    /// Regression test for Bug 1: `update_service_backend` clears buffered frames.
+    /// Regression test for Bug 1: setting a backend preserves buffered frames.
     #[test]
     fn update_backend_preserves_buffered_frames() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
         // Buffer 3 frames while there is no backend yet.
         for _ in 0..3 {
@@ -952,7 +852,7 @@ mod tests {
         }
 
         // Set the backend — this should NOT clear the buffer.
-        table.update_service_backend("svc1", Some(POD_IP));
+        sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(POD_IP), &mut passthrough_processor);
 
         // Mark ready — should return the 3 buffered frames.
         let result = table.mark_service_ready("svc1");
@@ -961,190 +861,11 @@ mod tests {
                 assert_eq!(
                     frames.len(),
                     3,
-                    "update_service_backend should not clear frames buffered before backend was set"
+                    "setting backend should not clear frames buffered before backend was set"
                 );
             }
             _ => panic!("expected Passthrough result"),
         }
-    }
-
-    // --- UnplacedPod tests ---
-
-    #[test]
-    fn unplaced_pod_buffers_frames() {
-        let mut table = EndpointTable::new();
-        let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
-        table.route_sync(vec![FabricRouteEntry {
-            ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        let (action, activate) = table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::Buffered { service_id: None }));
-        assert!(activate);
-    }
-
-    #[test]
-    fn unplaced_pod_buffer_capacity() {
-        let mut table = EndpointTable::new();
-        let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
-        table.route_sync(vec![FabricRouteEntry {
-            ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 2, timeout_ms: 5000 },
-            },
-        }]);
-
-        table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        let (action, _) = table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::Drop { service_id: None }));
-    }
-
-    #[test]
-    fn unplaced_pod_flush() {
-        let mut table = EndpointTable::new();
-        let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
-        table.route_sync(vec![FabricRouteEntry {
-            ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        for _ in 0..3 {
-            table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        }
-
-        let frames = table.flush_pod_buffer(pod_ip);
-        assert_eq!(frames.len(), 3);
-
-        // Second flush is empty.
-        let frames = table.flush_pod_buffer(pod_ip);
-        assert!(frames.is_empty());
-    }
-
-    #[test]
-    fn unplaced_pod_activation_debounced() {
-        let mut table = EndpointTable::new();
-        let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
-        table.route_sync(vec![FabricRouteEntry {
-            ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        let (_, activate1) = table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        assert!(activate1);
-
-        let (_, activate2) = table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        assert!(!activate2);
-    }
-
-    // --- RemoteSegment tests ---
-
-    #[test]
-    fn remote_segment_forwards() {
-        let mut table = EndpointTable::new();
-        let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
-        table.route_sync(vec![FabricRouteEntry {
-            ip: pod_ip,
-            destination: RouteDestination::RemoteWorker {
-                worker_id: "worker-1".to_string().into(),
-            },
-        }]);
-
-        let (action, activate) = table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::RemoteWorker { ref worker_id } if worker_id == "worker-1"));
-        assert!(!activate);
-    }
-
-    // --- Route sync/update tests ---
-
-    #[test]
-    fn route_sync_preserves_services() {
-        let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
-
-        let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
-        table.route_sync(vec![FabricRouteEntry {
-            ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        // Service still works.
-        let (action, _) = table.lookup_and_buffer(SVC_IP, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::Buffered { service_id: Some(_) }));
-
-        // Pod route works.
-        let (action, _) = table.lookup_and_buffer(pod_ip, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::Buffered { service_id: None }));
-    }
-
-    #[test]
-    fn route_sync_replaces_routes() {
-        let mut table = EndpointTable::new();
-        let ip_a = Ipv4Addr::new(10, 0, 0, 50);
-        let ip_b = Ipv4Addr::new(10, 0, 0, 51);
-
-        table.route_sync(vec![FabricRouteEntry {
-            ip: ip_a,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        // Resync with different IP.
-        table.route_sync(vec![FabricRouteEntry {
-            ip: ip_b,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        // Old IP gone.
-        let (action, _) = table.lookup_and_buffer(ip_a, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::NotFound));
-
-        // New IP present.
-        let (action, _) = table.lookup_and_buffer(ip_b, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::Buffered { service_id: None }));
-    }
-
-    #[test]
-    fn route_update() {
-        let mut table = EndpointTable::new();
-        let ip_a = Ipv4Addr::new(10, 0, 0, 50);
-        let ip_b = Ipv4Addr::new(10, 0, 0, 51);
-
-        table.route_sync(vec![FabricRouteEntry {
-            ip: ip_a,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy { buffer_frames: 10, timeout_ms: 5000 },
-            },
-        }]);
-
-        // Add ip_b, remove ip_a.
-        table.route_update(
-            vec![FabricRouteEntry {
-                ip: ip_b,
-                destination: RouteDestination::RemoteWorker {
-                    worker_id: "w2".to_string().into(),
-                },
-            }],
-            vec![ip_a],
-        );
-
-        let (action, _) = table.lookup_and_buffer(ip_a, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::NotFound));
-
-        let (action, _) = table.lookup_and_buffer(ip_b, FRAME, |_| true);
-        assert!(matches!(action, EndpointAction::RemoteWorker { .. }));
     }
 
     // --- Activator / L4 tests ---
@@ -1182,6 +903,18 @@ mod tests {
         with_fabric_header(0, 0, &ip_packet)
     }
 
+    fn l4_tcp_policy() -> ServicePolicy {
+        ServicePolicy {
+            buffer_frames: 64,
+            timeout_ms: 30000,
+            activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
+                ports: None,
+                tcp_only: false,
+                max_flows: 1024,
+            }),
+        }
+    }
+
     #[test]
     #[ignore = "requires WASM activators — run with --include-ignored"]
     fn l4_mark_ready_processes_backend_available() {
@@ -1198,20 +931,17 @@ mod tests {
         );
 
         let mut table = EndpointTable::new();
-        table.create_service(
-            "svc1".into(),
-            SVC_IP,
-            ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: false,
-                    max_flows: 1024,
-                }),
-            },
-            ServiceProcessor::L4 { activator: Some(instance), stream_manager: sm },
-        );
+        let mut make_l4 = {
+            let mut instance_opt = Some(instance);
+            let mut sm_opt = Some(sm);
+            move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+                ServiceProcessor::L4 {
+                    activator: Some(instance_opt.take().unwrap()),
+                    stream_manager: sm_opt.take().unwrap(),
+                }
+            }
+        };
+        sync_create_service(&mut table, "svc1", SVC_IP, l4_tcp_policy(), &mut make_l4);
 
         // Feed a TCP SYN to the L4 path (after vnet header).
         let syn_frame = make_tcp_frame_for_service(
@@ -1227,7 +957,7 @@ mod tests {
         );
 
         // Set backend and mark ready.
-        table.update_service_backend("svc1", Some(POD_IP));
+        sync_update_backend(&mut table, "svc1", SVC_IP, l4_tcp_policy(), Some(POD_IP), &mut passthrough_processor);
         let ready_result = table.mark_service_ready("svc1");
         assert!(ready_result.is_some(), "mark_service_ready should return Some");
 
@@ -1255,15 +985,16 @@ mod tests {
         );
 
         let mut table = EndpointTable::new();
-        table.create_service(
-            "svc1".into(),
-            SVC_IP,
-            default_policy(),
-            ServiceProcessor::L4 {
-                activator: None,
-                stream_manager: sm,
-            },
-        );
+        let mut make_l4 = {
+            let mut sm_opt = Some(sm);
+            move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+                ServiceProcessor::L4 {
+                    activator: None,
+                    stream_manager: sm_opt.take().unwrap(),
+                }
+            }
+        };
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut make_l4);
 
         // handle_timeout_for_ip on a service with a StreamManager should return Some(L4Result).
         let result = table.handle_timeout_for_ip(SVC_IP);
@@ -1277,7 +1008,7 @@ mod tests {
     #[test]
     fn handle_timeout_for_ip_returns_none_for_l3() {
         let mut table = EndpointTable::new();
-        table.create_service("svc1".into(), SVC_IP, default_policy(), ServiceProcessor::Passthrough);
+        sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
         // L3 service (no StreamManager) should return None.
         let result = table.handle_timeout_for_ip(SVC_IP);
@@ -1291,23 +1022,16 @@ mod tests {
             .expect("TCP activator WASM not built — run activators/build.sh");
 
         let mut table = EndpointTable::new();
-        table.create_service(
-            "svc1".into(),
-            SVC_IP,
-            ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: false,
-                    max_flows: 1024,
-                }),
-            },
-            ServiceProcessor::L3 {
-                activator: instance,
-                flow_tracker: distvirt_activator::FlowTracker::new(),
-            },
-        );
+        let mut make_l3 = {
+            let mut instance_opt = Some(instance);
+            move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+                ServiceProcessor::L3 {
+                    activator: instance_opt.take().unwrap(),
+                    flow_tracker: distvirt_activator::FlowTracker::new(),
+                }
+            }
+        };
+        sync_create_service(&mut table, "svc1", SVC_IP, l4_tcp_policy(), &mut make_l3);
 
         // Feed a TCP SYN frame via lookup_and_buffer.
         let syn_frame = make_tcp_frame_for_service(
@@ -1323,7 +1047,7 @@ mod tests {
         );
 
         // Set backend and mark ready.
-        table.update_service_backend("svc1", Some(POD_IP));
+        sync_update_backend(&mut table, "svc1", SVC_IP, l4_tcp_policy(), Some(POD_IP), &mut passthrough_processor);
         let ready_result = table.mark_service_ready("svc1");
         assert!(ready_result.is_some(), "mark_service_ready should return Some");
 

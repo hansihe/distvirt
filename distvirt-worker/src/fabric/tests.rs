@@ -1,6 +1,10 @@
 use super::*;
 use super::service_activator::ServiceProcessor;
+use super::endpoint::{EndpointTable, EndpointSyncEffect};
 use crate::packet::{FabricPacket, FABRIC_HDR_SZ, with_fabric_header};
+use distvirt_worker_protocol::{
+    EndpointKind, EndpointPodBackend, EndpointSpec, ServiceId, ServicePolicy,
+};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -268,9 +272,8 @@ async fn runt_frame_dropped() {
 
 #[tokio::test]
 async fn placeholder_route_buffers_instead_of_flooding() {
-    use distvirt_worker_protocol::{
-        BufferPolicy, FabricRouteEntry, RouteDestination,
-    };
+    use distvirt_worker_protocol::{EndpointKind, EndpointSpec};
+    use crate::fabric::service_activator::ServiceProcessor;
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -278,19 +281,15 @@ async fn placeholder_route_buffers_instead_of_flooding() {
 
     let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
 
-    // Add a placeholder route for pod_ip.
+    // Add an unplaced pod endpoint for pod_ip.
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        et.route_sync(vec![FabricRouteEntry {
+        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        et.apply_endpoint_sync(vec![EndpointSpec {
             ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy {
-                    buffer_frames: 10,
-                    timeout_ms: 5000,
-                },
-            },
-        }]);
+            kind: EndpointKind::Pod { placement: None },
+        }], "local-worker", &mut noop);
     }
 
     let (port0, handle0) = make_test_port();
@@ -344,27 +343,22 @@ async fn no_route_external_ip_goes_to_gateway() {
 
 #[tokio::test]
 async fn buffered_frames_flushed_to_new_port() {
-    use distvirt_worker_protocol::{
-        BufferPolicy, FabricRouteEntry, RouteDestination,
-    };
+    use distvirt_worker_protocol::{EndpointKind, EndpointSpec};
+    use crate::fabric::service_activator::ServiceProcessor;
 
     let fabric = make_test_fabric();
 
     let pod_ip = Ipv4Addr::new(172, 16, 0, 10);
 
-    // Add a placeholder route.
+    // Add an unplaced pod endpoint.
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        et.route_sync(vec![FabricRouteEntry {
+        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        et.apply_endpoint_sync(vec![EndpointSpec {
             ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy {
-                    buffer_frames: 10,
-                    timeout_ms: 5000,
-                },
-            },
-        }]);
+            kind: EndpointKind::Pod { placement: None },
+        }], "local-worker", &mut noop);
     }
 
     let (port0, handle0) = make_test_port();
@@ -392,9 +386,8 @@ async fn buffered_frames_flushed_to_new_port() {
 
 #[tokio::test]
 async fn route_miss_debounced_on_rapid_frames() {
-    use distvirt_worker_protocol::{
-        BufferPolicy, FabricRouteEntry, RouteDestination,
-    };
+    use distvirt_worker_protocol::{EndpointKind, EndpointSpec};
+    use crate::fabric::service_activator::ServiceProcessor;
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -405,15 +398,11 @@ async fn route_miss_debounced_on_rapid_frames() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        et.route_sync(vec![FabricRouteEntry {
+        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        et.apply_endpoint_sync(vec![EndpointSpec {
             ip: pod_ip,
-            destination: RouteDestination::Placeholder {
-                buffer_policy: BufferPolicy {
-                    buffer_frames: 100,
-                    timeout_ms: 5000,
-                },
-            },
-        }]);
+            kind: EndpointKind::Pod { placement: None },
+        }], "local-worker", &mut noop);
     }
 
     let (port0, handle0) = make_test_port();
@@ -452,6 +441,83 @@ fn try_load_tcp_activator() -> Option<(distvirt_activator::ActivatorRuntime, dis
 
 const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 50);
 const POD_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 130);
+const OWN_WORKER: &str = "local-worker";
+
+/// Default make_processor that returns Passthrough for all services.
+fn passthrough_processor(_: &str, _: &ServicePolicy, _: Ipv4Addr) -> ServiceProcessor {
+    ServiceProcessor::Passthrough
+}
+
+fn default_service_policy() -> ServicePolicy {
+    ServicePolicy {
+        buffer_frames: 64,
+        timeout_ms: 30000,
+        activator: None,
+    }
+}
+
+fn l4_tcp_policy() -> ServicePolicy {
+    ServicePolicy {
+        buffer_frames: 64,
+        timeout_ms: 30000,
+        activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
+            ports: None,
+            tcp_only: false,
+            max_flows: 1024,
+        }),
+    }
+}
+
+/// Create a service endpoint with no backend via apply_endpoint_sync on a locked table.
+fn table_create_service(
+    et: &mut EndpointTable,
+    service_id: &str,
+    ip: Ipv4Addr,
+    policy: ServicePolicy,
+    make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+) {
+    et.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip,
+            kind: EndpointKind::Service {
+                service_id: ServiceId::from(service_id),
+                policy,
+                backend: None,
+            },
+        }],
+        OWN_WORKER,
+        make_processor,
+    );
+}
+
+/// Update a service's backend via apply_endpoint_update (sets Pending or Buffering).
+fn table_update_backend(
+    et: &mut EndpointTable,
+    service_id: &str,
+    ip: Ipv4Addr,
+    policy: ServicePolicy,
+    backend_ip: Option<Ipv4Addr>,
+    make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+) {
+    let backend = backend_ip.map(|pod_ip| EndpointPodBackend {
+        pod_ip,
+        placement: None,
+        ready: false,
+    });
+    et.apply_endpoint_update(
+        vec![EndpointSpec {
+            ip,
+            kind: EndpointKind::Service {
+                service_id: ServiceId::from(service_id),
+                policy,
+                backend,
+            },
+        }],
+        vec![],
+        OWN_WORKER,
+        make_processor,
+    );
+}
 
 #[tokio::test]
 #[ignore = "requires WASM activators — run with --include-ignored"]
@@ -467,23 +533,16 @@ async fn activator_tcp_syn_emits_backend_need() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-tcp".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: false,
-                    max_flows: 1024,
-                }),
-            },
-            ServiceProcessor::L3 {
-                activator: instance,
-                flow_tracker: distvirt_activator::FlowTracker::new(),
-            },
-        );
+        let mut make_l3 = {
+            let mut instance_opt = Some(instance);
+            move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+                ServiceProcessor::L3 {
+                    activator: instance_opt.take().unwrap(),
+                    flow_tracker: distvirt_activator::FlowTracker::new(),
+                }
+            }
+        };
+        table_create_service(&mut st, "svc-tcp", SVC_IP, l4_tcp_policy(), &mut make_l3);
     }
 
     let (port0, handle0) = make_test_port();
@@ -529,23 +588,16 @@ async fn activator_tcp_rst_dropped() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-tcp".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: false,
-                    max_flows: 1024,
-                }),
-            },
-            ServiceProcessor::L3 {
-                activator: instance,
-                flow_tracker: distvirt_activator::FlowTracker::new(),
-            },
-        );
+        let mut make_l3 = {
+            let mut instance_opt = Some(instance);
+            move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+                ServiceProcessor::L3 {
+                    activator: instance_opt.take().unwrap(),
+                    flow_tracker: distvirt_activator::FlowTracker::new(),
+                }
+            }
+        };
+        table_create_service(&mut st, "svc-tcp", SVC_IP, l4_tcp_policy(), &mut make_l3);
     }
 
     let (port0, handle0) = make_test_port();
@@ -586,29 +638,21 @@ async fn activator_forwards_when_ready() {
 
     let fabric = make_test_fabric();
 
-    // Create service with TCP activator.
+    // Create service with TCP activator, set backend, and mark ready.
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-tcp".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: false,
-                    max_flows: 1024,
-                }),
-            },
-            ServiceProcessor::L3 {
-                activator: instance,
-                flow_tracker: distvirt_activator::FlowTracker::new(),
-            },
-        );
-        // Set backend and mark ready.
-        st.update_service_backend("svc-tcp", Some(POD_IP));
+        let mut make_l3 = {
+            let mut instance_opt = Some(instance);
+            move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+                ServiceProcessor::L3 {
+                    activator: instance_opt.take().unwrap(),
+                    flow_tracker: distvirt_activator::FlowTracker::new(),
+                }
+            }
+        };
+        table_create_service(&mut st, "svc-tcp", SVC_IP, l4_tcp_policy(), &mut make_l3);
+        table_update_backend(&mut st, "svc-tcp", SVC_IP, l4_tcp_policy(), Some(POD_IP), &mut passthrough_processor);
         st.mark_service_ready("svc-tcp");
     }
 
@@ -645,17 +689,8 @@ async fn service_forward_without_registered_backend_port() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-fwd".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: None,
-            },
-            ServiceProcessor::Passthrough,
-        );
-        st.update_service_backend("svc-fwd", Some(POD_IP));
+        table_create_service(&mut st, "svc-fwd", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-fwd", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
         st.mark_service_ready("svc-fwd");
     }
 
@@ -704,17 +739,8 @@ async fn service_nat_dnat_rewrites_dst_ip() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-nat".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: None,
-            },
-            ServiceProcessor::Passthrough,
-        );
-        st.update_service_backend("svc-nat", Some(POD_IP));
+        table_create_service(&mut st, "svc-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
         st.mark_service_ready("svc-nat");
     }
 
@@ -751,17 +777,8 @@ async fn service_nat_snat_rewrites_return_traffic() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-nat".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: None,
-            },
-            ServiceProcessor::Passthrough,
-        );
-        st.update_service_backend("svc-nat", Some(POD_IP));
+        table_create_service(&mut st, "svc-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
         st.mark_service_ready("svc-nat");
     }
 
@@ -842,17 +859,8 @@ async fn service_nat_ip_checksum_valid() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        st.create_service(
-            "svc-nat".into(),
-            SVC_IP,
-            distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: None,
-            },
-            ServiceProcessor::Passthrough,
-        );
-        st.update_service_backend("svc-nat", Some(POD_IP));
+        table_create_service(&mut st, "svc-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
         st.mark_service_ready("svc-nat");
     }
 
@@ -888,7 +896,7 @@ async fn service_nat_ip_checksum_valid() {
 
 #[tokio::test]
 async fn test_remote_worker_route_forwards_to_tunnel_port() {
-    use distvirt_worker_protocol::{FabricRouteEntry, RouteDestination, WorkerId};
+    use distvirt_worker_protocol::WorkerId;
 
     let fabric = make_test_fabric();
 
@@ -901,16 +909,21 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
     // Register it as a tunnel port.
     let (_port_id, _task) = fabric.add_tunnel_port(worker_id.to_string(), tunnel_port);
 
-    // Add a RemoteWorker route for the remote pod IP.
+    // Add a remote pod endpoint for the remote pod IP.
     {
+        use distvirt_worker_protocol::{EndpointKind, EndpointSpec, EndpointPlacement};
+        use crate::fabric::service_activator::ServiceProcessor;
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        et.route_sync(vec![FabricRouteEntry {
+        let mut noop = |_: &str, _: &distvirt_worker_protocol::ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        et.apply_endpoint_sync(vec![EndpointSpec {
             ip: remote_pod_ip,
-            destination: RouteDestination::RemoteWorker {
-                worker_id: WorkerId::from(worker_id),
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: WorkerId::from(worker_id),
+                }),
             },
-        }]);
+        }], "local-worker", &mut noop);
     }
 
     // Add a local port that sends a frame to the remote pod IP.

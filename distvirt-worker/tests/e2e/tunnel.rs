@@ -2,8 +2,8 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, FabricRouteEntry, NetworkConfig, OrchestratorConnection,
-    PodNetworkConfig, RouteDestination, WorkerAccepted, WorkerCommand, WorkerConnection,
+    ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig,
+    OrchestratorConnection, PodNetworkConfig, WorkerAccepted, WorkerCommand, WorkerConnection,
     WorkerEvent, WorkerHello, WorkerId, WorkerPeerInfo, WorkerReady,
 };
 
@@ -149,29 +149,33 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         })
         .await?;
 
-    // --- FabricRouteSync: route pod-B's IP via worker-b on worker-a, and vice versa ---
+    // --- EndpointSync: route pod-B's IP via worker-b on worker-a, and vice versa ---
     let pod_a_ip = Ipv4Addr::new(10, 0, 0, 2);
     let pod_b_ip = Ipv4Addr::new(10, 0, 0, 3);
 
     conn_a
-        .send_command(&WorkerCommand::FabricRouteSync {
+        .send_command(&WorkerCommand::EndpointSync {
             namespace_id: "ns-tunnel".into(),
-            routes: vec![FabricRouteEntry {
+            endpoints: vec![EndpointSpec {
                 ip: pod_b_ip,
-                destination: RouteDestination::RemoteWorker {
-                    worker_id: "worker-b".into(),
+                kind: EndpointKind::Pod {
+                    placement: Some(EndpointPlacement {
+                        worker_id: "worker-b".into(),
+                    }),
                 },
             }],
         })
         .await?;
 
     conn_b
-        .send_command(&WorkerCommand::FabricRouteSync {
+        .send_command(&WorkerCommand::EndpointSync {
             namespace_id: "ns-tunnel".into(),
-            routes: vec![FabricRouteEntry {
+            endpoints: vec![EndpointSpec {
                 ip: pod_a_ip,
-                destination: RouteDestination::RemoteWorker {
-                    worker_id: "worker-a".into(),
+                kind: EndpointKind::Pod {
+                    placement: Some(EndpointPlacement {
+                        worker_id: "worker-a".into(),
+                    }),
                 },
             }],
         })

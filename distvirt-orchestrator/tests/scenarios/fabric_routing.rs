@@ -35,32 +35,18 @@ async fn test_fabric_route_update_on_pod_launch() {
         _ => panic!("expected Running"),
     };
 
-    // The other worker should have received a FabricRouteUpdate with the pod's route.
+    // The other worker should have received an EndpointSync or EndpointUpdate with endpoint entries.
     let other_worker_id = if pod_worker_id == w1 { &w2 } else { &w1 };
 
     h.assert_worker_received_command_matching(
         other_worker_id,
-        "FabricRouteUpdate or FabricRouteSync with route entry",
+        "EndpointSync or EndpointUpdate with endpoints",
         |cmd| matches!(
             cmd,
-            WorkerCommand::FabricRouteUpdate { added, .. } if !added.is_empty()
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
         ) || matches!(
             cmd,
-            WorkerCommand::FabricRouteSync { routes, .. } if !routes.is_empty()
-        ),
-    );
-
-    // The hosting worker should NOT have a route to its own pod
-    // (neither via incremental FabricRouteUpdate nor full FabricRouteSync).
-    h.assert_worker_did_not_receive_command_matching(
-        &pod_worker_id,
-        "FabricRouteUpdate or FabricRouteSync adding a route to self",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::FabricRouteUpdate { added, .. } if !added.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::FabricRouteSync { routes, .. } if !routes.is_empty()
+            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
         ),
     );
 }
@@ -80,11 +66,11 @@ async fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.create_namespace("ns1", spec).await;
     h.converge().await;
 
-    // Activate via ServiceActivation.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    // Activate via EndpointActivation.
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns1".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_running("ns1", "web");
@@ -103,16 +89,16 @@ async fn test_fabric_route_lifecycle_with_suspend_resume() {
         w1.clone()
     };
 
-    // The other worker should have a route entry pointing to the hosting worker.
+    // The other worker should have received an EndpointSync or EndpointUpdate with endpoints.
     h.assert_worker_received_command_matching(
         &other_worker_id,
-        "FabricRouteUpdate or FabricRouteSync with route",
+        "EndpointSync or EndpointUpdate with endpoints",
         |cmd| matches!(
             cmd,
-            WorkerCommand::FabricRouteUpdate { added, .. } if !added.is_empty()
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
         ) || matches!(
             cmd,
-            WorkerCommand::FabricRouteSync { routes, .. } if !routes.is_empty()
+            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
         ),
     );
 
@@ -126,44 +112,42 @@ async fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.advance_time(Duration::from_secs(31)).await;
     h.assert_workload_suspended("ns1", "web");
 
-    // After suspend, the route should have been removed (FabricRouteUpdate with removed_ips).
-    // Check the other worker received a route removal.
+    // After suspend, an EndpointUpdate should have been sent (service backend becomes None).
     h.assert_worker_received_command_matching(
         &other_worker_id,
-        "FabricRouteUpdate with removed_ips (after suspend)",
+        "EndpointUpdate with upserted endpoints (after suspend, backend=None)",
         |cmd| matches!(
             cmd,
-            WorkerCommand::FabricRouteUpdate { removed_ips, .. } if !removed_ips.is_empty()
+            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
         ),
     );
 
-    // Re-activate via ServiceActivation → resume.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    // Re-activate via EndpointActivation → resume.
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns1".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: Ipv4Addr::new(172, 16, 0, 100),
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_running("ns1", "web");
 
-    // After resume, a new route should have been added for the pod.
-    // We can check that the other worker got another FabricRouteUpdate with added entries
-    // (there should be at least 2 FabricRouteUpdate with added entries: one from initial launch,
-    // one from resume).
+    // After resume, new EndpointUpdate(s) with upserted entries should have been sent.
+    // There should be at least 2 EndpointUpdate with upserted entries: one from initial launch,
+    // one from resume.
     let other_commands = h.worker(&other_worker_id).commands();
-    let route_adds: Vec<_> = other_commands
+    let endpoint_upserts: Vec<_> = other_commands
         .iter()
-        .filter(|cmd| matches!(cmd, WorkerCommand::FabricRouteUpdate { added, .. } if !added.is_empty()))
+        .filter(|cmd| matches!(cmd, WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()))
         .collect();
     assert!(
-        route_adds.len() >= 2,
-        "expected at least 2 FabricRouteUpdate with added entries (launch + resume), got {}: {:#?}",
-        route_adds.len(),
-        route_adds,
+        endpoint_upserts.len() >= 2,
+        "expected at least 2 EndpointUpdate with upserted entries (launch + resume), got {}: {:#?}",
+        endpoint_upserts.len(),
+        endpoint_upserts,
     );
 }
 
-/// FabricRouteMiss on a Dormant workload should activate it (LaunchPod).
+/// EndpointActivation (no service_id) on a Dormant workload should activate it (LaunchPod).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_route_miss_activates_dormant_workload() {
     let mut h = TestHarness::new();
@@ -173,10 +157,11 @@ async fn test_route_miss_activates_dormant_workload() {
     h.converge().await;
     h.assert_workload_dormant("ns", "web");
 
-    // Low-level: FabricRouteMiss targets the pod IP (not service IP), must use explicit IP
-    h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
+    // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: Ipv4Addr::new(172, 16, 0, 10),
+        service_id: None,
     });
     h.converge().await;
 
@@ -186,7 +171,7 @@ async fn test_route_miss_activates_dormant_workload() {
     });
 }
 
-/// FabricRouteMiss on a Suspended workload should resume it (ResumePod).
+/// EndpointActivation (no service_id) on a Suspended workload should resume it (ResumePod).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_route_miss_activates_suspended_workload() {
     let mut h = TestHarness::new();
@@ -202,10 +187,11 @@ async fn test_route_miss_activates_suspended_workload() {
     h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_workload_suspended("ns", "web");
 
-    // Low-level: FabricRouteMiss targets the pod IP (not service IP)
-    h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
+    // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: Ipv4Addr::new(172, 16, 0, 10),
+        service_id: None,
     });
     h.converge().await;
 
@@ -215,7 +201,7 @@ async fn test_route_miss_activates_suspended_workload() {
     });
 }
 
-/// FabricRouteMiss on an already-running workload should be a no-op.
+/// EndpointActivation (no service_id) on an already-running workload should be a no-op.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_route_miss_ignored_when_already_running() {
     let mut h = TestHarness::new();
@@ -227,12 +213,13 @@ async fn test_route_miss_ignored_when_already_running() {
     // Activate via service first
     h.activate_service("ns", "web-svc").await;
 
-    // Low-level: command window slicing to verify no new commands after route miss
+    // Low-level: command window slicing to verify no new commands after endpoint activation
     let cmds_before = h.worker(&w1).commands().len();
 
-    h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: Ipv4Addr::new(172, 16, 0, 10),
+        service_id: None,
     });
     h.converge().await;
 
@@ -248,7 +235,7 @@ async fn test_route_miss_ignored_when_already_running() {
     );
 }
 
-/// FabricRouteMiss for an IP that doesn't match any workload should be ignored.
+/// EndpointActivation (no service_id) for an IP that doesn't match any workload should be ignored.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_route_miss_ignored_for_unknown_ip() {
     let mut h = TestHarness::new();
@@ -259,9 +246,10 @@ async fn test_route_miss_ignored_for_unknown_ip() {
     h.assert_workload_dormant("ns", "web");
 
     // Low-level: testing with an IP that doesn't match any workload
-    h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 99),
+        ip: Ipv4Addr::new(172, 16, 0, 99),
+        service_id: None,
     });
     h.converge().await;
 
@@ -279,21 +267,22 @@ async fn test_route_miss_demand_leak() {
     h.converge().await;
     h.assert_workload_dormant("ns", "web");
 
-    // Low-level: testing exact demand leak behavior with route miss + service activation interaction
-    // Step 1: FabricRouteMiss activates the workload.
-    h.worker(&w1).send_event(WorkerEvent::FabricRouteMiss {
+    // Low-level: testing exact demand leak behavior with endpoint activation interaction
+    // Step 1: EndpointActivation (no service_id) activates the workload.
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        dst_ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: Ipv4Addr::new(172, 16, 0, 10),
+        service_id: None,
     });
     h.converge().await;
     h.assert_workload_running("ns", "web");
 
-    // Step 2: ServiceActivation arrives (real traffic hits the service IP).
+    // Step 2: EndpointActivation with service_id arrives (real traffic hits the service IP).
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
     h.assert_workload_running("ns", "web");

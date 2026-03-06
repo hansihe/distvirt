@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, ServiceBackend, ServicePolicy,
-    WorkerCommand, WorkerEvent,
+    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
+    EndpointPodBackend, EndpointSpec, ServicePolicy, WorkerCommand, WorkerEvent,
 };
 
 use super::common::*;
@@ -219,16 +219,21 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Create service at 10.0.0.99 (no activator, simple forwarding)
-    conn.send_command(&WorkerCommand::CreateService {
+    // Create service at 10.0.0.99 (no activator, simple forwarding) via EndpointSync
+    conn.send_command(&WorkerCommand::EndpointSync {
         namespace_id: "ns-susp-net".into(),
-        service_id: "svc-susp".into(),
-        ip: Ipv4Addr::new(10, 0, 0, 99),
-        policy: ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 5000,
-            activator: None,
-        },
+        endpoints: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-susp".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 5000,
+                    activator: None,
+                },
+                backend: None,
+            },
+        }],
     })
     .await?;
 
@@ -263,19 +268,26 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Point service at server pod and mark ready
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    // Point service at server pod and mark ready via EndpointUpdate
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-susp-net".into(),
-        service_id: "svc-susp".into(),
-        backend: Some(ServiceBackend {
-            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-        }),
-    })
-    .await?;
-
-    conn.send_command(&WorkerCommand::ServiceReady {
-        namespace_id: "ns-susp-net".into(),
-        service_id: "svc-susp".into(),
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-susp".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 5000,
+                    activator: None,
+                },
+                backend: Some(EndpointPodBackend {
+                    pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 
@@ -381,19 +393,26 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
     eprintln!("e2e: server pod resumed");
 
-    // Re-point service at resumed pod (same IP/MAC) and mark ready
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    // Re-point service at resumed pod (same IP/MAC) and mark ready via EndpointUpdate
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-susp-net".into(),
-        service_id: "svc-susp".into(),
-        backend: Some(ServiceBackend {
-            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-        }),
-    })
-    .await?;
-
-    conn.send_command(&WorkerCommand::ServiceReady {
-        namespace_id: "ns-susp-net".into(),
-        service_id: "svc-susp".into(),
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-susp".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 5000,
+                    activator: None,
+                },
+                backend: Some(EndpointPodBackend {
+                    pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 
@@ -496,20 +515,25 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Create service with TCP activator at 10.0.0.99
-    conn.send_command(&WorkerCommand::CreateService {
+    // Create service with TCP activator at 10.0.0.99 via EndpointSync
+    conn.send_command(&WorkerCommand::EndpointSync {
         namespace_id: "ns-act-resume".into(),
-        service_id: "svc-act".into(),
-        ip: Ipv4Addr::new(10, 0, 0, 99),
-        policy: ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 10000,
-            activator: Some(ActivatorConfig::Tcp {
-                ports: None,
-                tcp_only: true,
-                max_flows: 1024,
-            }),
-        },
+        endpoints: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-act".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 10000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: None,
+            },
+        }],
     })
     .await?;
 
@@ -544,19 +568,30 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Point service at server pod and mark ready
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    // Point service at server pod and mark ready via EndpointUpdate
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-act-resume".into(),
-        service_id: "svc-act".into(),
-        backend: Some(ServiceBackend {
-            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-        }),
-    })
-    .await?;
-
-    conn.send_command(&WorkerCommand::ServiceReady {
-        namespace_id: "ns-act-resume".into(),
-        service_id: "svc-act".into(),
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-act".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 10000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: Some(EndpointPodBackend {
+                    pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 
@@ -648,10 +683,25 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Clear the service backend — pod is suspended, no backend available.
     // The activator will now buffer incoming traffic and signal BackendNeed.
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-act-resume".into(),
-        service_id: "svc-act".into(),
-        backend: None,
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-act".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 10000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: None,
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 
@@ -709,18 +759,29 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     eprintln!("e2e: server pod resumed");
 
     // Point service at resumed pod and mark ready — flushes the buffered SYN
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-act-resume".into(),
-        service_id: "svc-act".into(),
-        backend: Some(ServiceBackend {
-            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-        }),
-    })
-    .await?;
-
-    conn.send_command(&WorkerCommand::ServiceReady {
-        namespace_id: "ns-act-resume".into(),
-        service_id: "svc-act".into(),
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-act".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 10000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: Some(EndpointPodBackend {
+                    pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 

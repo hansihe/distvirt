@@ -53,12 +53,12 @@ async fn test_activation_pending_condition_lifecycle() {
     h.assert_service_idle("ns", "web-svc");
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 
-    // Send ServiceActivation manually (activate_service helper asserts Running, which won't happen).
+    // Send EndpointActivation manually (activate_service helper asserts Running, which won't happen).
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
 
@@ -86,10 +86,10 @@ async fn test_activation_pending_condition_lifecycle() {
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 
     // Re-activate — ResumePod is also hung, so condition should reappear.
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
 
@@ -114,10 +114,10 @@ async fn test_activation_pending_in_status_report() {
 
     // Send activation manually so we can observe mid-flow.
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
 

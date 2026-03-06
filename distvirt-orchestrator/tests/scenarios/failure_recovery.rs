@@ -237,12 +237,12 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     h.run_activation_suspend_cycle("ns1", "web-svc", "web").await;
     h.assert_service_idle("ns1", "web-svc");
 
-    // Re-activate via ServiceActivation — resume will fail.
+    // Re-activate via EndpointActivation — resume will fail.
     let svc_ip = h.service_ip("ns1", "web-svc");
-    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
         namespace_id: "ns1".into(),
-        service_id: distvirt_worker_protocol::ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
     });
     h.converge().await;
 

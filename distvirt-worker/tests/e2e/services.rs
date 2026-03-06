@@ -4,8 +4,8 @@ use std::time::Duration;
 use futures_lite::io::AsyncReadExt;
 
 use distvirt_worker_protocol::{
-    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, RegistryEntry, ServiceBackend,
-    ServicePolicy, WorkerCommand, WorkerEvent,
+    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
+    EndpointPodBackend, EndpointSpec, RegistryEntry, ServicePolicy, WorkerCommand, WorkerEvent,
 };
 
 use super::common::*;
@@ -104,20 +104,25 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
         event
     );
 
-    // Create a service with TCP activator
-    conn.send_command(&WorkerCommand::CreateService {
+    // Create a service with TCP activator via EndpointSync
+    conn.send_command(&WorkerCommand::EndpointSync {
         namespace_id: "ns-tcp-act".into(),
-        service_id: "svc-tcp".into(),
-        ip: Ipv4Addr::new(10, 0, 0, 99),
-        policy: ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 30000,
-            activator: Some(ActivatorConfig::Tcp {
-                ports: None,
-                tcp_only: true,
-                max_flows: 1024,
-            }),
-        },
+        endpoints: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-tcp".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 30000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: None,
+            },
+        }],
     })
     .await?;
 
@@ -194,16 +199,21 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Create service at 10.0.0.99 (no activator)
-    conn.send_command(&WorkerCommand::CreateService {
+    // Create service at 10.0.0.99 (no activator) via EndpointSync
+    conn.send_command(&WorkerCommand::EndpointSync {
         namespace_id: "ns-svc-fwd".into(),
-        service_id: "svc-fwd".into(),
-        ip: Ipv4Addr::new(10, 0, 0, 99),
-        policy: ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 30000,
-            activator: None,
-        },
+        endpoints: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-fwd".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 30000,
+                    activator: None,
+                },
+                backend: None,
+            },
+        }],
     })
     .await?;
 
@@ -247,19 +257,26 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await
     .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
 
-    // Set the backend and mark service ready
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    // Set the backend and mark service ready via EndpointUpdate
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-svc-fwd".into(),
-        service_id: "svc-fwd".into(),
-        backend: Some(ServiceBackend {
-            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-        }),
-    })
-    .await?;
-
-    conn.send_command(&WorkerCommand::ServiceReady {
-        namespace_id: "ns-svc-fwd".into(),
-        service_id: "svc-fwd".into(),
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-fwd".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 30000,
+                    activator: None,
+                },
+                backend: Some(EndpointPodBackend {
+                    pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 
@@ -342,20 +359,25 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Create service with TCP activator
-    conn.send_command(&WorkerCommand::CreateService {
+    // Create service with TCP activator via EndpointSync
+    conn.send_command(&WorkerCommand::EndpointSync {
         namespace_id: "ns-svc-buf".into(),
-        service_id: "svc-buf".into(),
-        ip: Ipv4Addr::new(10, 0, 0, 99),
-        policy: ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 30000,
-            activator: Some(ActivatorConfig::Tcp {
-                ports: None,
-                tcp_only: true,
-                max_flows: 1024,
-            }),
-        },
+        endpoints: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-buf".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 30000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: None,
+            },
+        }],
     })
     .await?;
 
@@ -432,18 +454,29 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     // Now set the backend and mark ready — buffered SYN should be flushed
-    conn.send_command(&WorkerCommand::UpdateServiceBackend {
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-svc-buf".into(),
-        service_id: "svc-buf".into(),
-        backend: Some(ServiceBackend {
-            pod_ip: Ipv4Addr::new(10, 0, 0, 2),
-        }),
-    })
-    .await?;
-
-    conn.send_command(&WorkerCommand::ServiceReady {
-        namespace_id: "ns-svc-buf".into(),
-        service_id: "svc-buf".into(),
+        upserted: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-buf".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 30000,
+                    activator: Some(ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: true,
+                        max_flows: 1024,
+                    }),
+                },
+                backend: Some(EndpointPodBackend {
+                    pod_ip: Ipv4Addr::new(10, 0, 0, 2),
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        removed_ips: vec![],
     })
     .await?;
 
@@ -500,23 +533,29 @@ async fn test_destroy_service() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Create service
-    conn.send_command(&WorkerCommand::CreateService {
+    // Create service via EndpointSync
+    conn.send_command(&WorkerCommand::EndpointSync {
         namespace_id: "ns-svc-destroy".into(),
-        service_id: "svc-destroy".into(),
-        ip: Ipv4Addr::new(10, 0, 0, 99),
-        policy: ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 30000,
-            activator: None,
-        },
+        endpoints: vec![EndpointSpec {
+            ip: Ipv4Addr::new(10, 0, 0, 99),
+            kind: EndpointKind::Service {
+                service_id: "svc-destroy".into(),
+                policy: ServicePolicy {
+                    buffer_frames: 64,
+                    timeout_ms: 30000,
+                    activator: None,
+                },
+                backend: None,
+            },
+        }],
     })
     .await?;
 
-    // Destroy the service
-    conn.send_command(&WorkerCommand::DestroyService {
+    // Destroy the service via EndpointUpdate with removed_ips
+    conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: "ns-svc-destroy".into(),
-        service_id: "svc-destroy".into(),
+        upserted: vec![],
+        removed_ips: vec![Ipv4Addr::new(10, 0, 0, 99)],
     })
     .await?;
 

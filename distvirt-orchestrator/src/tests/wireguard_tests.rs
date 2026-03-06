@@ -476,8 +476,9 @@ fn test_deactivate_workload_active_idle() {
         namespace_id: ns_id("ns1"),
         input: NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
     });
@@ -581,8 +582,9 @@ fn test_deactivate_workload_with_demand_refused() {
         namespace_id: ns_id("ns1"),
         input: NamespaceInput::WorkerEvent {
             worker_id: worker_id(1),
-            event: WorkerEvent::ServiceActivation {
-                service_id: svc_id(),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
             },
         },
     });

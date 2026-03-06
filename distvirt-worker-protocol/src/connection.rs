@@ -53,7 +53,7 @@ use crate::types::{
 type YamuxStream = yamux::Stream;
 
 /// A handle that aborts its task on drop.
-struct DriverHandle(Option<JoinHandle<()>>);
+pub struct DriverHandle(Option<JoinHandle<()>>);
 
 impl Drop for DriverHandle {
     fn drop(&mut self) {
@@ -207,12 +207,14 @@ impl OrchestratorConnection {
         OrchestratorReader,
         OrchestratorWriter,
         mpsc::UnboundedReceiver<YamuxStream>,
+        DriverHandle,
     ) {
         let (read_half, write_half) = futures_lite::io::split(self.control);
         (
             OrchestratorReader { read_half },
             OrchestratorWriter { write_half },
             self.incoming_rx,
+            self._driver,
         )
     }
 }

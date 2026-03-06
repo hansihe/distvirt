@@ -204,7 +204,7 @@ pub struct MockWorkerHandle {
 }
 
 impl MockWorkerHandle {
-    /// Inject an event from the worker side (e.g. ServiceActivation).
+    /// Inject an event from the worker side (e.g. EndpointActivation).
     pub fn send_event(&self, event: WorkerEvent) {
         let _ = self.inject_tx.send(event);
     }

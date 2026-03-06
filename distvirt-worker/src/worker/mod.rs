@@ -99,10 +99,6 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         }
     }
 
-    fn my_worker_id(&self) -> &WorkerId {
-        self.worker_id.as_ref().expect("worker_id not set (handshake not completed)")
-    }
-
     /// Look up a pool's root directory by ID.
     fn pool_path(&self, pool_id: &PoolId) -> Option<&PathBuf> {
         self.pools.get(pool_id)
@@ -453,56 +449,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 pod_id,
                 graceful,
             } => self.handle_stop_pod(&namespace_id, &pod_id, graceful).await,
-            WorkerCommand::FabricRouteSync {
-                namespace_id,
-                routes,
-            } => {
-                let ns = self.get_namespace_mut(&namespace_id)?;
-                ns.route_sync(&namespace_id, routes)
-            }
-            WorkerCommand::FabricRouteUpdate {
-                namespace_id,
-                added,
-                removed_ips,
-            } => {
-                let ns = self.get_namespace_mut(&namespace_id)?;
-                ns.route_update(&namespace_id, added, removed_ips)
-            }
-            WorkerCommand::CreateService {
-                namespace_id,
-                service_id,
-                ip,
-                policy,
-            } => {
-                // Borrow separate fields to avoid conflicting mutable/immutable borrows on self.
-                let activator_runtime = self.activator_runtime.as_ref();
-                let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
-                    FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
-                })?;
-                ns.create_service(&namespace_id, &service_id, ip, policy, activator_runtime)
-            }
-            WorkerCommand::UpdateServiceBackend {
-                namespace_id,
-                service_id,
-                backend,
-            } => {
-                let ns = self.get_namespace_mut(&namespace_id)?;
-                ns.update_service_backend(&namespace_id, &service_id, backend)
-            }
-            WorkerCommand::ServiceReady {
-                namespace_id,
-                service_id,
-            } => {
-                let ns = self.get_namespace_mut(&namespace_id)?;
-                ns.service_ready(&namespace_id, &service_id).await
-            }
-            WorkerCommand::DestroyService {
-                namespace_id,
-                service_id,
-            } => {
-                let ns = self.get_namespace_mut(&namespace_id)?;
-                ns.destroy_service(&namespace_id, &service_id)
-            }
+
             WorkerCommand::AddWireGuardPeer {
                 namespace_id,
                 peer_public_key,
@@ -603,6 +550,16 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
                 ns.endpoint_update(&namespace_id, upserted, removed_ips, &worker_id, activator_runtime)
+            }
+            // Deprecated command variants replaced by EndpointSync/EndpointUpdate.
+            WorkerCommand::FabricRouteSync { .. }
+            | WorkerCommand::FabricRouteUpdate { .. }
+            | WorkerCommand::CreateService { .. }
+            | WorkerCommand::UpdateServiceBackend { .. }
+            | WorkerCommand::ServiceReady { .. }
+            | WorkerCommand::DestroyService { .. } => {
+                log::warn!("worker: received deprecated command, ignoring");
+                Ok(())
             }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.

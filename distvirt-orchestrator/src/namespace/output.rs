@@ -1,4 +1,3 @@
-use crate::broadcast::broadcast_to_active_workers;
 use crate::service::ServiceOutput;
 use crate::types::*;
 use crate::workload::{WorkloadInput, WorkloadOutput};
@@ -164,12 +163,6 @@ impl NamespaceStateMachine {
     ) {
         for svc_out in outputs {
             match svc_out {
-                ServiceOutput::WorkerCommand(wid, cmd) => {
-                    out.worker_commands.push((wid, cmd));
-                }
-                ServiceOutput::BroadcastWorkerCommand(cmd) => {
-                    broadcast_to_active_workers(&self.workers, out, |_| cmd.clone());
-                }
                 ServiceOutput::TimerSet(key, duration) => {
                     let adjusted = if matches!(key, TimerKey::IdleTimeout { .. }) {
                         self.pressure_adjusted_idle_timeout(service_id, duration)

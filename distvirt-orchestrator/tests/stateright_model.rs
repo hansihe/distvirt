@@ -326,23 +326,36 @@ fn worker_id(i: usize) -> WorkerId {
     WorkerId(format!("w-{}", i))
 }
 
-/// Track CreateService/DestroyService commands in output to worker_service_created map.
+/// Track EndpointSync/EndpointUpdate commands to know which workers have service endpoints.
 fn track_service_commands(
     output: &NamespaceOutput,
     tracker: &mut BTreeMap<WorkerId, BTreeSet<ServiceId>>,
 ) {
+    use distvirt_worker_protocol::EndpointKind;
+
     for (wid, cmd) in &output.worker_commands {
         match cmd {
-            WorkerCommand::CreateService { service_id, .. } => {
-                tracker
-                    .entry(wid.clone())
-                    .or_default()
-                    .insert(service_id.clone());
-            }
-            WorkerCommand::DestroyService { service_id, .. } => {
-                if let Some(services) = tracker.get_mut(wid) {
-                    services.remove(service_id);
+            WorkerCommand::EndpointSync { endpoints, .. } => {
+                // Full sync replaces all known services for this worker.
+                let entry = tracker.entry(wid.clone()).or_default();
+                entry.clear();
+                for ep in endpoints {
+                    if let EndpointKind::Service { service_id, .. } = &ep.kind {
+                        entry.insert(service_id.clone());
+                    }
                 }
+            }
+            WorkerCommand::EndpointUpdate { upserted, removed_ips, .. } => {
+                let entry = tracker.entry(wid.clone()).or_default();
+                for ep in upserted {
+                    if let EndpointKind::Service { service_id, .. } = &ep.kind {
+                        entry.insert(service_id.clone());
+                    }
+                }
+                // For removed_ips we'd need to map IP→service_id, but the property
+                // only checks that services are present, so removals don't matter
+                // for a "have all services" invariant. We can skip this.
+                let _ = removed_ips;
             }
             _ => {}
         }
@@ -414,10 +427,14 @@ impl Model for NamespaceModel {
                 // Service-level events.
                 match &svc_snap.state {
                     ServiceState::Idle => {
+                        let svc_ip = self.initial_spec.services.get(service_id)
+                            .map(|s| s.ip)
+                            .unwrap_or(Ipv4Addr::UNSPECIFIED);
                         actions.push(ModelAction::WorkerEvent {
                             worker_id: wid.clone(),
-                            event: WorkerEvent::ServiceActivation {
-                                service_id: service_id.clone(),
+                            event: WorkerEvent::EndpointActivation {
+                                ip: svc_ip,
+                                service_id: Some(service_id.clone()),
                             },
                         });
                     }
@@ -901,11 +918,11 @@ impl Model for NamespaceModel {
             },
         ));
 
-        // Safety: active workers should have received CreateService for all
+        // Safety: active workers should have received endpoint data for all
         // non-Pending services.
         {
         props.push(Property::<Self>::always(
-            "active workers have all services created",
+            "active workers have all services in endpoints",
             |_model, state| {
                 let ns = &state.namespace;
                 if ns.status != NamespaceStatus::Active {

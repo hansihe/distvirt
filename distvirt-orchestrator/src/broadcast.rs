@@ -14,19 +14,6 @@ pub fn broadcast_to_active_workers(
     }
 }
 
-pub fn broadcast_to_active_workers_except(
-    workers: &BTreeMap<WorkerId, NamespaceWorkerState>,
-    exclude: &WorkerId,
-    out: &mut NamespaceOutput,
-    make_cmd: impl Fn(&WorkerId) -> WorkerCommand,
-) {
-    for (wid, ws) in workers {
-        if ws.fabric_status == FabricStatus::Active && wid != exclude {
-            out.worker_commands.push((wid.clone(), make_cmd(wid)));
-        }
-    }
-}
-
 pub fn send_to_worker(
     worker_id: &WorkerId,
     out: &mut NamespaceOutput,
@@ -108,29 +95,6 @@ mod tests {
         let mut out = NamespaceOutput::default();
         broadcast_to_active_workers(&workers, &mut out, dummy_cmd);
         assert_eq!(out.worker_commands.len(), 0);
-    }
-
-    #[test]
-    fn broadcast_except_excludes() {
-        let workers = make_workers(&[
-            ("w1", FabricStatus::Active),
-            ("w2", FabricStatus::Active),
-        ]);
-        let mut out = NamespaceOutput::default();
-        broadcast_to_active_workers_except(&workers, &wid("w1"), &mut out, dummy_cmd);
-        assert_eq!(out.worker_commands.len(), 1);
-        assert_eq!(out.worker_commands[0].0, wid("w2"));
-    }
-
-    #[test]
-    fn broadcast_except_nonexistent() {
-        let workers = make_workers(&[
-            ("w1", FabricStatus::Active),
-            ("w2", FabricStatus::Active),
-        ]);
-        let mut out = NamespaceOutput::default();
-        broadcast_to_active_workers_except(&workers, &wid("w_unknown"), &mut out, dummy_cmd);
-        assert_eq!(out.worker_commands.len(), 2);
     }
 
     #[test]

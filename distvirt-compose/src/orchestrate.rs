@@ -1,9 +1,9 @@
 use anyhow::Context;
 use distvirt_worker_protocol::codec::recv_log_header;
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, LogStreamHeader, NamespaceId, NetworkConfig,
-    OrchestratorConnection, PodNetworkConfig, RegistryEntry, ServiceBackend, ServiceId,
-    ServicePolicy, WorkerCommand, WorkerEvent,
+    ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend, EndpointSpec,
+    LogStreamHeader, NamespaceId, NetworkConfig, OrchestratorConnection, PodNetworkConfig,
+    RegistryEntry, ServiceId, ServicePolicy, WorkerCommand, WorkerEvent,
 };
 use futures_lite::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -131,20 +131,30 @@ pub async fn run_compose(
     .await
     .context("send registry sync")?;
 
-    // 2b. Create fabric-level service entities for each planned service.
-    for planned in &plan.services {
-        conn.send_command(&WorkerCommand::CreateService {
+    // 2b. Sync endpoint table with service entries for each planned service.
+    {
+        let endpoints: Vec<EndpointSpec> = plan
+            .services
+            .iter()
+            .map(|s| EndpointSpec {
+                ip: s.service_ip,
+                kind: EndpointKind::Service {
+                    service_id: ServiceId::from(s.name.as_str()),
+                    policy: ServicePolicy {
+                        buffer_frames: 64,
+                        timeout_ms: 30000,
+                        activator: None,
+                    },
+                    backend: None,
+                },
+            })
+            .collect();
+        conn.send_command(&WorkerCommand::EndpointSync {
             namespace_id: namespace_id.clone(),
-            service_id: ServiceId::from(planned.name.as_str()),
-            ip: planned.service_ip,
-            policy: ServicePolicy {
-                buffer_frames: 64,
-                timeout_ms: 30000,
-                activator: None,
-            },
+            endpoints,
         })
         .await
-        .with_context(|| format!("send create service '{}'", planned.name))?;
+        .context("send endpoint sync")?;
     }
 
     // 3. Launch pods for each service in dependency order.
@@ -210,24 +220,30 @@ pub async fn run_compose(
                         pod_id,
                     } => {
                         log::info!("pod '{}' is running", pod_id);
-                        // Wire up the service backend and mark ready.
+                        // Wire up the service backend via endpoint update.
                         if let Some(planned) = planned_by_name.get(pod_id.as_ref()) {
-                            conn.send_command(&WorkerCommand::UpdateServiceBackend {
+                            conn.send_command(&WorkerCommand::EndpointUpdate {
                                 namespace_id: namespace_id.clone(),
-                                service_id: ServiceId::from(pod_id.as_ref()),
-                                backend: Some(ServiceBackend {
-                                    pod_ip: planned.pod_ip,
-                                }),
+                                upserted: vec![EndpointSpec {
+                                    ip: planned.service_ip,
+                                    kind: EndpointKind::Service {
+                                        service_id: ServiceId::from(pod_id.as_ref()),
+                                        policy: ServicePolicy {
+                                            buffer_frames: 64,
+                                            timeout_ms: 30000,
+                                            activator: None,
+                                        },
+                                        backend: Some(EndpointPodBackend {
+                                            pod_ip: planned.pod_ip,
+                                            placement: None,
+                                            ready: true,
+                                        }),
+                                    },
+                                }],
+                                removed_ips: vec![],
                             })
                             .await
-                            .with_context(|| format!("send update service backend '{}'", pod_id))?;
-
-                            conn.send_command(&WorkerCommand::ServiceReady {
-                                namespace_id: namespace_id.clone(),
-                                service_id: ServiceId::from(pod_id.as_ref()),
-                            })
-                            .await
-                            .with_context(|| format!("send service ready '{}'", pod_id))?;
+                            .with_context(|| format!("send endpoint update for '{}'", pod_id))?;
                         }
                     }
                     WorkerEvent::PodExited {
@@ -279,11 +295,14 @@ pub async fn run_compose(
                     } => {
                         eprintln!("{} | log stream error ({}): {}", pod_id, phase, error);
                     }
-                    WorkerEvent::FabricRouteMiss { namespace_id: _, dst_ip } => {
-                        log::debug!("fabric route miss for {}", dst_ip);
+                    // Deprecated: these events are no longer emitted by current workers,
+                    // but the enum variants still exist for wire compatibility.
+                    WorkerEvent::FabricRouteMiss { .. } | WorkerEvent::ServiceActivation { .. } => {}
+                    WorkerEvent::EndpointActivation { namespace_id: _, ip, service_id } => {
+                        log::debug!("endpoint activation for {} (service: {:?})", ip, service_id);
                     }
-                    WorkerEvent::ServiceActivation { namespace_id: _, service_id, dst_ip } => {
-                        log::debug!("service activation for '{}' ({})", service_id, dst_ip);
+                    WorkerEvent::EndpointFlowStatus { namespace_id: _, ip, has_active_flows } => {
+                        log::debug!("endpoint flow status for {}: active={}", ip, has_active_flows);
                     }
                     WorkerEvent::ServiceBackendNeed { namespace_id: _, service_id, need } => {
                         log::debug!("service backend need for '{}': {:?}", service_id, need);
@@ -324,12 +343,6 @@ pub async fn run_compose(
                     }
                     WorkerEvent::PressureUpdate { .. } => {
                         log::debug!("pressure update received");
-                    }
-                    WorkerEvent::EndpointActivation { namespace_id: _, ip, service_id } => {
-                        log::debug!("endpoint activation for {} (service: {:?})", ip, service_id);
-                    }
-                    WorkerEvent::EndpointFlowStatus { namespace_id: _, ip, has_active_flows } => {
-                        log::debug!("endpoint flow status for {}: active={}", ip, has_active_flows);
                     }
                 }
             }

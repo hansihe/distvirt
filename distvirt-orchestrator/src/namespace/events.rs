@@ -60,22 +60,6 @@ impl NamespaceStateMachine {
                     self.emit_endpoint_sync_to_worker(worker_id, out);
                 }
             }
-            WorkerEvent::ServiceActivation { service_id } => {
-                if let Some(svc) = self.services.get_mut(&service_id) {
-                    let wl_id = svc.workload_id.clone();
-                    out.events.push(SmNamespaceEvent::Service {
-                        service_id: service_id.clone(),
-                        workload_id: wl_id.clone(),
-                        event: SmServiceEvent::Activated {
-                            trigger: ServiceActivationTrigger::Traffic,
-                        },
-                    });
-                    let svc_outputs =
-                        svc.step(ServiceInput::ServiceActivation, &self.namespace_id);
-                    self.translate_service_effects(&service_id, svc_outputs, out);
-                    self.reconcile_demand(&wl_id, placement_table, out);
-                }
-            }
             WorkerEvent::ServiceBackendNeed { service_id, need } => {
                 if let Some(svc) = self.services.get_mut(&service_id) {
                     let wl_id = svc.workload_id.clone();
@@ -239,30 +223,6 @@ impl NamespaceStateMachine {
                 };
                 self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&wl_id, placement_table, out);
-            }
-            WorkerEvent::FabricRouteMiss { dst_ip } => {
-                // Look up workload whose network.ip == dst_ip.
-                let wl_match = self
-                    .spec
-                    .workloads
-                    .iter()
-                    .find(|(_, wl_spec)| wl_spec.network.ip == dst_ip)
-                    .map(|(wl_id, _)| wl_id.clone());
-                if let Some(wl_id) = wl_match {
-                    let should_wake = self.workloads.get(&wl_id)
-                        .map(|wl| matches!(wl.state, WorkloadState::Dormant | WorkloadState::Suspended { .. }))
-                        .unwrap_or(false);
-                    if should_wake {
-                        // Set directly on the SM field rather than via step() —
-                        // route_miss_wake is an external flag observed by reconciliation,
-                        // not an SM input. The SM has no SetRouteMissWake input because
-                        // the flag is purely a reconciliation concern.
-                        if let Some(wl) = self.workloads.get_mut(&wl_id) {
-                            wl.route_miss_wake = true;
-                        }
-                        self.reconcile_demand(&wl_id, placement_table, out);
-                    }
-                }
             }
             WorkerEvent::EndpointActivation { ip, service_id } => {
                 match service_id {

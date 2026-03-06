@@ -69,7 +69,7 @@ fn arb_worker_event() -> impl Strategy<Value = WorkerEvent> {
             error: "test failure".into(),
         }),
         Just(WorkerEvent::NamespaceDestroyed),
-        arb_service_id().prop_map(|sid| WorkerEvent::ServiceActivation { service_id: sid }),
+        arb_service_id().prop_map(|sid| WorkerEvent::EndpointActivation { ip: Ipv4Addr::new(172, 16, 0, 100), service_id: Some(sid) }),
         (arb_service_id(), arb_backend_need()).prop_map(|(sid, need)| {
             WorkerEvent::ServiceBackendNeed {
                 service_id: sid,

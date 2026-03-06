@@ -35,6 +35,7 @@ pub struct OrchestratorShell {
 struct WorkerHandle {
     writer: OrchestratorWriter,
     _reader_task: tokio::task::JoinHandle<()>,
+    _driver: distvirt_worker_protocol::DriverHandle,
 }
 
 struct ClientSender {
@@ -276,7 +277,7 @@ impl OrchestratorShell {
 
         // Split the connection so the reader task only reads (no cancellation-safety issues)
         // and the shell sends commands directly via the write half.
-        let (mut reader, writer, mut log_streams) = conn.into_split();
+        let (mut reader, writer, mut log_streams, _driver) = conn.into_split();
 
         let reader_task = tokio::spawn(async move {
             loop {
@@ -374,6 +375,7 @@ impl OrchestratorShell {
             WorkerHandle {
                 writer,
                 _reader_task: reader_task,
+                _driver,
             },
         );
 

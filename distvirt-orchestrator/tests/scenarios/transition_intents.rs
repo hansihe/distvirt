@@ -6,7 +6,7 @@ use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{ServiceId, WorkerCommand, WorkerEvent};
 
 /// Workload is Suspending (handler suppresses SuspendPod response).
-/// Inject ServiceActivation (DemandUp). Then inject PodSuspended.
+/// Inject EndpointActivation (DemandUp). Then inject PodSuspended.
 /// Workload SHOULD go directly to Resuming (not through Dormant).
 // Low-level: tests mid-state-transition event injection with specific state dependencies
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -30,12 +30,12 @@ async fn test_demand_during_suspend_immediate_resume() {
         other => panic!("expected Suspending, got {:?}", other),
     };
 
-    // Low-level: inject demand (ServiceActivation) while suspending
+    // Low-level: inject demand (EndpointActivation) while suspending
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
-        dst_ip: svc_ip,
+        ip: svc_ip,
+        service_id: Some(ServiceId::from("web-svc")),
     });
     h.converge().await;
 
@@ -131,10 +131,10 @@ async fn test_demand_up_during_resume() {
 
     // Low-level: activate via svc-a → triggers resume (but handler hangs on ResumePod)
     let svc_a_ip = h.service_ip("ns", "svc-a");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
-        dst_ip: svc_a_ip,
+        ip: svc_a_ip,
+        service_id: Some(ServiceId::from("svc-a")),
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "shared");
@@ -143,10 +143,10 @@ async fn test_demand_up_during_resume() {
 
     // Low-level: activate svc-b too (second demand while resuming)
     let svc_b_ip = h.service_ip("ns", "svc-b");
-    h.worker(&w1).send_event(WorkerEvent::ServiceActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-b"),
-        dst_ip: svc_b_ip,
+        ip: svc_b_ip,
+        service_id: Some(ServiceId::from("svc-b")),
     });
     h.converge().await;
     h.assert_workload_resuming("ns", "shared");

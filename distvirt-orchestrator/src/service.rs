@@ -26,9 +26,6 @@ pub enum ServiceInput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceOutput {
-    WorkerCommand(WorkerId, WorkerCommand),
-    /// Emit to all active workers.
-    BroadcastWorkerCommand(WorkerCommand),
     /// The endpoint spec for this service changed; broadcast an update.
     EndpointChanged,
     TimerSet(TimerKey, std::time::Duration),
