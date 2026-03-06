@@ -23,14 +23,17 @@ impl Orchestrator {
                 if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
                     let launch_out = ns.step(NamespaceInput::LaunchPod {
                         workload_id: req.workload_id,
-                        worker_id,
-                        pod_id,
+                        worker_id: worker_id.clone(),
+                        pod_id: pod_id.clone(),
                     }, &mut self.placement_table);
+                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, DEFAULT_POD_MEMORY_MB);
                     // Recursively process outputs from LaunchPod (it won't emit more pod_requests).
                     out.merge_namespace(namespace_id.clone(), launch_out);
                 }
+            } else {
+                // No worker available — try preempting a lower-priority workload.
+                self.try_preempt_for_workload(&namespace_id, out);
             }
-            // If no worker available, workload stays in WaitingForCapacity.
         }
 
         // Process resume requests from the namespace.
@@ -47,10 +50,16 @@ impl Orchestrator {
             if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
                 let resume_out = ns.step(NamespaceInput::ResumePod {
                     workload_id: req.workload_id,
-                    worker_id,
-                    pod_id,
-                    artifact_id: req.artifact_id,
+                    worker_id: worker_id.clone(),
+                    pod_id: pod_id.clone(),
+                    artifact_id: req.artifact_id.clone(),
                 }, &mut self.placement_table);
+                self.lease_table.grant(
+                    pod_id,
+                    worker_id,
+                    LeaseIntent::PodResume { artifact_id: req.artifact_id },
+                    DEFAULT_POD_MEMORY_MB,
+                );
                 // Recursively process outputs from ResumePod.
                 out.merge_namespace(namespace_id.clone(), resume_out);
             }
@@ -99,9 +108,10 @@ impl Orchestrator {
                 if let Some(ns) = self.namespaces.get_mut(&ns_id) {
                     let launch_out = ns.step(NamespaceInput::LaunchPod {
                         workload_id: wl_id,
-                        worker_id,
-                        pod_id,
+                        worker_id: worker_id.clone(),
+                        pod_id: pod_id.clone(),
                     }, &mut self.placement_table);
+                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, DEFAULT_POD_MEMORY_MB);
                     out.merge_namespace(ns_id.clone(), launch_out);
                 }
             }
@@ -112,6 +122,91 @@ impl Orchestrator {
         let id = self.next_pod_id;
         self.next_pod_id += 1;
         PodId(format!("pod-{}", id))
+    }
+
+    /// Attempt to preempt a lower-priority workload to free capacity for a waiting workload.
+    /// Returns true if a preemption was triggered (victim will deactivate asynchronously).
+    pub(crate) fn try_preempt_for_workload(
+        &mut self,
+        namespace_id: &NamespaceId,
+        out: &mut OrchestratorOutput,
+    ) -> bool {
+        // Compute preemption priority for each running workload in the namespace.
+        // Priority 3 = active but idle (all services BackendNeed::None or no active services)
+        // Priority 4 = always-on, no demand (current_demand == 0, no services want backend)
+        // Lower number = higher priority (less preemptable).
+        let ns = match self.namespaces.get(namespace_id) {
+            Some(ns) => ns,
+            None => return false,
+        };
+
+        let mut candidates: Vec<(WorkloadId, u8, usize)> = Vec::new();
+
+        for (wl_id, wl) in &ns.workloads {
+            // Only consider workloads with a pod that can be preempted.
+            let worker_id = match wl.state.worker_id() {
+                Some(wid) => wid,
+                None => continue,
+            };
+
+            // Must be Running to be a clean preemption target.
+            if !matches!(wl.state, WorkloadState::Running { .. }) {
+                continue;
+            }
+
+            // Check service backend_need for all services mapped to this workload.
+            let has_active_traffic = ns.services.iter().any(|(_, svc)| {
+                svc.workload_id == *wl_id && matches!(
+                    svc.state,
+                    ServiceState::Active { backend_need, .. }
+                    if backend_need != BackendNeed::None
+                )
+            });
+
+            if has_active_traffic {
+                // Priority 2: active with traffic — do not preempt.
+                continue;
+            }
+
+            let priority = if wl.current_demand == 0 {
+                // Priority 4: always-on workload with no demand.
+                4u8
+            } else {
+                // Priority 3: active but idle (services active with BackendNeed::None).
+                3u8
+            };
+
+            let pod_count = ns.pod_map.worker_pod_count(worker_id);
+            candidates.push((wl_id.clone(), priority, pod_count));
+        }
+
+        if candidates.is_empty() {
+            return false;
+        }
+
+        // Select victim: highest priority number (most preemptable), then most pods on worker
+        // (freeing more capacity), then workload ID for determinism.
+        candidates.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        let victim_id = candidates[0].0.clone();
+
+        // Dispatch preemption via namespace SM.
+        let ns = match self.namespaces.get_mut(namespace_id) {
+            Some(ns) => ns,
+            None => return false,
+        };
+        let preempt_out = ns.step(
+            NamespaceInput::PreemptWorkload {
+                workload_id: victim_id,
+            },
+            &mut self.placement_table,
+        );
+        out.merge_namespace(namespace_id.clone(), preempt_out);
+        true
     }
 
     pub(crate) fn select_worker_for_pod(&self, namespace_id: &NamespaceId) -> Option<WorkerId> {

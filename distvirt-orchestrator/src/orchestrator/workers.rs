@@ -56,6 +56,9 @@ impl Orchestrator {
         worker_id: WorkerId,
         out: &mut OrchestratorOutput,
     ) {
+        // Release all leases for this worker before removing it.
+        self.lease_table.release_worker_leases(&worker_id);
+
         let worker_state = self.workers.remove(&worker_id);
 
         // Fan out WorkerLost to every namespace that had this worker.

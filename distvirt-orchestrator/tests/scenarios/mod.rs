@@ -2,6 +2,7 @@ mod activation;
 mod failure_recovery;
 mod fabric_routing;
 mod multi_service;
+mod preemption;
 mod pressure;
 mod registry;
 mod snapshot_placement;

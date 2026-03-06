@@ -546,6 +546,77 @@ mod pressure_tests {
     }
 }
 
+// --- Resource Leases ---
+
+/// What a lease is reserving capacity for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseIntent {
+    PodLaunch,
+    PodResume { artifact_id: ArtifactId },
+}
+
+/// A capacity reservation for an in-flight pod operation (launch or resume).
+/// Exists from dispatch until the pod reaches a terminal state (running, failed, exited, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    pub worker_id: WorkerId,
+    pub intent: LeaseIntent,
+    pub memory_mb: u64,
+}
+
+/// Tracks in-flight capacity reservations keyed by PodId.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeaseTable {
+    leases: BTreeMap<PodId, Lease>,
+}
+
+impl LeaseTable {
+    /// Reserve capacity for a pod operation.
+    pub fn grant(&mut self, pod_id: PodId, worker_id: WorkerId, intent: LeaseIntent, memory_mb: u64) {
+        self.leases.insert(pod_id, Lease { worker_id, intent, memory_mb });
+    }
+
+    /// Release a lease. Returns the lease if it existed.
+    pub fn release(&mut self, pod_id: &PodId) -> Option<Lease> {
+        self.leases.remove(pod_id)
+    }
+
+    /// Release all leases for a given worker. Returns the released leases.
+    pub fn release_worker_leases(&mut self, worker_id: &WorkerId) -> Vec<(PodId, Lease)> {
+        let to_remove: Vec<PodId> = self.leases
+            .iter()
+            .filter(|(_, l)| l.worker_id == *worker_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        to_remove
+            .into_iter()
+            .filter_map(|id| self.leases.remove(&id).map(|l| (id, l)))
+            .collect()
+    }
+
+    /// Total leased memory in MB for a specific worker.
+    pub fn leased_memory_mb(&self, worker_id: &WorkerId) -> u64 {
+        self.leases
+            .values()
+            .filter(|l| l.worker_id == *worker_id)
+            .map(|l| l.memory_mb)
+            .sum()
+    }
+
+    /// Number of active leases for a specific worker.
+    pub fn leased_pod_count(&self, worker_id: &WorkerId) -> usize {
+        self.leases
+            .values()
+            .filter(|l| l.worker_id == *worker_id)
+            .count()
+    }
+
+    /// Iterate over all leases.
+    pub fn iter(&self) -> impl Iterator<Item = (&PodId, &Lease)> {
+        self.leases.iter()
+    }
+}
+
 // --- Pending Intent ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -744,4 +815,82 @@ pub struct WorkerCapabilities {
 pub struct WorkerWgConfig {
     pub listen_port: u16,
     pub public_key: [u8; 32],
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn test_grant_release_round_trip() {
+        let mut table = LeaseTable::default();
+        let pod_id = PodId("pod-1".into());
+        let worker_id = WorkerId("w-0".into());
+
+        table.grant(pod_id.clone(), worker_id.clone(), LeaseIntent::PodLaunch, 128);
+        assert_eq!(table.leased_pod_count(&worker_id), 1);
+        assert_eq!(table.leased_memory_mb(&worker_id), 128);
+
+        let lease = table.release(&pod_id);
+        assert!(lease.is_some());
+        assert_eq!(lease.unwrap().worker_id, worker_id);
+        assert_eq!(table.leased_pod_count(&worker_id), 0);
+        assert_eq!(table.leased_memory_mb(&worker_id), 0);
+    }
+
+    #[test]
+    fn test_double_release_returns_none() {
+        let mut table = LeaseTable::default();
+        let pod_id = PodId("pod-1".into());
+        table.grant(pod_id.clone(), WorkerId("w-0".into()), LeaseIntent::PodLaunch, 128);
+        table.release(&pod_id);
+        assert!(table.release(&pod_id).is_none());
+    }
+
+    #[test]
+    fn test_leased_memory_mb_sums_correctly() {
+        let mut table = LeaseTable::default();
+        let w0 = WorkerId("w-0".into());
+        let w1 = WorkerId("w-1".into());
+
+        table.grant(PodId("p-1".into()), w0.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId("p-2".into()), w0.clone(), LeaseIntent::PodLaunch, 256);
+        table.grant(PodId("p-3".into()), w1.clone(), LeaseIntent::PodLaunch, 64);
+
+        assert_eq!(table.leased_memory_mb(&w0), 384);
+        assert_eq!(table.leased_memory_mb(&w1), 64);
+    }
+
+    #[test]
+    fn test_release_worker_leases() {
+        let mut table = LeaseTable::default();
+        let w0 = WorkerId("w-0".into());
+        let w1 = WorkerId("w-1".into());
+
+        table.grant(PodId("p-1".into()), w0.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId("p-2".into()), w0.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId("p-3".into()), w1.clone(), LeaseIntent::PodLaunch, 128);
+
+        let released = table.release_worker_leases(&w0);
+        assert_eq!(released.len(), 2);
+        assert_eq!(table.leased_pod_count(&w0), 0);
+        assert_eq!(table.leased_pod_count(&w1), 1);
+    }
+
+    #[test]
+    fn test_resume_intent() {
+        let mut table = LeaseTable::default();
+        let pod_id = PodId("pod-1".into());
+        let artifact_id = ArtifactId("art-1".into());
+
+        table.grant(
+            pod_id.clone(),
+            WorkerId("w-0".into()),
+            LeaseIntent::PodResume { artifact_id: artifact_id.clone() },
+            128,
+        );
+
+        let lease = table.release(&pod_id).unwrap();
+        assert_eq!(lease.intent, LeaseIntent::PodResume { artifact_id });
+    }
 }

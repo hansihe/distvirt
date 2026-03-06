@@ -437,6 +437,9 @@ impl NamespaceStateMachine {
             } => {
                 self.handle_deactivate_workload(client_id, workload_id, placement_table, &mut out);
             }
+            NamespaceInput::PreemptWorkload { workload_id } => {
+                self.handle_preempt_workload(workload_id, placement_table, &mut out);
+            }
         }
 
         out

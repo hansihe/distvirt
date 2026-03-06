@@ -851,7 +851,7 @@ A worker's storage pool can become degraded (read-only filesystem, IO errors, di
 
 ### 4. Hardcoded Per-Pod Resource Sizing
 
-`available_memory_mb` is derived from actual host memory via `/proc/meminfo`. However, `vcpus=1/pod` and `memory=128MB/pod` (`DEFAULT_POD_MEMORY_MB`) are still hardcoded. PSI integration provides real pressure feedback for compute, but static capacity accounting (used for scheduling admission and memory pressure fallback) operates on these fictional per-pod sizes. Resource leases (Task 4.1) will have limited value until per-pod resource requests exist in the spec.
+`available_memory_mb` is derived from actual host memory via `/proc/meminfo`. However, `vcpus=1/pod` and `memory=128MB/pod` (`DEFAULT_POD_MEMORY_MB`) are still hardcoded. PSI integration provides real pressure feedback for compute, but static capacity accounting (used for scheduling admission and memory pressure fallback) operates on these fictional per-pod sizes. Resource leases (Task 4.1, done) track in-flight operations with `DEFAULT_POD_MEMORY_MB` but will provide more accurate reservation once per-pod resource requests exist in the spec.
 
 ### 5. ~~`route_miss_wake` Demand Leak~~ (Fixed)
 
@@ -949,7 +949,7 @@ Three complementary methods:
    - `proptest.rs`: PodMap shadow consistency, namespace invariant fuzzing, orchestrator panic testing
 
 3. **Scenario tests** — mock workers over real shell/protocol stack with paused time
-   - ~60 scenario tests across: activation, suspend/resume, failure recovery, fabric routing, pressure, registry, worker lifecycle, multi-service, snapshot placement, spec reconciliation, transition intents
+   - ~60 scenario tests across: activation, suspend/resume, failure recovery, fabric routing, preemption, pressure, registry, worker lifecycle, multi-service, snapshot placement, spec reconciliation, transition intents
 
 4. **Shell integration** — end-to-end lifecycle with yamux/capnp handshake
    - `shell_integration.rs`: full protocol roundtrip
@@ -977,13 +977,13 @@ Three complementary methods:
 | PSI integration | Done — workers read `/proc/pressure/` every 10s, orchestrator feeds into pressure scores | `worker/mod.rs`, `types/states.rs`, `shell/mod.rs` |
 | Pressure-driven idle timeout | Done — namespace layer adjusts `IdleTimeout` by pressure band (75%/25%/5s floor) | `namespace/output.rs` |
 | Real memory detection | Done — `/proc/meminfo` at startup, fallback 1024 MB | `worker/mod.rs` |
-| Resource leases | **Not implemented** — dead `locked_by` removed (see Known Issues #6) | `types/states.rs` |
-| Preemption | **Not implemented** | — |
+| Resource leases | Done — `LeaseTable` tracks in-flight pod launches/resumes, released on lifecycle events/timeouts/worker disconnect, included in pressure accounting | `types/states.rs`, `orchestrator/mod.rs`, `orchestrator/scheduling.rs`, `orchestrator/workers.rs` |
+| Preemption | Done — namespace-scoped, priority derived from runtime state (idle/no-demand), dispatches `ForceDeactivate` to victim, sets `preempted` condition | `orchestrator/scheduling.rs`, `namespace/commands.rs` |
 | Worker drain | **Not implemented** | — |
 | Worker heartbeat | **Not implemented** — loss detected only by TCP drop | — |
 | Imperative commands | **Not implemented** | — |
 
-Phases 1–3 are complete. See git history for detailed per-task changelogs.
+Phases 1–3 are complete. Phase 4: Resource Leases (4.1) and Preemption (4.2) are done. See git history for detailed per-task changelogs.
 
 ---
 
@@ -1024,33 +1024,41 @@ Recommendation: Option 1 — drain is rare enough that global scope is fine for 
 
 **Priority field**: Preemption (Task 4.2) needs a priority hierarchy, but `WorkloadSpec` has no priority field. The policy doc defines priority based on runtime state (activated > active-with-traffic > idle > always-on > suspended), not spec-declared priority. This means preemption can work without a spec change — priority is derived from workload/service state at preemption time.
 
-#### Task 4.1: Resource Leases
+#### ~~Task 4.1: Resource Leases~~ (Done)
 
-**Problem**: Resources (pod slots, memory, artifact entries) are claimed during async operations that can fail. On failure, resources are "leaked" until ad-hoc cleanup runs.
+**Problem**: Resources (pod slots, memory, artifact entries) are claimed during async operations that can fail. On failure, resources are "leaked" until ad-hoc cleanup runs. With preemption, freed capacity could be assigned to a different waiting workload than the one that triggered preemption.
 
-**Changes**: Introduce `Lease<T>` abstraction with automatic expiry (see [Resource Leases](#resource-leases) section). Prevents overcommit during concurrent scheduling.
+**Changes**: `LeaseTable` keyed by `PodId` tracks in-flight pod operations. `Lease` carries `worker_id`, `LeaseIntent` (PodLaunch or PodResume), and `memory_mb`. Leases are granted on `LaunchPod`/`ResumePod` dispatch and released on pod lifecycle events (`PodRunning`, `PodExited`, `PodFailed`, `PodSuspended`, `PodSuspendFailed`), timeouts (`LaunchTimeout`, `ResumeTimeout`), and worker disconnect.
 
-**Note**: With `DEFAULT_POD_MEMORY_MB = 128` still hardcoded for all pods, leases primarily prevent pod *slot* overcommit (two concurrent scheduling decisions racing past the same capacity). Memory-based lease value is limited until per-pod resource requests exist in the spec. Consider implementing slot-only leases first (simpler, still useful) and adding memory reservation when per-pod sizing lands.
+**Implementation**:
+1. `types/states.rs`: `LeaseIntent`, `Lease`, `LeaseTable` with methods (`grant`, `release`, `release_worker_leases`, `leased_memory_mb`, `leased_pod_count`, `iter`)
+2. `orchestrator/mod.rs`: `lease_table` field on `Orchestrator`, `recompute_worker_pressure` includes `leased_memory_mb` in committed memory, `check_invariants` verifies lease worker references, `route_namespace_input` releases leases before forwarding lifecycle events/timeouts
+3. `orchestrator/scheduling.rs`: grants leases after `LaunchPod`/`ResumePod` dispatch in `process_namespace_output` and `schedule_waiting_pods`
+4. `orchestrator/workers.rs`: `handle_worker_disconnected` releases all worker leases before removal
 
-**Depends on**: Pre-Phase-4 cleanup (done — `locked_by` removed).
+**Note**: With `DEFAULT_POD_MEMORY_MB = 128` still hardcoded for all pods, leases primarily prevent pod *slot* overcommit. Memory-based lease value is limited until per-pod resource requests exist in the spec.
 
 ---
 
-#### Task 4.2: Preemption
+#### ~~Task 4.2: Preemption~~ (Done)
 
 **Problem**: When no worker has capacity for an activated workload, it waits forever in `WaitingForCapacity`.
 
-**Changes**: See [Preemption](#preemption) section. Priority is derived from runtime state (not spec-declared). `ForceDeactivate` input serves as the preemption mechanism — no new SM input needed.
+**Changes**: Namespace-scoped preemption via `NamespaceInput::PreemptWorkload`. Priority derived from runtime state: priority 3 (active but idle — `BackendNeed::None`) and priority 4 (always-on, `current_demand == 0`) are preemptable. Active-with-traffic workloads (`BackendNeed::Active/Traffic`) are never preempted.
 
-**Implementation sketch**:
-1. `select_worker_for_pod` returns `None` (all workers High+ or at capacity)
-2. New `find_preemption_target(namespace_id)` scans workloads for preemptable candidates (priority 3–4: idle or always-on-no-traffic)
-3. Select lowest-priority, longest-idle workload on the best-fit worker
-4. Dispatch `ForceDeactivate` to the target workload
-5. Set `preempted` condition on the target
-6. After target's pod slot frees (on `PodSuspended`/`PodExited`), `schedule_waiting_pods` naturally retries the waiting workload
+**Implementation**:
+1. `process_namespace_output()`: when `select_worker_for_pod()` returns `None` for a `PodRequest`, calls `try_preempt_for_workload()`
+2. `try_preempt_for_workload()` scans same-namespace workloads for Running preemptable candidates (priority 3–4), selects victim by (highest priority number, most pods on worker, workload ID for determinism)
+3. Dispatches `NamespaceInput::PreemptWorkload { workload_id }` to the namespace SM
+4. `handle_preempt_workload()` force-deactivates the victim's services, steps the workload SM with `ForceDeactivate`, sets `preempted` condition
+5. `schedule_waiting_pods()` naturally retries the waiting workload once the victim's pod slot frees
 
-**Depends on**: Pre-Phase-4 cleanup (done — `route_miss_wake` removed), Task 3.2 (pressure-aware scheduling).
+**Key design decisions**:
+- One preemption per scheduling attempt (avoids cascading evictions)
+- No capacity reservation/lease — relies on `schedule_waiting_pods()` called after every `process_namespace_output()`
+- Reuses `WorkloadInput::ForceDeactivate` — from the victim's perspective, identical to an early idle timeout
+
+**Files**: `orchestrator/scheduling.rs`, `namespace/commands.rs`, `types/namespace_io.rs`, `namespace/mod.rs`
 
 ---
 
@@ -1097,13 +1105,12 @@ Pre-Phase-4 cleanup (done: route_miss_wake fix, locked_by removal)
     │
     ├──→ Task 4.4 (Worker Heartbeat) ← self-contained, shell-layer only
     │
-    ├──→ Task 4.1 (Resource Leases) ← needs clean PlacementTable
-    │         │
-    │         └──→ Task 4.2 (Preemption) ← needs leases
+    ├──→ Task 4.1 (Resource Leases) ← done
     │
+    └──→ Task 4.2 (Preemption) ← done
 ```
 
-Recommended implementation order: cleanup → 4.3 → 4.4 → 4.1 → 4.2. Tasks 4.3 and 4.4 can be done in parallel since they're independent.
+Recommended implementation order: cleanup → 4.3 → 4.4 → 4.1. Tasks 4.3 and 4.4 can be done in parallel since they're independent. Task 4.1 (Resource Leases) and Task 4.2 (Preemption) are complete.
 
 #### Test Harness Additions for Phase 4
 
@@ -1113,8 +1120,8 @@ The existing test harness (mock workers, paused time, event injection, command i
 |---|---|
 | Worker Drain | `drain_worker(id)` helper, `assert_worker_draining()` assertion |
 | Worker Heartbeat | `MockWorkerConfig::with_silent()` (connects but sends no events), `assert_worker_unresponsive()` |
-| Preemption | `assert_workload_preempted()` (checks condition) |
-| Resource Leases | Existing snapshot_placement tests cover the semantic outcome; add lease expiry/cleanup tests |
+| Preemption | Done — 4 scenario tests in `tests/scenarios/preemption.rs` (basic preemption, no-preempt-active-traffic, no-preempt-with-capacity, reactivation after preemption) |
+| Resource Leases | Done — unit tests for `LeaseTable` operations in `types/states.rs` |
 
 ### Design Notes for Implementers
 

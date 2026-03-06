@@ -540,6 +540,72 @@ impl NamespaceStateMachine {
         }
     }
 
+    /// Preempt a workload: force-deactivate it and set a "preempted" condition.
+    /// Called by the orchestrator's scheduling layer when a higher-priority workload
+    /// needs capacity and this workload has been selected as the victim.
+    pub(super) fn handle_preempt_workload(
+        &mut self,
+        workload_id: WorkloadId,
+        placement_table: &mut PlacementTable,
+        out: &mut NamespaceOutput,
+    ) {
+        let wl = match self.workloads.get(&workload_id) {
+            Some(wl) => wl,
+            None => return,
+        };
+
+        // Only preempt workloads that have a pod (Running, Launching, etc.)
+        if matches!(wl.state, WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed) {
+            return;
+        }
+
+        // Force-deactivate services for this workload (same as handle_deactivate_workload
+        // but without client interaction and without checking backend_need).
+        let svc_ids: Vec<ServiceId> = self
+            .services
+            .iter()
+            .filter(|(_, svc)| svc.workload_id == workload_id && svc.has_activation)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+
+        for sid in svc_ids {
+            let svc = match self.services.get_mut(&sid) {
+                Some(svc) => svc,
+                None => continue,
+            };
+            if !matches!(svc.state, ServiceState::Active { .. }) {
+                continue;
+            }
+            let wl_id = svc.workload_id.clone();
+
+            out.events.push(SmNamespaceEvent::Service {
+                service_id: sid.clone(),
+                workload_id: wl_id.clone(),
+                event: SmServiceEvent::Deactivated {
+                    reason: ServiceDeactivationReason::ForceDeactivate,
+                },
+            });
+
+            let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
+            self.translate_service_effects(&sid, svc_outputs, out);
+            self.reconcile_demand(&wl_id, placement_table, out);
+        }
+
+        // Step the workload SM with ForceDeactivate.
+        let wl = match self.workloads.get_mut(&workload_id) {
+            Some(wl) => wl,
+            None => return,
+        };
+        let wl_outputs = wl.step(WorkloadInput::ForceDeactivate, &self.namespace_id);
+        // Set preempted condition.
+        wl.conditions.insert(
+            "preempted".to_string(),
+            "preempted for higher-priority workload".to_string(),
+        );
+        self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
+        self.reconcile_demand(&workload_id, placement_table, out);
+    }
+
     /// Clean up a removed workload: cancel timers, stop pods, delete artifacts.
     pub(super) fn teardown_workload(
         &mut self,

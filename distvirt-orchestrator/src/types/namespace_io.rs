@@ -38,6 +38,9 @@ pub enum NamespaceInput {
         client_id: ClientId,
         workload_id: WorkloadId,
     },
+    PreemptWorkload {
+        workload_id: WorkloadId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

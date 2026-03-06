@@ -24,6 +24,7 @@ pub struct Orchestrator {
     ///   PlacementSM → Namespace: ArtifactLost (eviction), TransferComplete
     /// This would enable independent model-checking of placement invariants.
     pub placement_table: PlacementTable,
+    pub lease_table: LeaseTable,
 }
 
 impl Default for Orchestrator {
@@ -42,6 +43,7 @@ impl Orchestrator {
             next_segment_id: 1,
             active_segment_ids: BTreeSet::new(),
             placement_table: PlacementTable::default(),
+            lease_table: LeaseTable::default(),
         }
     }
 
@@ -135,6 +137,16 @@ impl Orchestrator {
                 );
             }
         }
+
+        // Verify every lease references an existing worker.
+        for (pod_id, lease) in self.lease_table.iter() {
+            debug_assert!(
+                self.workers.contains_key(&lease.worker_id),
+                "Lease for pod {:?} references worker {:?} which doesn't exist",
+                pod_id,
+                lease.worker_id,
+            );
+        }
     }
 
     /// Recompute pressure scores for a specific worker based on pod counts across all namespaces.
@@ -142,7 +154,8 @@ impl Orchestrator {
         let pod_count: usize = self.namespaces.values()
             .map(|ns| ns.pod_map.worker_pod_count(worker_id))
             .sum();
-        let committed_mb = pod_count as u64 * DEFAULT_POD_MEMORY_MB;
+        let committed_mb = pod_count as u64 * DEFAULT_POD_MEMORY_MB
+            + self.lease_table.leased_memory_mb(worker_id);
         if let Some(ws) = self.workers.get_mut(worker_id) {
             ws.recompute_pressure(committed_mb);
         }
@@ -176,6 +189,28 @@ impl Orchestrator {
         input: NamespaceInput,
         out: &mut OrchestratorOutput,
     ) {
+        // Release leases for pod lifecycle events and timeouts before forwarding.
+        match &input {
+            NamespaceInput::WorkerEvent { event, .. } => match event {
+                WorkerEvent::PodRunning { pod_id }
+                | WorkerEvent::PodExited { pod_id, .. }
+                | WorkerEvent::PodFailed { pod_id, .. }
+                | WorkerEvent::PodSuspended { pod_id, .. }
+                | WorkerEvent::PodSuspendFailed { pod_id, .. } => {
+                    self.lease_table.release(pod_id);
+                }
+                _ => {}
+            },
+            NamespaceInput::TimerFired { timer_key } => match timer_key {
+                TimerKey::LaunchTimeout { pod_id, .. }
+                | TimerKey::ResumeTimeout { pod_id, .. } => {
+                    self.lease_table.release(pod_id);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+
         if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
             let ns_out = ns.step(input, &mut self.placement_table);
             self.process_namespace_output(namespace_id, ns_out, out);
