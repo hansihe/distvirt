@@ -4,7 +4,6 @@ pub(crate) mod gateway;
 pub(crate) mod nat;
 pub(crate) mod port;
 pub(crate) mod endpoint;
-pub(crate) mod service_activator;
 pub(crate) mod tunnel;
 
 // Lock ordering (acquire in this order to prevent deadlocks):
@@ -19,7 +18,7 @@ pub use endpoint::EndpointTable;
 pub use tunnel::{TunnelTransport, TunnelPortHandle};
 pub(crate) use forwarding::FabricContextInner;
 pub(crate) use endpoint::MarkReadyResult;
-pub(crate) use service_activator::ServiceProcessor;
+pub(crate) use endpoint::ServiceProcessor;
 pub(crate) use gateway::{DnsRegistry, FabricGateway};
 
 use std::collections::HashMap;

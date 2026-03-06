@@ -14,7 +14,6 @@ pub enum ArtifactStatus {
 pub struct ArtifactPlacement {
     pub pool_id: PoolId,
     pub worker_id: WorkerId,
-    pub locked_by: Option<PodId>,
     pub status: ArtifactStatus,
 }
 
@@ -38,18 +37,6 @@ impl PlacementTable {
 
     pub fn remove(&mut self, artifact_id: &ArtifactId) -> Option<ArtifactPlacement> {
         self.placements.remove(artifact_id)
-    }
-
-    pub fn lock(&mut self, artifact_id: &ArtifactId, pod_id: &PodId) {
-        if let Some(p) = self.placements.get_mut(artifact_id) {
-            p.locked_by = Some(pod_id.clone());
-        }
-    }
-
-    pub fn unlock(&mut self, artifact_id: &ArtifactId) {
-        if let Some(p) = self.placements.get_mut(artifact_id) {
-            p.locked_by = None;
-        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&ArtifactId, &ArtifactPlacement)> {
@@ -567,7 +554,7 @@ pub enum PendingIntent {
     None,
     Demand,
     Deactivate,
-    Restart, // stubbed for Task 1.3 (SpecChanged) — no input produces it yet
+    Restart, // Produced by WorkloadInput::SpecChanged when spec changes during a transition
 }
 
 // --- Domain Enums ---

@@ -36,7 +36,6 @@ struct WlModelState {
     pending_timers: BTreeSet<TimerKey>,
     next_pod_id: u64,
     step_count: usize,
-    route_miss_wake: bool,
     has_active_flows: bool,
     needs_successful_boot: bool,
 }
@@ -96,7 +95,6 @@ impl Model for WorkloadModel {
             pending_timers: BTreeSet::new(),
             next_pod_id: 0,
             step_count: 0,
-            route_miss_wake: false,
             has_active_flows: false,
             needs_successful_boot: false,
         }]
@@ -238,7 +236,6 @@ impl Model for WorkloadModel {
         sm.state = state.state.clone();
         sm.current_demand = state.current_demand;
         sm.consecutive_failures = state.consecutive_failures;
-        sm.route_miss_wake = state.route_miss_wake;
         sm.has_active_flows = state.has_active_flows;
         sm.needs_successful_boot = state.needs_successful_boot;
 
@@ -326,7 +323,6 @@ impl Model for WorkloadModel {
             pending_timers,
             next_pod_id,
             step_count: state.step_count + 1,
-            route_miss_wake: sm.route_miss_wake,
             has_active_flows: sm.has_active_flows,
             needs_successful_boot: sm.needs_successful_boot,
         })

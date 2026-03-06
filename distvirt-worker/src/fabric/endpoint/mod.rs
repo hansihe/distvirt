@@ -1,5 +1,6 @@
 mod config;
 mod dispatch;
+pub(crate) mod service_processor;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
@@ -10,7 +11,7 @@ use distvirt_worker_protocol::ServicePolicy;
 
 use super::flow::FlowTracker;
 use super::port::PortId;
-use super::service_activator::ServiceProcessor;
+pub(crate) use service_processor::ServiceProcessor;
 
 /// Side-effects from applying an endpoint sync/update.
 #[derive(Debug)]
@@ -124,6 +125,10 @@ struct Endpoint {
     /// TCP flow tracker for passthrough services and pod endpoints.
     /// `None` for activator-based services (they have their own demand signals).
     flow_tracker: Option<FlowTracker>,
+    /// Per-endpoint activation debounce timestamp.
+    /// Stored on the endpoint so that activation checks only need
+    /// the endpoint's own data (preparing for per-entry locking).
+    last_activation: Option<Instant>,
 }
 
 /// Optional flow status transition returned alongside an `EndpointAction`.
@@ -134,10 +139,13 @@ pub struct FlowStatusChange {
 }
 
 /// Table of endpoints indexed by IP for fast frame-path lookup.
+///
+/// Structured so that most operations only access a single endpoint entry.
+/// This prepares for a future migration to per-entry locking (e.g. DashMap),
+/// where the hot path (lookup_and_buffer) can proceed without a global lock.
 pub struct EndpointTable {
     by_ip: HashMap<Ipv4Addr, Endpoint>,
     service_id_to_ip: HashMap<String, Ipv4Addr>,
-    last_activation: HashMap<Ipv4Addr, Instant>,
     activation_debounce: Duration,
 }
 
@@ -146,7 +154,6 @@ impl EndpointTable {
         EndpointTable {
             by_ip: HashMap::new(),
             service_id_to_ip: HashMap::new(),
-            last_activation: HashMap::new(),
             activation_debounce: Duration::from_secs(1),
         }
     }

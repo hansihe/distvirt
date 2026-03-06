@@ -49,7 +49,6 @@ struct PlacementSnapshot {
 struct PlacementEntrySnapshot {
     pool_id: PoolId,
     worker_id: WorkerId,
-    locked_by: Option<PodId>,
 }
 
 impl PlacementSnapshot {
@@ -63,7 +62,6 @@ impl PlacementSnapshot {
                         PlacementEntrySnapshot {
                             pool_id: p.pool_id.clone(),
                             worker_id: p.worker_id.clone(),
-                            locked_by: p.locked_by.clone(),
                         },
                     )
                 })
@@ -79,7 +77,6 @@ impl PlacementSnapshot {
                 ArtifactPlacement {
                     pool_id: entry.pool_id.clone(),
                     worker_id: entry.worker_id.clone(),
-                    locked_by: entry.locked_by.clone(),
                     status: ArtifactStatus::Ready,
                 },
             );
@@ -93,7 +90,6 @@ struct WorkloadSnapshot {
     state: WorkloadState,
     current_demand: u32,
     consecutive_failures: u32,
-    route_miss_wake: bool,
     has_active_flows: bool,
     needs_successful_boot: bool,
 }
@@ -147,7 +143,6 @@ impl NamespaceSnapshot {
                             state: v.state.clone(),
                             current_demand: v.current_demand,
                             consecutive_failures: v.consecutive_failures,
-                            route_miss_wake: v.route_miss_wake,
                             has_active_flows: v.has_active_flows,
                             needs_successful_boot: v.needs_successful_boot,
                         },
@@ -218,7 +213,6 @@ impl NamespaceSnapshot {
             wl.state = wl_snap.state.clone();
             wl.current_demand = wl_snap.current_demand;
             wl.consecutive_failures = wl_snap.consecutive_failures;
-            wl.route_miss_wake = wl_snap.route_miss_wake;
             workloads.insert(wl_id.clone(), wl);
         }
 

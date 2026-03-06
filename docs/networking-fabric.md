@@ -450,7 +450,7 @@ The orchestrator's demand computation is uniform:
 
 ```
 effective_demand = services_wanting_backend_count
-                 + (has_active_flows || route_miss_wake ? 1 : 0)
+                 + (has_active_flows ? 1 : 0)
 ```
 
 `EndpointActivation` replaces both former `FabricRouteMiss` and `ServiceActivation` as the wake signal. The orchestrator routes it to the correct workload/service based on whether `service_id` is present.
@@ -548,7 +548,7 @@ From the fabric's perspective, nothing is special — the WireGuard `ChannelPort
 
 ## Known Issues & Remaining Work
 
-1. **`route_miss_wake` demand leak** — flag not always cleared when service takes over demand. Documented with a `#[should_panic]` test.
+1. ~~`route_miss_wake` demand leak~~ — **Fixed**. `EndpointActivation` with no `service_id` now sets `has_active_flows = true` instead, which is naturally cleared by `EndpointFlowStatus`.
 2. **Hardcoded buffer policy** — UnplacedPod buffer policy (64 frames, 30s) should be configurable.
 3. **Lock ordering** — consider type-safe enforcement for fabric locks.
 4. **Flow tracker memory bounds** — with many concurrent connections the flow tracker could grow large. Per-endpoint flow limits or LRU eviction may be needed for production.

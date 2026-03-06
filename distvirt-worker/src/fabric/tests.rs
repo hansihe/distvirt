@@ -1,5 +1,5 @@
 use super::*;
-use super::service_activator::ServiceProcessor;
+use super::ServiceProcessor;
 use super::endpoint::EndpointTable;
 use crate::packet::{FabricPacket, FABRIC_HDR_SZ, with_fabric_header};
 use distvirt_worker_protocol::{
@@ -92,7 +92,7 @@ fn make_test_fabric() -> Fabric<TestPort> {
 
 /// Create a LocalPod endpoint entry for an IP so that add_port_raw_with_ip can attach to it.
 fn create_local_pod_endpoint(fabric: &Fabric<TestPort>, ip: Ipv4Addr) {
-    use crate::fabric::service_activator::ServiceProcessor;
+    use crate::fabric::ServiceProcessor;
     let tables = fabric.tables();
     let mut et = tables.endpoint_table.lock().unwrap();
     let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
@@ -307,7 +307,7 @@ async fn runt_frame_dropped() {
 
 #[tokio::test]
 async fn placeholder_route_buffers_instead_of_flooding() {
-    use crate::fabric::service_activator::ServiceProcessor;
+    use crate::fabric::ServiceProcessor;
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -381,7 +381,7 @@ async fn no_route_external_ip_goes_to_gateway() {
 
 #[tokio::test]
 async fn buffered_frames_flushed_to_new_port() {
-    use crate::fabric::service_activator::ServiceProcessor;
+    use crate::fabric::ServiceProcessor;
 
     let fabric = make_test_fabric();
 
@@ -427,7 +427,7 @@ async fn buffered_frames_flushed_to_new_port() {
 
 #[tokio::test]
 async fn route_miss_debounced_on_rapid_frames() {
-    use crate::fabric::service_activator::ServiceProcessor;
+    use crate::fabric::ServiceProcessor;
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -968,7 +968,7 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
 
     // Add a remote pod endpoint for the remote pod IP.
     {
-        use crate::fabric::service_activator::ServiceProcessor;
+        use crate::fabric::ServiceProcessor;
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
         let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;

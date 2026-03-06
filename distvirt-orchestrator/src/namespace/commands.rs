@@ -372,9 +372,6 @@ impl NamespaceStateMachine {
             _ => return,
         };
 
-        // Lock the artifact for this pod.
-        placement_table.lock(artifact_id, pod_id);
-
         // Get workload spec for pod network config.
         let wl_spec = match self.spec.workloads.get(workload_id) {
             Some(s) => s.clone(),

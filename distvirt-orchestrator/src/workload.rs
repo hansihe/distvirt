@@ -34,9 +34,6 @@ pub struct WorkloadStateMachine {
     /// Maximum number of retries before entering terminal Failed state.
     /// Defaults to MAX_RETRIES (5). Can be lowered for model checking.
     pub max_retries: u32,
-    /// Set by FabricRouteMiss/EndpointActivation to wake a dormant workload.
-    /// Cleared by EndpointFlowStatus(has_active_flows=false) or on PodRunning.
-    pub route_miss_wake: bool,
     /// Whether the endpoint has active flows, reported by EndpointFlowStatus events.
     pub has_active_flows: bool,
     /// Once demand appears (0→non-zero) or the workload loses its pod (WorkerLost,
@@ -109,7 +106,6 @@ impl WorkloadStateMachine {
             last_failure_reason: None,
             consecutive_failures: 0,
             max_retries: MAX_RETRIES,
-            route_miss_wake: false,
             has_active_flows: false,
             needs_successful_boot: false,
             conditions: std::collections::BTreeMap::new(),
@@ -380,9 +376,6 @@ impl WorkloadStateMachine {
                 self.consecutive_failures = 0;
                 self.last_failure_reason = None;
                 self.needs_successful_boot = false;
-                // NOTE: route_miss_wake is intentionally NOT cleared here.
-                // Bug 6: FabricRouteMiss demand is never externally resolved.
-                // Clearing on PodRunning would drop demand before any service activates.
                 outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
                 match &self.state {
                     WorkloadState::Launching { pod_id: pid, .. } if *pid == pod_id => {

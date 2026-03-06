@@ -376,7 +376,7 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
     }
 
     // current_demand consistency: for each workload, current_demand should equal the
-    // number of services with wants_backend() + route_miss_wake.
+    // number of services with wants_backend() + has_active_flows.
     for (wl_id, wl) in &ns.workloads {
         let service_demand: u32 = ns
             .service_workload
@@ -386,12 +386,12 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
                 ns.services.get(svc_id).map(|s| s.wants_backend()).unwrap_or(false)
             })
             .count() as u32;
-        let route_miss: u32 = if wl.route_miss_wake { 1 } else { 0 };
-        let expected_demand = service_demand + route_miss;
+        let active_flows: u32 = if wl.has_active_flows { 1 } else { 0 };
+        let expected_demand = service_demand + active_flows;
         assert_eq!(
             wl.current_demand, expected_demand,
-            "Workload {:?} current_demand={} but expected {} (services={}, route_miss={})",
-            wl_id, wl.current_demand, expected_demand, service_demand, route_miss
+            "Workload {:?} current_demand={} but expected {} (services={}, active_flows={})",
+            wl_id, wl.current_demand, expected_demand, service_demand, active_flows
         );
     }
 

@@ -5,7 +5,7 @@ use distvirt_worker_protocol::{BufferPolicy, EndpointKind, EndpointSpec, Service
 
 use crate::fabric::flow::FlowTracker;
 use crate::fabric::port::PortId;
-use crate::fabric::service_activator::ServiceProcessor;
+use super::ServiceProcessor;
 use super::{
     Endpoint, EndpointBackend, EndpointState, EndpointSyncEffect, EndpointTable,
 };
@@ -43,7 +43,6 @@ impl EndpointTable {
                 }
             }
             self.by_ip.remove(&ip);
-            self.last_activation.remove(&ip);
         }
 
         // Upsert each spec.
@@ -72,7 +71,6 @@ impl EndpointTable {
                 }
             }
             self.by_ip.remove(&ip);
-            self.last_activation.remove(&ip);
         }
 
         for spec in upserted {
@@ -130,6 +128,7 @@ impl EndpointTable {
                                 port_id: existing_port_id,
                             },
                             flow_tracker,
+                            last_activation: None,
                         });
                     }
                     Some(ref p) => {
@@ -150,6 +149,7 @@ impl EndpointTable {
                                 worker_id: p.worker_id.0.clone(),
                             },
                             flow_tracker: None,
+                            last_activation: None,
                         });
                         if was_buffering {
                             effects.push(EndpointSyncEffect::FlushPodBuffer { ip });
@@ -170,6 +170,7 @@ impl EndpointTable {
                                     },
                                 },
                                 flow_tracker: None,
+                                last_activation: None,
                             });
                         }
                         // If already exists as UnplacedPod, keep buffer intact.
@@ -208,6 +209,7 @@ impl EndpointTable {
                             buffer_start: None,
                             backend: EndpointBackend::LocalAdapter { port_id },
                             flow_tracker: None,
+                            last_activation: None,
                         });
                         if !old_frames.is_empty() {
                             effects.push(EndpointSyncEffect::FlushAdapterBuffer {
@@ -236,6 +238,7 @@ impl EndpointTable {
                                 worker_id: p.worker_id.0.clone(),
                             },
                             flow_tracker: None,
+                            last_activation: None,
                         });
                         if was_buffering {
                             effects.push(EndpointSyncEffect::FlushPodBuffer { ip });
@@ -256,6 +259,7 @@ impl EndpointTable {
                                     },
                                 },
                                 flow_tracker: None,
+                                last_activation: None,
                             });
                         }
                     }
@@ -310,7 +314,7 @@ impl EndpointTable {
                         endpoint.buffer_start = None;
                     }
                     if new_backend_ip.is_none() {
-                        self.last_activation.remove(&ip);
+                        endpoint.last_activation = None;
                         endpoint.flow_tracker = None;
                     }
 
@@ -353,6 +357,7 @@ impl EndpointTable {
                             processor,
                         },
                         flow_tracker,
+                        last_activation: None,
                     });
                     self.service_id_to_ip.insert(svc_id_str.clone(), ip);
 

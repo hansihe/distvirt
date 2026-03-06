@@ -93,15 +93,35 @@ enum FrameSource<'a, P: FramePort> {
     Port { port_id: PortId, port: &'a SharedPort<P> },
     /// Packet from the gateway (TUN ingress).
     Gateway,
+    /// Internally generated frame (DNAT rewrite, replay).
+    Internal,
 }
 
-/// Send a fabric packet to a local pod port (L3 internal format).
-async fn deliver_to_port<P: FramePort>(
-    packet: &[u8],
-    dst_port: &SharedPort<P>,
+/// Insert a reverse NAT entry so return traffic from the backend can be
+/// SNATted back to the service VIP.
+fn insert_reverse_nat<P: FramePort>(
+    rewritten: &[u8],
+    service_ip: Ipv4Addr,
+    pod_ip: Ipv4Addr,
+    ctx: &FabricContext<P>,
 ) {
-    if let Err(e) = dst_port.send_frame(packet).await {
-        log::warn!("fabric: deliver_to_port error: {}", e);
+    if let Some(fp_rw) = FabricPacket::new(rewritten) {
+        let ip_pkt = fp_rw.ip_packet();
+        let protocol = ip_packet_protocol(ip_pkt).unwrap_or(0);
+        let (src_port, dst_port_val) = ip_packet_transport_ports(ip_pkt).unwrap_or((0, 0));
+        let reverse_key = NatFlowKey {
+            src_ip: pod_ip,
+            dst_ip: fp_rw.ipv4_src(),
+            protocol,
+            src_port: dst_port_val,
+            dst_port: src_port,
+        };
+        let nat_entry = NatEntry {
+            service_ip,
+            backend_ip: pod_ip,
+            last_seen: std::time::Instant::now(),
+        };
+        ctx.inner.nat_table.lock().expect("poisoned").insert(reverse_key, nat_entry);
     }
 }
 
@@ -113,226 +133,210 @@ async fn dispatch_frame<P: FramePort>(
     source: FrameSource<'_, P>,
     ctx: &FabricContext<P>,
 ) {
-    // 1. Parse and validate packet.
-    let fp = match FabricPacket::new(packet) {
-        Some(f) => f,
-        None => return, // runt packet
-    };
+    let mut owned_packet: Option<Vec<u8>> = None;
+    let mut skip_flow_tracking = false;
 
-    // 2. Extract dst_ip.
-    let dst_ip = fp.ipv4_dst();
-    let src_ip = fp.ipv4_src();
+    for _iteration in 0..2 {
+        let pkt = owned_packet.as_deref().unwrap_or(packet);
 
-    if log::log_enabled!(log::Level::Debug) {
-        let source_label = match &source {
-            FrameSource::Port { port_id, .. } => format!("port {}", port_id),
-            FrameSource::Gateway => "gateway".to_string(),
+        // 1. Parse and validate packet.
+        let fp = match FabricPacket::new(pkt) {
+            Some(f) => f,
+            None => return, // runt packet
         };
-        let ip_pkt = fp.ip_packet();
-        let tcp_info = if ip_packet_protocol(ip_pkt) == Some(IP_PROTO_TCP) {
-            let flags = fp.tcp_flags().map(format_tcp_flags).unwrap_or_default();
-            let ports = fp.transport_ports().map(|(s, d)| format!(" {}→{}", s, d)).unwrap_or_default();
-            format!(" TCP{}{}", ports, flags)
-        } else {
-            String::new()
-        };
-        log::debug!(
-            "fabric: dispatch_frame from {} | IPv4 {:?} -> {}{} len={}",
-            source_label, src_ip, dst_ip, tcp_info, packet.len()
-        );
-    }
 
-    // 3. Endpoint table lookup (services + routes).
-    let (ep_action, should_activate, flow_change) = {
-        let mut st = ctx.inner.endpoint_table.lock().expect("poisoned");
-        st.lookup_and_buffer(dst_ip, packet)
-    };
+        // 2. Extract dst_ip.
+        let dst_ip = fp.ipv4_dst();
+        let src_ip = fp.ipv4_src();
 
-    // Emit flow status change if the tracker detected a transition.
-    if let Some(change) = flow_change {
-        if let Some(tx) = ctx.inner.event_tx.get() {
-            let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
-                ip: change.ip,
-                has_active_flows: change.has_active_flows,
-            });
-        }
-    }
-
-    match ep_action {
-        EndpointAction::ServiceForward { pod_ip, service_ip } => {
-            log::debug!(
-                "fabric: service Forward (DNAT {} -> {})",
-                service_ip, pod_ip
-            );
-            if let Some(dst_port) = ctx.inner.resolve_ip(&pod_ip) {
-                let mut rewritten = packet.to_vec();
-                rewrite_ipv4_dst(&mut rewritten, service_ip, pod_ip);
-
-                // Insert a reverse NAT entry so return traffic from the
-                // backend can be SNATted back to the service VIP.
-                if let Some(fp_rw) = FabricPacket::new(&rewritten) {
-                    let ip_pkt = fp_rw.ip_packet();
-                    let protocol = ip_packet_protocol(ip_pkt).unwrap_or(0);
-                    let (src_port, dst_port_val) = ip_packet_transport_ports(ip_pkt).unwrap_or((0, 0));
-                    let reverse_key = NatFlowKey {
-                        src_ip: pod_ip,
-                        dst_ip: fp_rw.ipv4_src(),
-                        protocol,
-                        src_port: dst_port_val,
-                        dst_port: src_port,
-                    };
-                    let nat_entry = NatEntry {
-                        service_ip,
-                        backend_ip: pod_ip,
-                        last_seen: std::time::Instant::now(),
-                    };
-                    ctx.inner.nat_table.lock().expect("poisoned").insert(reverse_key, nat_entry);
-                }
-
-                if let Err(e) = dst_port.send_frame(&rewritten).await {
-                    log::warn!("fabric: service forward error: {}", e);
-                }
+        if log::log_enabled!(log::Level::Debug) {
+            let source_label = match &source {
+                FrameSource::Port { port_id, .. } => format!("port {}", port_id),
+                FrameSource::Gateway => "gateway".to_string(),
+                FrameSource::Internal => "internal".to_string(),
+            };
+            let ip_pkt = fp.ip_packet();
+            let tcp_info = if ip_packet_protocol(ip_pkt) == Some(IP_PROTO_TCP) {
+                let flags = fp.tcp_flags().map(format_tcp_flags).unwrap_or_default();
+                let ports = fp.transport_ports().map(|(s, d)| format!(" {}→{}", s, d)).unwrap_or_default();
+                format!(" TCP{}{}", ports, flags)
             } else {
-                log::warn!(
-                    "fabric: service forward to {} but backend IP {} not reachable",
-                    dst_ip, pod_ip
+                String::new()
+            };
+            log::debug!(
+                "fabric: dispatch_frame from {} | IPv4 {:?} -> {}{} len={}",
+                source_label, src_ip, dst_ip, tcp_info, pkt.len()
+            );
+        }
+
+        // 3. Endpoint table lookup (services + routes).
+        let (ep_action, should_activate, flow_change) = {
+            let mut st = ctx.inner.endpoint_table.lock().expect("poisoned");
+            st.lookup_and_buffer(dst_ip, pkt, skip_flow_tracking)
+        };
+
+        // Emit flow status change if the tracker detected a transition.
+        if let Some(change) = flow_change {
+            if let Some(tx) = ctx.inner.event_tx.get() {
+                let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
+                    ip: change.ip,
+                    has_active_flows: change.has_active_flows,
+                });
+            }
+        }
+
+        match ep_action {
+            EndpointAction::ServiceForward { pod_ip, service_ip } => {
+                log::debug!(
+                    "fabric: service Forward (DNAT {} -> {})",
+                    service_ip, pod_ip
                 );
-            }
+                let mut rewritten = pkt.to_vec();
+                rewrite_ipv4_dst(&mut rewritten, service_ip, pod_ip);
+                insert_reverse_nat(&rewritten, service_ip, pod_ip, ctx);
 
-            if should_activate {
-                emit_activation(ctx, dst_ip, None).await;
-            }
-            return;
-        }
-        EndpointAction::Buffered { ref service_id } => {
-            log::trace!("fabric: frame to {} buffered", dst_ip);
-            if should_activate {
-                emit_activation(ctx, dst_ip, service_id.clone()).await;
-            }
-            return;
-        }
-        EndpointAction::Drop { ref service_id } => {
-            log::trace!("fabric: frame to {} dropped", dst_ip);
-            if should_activate {
-                emit_activation(ctx, dst_ip, service_id.clone()).await;
-            }
-            return;
-        }
-        EndpointAction::ActivatorActions { actions, service_id } => {
-            log::debug!(
-                "fabric: service '{}' activator returned {} actions",
-                service_id, actions.len()
-            );
-            for action in actions {
-                dispatch_action(&action, &service_id, dst_ip, ctx).await;
-            }
-            if should_activate {
-                emit_activation(ctx, dst_ip, Some(service_id)).await;
-            }
-            return;
-        }
-        EndpointAction::L4Result { actions, frames, service_id, poll_delay } => {
-            send_l4_frames(&frames, ctx);
-            for action in actions {
-                dispatch_action(&action, &service_id, dst_ip, ctx).await;
-            }
-            if let Some(delay) = poll_delay {
-                schedule_poll_timer(delay, dst_ip, ctx.clone());
-            }
-            if should_activate {
-                emit_activation(ctx, dst_ip, Some(service_id)).await;
-            }
-            return;
-        }
-        EndpointAction::RemoteWorker { worker_id } => {
-            let port = {
-                let tp = ctx.inner.tunnel_ports.lock().expect("poisoned");
-                tp.get(&worker_id).and_then(|pid| {
-                    ctx.inner.ports.lock().expect("poisoned").get(pid).cloned()
-                })
-            };
-            if let Some(port) = port {
-                if let Err(e) = port.send_frame(packet).await {
-                    log::warn!("fabric: tunnel send to worker {} failed: {}", worker_id, e);
-                }
-            } else {
-                log::debug!("fabric: no tunnel port for worker {}, dropping", worker_id);
-            }
-            return;
-        }
-        EndpointAction::LocalAdapter { port_id } => {
-            let port = {
-                ctx.inner.ports.lock().expect("poisoned").get(&port_id).cloned()
-            };
-            if let Some(port) = port {
-                if let Err(e) = port.send_frame(packet).await {
-                    log::warn!("fabric: adapter send to port {} failed: {}", port_id, e);
-                }
-            } else {
-                log::debug!("fabric: no adapter port {}, dropping", port_id);
-            }
-            return;
-        }
-        EndpointAction::LocalPod { port_id } => {
-            let dst_port = {
-                ctx.inner.ports.lock().expect("poisoned").get(&port_id).cloned()
-            };
-            if let Some(dst_port) = dst_port {
-                // Check NAT table for SNAT (return traffic from backend to client).
-                let nat_match = {
-                    let ip_pkt = fp.ip_packet();
-                    let protocol = ip_packet_protocol(ip_pkt);
-                    let ports = ip_packet_transport_ports(ip_pkt);
+                // Loop back for a second dispatch pass to route the
+                // rewritten packet through the normal path.
+                owned_packet = Some(rewritten);
+                skip_flow_tracking = true;
 
-                    if let Some(proto) = protocol {
-                        let (s_port, d_port) = ports.unwrap_or((0, 0));
-                        let key = NatFlowKey {
-                            src_ip,
-                            dst_ip,
-                            protocol: proto,
-                            src_port: s_port,
-                            dst_port: d_port,
-                        };
-                        let mut nat = ctx.inner.nat_table.lock().expect("poisoned");
-                        nat.lookup(&key).map(|e| e.service_ip)
-                    } else {
-                        None
-                    }
+                if should_activate {
+                    emit_activation(ctx, dst_ip, None).await;
+                }
+                continue;
+            }
+            EndpointAction::Buffered { ref service_id } => {
+                log::trace!("fabric: frame to {} buffered", dst_ip);
+                if should_activate {
+                    emit_activation(ctx, dst_ip, service_id.clone()).await;
+                }
+                return;
+            }
+            EndpointAction::Drop { ref service_id } => {
+                log::trace!("fabric: frame to {} dropped", dst_ip);
+                if should_activate {
+                    emit_activation(ctx, dst_ip, service_id.clone()).await;
+                }
+                return;
+            }
+            EndpointAction::ActivatorActions { actions, service_id } => {
+                log::debug!(
+                    "fabric: service '{}' activator returned {} actions",
+                    service_id, actions.len()
+                );
+                for action in actions {
+                    dispatch_action(&action, &service_id, dst_ip, ctx).await;
+                }
+                if should_activate {
+                    emit_activation(ctx, dst_ip, Some(service_id)).await;
+                }
+                return;
+            }
+            EndpointAction::L4Result { actions, frames, service_id, poll_delay } => {
+                send_l4_frames(&frames, ctx);
+                for action in actions {
+                    dispatch_action(&action, &service_id, dst_ip, ctx).await;
+                }
+                if let Some(delay) = poll_delay {
+                    schedule_poll_timer(delay, dst_ip, ctx.clone());
+                }
+                if should_activate {
+                    emit_activation(ctx, dst_ip, Some(service_id)).await;
+                }
+                return;
+            }
+            EndpointAction::RemoteWorker { worker_id } => {
+                let port = {
+                    let tp = ctx.inner.tunnel_ports.lock().expect("poisoned");
+                    tp.get(&worker_id).and_then(|pid| {
+                        ctx.inner.ports.lock().expect("poisoned").get(pid).cloned()
+                    })
                 };
-
-                if let Some(svc_ip) = nat_match {
-                    let backend_ip = src_ip;
-                    log::debug!(
-                        "fabric: SNAT return traffic (rewriting src {} -> {})",
-                        backend_ip, svc_ip
-                    );
-                    let mut rewritten = packet.to_vec();
-                    rewrite_ipv4_src(&mut rewritten, backend_ip, svc_ip);
-                    if let Err(e) = dst_port.send_frame(&rewritten).await {
-                        log::warn!("fabric: SNAT send error: {}", e);
+                if let Some(port) = port {
+                    if let Err(e) = port.send_frame(pkt).await {
+                        log::warn!("fabric: tunnel send to worker {} failed: {}", worker_id, e);
                     }
                 } else {
-                    deliver_to_port(packet, &dst_port).await;
+                    log::debug!("fabric: no tunnel port for worker {}, dropping", worker_id);
                 }
-            } else {
-                log::debug!("fabric: LocalPod port {} not found, dropping", port_id);
+                return;
             }
-            return;
-        }
-        EndpointAction::NotFound => {
-            // Gateway or drop.
-            if dst_ip == ctx.inner.gateway_ip || !ctx.inner.is_in_subnet(&dst_ip) {
-                if matches!(source, FrameSource::Gateway) {
-                    log::debug!("fabric: dropping gateway-originated frame to {} (no route back)", dst_ip);
-                } else if let Some(gw_tx) = ctx.inner.gateway_tx.get() {
-                    let _ = gw_tx.try_send(packet.to_vec());
+            EndpointAction::LocalAdapter { port_id } => {
+                let port = {
+                    ctx.inner.ports.lock().expect("poisoned").get(&port_id).cloned()
+                };
+                if let Some(port) = port {
+                    if let Err(e) = port.send_frame(pkt).await {
+                        log::warn!("fabric: adapter send to port {} failed: {}", port_id, e);
+                    }
                 } else {
-                    log::debug!("fabric: dropping frame to {} (no gateway)", dst_ip);
+                    log::debug!("fabric: no adapter port {}, dropping", port_id);
                 }
-            } else {
-                log::debug!("fabric: dropping frame to {} (in subnet, no route/port)", dst_ip);
+                return;
             }
-            return;
+            EndpointAction::LocalPod { port_id } => {
+                let dst_port = {
+                    ctx.inner.ports.lock().expect("poisoned").get(&port_id).cloned()
+                };
+                if let Some(dst_port) = dst_port {
+                    // Check NAT table for SNAT (return traffic from backend to client).
+                    let nat_match = {
+                        let ip_pkt = fp.ip_packet();
+                        let protocol = ip_packet_protocol(ip_pkt);
+                        let ports = ip_packet_transport_ports(ip_pkt);
+
+                        if let Some(proto) = protocol {
+                            let (s_port, d_port) = ports.unwrap_or((0, 0));
+                            let key = NatFlowKey {
+                                src_ip,
+                                dst_ip,
+                                protocol: proto,
+                                src_port: s_port,
+                                dst_port: d_port,
+                            };
+                            let mut nat = ctx.inner.nat_table.lock().expect("poisoned");
+                            nat.lookup(&key).map(|e| e.service_ip)
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(svc_ip) = nat_match {
+                        let backend_ip = src_ip;
+                        log::debug!(
+                            "fabric: SNAT return traffic (rewriting src {} -> {})",
+                            backend_ip, svc_ip
+                        );
+                        let mut rewritten = pkt.to_vec();
+                        rewrite_ipv4_src(&mut rewritten, backend_ip, svc_ip);
+                        if let Err(e) = dst_port.send_frame(&rewritten).await {
+                            log::warn!("fabric: SNAT send error: {}", e);
+                        }
+                    } else {
+                        if let Err(e) = dst_port.send_frame(pkt).await {
+                            log::warn!("fabric: deliver_to_port error: {}", e);
+                        }
+                    }
+                } else {
+                    log::debug!("fabric: LocalPod port {} not found, dropping", port_id);
+                }
+                return;
+            }
+            EndpointAction::NotFound => {
+                // Gateway or drop.
+                if dst_ip == ctx.inner.gateway_ip || !ctx.inner.is_in_subnet(&dst_ip) {
+                    if matches!(source, FrameSource::Gateway | FrameSource::Internal) {
+                        log::debug!("fabric: dropping non-port frame to {} (no route back)", dst_ip);
+                    } else if let Some(gw_tx) = ctx.inner.gateway_tx.get() {
+                        let _ = gw_tx.try_send(pkt.to_vec());
+                    } else {
+                        log::debug!("fabric: dropping frame to {} (no gateway)", dst_ip);
+                    }
+                } else {
+                    log::debug!("fabric: dropping frame to {} (in subnet, no route/port)", dst_ip);
+                }
+                return;
+            }
         }
     }
 }
@@ -424,48 +428,10 @@ pub(super) async fn dispatch_action<P: FramePort>(
                 st.get_service_nat_info(service_id)
             };
             if let Some((service_ip, backend_ip)) = nat_info {
-                if let Some(dst_port) = ctx.inner.resolve_ip(&backend_ip) {
-                    let mut rewritten = raw_frame.clone();
-                    // DNAT: rewrite dst IP from service_ip to backend_ip.
-                    rewrite_ipv4_dst(&mut rewritten, service_ip, backend_ip);
-
-                    // Insert reverse NAT entry.
-                    if let Some(fp_rw) = FabricPacket::new(&rewritten) {
-                        let ip_pkt = fp_rw.ip_packet();
-                        let protocol = ip_packet_protocol(ip_pkt).unwrap_or(0);
-                        let (src_port, dst_port_val) = ip_packet_transport_ports(ip_pkt).unwrap_or((0, 0));
-                        let reverse_key = NatFlowKey {
-                            src_ip: backend_ip,
-                            dst_ip: fp_rw.ipv4_src(),
-                            protocol,
-                            src_port: dst_port_val,
-                            dst_port: src_port,
-                        };
-                        let nat_entry = NatEntry {
-                            service_ip,
-                            backend_ip,
-                            last_seen: std::time::Instant::now(),
-                        };
-                        ctx.inner.nat_table.lock().expect("poisoned").insert(reverse_key, nat_entry);
-                    }
-
-                    match dst_port.send_frame(&rewritten).await {
-                        Err(e) => {
-                            log::warn!("fabric: replay send error: {}", e);
-                        }
-                        Ok(n) => {
-                            log::debug!(
-                                "fabric: ReplayPacket sent {} bytes to backend IP {} (DNAT {} -> {})",
-                                n, backend_ip, service_ip, backend_ip
-                            );
-                        }
-                    }
-                } else {
-                    log::warn!(
-                        "fabric: ReplayPacket for service '{}': backend IP {} not reachable, dropping",
-                        service_id, backend_ip
-                    );
-                }
+                let mut rewritten = raw_frame.clone();
+                rewrite_ipv4_dst(&mut rewritten, service_ip, backend_ip);
+                insert_reverse_nat(&rewritten, service_ip, backend_ip, ctx);
+                Box::pin(dispatch_frame(&rewritten, FrameSource::Internal, ctx)).await;
             } else {
                 log::warn!(
                     "fabric: ReplayPacket for service '{}': no NAT info (backend not set?), dropping",

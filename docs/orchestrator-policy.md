@@ -853,15 +853,13 @@ A worker's storage pool can become degraded (read-only filesystem, IO errors, di
 
 `available_memory_mb` is derived from actual host memory via `/proc/meminfo`. However, `vcpus=1/pod` and `memory=128MB/pod` (`DEFAULT_POD_MEMORY_MB`) are still hardcoded. PSI integration provides real pressure feedback for compute, but static capacity accounting (used for scheduling admission and memory pressure fallback) operates on these fictional per-pod sizes. Resource leases (Task 4.1) will have limited value until per-pod resource requests exist in the spec.
 
-### 5. `route_miss_wake` Demand Leak
+### 5. ~~`route_miss_wake` Demand Leak~~ (Fixed)
 
-`FabricRouteMiss` sets `route_miss_wake = true` on the workload, contributing +1 to `effective_demand()` in reconciliation. This flag is **never cleared** — once set, it persists indefinitely, preventing the workload from going idle even after a service takes over demand and subsequently goes idle itself. The workload stays `Running` when it should suspend to `Suspended`.
+**Resolved**: `route_miss_wake` field removed. `EndpointActivation` with no `service_id` now sets `has_active_flows = true` instead, which is naturally cleared by `EndpointFlowStatus(has_active_flows=false)`.
 
-**Fix**: Clear `route_miss_wake` once a service activates and takes over demand (i.e., when reconciliation sees at least one service with `wants_backend()` for this workload). This is a correctness bug that should be fixed before implementing preemption (Task 4.2), since it prevents workloads from appearing idle and thus preemptable.
+### 6. ~~`PlacementTable.locked_by` is Dead Code~~ (Fixed)
 
-### 6. `PlacementTable.locked_by` is Dead Code
-
-`ArtifactPlacement.locked_by` is set during `handle_resume_pod` but never read for any gating decision. The `unlock()` method has zero call sites. The actual guard against double-resume is the `Suspended → Resuming` state transition, not the lock. This field should be removed (clean slate for Task 4.1 Resource Leases) or actually wired to gate scheduling decisions.
+**Resolved**: `locked_by` field, `lock()`, and `unlock()` methods removed from `PlacementTable`/`ArtifactPlacement`. The actual double-resume guard is the `Suspended → Resuming` state transition.
 
 ---
 
@@ -897,7 +895,7 @@ Dormant → WaitingForCapacity → Launching{pod_id, worker_id, launch_timeout, 
 
 `pending: PendingIntent` on transition states captures contradicting signals during async operations (see [Transition Intents](#transition-intents)).
 
-Fields on `WorkloadStateMachine`: `workload_id`, `state`, `current_demand`, `needs_successful_boot`, `route_miss_wake`, `suspend_on_idle`, `consecutive_failures`, `max_retries`, `last_failure_reason`, `conditions`.
+Fields on `WorkloadStateMachine`: `workload_id`, `state`, `current_demand`, `needs_successful_boot`, `has_active_flows`, `suspend_on_idle`, `consecutive_failures`, `max_retries`, `last_failure_reason`, `conditions`.
 
 **ServiceState** (`types/states.rs`):
 ```
@@ -979,7 +977,7 @@ Three complementary methods:
 | PSI integration | Done — workers read `/proc/pressure/` every 10s, orchestrator feeds into pressure scores | `worker/mod.rs`, `types/states.rs`, `shell/mod.rs` |
 | Pressure-driven idle timeout | Done — namespace layer adjusts `IdleTimeout` by pressure band (75%/25%/5s floor) | `namespace/output.rs` |
 | Real memory detection | Done — `/proc/meminfo` at startup, fallback 1024 MB | `worker/mod.rs` |
-| Resource leases | **Not implemented** — `PlacementTable.locked_by` exists but is dead code (see [Known Issues](#known-issues) #6) | `types/states.rs` |
+| Resource leases | **Not implemented** — dead `locked_by` removed (see Known Issues #6) | `types/states.rs` |
 | Preemption | **Not implemented** | — |
 | Worker drain | **Not implemented** | — |
 | Worker heartbeat | **Not implemented** — loss detected only by TCP drop | — |
@@ -993,23 +991,13 @@ Phases 1–3 are complete. See git history for detailed per-task changelogs.
 
 Issues that should be addressed before starting Phase 4 tasks. These are not feature work — they fix existing bugs and remove dead code that would cause confusion or incorrect behavior in Phase 4.
 
-#### Fix `route_miss_wake` demand leak (Known Issue #5)
+#### ~~Fix `route_miss_wake` demand leak~~ (Done)
 
-**Priority**: High — blocks preemption correctness.
+Resolved: `route_miss_wake` removed. `EndpointActivation` with no `service_id` now sets `has_active_flows = true`.
 
-`route_miss_wake` is set by `FabricRouteMiss` but never cleared. This makes demand artificially sticky: once a route miss triggers activation, the workload can never go idle again, preventing suspension. Preemption (Task 4.2) depends on identifying idle workloads — this bug makes them invisible.
+#### ~~Remove dead `PlacementTable.locked_by`~~ (Done)
 
-**Fix**: Clear `route_miss_wake` in reconciliation once a service activates and takes over demand (`wants_backend()` is true for the workload).
-
-**Scope**: `namespace/reconciliation.rs` (clear logic), `workload.rs` (remove Bug 6 comment), `fabric_routing.rs` (fix `#[should_panic]` test).
-
-#### Remove dead `PlacementTable.locked_by` (Known Issue #6)
-
-**Priority**: Low — cleanup before Task 4.1.
-
-Remove `locked_by: Option<PodId>`, `lock()`, and `unlock()` from `ArtifactPlacement`. The field is set but never read for gating. The actual double-resume guard is the `Suspended → Resuming` state transition. Clean removal gives Task 4.1 (Resource Leases) a clean slate.
-
-**Scope**: `types/states.rs` (remove field + methods), `namespace/commands.rs` (remove `lock()` call), `stateright_model.rs` (remove from snapshot state).
+Resolved: `locked_by`, `lock()`, `unlock()` removed from `ArtifactPlacement`/`PlacementTable`.
 
 #### Fix stale `PendingIntent::Restart` comment
 
@@ -1044,7 +1032,7 @@ Recommendation: Option 1 — drain is rare enough that global scope is fine for 
 
 **Note**: With `DEFAULT_POD_MEMORY_MB = 128` still hardcoded for all pods, leases primarily prevent pod *slot* overcommit (two concurrent scheduling decisions racing past the same capacity). Memory-based lease value is limited until per-pod resource requests exist in the spec. Consider implementing slot-only leases first (simpler, still useful) and adding memory reservation when per-pod sizing lands.
 
-**Depends on**: Pre-Phase-4 cleanup (remove dead `locked_by`).
+**Depends on**: Pre-Phase-4 cleanup (done — `locked_by` removed).
 
 ---
 
@@ -1062,7 +1050,7 @@ Recommendation: Option 1 — drain is rare enough that global scope is fine for 
 5. Set `preempted` condition on the target
 6. After target's pod slot frees (on `PodSuspended`/`PodExited`), `schedule_waiting_pods` naturally retries the waiting workload
 
-**Depends on**: Pre-Phase-4 cleanup (fix `route_miss_wake` — idle workloads must actually appear idle), Task 3.2 (pressure-aware scheduling).
+**Depends on**: Pre-Phase-4 cleanup (done — `route_miss_wake` removed), Task 3.2 (pressure-aware scheduling).
 
 ---
 
@@ -1103,7 +1091,7 @@ Recommendation: Option 1 — drain is rare enough that global scope is fine for 
 #### Phase 4 Task Dependencies & Recommended Order
 
 ```
-Pre-Phase-4 cleanup (route_miss_wake fix, locked_by removal)
+Pre-Phase-4 cleanup (done: route_miss_wake fix, locked_by removal)
     │
     ├──→ Task 4.3 (Worker Drain) ← simplest, self-contained warm-up
     │
@@ -1111,7 +1099,7 @@ Pre-Phase-4 cleanup (route_miss_wake fix, locked_by removal)
     │
     ├──→ Task 4.1 (Resource Leases) ← needs clean PlacementTable
     │         │
-    │         └──→ Task 4.2 (Preemption) ← needs route_miss_wake fix + leases
+    │         └──→ Task 4.2 (Preemption) ← needs leases
     │
 ```
 
@@ -1134,7 +1122,7 @@ The existing test harness (mock workers, paused time, event injection, command i
 
 Three mechanisms work together for demand management:
 
-- **`current_demand`**: set authoritatively by reconciliation via `SetDemand { count }`. Reconciliation derives this from service states (`wants_backend()`) plus `route_miss_wake`. No incremental DemandUp/DemandDown — demand is always consistent with actual service states.
+- **`current_demand`**: set authoritatively by reconciliation via `SetDemand { count }`. Reconciliation derives this from service states (`wants_backend()`) plus `has_active_flows`. No incremental DemandUp/DemandDown — demand is always consistent with actual service states.
 - **`needs_successful_boot`**: once demand goes 0→non-zero, the workload is committed to reaching Running before it can go Dormant via SetDemand(0). Also set on WorkerLost and PodGone. Cleared on PodRunning→Running or entering Failed. Prevents demand fluctuations during boot/retry from prematurely stopping the workload.
 - **`PendingIntent`**: captures contradicting signals that arrive *during transitions*. Consumed once when the transition completes.
 

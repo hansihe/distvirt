@@ -69,7 +69,7 @@ impl NamespaceStateMachine {
         }
     }
 
-    /// Compute effective demand for a workload: count of services with wants_backend() + route_miss_wake.
+    /// Compute effective demand for a workload: count of services with wants_backend() + has_active_flows.
     pub fn effective_demand(&self, workload_id: &WorkloadId) -> u32 {
         let service_demand: u32 = self
             .service_workload
@@ -83,13 +83,13 @@ impl NamespaceStateMachine {
             })
             .count() as u32;
 
-        let route_miss: u32 = self
+        let has_active_flows: u32 = self
             .workloads
             .get(workload_id)
-            .map(|wl| if wl.has_active_flows || wl.route_miss_wake { 1 } else { 0 })
+            .map(|wl| if wl.has_active_flows { 1 } else { 0 })
             .unwrap_or(0);
 
-        service_demand + route_miss
+        service_demand + has_active_flows
     }
 
     /// Reconcile demand for a single workload: compute effective_demand, compare to current_demand,

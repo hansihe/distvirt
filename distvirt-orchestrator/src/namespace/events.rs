@@ -184,7 +184,6 @@ impl NamespaceStateMachine {
                     ArtifactPlacement {
                         pool_id,
                         worker_id: worker_id.clone(),
-                        locked_by: None,
                         status: ArtifactStatus::Writing,
                     },
                 );
@@ -257,7 +256,7 @@ impl NamespaceStateMachine {
                                 .unwrap_or(false);
                             if should_wake {
                                 if let Some(wl) = self.workloads.get_mut(&wl_id) {
-                                    wl.route_miss_wake = true;
+                                    wl.has_active_flows = true;
                                 }
                                 self.reconcile_demand(&wl_id, placement_table, out);
                             }
@@ -275,9 +274,6 @@ impl NamespaceStateMachine {
                 if let Some(wl_id) = wl_match {
                     if let Some(wl) = self.workloads.get_mut(&wl_id) {
                         wl.has_active_flows = has_active_flows;
-                        if !has_active_flows {
-                            wl.route_miss_wake = false;
-                        }
                         // Drop mutable borrow before calling reconcile_demand.
                     }
                     self.reconcile_demand(&wl_id, placement_table, out);

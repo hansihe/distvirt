@@ -256,9 +256,8 @@ async fn test_route_miss_ignored_for_unknown_ip() {
     h.assert_workload_dormant("ns", "web");
 }
 
-/// BUG: `route_miss_wake` flag is never cleared, causing a demand leak.
+/// After route-miss wake + service activation + idle timeout, workload should suspend.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[should_panic]
 async fn test_route_miss_demand_leak() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
@@ -288,7 +287,15 @@ async fn test_route_miss_demand_leak() {
     h.assert_workload_running("ns", "web");
     h.assert_service_active("ns", "web-svc");
 
-    // Step 3: Signal no more traffic → start idle timer.
+    // Step 3: Signal no more active flows (clears has_active_flows demand).
+    h.worker(&w1).send_event(WorkerEvent::EndpointFlowStatus {
+        namespace_id: "ns".into(),
+        ip: Ipv4Addr::new(172, 16, 0, 10),
+        has_active_flows: false,
+    });
+    h.converge().await;
+
+    // Step 4: Signal no more traffic → start idle timer.
     h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
         namespace_id: "ns".into(),
         service_id: ServiceId::from("web-svc"),
@@ -296,7 +303,7 @@ async fn test_route_miss_demand_leak() {
     });
     h.converge().await;
 
-    // Step 4: Advance past idle timeout.
+    // Step 5: Advance past idle timeout.
     h.advance_past_idle_timeout("ns", "web-svc").await;
     h.assert_service_idle("ns", "web-svc");
     h.assert_workload_suspended("ns", "web");

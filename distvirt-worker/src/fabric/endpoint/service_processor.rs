@@ -6,7 +6,7 @@ use distvirt_activator::{
 };
 use distvirt_activator::types::Event;
 
-use super::endpoint::EndpointAction;
+use super::EndpointAction;
 
 /// Processing mode for a service entity.
 pub(crate) enum ServiceProcessor {

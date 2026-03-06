@@ -85,7 +85,7 @@ fn sync_remove_service(
 #[test]
 fn unknown_ip_returns_not_found() {
     let mut table = EndpointTable::new();
-    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::NotFound));
 }
 
@@ -94,7 +94,7 @@ fn buffers_when_not_ready() {
     let mut table = EndpointTable::new();
     sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
-    let (action, activate, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (action, activate, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::Buffered { service_id: Some(_) }));
     assert!(activate);
 }
@@ -130,7 +130,7 @@ fn forwards_when_ready() {
     // Attach a fake port so the LocalPod is reachable.
     table.attach_port(POD_IP, 99);
 
-    let (action, activate, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (action, activate, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(
         action,
         EndpointAction::ServiceForward { pod_ip, .. }
@@ -146,7 +146,7 @@ fn mark_ready_returns_buffered_frames() {
 
     // Buffer some frames (no backend yet).
     for _ in 0..3 {
-        table.lookup_and_buffer(SVC_IP, FRAME);
+        table.lookup_and_buffer(SVC_IP, FRAME, false);
     }
 
     // Set backend (Pending) — preserves buffer since None→Some.
@@ -172,7 +172,7 @@ fn update_backend_clears_ready_and_buffer() {
     // Service is ready — now remove backend (Buffering state).
     sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), None, &mut passthrough_processor);
 
-    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::Buffered { .. }));
 }
 
@@ -181,7 +181,7 @@ fn destroy_removes_service() {
     let mut table = EndpointTable::new();
     sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
     sync_remove_service(&mut table, SVC_IP, &mut passthrough_processor);
-    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::NotFound));
 }
 
@@ -190,10 +190,10 @@ fn activation_debounced() {
     let mut table = EndpointTable::new();
     sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
 
-    let (_, activate1, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (_, activate1, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(activate1);
 
-    let (_, activate2, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    let (_, activate2, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(!activate2);
 }
 
@@ -207,9 +207,9 @@ fn buffer_capacity_drops_excess() {
     let mut table = EndpointTable::new();
     sync_create_service(&mut table, "svc1", SVC_IP, policy, &mut passthrough_processor);
 
-    table.lookup_and_buffer(SVC_IP, FRAME);
-    table.lookup_and_buffer(SVC_IP, FRAME);
-    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+    table.lookup_and_buffer(SVC_IP, FRAME, false);
+    table.lookup_and_buffer(SVC_IP, FRAME, false);
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::Drop { .. }));
 }
 
@@ -221,7 +221,7 @@ fn update_backend_preserves_buffered_frames() {
 
     // Buffer 3 frames while there is no backend yet.
     for _ in 0..3 {
-        let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME);
+        let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
         assert!(matches!(action, EndpointAction::Buffered { .. }));
     }
 
@@ -324,7 +324,7 @@ fn l4_mark_ready_processes_backend_available() {
         12345,
         80,
     );
-    let (action, _, _) = table.lookup_and_buffer(SVC_IP, &syn_frame);
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, &syn_frame, false);
     assert!(
         matches!(action, EndpointAction::L4Result { .. }),
         "SYN should trigger L4Result"
@@ -414,7 +414,7 @@ fn activator_mark_ready_returns_replay_actions() {
         12345,
         80,
     );
-    let (action, _, _) = table.lookup_and_buffer(SVC_IP, &syn_frame);
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, &syn_frame, false);
     assert!(
         matches!(action, EndpointAction::ActivatorActions { .. }),
         "SYN should trigger activator actions"
@@ -464,7 +464,7 @@ fn wg_peer_local_creates_local_adapter_endpoint() {
     assert!(effects.is_empty());
 
     // Should return LocalAdapter action.
-    let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME, false);
     assert!(
         matches!(action, EndpointAction::LocalAdapter { port_id } if port_id == ADAPTER_PORT_ID),
         "expected LocalAdapter action, got {:?}", action
@@ -490,7 +490,7 @@ fn wg_peer_remote_creates_remote_segment() {
         Some(ADAPTER_PORT_ID),
     );
 
-    let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME, false);
     assert!(
         matches!(action, EndpointAction::RemoteWorker { ref worker_id } if worker_id == "other-worker"),
         "expected RemoteWorker action, got {:?}", action
@@ -510,7 +510,7 @@ fn wg_peer_unplaced_buffers_and_activates() {
         Some(ADAPTER_PORT_ID),
     );
 
-    let (action, activate, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME);
+    let (action, activate, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::Buffered { service_id: None }));
     assert!(activate, "should emit activation for unplaced peer");
 }
@@ -533,7 +533,7 @@ fn wg_peer_transition_flushes_buffer() {
 
     // Buffer some frames.
     for _ in 0..3 {
-        table.lookup_and_buffer(WG_PEER_IP, FRAME);
+        table.lookup_and_buffer(WG_PEER_IP, FRAME, false);
     }
 
     // Now place locally — should flush buffered frames.
@@ -565,7 +565,7 @@ fn wg_peer_transition_flushes_buffer() {
     }
 
     // Endpoint should now be LocalAdapter.
-    let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::LocalAdapter { .. }));
 }
 
@@ -593,7 +593,7 @@ fn local_pod_pending_buffers_frames() {
     );
 
     // No port attached yet — should buffer.
-    let (action, activate, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME);
+    let (action, activate, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::Buffered { service_id: None }));
     assert!(activate);
 }
@@ -619,7 +619,7 @@ fn local_pod_attach_flushes_buffer() {
 
     // Buffer 3 frames.
     for _ in 0..3 {
-        table.lookup_and_buffer(LOCAL_POD_IP, FRAME);
+        table.lookup_and_buffer(LOCAL_POD_IP, FRAME, false);
     }
 
     // Attach port — should return buffered frames.
@@ -627,7 +627,7 @@ fn local_pod_attach_flushes_buffer() {
     assert_eq!(frames.len(), 3);
 
     // Now should forward to the port.
-    let (action, _, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::LocalPod { port_id: 42 }));
 }
 
@@ -656,7 +656,7 @@ fn local_pod_detach_returns_to_pending() {
     table.detach_port(42);
 
     // Should buffer again (no port).
-    let (action, _, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME);
+    let (action, _, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME, false);
     assert!(matches!(action, EndpointAction::Buffered { service_id: None }));
 }
 
