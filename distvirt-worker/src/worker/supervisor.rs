@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use distvirt_guest_protocol::GuestEvent;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId, PodNetworkConfig,
     PoolId, ArtifactId, WorkerEvent,
@@ -320,7 +321,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                 Some(BalloonConfig {
                     amount_mib: (limits.memory_mib - requests.memory_mib) as u32,
                     deflate_on_oom: true,
-                    stats_polling_interval_s: 0,
+                    stats_polling_interval_s: 1,
                 })
             } else {
                 None
@@ -336,6 +337,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         net: Some(net_config.clone()),
         serial_console: true,
         balloon,
+        initial_commands: vec![],
     };
 
     let mut instance = tokio::select! {
@@ -488,150 +490,169 @@ async fn pod_monitor<I: VmInstance>(
         }
     });
 
-    let event = tokio::select! {
-        // Normal path: container exits.
-        result = vm.wait_container_exit() => {
-            match result {
-                Ok((_container_id, exit_code)) => {
-                    // Gracefully shut down the VM.
-                    match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
-                            let _ = vm.force_kill().await;
+    let event = loop {
+        tokio::select! {
+            // Event-driven path: handle guest events (container exit, balloon, errors).
+            result = vm.recv_event() => {
+                match result {
+                    Ok(GuestEvent::ContainerExited { id, code }) => {
+                        log::info!("pod '{}': container {} exited with code {}", pod_id, id, code);
+                        // Gracefully shut down the VM.
+                        match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
+                                let _ = vm.force_kill().await;
+                            }
+                            Err(_) => {
+                                log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
+                                let _ = vm.force_kill().await;
+                            }
                         }
-                        Err(_) => {
-                            log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
-                            let _ = vm.force_kill().await;
-                        }
-                    }
-                    WorkerEvent::PodExited {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        exit_code,
-                    }
-                }
-                Err(e) => {
-                    log::error!("pod '{}': wait_container_exit error: {:#}", pod_id, e);
-                    let _ = vm.force_kill().await;
-                    WorkerEvent::PodFailed {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        error: format!("{:#}", e),
-                    }
-                }
-            }
-        }
-
-        // Fatal: yamux driver died unexpectedly.
-        result = &mut driver_exit_fut => {
-            let error = match result {
-                Ok(Ok(())) => "yamux driver exited unexpectedly".to_string(),
-                Ok(Err(msg)) => format!("yamux driver error: {}", msg),
-                Err(_) => "yamux driver task dropped exit signal".to_string(),
-            };
-            log::error!("pod '{}': {}", pod_id, error);
-            let _ = vm.force_kill().await;
-            WorkerEvent::PodFailed {
-                namespace_id: namespace_id.clone(),
-                pod_id: pod_id.clone(),
-                error,
-            }
-        }
-
-        // Fatal: port read task died (TAP error, etc.).
-        _ = &mut port_task_fut => {
-            log::error!("pod '{}': port task exited, network dead — force killing VM", pod_id);
-            let _ = vm.force_kill().await;
-            WorkerEvent::PodFailed {
-                namespace_id: namespace_id.clone(),
-                pod_id: pod_id.clone(),
-                error: "port task exited unexpectedly".to_string(),
-            }
-        }
-
-        // Suspend request: snapshot the VM and exit.
-        Some(req) = suspend_rx.recv() => {
-            log::info!("pod '{}': suspend requested, artifact_id={}", pod_id, req.artifact_id);
-            // Emit ArtifactWriteStarted before beginning the snapshot write.
-            send_event(
-                &event_tx,
-                WorkerEvent::ArtifactWriteStarted {
-                    namespace_id: namespace_id.clone(),
-                    artifact_id: req.artifact_id.clone(),
-                    pool_id: req.pool_id.clone(),
-                },
-            )
-            .await;
-            match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
-                Ok(artifacts) => {
-                    // Calculate snapshot size.
-                    let artifact_size_bytes = match dir_size(&req.snapshot_dir).await {
-                        Ok(size) => size,
-                        Err(e) => {
-                            log::warn!("pod '{}': failed to calculate artifact size: {:#}", pod_id, e);
-                            0
-                        }
-                    };
-                    let _ = req.reply.send(Ok(artifacts));
-                    // Emit ArtifactWriteCommitted now that snapshot is durable.
-                    send_event(
-                        &event_tx,
-                        WorkerEvent::ArtifactWriteCommitted {
-                            namespace_id: namespace_id.clone(),
-                            artifact_id: req.artifact_id.clone(),
-                            pool_id: req.pool_id.clone(),
-                            size_bytes: artifact_size_bytes,
-                        },
-                    )
-                    .await;
-                    send_event(
-                        &event_tx,
-                        WorkerEvent::PodSuspended {
+                        break WorkerEvent::PodExited {
                             namespace_id: namespace_id.clone(),
                             pod_id: pod_id.clone(),
-                            artifact_id: req.artifact_id,
-                            artifact_size_bytes,
-                            pool_id: req.pool_id,
-                        },
-                    )
-                    .await;
-                    return; // VM is dead after suspend, exit monitor.
-                }
-                Err(e) => {
-                    let err_msg = format!("{:#}", e);
-                    log::error!("pod '{}': suspend failed: {}", pod_id, err_msg);
-                    let _ = req.reply.send(Err(err_msg.clone()));
-                    let _ = vm.force_kill().await;
-                    WorkerEvent::PodSuspendFailed {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        error: err_msg,
+                            exit_code: code,
+                        };
+                    }
+                    Ok(GuestEvent::BalloonSet { amount_mib }) => {
+                        log::info!("pod '{}': guest requests balloon={} MiB", pod_id, amount_mib);
+                        if let Err(e) = vm.set_balloon(amount_mib).await {
+                            log::warn!("pod '{}': set_balloon failed: {:#}", pod_id, e);
+                        }
+                        continue;
+                    }
+                    Ok(GuestEvent::TaskError { task, message }) => {
+                        log::error!("pod '{}': guest task error: task={}, message={}", pod_id, task, message);
+                        let _ = vm.force_kill().await;
+                        break WorkerEvent::PodFailed {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            error: format!("guest task error: task={}, message={}", task, message),
+                        };
+                    }
+                    Err(e) => {
+                        log::error!("pod '{}': recv_event error: {:#}", pod_id, e);
+                        let _ = vm.force_kill().await;
+                        break WorkerEvent::PodFailed {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            error: format!("{:#}", e),
+                        };
                     }
                 }
             }
-        }
 
-        // Cancellation: graceful shutdown requested.
-        _ = cancel.cancelled() => {
-            log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
-            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
-                Ok(Ok(())) => {
-                    log::info!("pod '{}': graceful shutdown complete", pod_id);
-                }
-                Ok(Err(e)) => {
-                    log::warn!("pod '{}': graceful shutdown error: {:#}, force killing", pod_id, e);
-                    let _ = vm.force_kill().await;
-                }
-                Err(_) => {
-                    log::warn!("pod '{}': graceful shutdown timed out, force killing", pod_id);
-                    let _ = vm.force_kill().await;
+            // Fatal: yamux driver died unexpectedly.
+            result = &mut driver_exit_fut => {
+                let error = match result {
+                    Ok(Ok(())) => "yamux driver exited unexpectedly".to_string(),
+                    Ok(Err(msg)) => format!("yamux driver error: {}", msg),
+                    Err(_) => "yamux driver task dropped exit signal".to_string(),
+                };
+                log::error!("pod '{}': {}", pod_id, error);
+                let _ = vm.force_kill().await;
+                break WorkerEvent::PodFailed {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    error,
+                };
+            }
+
+            // Fatal: port read task died (TAP error, etc.).
+            _ = &mut port_task_fut => {
+                log::error!("pod '{}': port task exited, network dead — force killing VM", pod_id);
+                let _ = vm.force_kill().await;
+                break WorkerEvent::PodFailed {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    error: "port task exited unexpectedly".to_string(),
+                };
+            }
+
+            // Suspend request: snapshot the VM and exit.
+            Some(req) = suspend_rx.recv() => {
+                log::info!("pod '{}': suspend requested, artifact_id={}", pod_id, req.artifact_id);
+                // Emit ArtifactWriteStarted before beginning the snapshot write.
+                send_event(
+                    &event_tx,
+                    WorkerEvent::ArtifactWriteStarted {
+                        namespace_id: namespace_id.clone(),
+                        artifact_id: req.artifact_id.clone(),
+                        pool_id: req.pool_id.clone(),
+                    },
+                )
+                .await;
+                match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
+                    Ok(artifacts) => {
+                        // Calculate snapshot size.
+                        let artifact_size_bytes = match dir_size(&req.snapshot_dir).await {
+                            Ok(size) => size,
+                            Err(e) => {
+                                log::warn!("pod '{}': failed to calculate artifact size: {:#}", pod_id, e);
+                                0
+                            }
+                        };
+                        let _ = req.reply.send(Ok(artifacts));
+                        // Emit ArtifactWriteCommitted now that snapshot is durable.
+                        send_event(
+                            &event_tx,
+                            WorkerEvent::ArtifactWriteCommitted {
+                                namespace_id: namespace_id.clone(),
+                                artifact_id: req.artifact_id.clone(),
+                                pool_id: req.pool_id.clone(),
+                                size_bytes: artifact_size_bytes,
+                            },
+                        )
+                        .await;
+                        send_event(
+                            &event_tx,
+                            WorkerEvent::PodSuspended {
+                                namespace_id: namespace_id.clone(),
+                                pod_id: pod_id.clone(),
+                                artifact_id: req.artifact_id,
+                                artifact_size_bytes,
+                                pool_id: req.pool_id,
+                            },
+                        )
+                        .await;
+                        return; // VM is dead after suspend, exit monitor.
+                    }
+                    Err(e) => {
+                        let err_msg = format!("{:#}", e);
+                        log::error!("pod '{}': suspend failed: {}", pod_id, err_msg);
+                        let _ = req.reply.send(Err(err_msg.clone()));
+                        let _ = vm.force_kill().await;
+                        break WorkerEvent::PodSuspendFailed {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            error: err_msg,
+                        };
+                    }
                 }
             }
-            WorkerEvent::PodExited {
-                namespace_id: namespace_id.clone(),
-                pod_id: pod_id.clone(),
-                exit_code: -1,
+
+            // Cancellation: graceful shutdown requested.
+            _ = cancel.cancelled() => {
+                log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
+                match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
+                    Ok(Ok(())) => {
+                        log::info!("pod '{}': graceful shutdown complete", pod_id);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("pod '{}': graceful shutdown error: {:#}, force killing", pod_id, e);
+                        let _ = vm.force_kill().await;
+                    }
+                    Err(_) => {
+                        log::warn!("pod '{}': graceful shutdown timed out, force killing", pod_id);
+                        let _ = vm.force_kill().await;
+                    }
+                }
+                break WorkerEvent::PodExited {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    exit_code: -1,
+                };
             }
         }
     };

@@ -1,8 +1,9 @@
 use std::io;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::{bail, Context};
-use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
+use async_io::Async;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 
 const AF_VSOCK: i32 = 40;
 const VMADDR_CID_ANY: u32 = u32::MAX;
@@ -17,7 +18,7 @@ struct sockaddr_vm {
 }
 
 pub struct VsockListener {
-    fd: OwnedFd,
+    fd: Async<OwnedFd>,
 }
 
 impl VsockListener {
@@ -52,41 +53,47 @@ impl VsockListener {
             bail!("listen: {}", io::Error::last_os_error());
         }
 
+        // Set non-blocking for async accept.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            bail!("fcntl(F_GETFL): {}", io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            bail!("fcntl(F_SETFL, O_NONBLOCK): {}", io::Error::last_os_error());
+        }
+
+        let fd = Async::new_nonblocking(fd).context("wrap vsock listener in Async")?;
+
         Ok(VsockListener { fd })
     }
 
-    /// Blocking accept — returns a raw File for the accepted connection.
-    pub fn accept(&self) -> anyhow::Result<std::fs::File> {
-        let fd = unsafe {
-            libc::accept4(
-                self.fd.as_raw_fd(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            bail!("accept: {}", io::Error::last_os_error());
+    /// Async accept — returns a raw File for the accepted connection.
+    pub async fn accept(&self) -> anyhow::Result<std::fs::File> {
+        loop {
+            self.fd.readable().await.context("wait for vsock readable")?;
+            let fd = unsafe {
+                libc::accept4(
+                    self.fd.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    continue;
+                }
+                bail!("accept: {}", err);
+            }
+            return Ok(unsafe { std::fs::File::from_raw_fd(fd) });
         }
-        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
-    }
-}
-
-impl AsFd for VsockListener {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
-impl AsRawFd for VsockListener {
-    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
-        self.fd.as_raw_fd()
     }
 }
 
 /// Send a length-prefixed JSON message over an async writer.
 pub async fn send_msg<T: serde::Serialize>(
-    writer: &mut (impl futures_lite::io::AsyncWrite + Unpin),
+    writer: &mut (impl futures::io::AsyncWrite + Unpin),
     msg: &T,
 ) -> anyhow::Result<()> {
     let json = serde_json::to_vec(msg).context("serialize message")?;
@@ -102,7 +109,7 @@ pub async fn send_msg<T: serde::Serialize>(
 
 /// Receive a length-prefixed JSON message from an async reader.
 pub async fn recv_msg<T: serde::de::DeserializeOwned>(
-    reader: &mut (impl futures_lite::io::AsyncRead + Unpin),
+    reader: &mut (impl futures::io::AsyncRead + Unpin),
 ) -> anyhow::Result<T> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await.context("read length")?;

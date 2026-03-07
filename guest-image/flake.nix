@@ -16,6 +16,9 @@
         configfile = ./guest-kernel.config;
         allowImportFromDerivation = true;
       }).overrideAttrs (old: {
+        patches = (old.patches or []) ++ [
+          ./patches/virtio-balloon-sysfs-notify.patch
+        ];
         postInstall = (old.postInstall or "") + ''
           cp vmlinux $out/
         '';

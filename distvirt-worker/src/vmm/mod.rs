@@ -3,6 +3,7 @@ pub mod firecracker;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
+use distvirt_guest_protocol::HostMessage;
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 
@@ -40,6 +41,9 @@ pub struct VmConfig {
     pub serial_console: bool,
     /// Optional balloon device for memory overcommit.
     pub balloon: Option<BalloonConfig>,
+    /// Commands to bake into a config drive for pre-vsock execution.
+    /// When non-empty, a config drive image is created and attached to the VM.
+    pub initial_commands: Vec<HostMessage>,
 }
 
 /// Metadata persisted as `metadata.json` in a snapshot directory.
@@ -113,7 +117,7 @@ pub trait VmInstance: Send + 'static {
 
     /// Update the balloon device size. `amount_mib` is the amount of memory
     /// to reclaim from the guest.
-    fn set_balloon(&self, amount_mib: u32) -> impl Future<Output = anyhow::Result<()>> + Send {
+    fn set_balloon(&mut self, amount_mib: u32) -> impl Future<Output = anyhow::Result<()>> + Send {
         let _ = amount_mib;
         async { anyhow::bail!("balloon not supported by this VM instance") }
     }

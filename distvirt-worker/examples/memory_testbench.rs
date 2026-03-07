@@ -17,8 +17,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 
-use distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider;
 use distvirt_worker::image_provider::ImageProvider;
+use distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider;
 use distvirt_worker::io_session::IoEvent;
 use distvirt_worker::managed_vm::ManagedVm;
 use distvirt_worker::vmm::firecracker::Firecracker;
@@ -53,11 +53,11 @@ struct Args {
     containerd_namespace: String,
 
     /// VM memory size in MiB.
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "256")]
     mem_size_mib: u32,
 
     /// Initial balloon size in MiB (memory reclaimed from guest).
-    #[arg(long, default_value = "256")]
+    #[arg(long, default_value = "128")]
     balloon_amount_mib: u32,
 
     /// Number of vCPUs.
@@ -69,7 +69,7 @@ struct Args {
     stress_target_mib: u64,
 
     /// Step MiB for mem-stress container allocation.
-    #[arg(long, default_value = "32")]
+    #[arg(long, default_value = "16")]
     stress_step_mib: u64,
 
     /// Interval in ms between mem-stress allocation steps.
@@ -118,14 +118,20 @@ async fn main() -> Result<()> {
     eprintln!("    firecracker:     {}", args.firecracker_bin);
     eprintln!("    vcpus:           {}", args.vcpu_count);
     eprintln!("    mem_size:        {} MiB", args.mem_size_mib);
-    eprintln!("    balloon_init:    {} MiB (reclaimed from guest)", args.balloon_amount_mib);
+    eprintln!(
+        "    balloon_init:    {} MiB (reclaimed from guest)",
+        args.balloon_amount_mib
+    );
     eprintln!("    effective guest:  ~{} MiB", effective_guest_mem);
     eprintln!("    deflate_on_oom:  true");
     eprintln!("    serial_console:  {}", args.serial_console);
     eprintln!();
     eprintln!("  Container config:");
     eprintln!("    image:           {}", args.container_image);
-    eprintln!("    containerd:      {} (ns={})", args.containerd_socket, args.containerd_namespace);
+    eprintln!(
+        "    containerd:      {} (ns={})",
+        args.containerd_socket, args.containerd_namespace
+    );
     eprintln!("    entrypoint:      /bin/test-containers mem-stress");
     eprintln!("    stress target:   {} MiB", args.stress_target_mib);
     eprintln!("    stress step:     {} MiB", args.stress_step_mib);
@@ -137,7 +143,7 @@ async fn main() -> Result<()> {
     {
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sigint = signal(SignalKind::interrupt()).expect("register SIGINT handler");
             let mut sigterm = signal(SignalKind::terminate()).expect("register SIGTERM handler");
             tokio::select! {
@@ -176,6 +182,7 @@ async fn main() -> Result<()> {
             deflate_on_oom: true,
             stats_polling_interval_s: 1,
         }),
+        initial_commands: vec![],
     };
     let instance = vmm.launch(&config).await.context("launch VM")?;
     eprintln!("       -> VM process launched");
@@ -198,10 +205,7 @@ async fn main() -> Result<()> {
     eprintln!("       -> container filesystem added");
 
     let container_config = ContainerConfig {
-        entrypoint: vec![
-            "/bin/test-containers".to_string(),
-            "mem-stress".to_string(),
-        ],
+        entrypoint: vec!["/bin/test-containers".to_string(), "mem-stress".to_string()],
         args: vec![
             format!("--target-mib={}", args.stress_target_mib),
             format!("--step-mib={}", args.stress_step_mib),
@@ -227,7 +231,10 @@ async fn main() -> Result<()> {
         .accept_output_stream()
         .await
         .context("accept output stream")?;
-    eprintln!("       -> output stream accepted (container={})", output_container_id);
+    eprintln!(
+        "       -> output stream accepted (container={})",
+        output_container_id
+    );
 
     // Monitoring phase.
     eprintln!("[5/5] Monitoring (Ctrl+C to shut down)...");
@@ -261,36 +268,42 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Balloon adjustment: run inline before entering the wait loop, so that
-    // we don't need to use wait_container_exit in a select loop (it is NOT
-    // cancel-safe because recv_event does two sequential read_exact calls).
-    let initial_balloon = args.balloon_amount_mib;
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let new_amount = initial_balloon / 2;
-    eprintln!(
-        "  [balloon] adjusting: {} -> {} MiB (releasing {} MiB to guest)",
-        initial_balloon, new_amount, initial_balloon - new_amount,
-    );
-    match vm.set_balloon(new_amount).await {
-        Ok(()) => eprintln!("  [balloon] set to {} MiB", new_amount),
-        Err(e) => eprintln!("  [balloon] set_balloon failed: {:#}", e),
-    }
-    eprintln!("  [testbench] waiting for container exit or Ctrl+C...");
+    eprintln!("  [testbench] waiting for guest balloon requests, container exit, or Ctrl+C...");
 
-    // Wait for container exit or shutdown signal. No loop needed — both futures
-    // are polled exactly once, avoiding the cancel-safety problem.
+    // Event-driven balloon loop: recv_event returns raw GuestEvents.
+    // BalloonSet events trigger host-side balloon adjustment.
+    // ContainerExited means the workload finished.
     let mut container_exited = false;
-    tokio::select! {
-        result = vm.wait_container_exit() => {
-            match result {
-                Ok((id, code)) => eprintln!("  [testbench] container {} exited (code={})", id, code),
-                Err(e) => eprintln!("  [testbench] wait_container_exit error: {:#}", e),
+    loop {
+        tokio::select! {
+            result = vm.recv_event() => {
+                match result {
+                    Ok(distvirt_guest_protocol::GuestEvent::ContainerExited { id, code }) => {
+                        eprintln!("  [testbench] container {} exited (code={})", id, code);
+                        container_exited = true;
+                        break;
+                    }
+                    Ok(distvirt_guest_protocol::GuestEvent::BalloonSet { amount_mib }) => {
+                        eprintln!("  [balloon] guest requests balloon={} MiB", amount_mib);
+                        match vm.set_balloon(amount_mib).await {
+                            Ok(()) => eprintln!("  [balloon] set to {} MiB", amount_mib),
+                            Err(e) => eprintln!("  [balloon] set_balloon failed: {:#}", e),
+                        }
+                    }
+                    Ok(distvirt_guest_protocol::GuestEvent::TaskError { task, message }) => {
+                        eprintln!("  [testbench] guest task error: task={}, message={}", task, message);
+                    }
+                    Err(e) => {
+                        eprintln!("  [testbench] recv_event error: {:#}", e);
+                        break;
+                    }
+                }
             }
-            container_exited = true;
-        }
-        _ = shutdown.cancelled() => {
-            eprintln!();
-            eprintln!("  [testbench] shutdown requested");
+            _ = shutdown.cancelled() => {
+                eprintln!();
+                eprintln!("  [testbench] shutdown requested");
+                break;
+            }
         }
     }
 
@@ -306,7 +319,10 @@ async fn main() -> Result<()> {
         match vm.graceful_shutdown(Duration::from_secs(5)).await {
             Ok(()) => eprintln!("  [testbench] VM shut down cleanly"),
             Err(e) => {
-                eprintln!("  [testbench] graceful shutdown failed: {:#}, force killing...", e);
+                eprintln!(
+                    "  [testbench] graceful shutdown failed: {:#}, force killing...",
+                    e
+                );
                 let _ = vm.force_kill().await;
             }
         }

@@ -1,10 +1,9 @@
 use std::ffi::CString;
 use std::io;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::ptr;
 
 use anyhow::{bail, Context};
-use async_io::Async;
 
 /// Mount a filesystem. Creates the target directory if it doesn't exist.
 pub fn mount(
@@ -93,38 +92,3 @@ pub fn read_pipe(fd: i32) -> io::Result<ReadPipeResult> {
     }
 }
 
-/// Block SIGCHLD and return a signalfd that fires when children exit.
-pub fn setup_signalfd() -> anyhow::Result<OwnedFd> {
-    unsafe {
-        let mut mask: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut mask);
-        libc::sigaddset(&mut mask, libc::SIGCHLD);
-
-        if libc::sigprocmask(libc::SIG_BLOCK, &mask, ptr::null_mut()) != 0 {
-            bail!("sigprocmask: {}", io::Error::last_os_error());
-        }
-
-        let fd = libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK);
-        if fd < 0 {
-            bail!("signalfd: {}", io::Error::last_os_error());
-        }
-        Ok(OwnedFd::from_raw_fd(fd))
-    }
-}
-
-/// Drain all pending signals from the signalfd.
-pub fn drain_signalfd(fd: &Async<OwnedFd>) {
-    let mut buf = [0u8; std::mem::size_of::<libc::signalfd_siginfo>()];
-    loop {
-        let n = unsafe {
-            libc::read(
-                fd.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-            )
-        };
-        if n <= 0 {
-            break;
-        }
-    }
-}

@@ -48,11 +48,14 @@ impl<I: VmInstance> ManagedVm<I> {
 
         let msg: GuestMessage = session.recv().await.context("receive Ready")?;
         match msg {
-            GuestMessage::Ready { running_containers } => {
+            GuestMessage::Ready { running_containers, pre_config_responses } => {
                 if running_containers.is_empty() {
                     log::info!("guest is ready");
                 } else {
                     log::info!("guest is ready (resumed, running containers: {:?})", running_containers);
+                }
+                if !pre_config_responses.is_empty() {
+                    log::info!("guest executed {} config drive command(s): {:?}", pre_config_responses.len(), pre_config_responses);
                 }
             }
             other => bail!("expected Ready, got {:?}", other),
@@ -226,18 +229,36 @@ impl<I: VmInstance> ManagedVm<I> {
 
     /// Wait for a container to exit.
     pub async fn wait_container_exit(&mut self) -> anyhow::Result<(String, i32)> {
-        let event: GuestEvent = self
+        let mut event: GuestEvent = self
             .session
             .recv_event()
             .await
             .context("receive ContainerExited event")?;
-        match event {
-            GuestEvent::ContainerExited { id, code } => {
-                log::info!("container {} exited with code {}", id, code);
-                self.started_containers.retain(|c| c != &id);
-                Ok((id, code))
+        loop {
+            match event {
+                GuestEvent::ContainerExited { id, code } => {
+                    log::info!("container {} exited with code {}", id, code);
+                    self.started_containers.retain(|c| c != &id);
+                    return Ok((id, code));
+                }
+                GuestEvent::BalloonSet { .. } | GuestEvent::TaskError { .. } => {
+                    // Skip non-exit events, keep waiting.
+                    event = self
+                        .session
+                        .recv_event()
+                        .await
+                        .context("receive ContainerExited event")?;
+                }
             }
         }
+    }
+
+    /// Receive the next raw event from the guest event stream.
+    pub async fn recv_event(&mut self) -> anyhow::Result<GuestEvent> {
+        self.session
+            .recv_event()
+            .await
+            .context("receive guest event")
     }
 
     /// Accept the next output stream opened by the guest.
@@ -251,7 +272,7 @@ impl<I: VmInstance> ManagedVm<I> {
     }
 
     /// Update the balloon device size (memory to reclaim from guest, in MiB).
-    pub async fn set_balloon(&self, amount_mib: u32) -> anyhow::Result<()> {
+    pub async fn set_balloon(&mut self, amount_mib: u32) -> anyhow::Result<()> {
         self.instance.set_balloon(amount_mib).await
     }
 
@@ -327,6 +348,9 @@ impl<I: VmInstance> ManagedVm<I> {
                     Ok(Ok(GuestEvent::ContainerExited { id, code })) => {
                         log::info!("container {} exited with code {} during graceful shutdown", id, code);
                         remaining -= 1;
+                    }
+                    Ok(Ok(GuestEvent::BalloonSet { .. })) | Ok(Ok(GuestEvent::TaskError { .. })) => {
+                        // Ignore non-exit events during shutdown.
                     }
                     Ok(Err(e)) => {
                         log::warn!("recv error during graceful shutdown: {:#}", e);

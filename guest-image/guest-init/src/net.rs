@@ -315,6 +315,18 @@ fn build_qdisc_msg(
     buf
 }
 
+pub const DEFAULT_INTERFACE: &str = "eth0";
+
+/// Suspend network traffic by installing a plug qdisc on the default interface.
+pub fn suspend() -> anyhow::Result<()> {
+    plug_qdisc(DEFAULT_INTERFACE)
+}
+
+/// Resume network traffic by removing the plug qdisc from the default interface.
+pub fn resume() -> anyhow::Result<()> {
+    unplug_qdisc(DEFAULT_INTERFACE)
+}
+
 /// Install a `plug` qdisc on the given interface to buffer all outbound packets.
 ///
 /// Equivalent to: `tc qdisc add dev <interface> root plug`

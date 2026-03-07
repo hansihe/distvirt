@@ -6,7 +6,7 @@ use anyhow::{bail, Context};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use super::{BalloonConfig, NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
+use super::{NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
 
@@ -88,19 +88,39 @@ impl Vmm for Firecracker {
             .context("waiting for firecracker API socket")?;
 
         // Configure the VM via the API.
+        //
+        // Boot args for the microVM kernel:
+        //   console=ttyS0  — serial console for boot logs (captured via stdout)
+        //   reboot=k       — use keyboard controller reset (prevents triple-fault reboot loop)
+        //   panic=1        — reboot 1s after kernel panic (fast failure detection)
+        //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
+        //   init=/sbin/init — our custom init binary (not systemd)
+        let mut boot_args = "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init".to_string();
+        if let Some(ref balloon) = config.balloon {
+            boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
+        }
+
+        // Write config drive if there are pre-vsock commands to bake in.
+        if !config.initial_commands.is_empty() {
+            let config_img_path = tmpdir.path().join("config.img");
+            let json_payload = serde_json::to_vec(&config.initial_commands)
+                .context("serialize initial_commands")?;
+            let mut img_data = Vec::with_capacity(4 + json_payload.len());
+            img_data.extend_from_slice(&(json_payload.len() as u32).to_le_bytes());
+            img_data.extend_from_slice(&json_payload);
+            tokio::fs::write(&config_img_path, &img_data)
+                .await
+                .context("write config.img")?;
+            boot_args.push_str(" distvirt.config_device=/dev/vdc");
+        }
+
         api_request("PUT",
             &api_socket,
             "/boot-source",
             &serde_json::json!({
                 "kernel_image_path": config.kernel_path.to_str()
                     .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8: {:?}", config.kernel_path))?,
-                // Boot args for the microVM kernel:
-                //   console=ttyS0  — serial console for boot logs (captured via stdout)
-                //   reboot=k       — use keyboard controller reset (prevents triple-fault reboot loop)
-                //   panic=1        — reboot 1s after kernel panic (fast failure detection)
-                //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
-                //   init=/sbin/init — our custom init binary (not systemd)
-                "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init"
+                "boot_args": boot_args
             }),
         )
         .await
@@ -131,6 +151,22 @@ impl Vmm for Firecracker {
         )
         .await
         .context("configure container drive")?;
+
+        // Register config drive if present.
+        if !config.initial_commands.is_empty() {
+            api_request("PUT",
+                &api_socket,
+                "/drives/config",
+                &serde_json::json!({
+                    "drive_id": "config",
+                    "path_on_host": "./config.img",
+                    "is_root_device": false,
+                    "is_read_only": true
+                }),
+            )
+            .await
+            .context("configure config drive")?;
+        }
 
         api_request("PUT",
             &api_socket,
@@ -459,7 +495,7 @@ impl VmInstance for FirecrackerInstance {
         Ok(())
     }
 
-    async fn set_balloon(&self, amount_mib: u32) -> anyhow::Result<()> {
+    async fn set_balloon(&mut self, amount_mib: u32) -> anyhow::Result<()> {
         if !self.balloon_configured {
             bail!("balloon device not configured for this VM");
         }

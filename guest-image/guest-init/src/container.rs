@@ -1,15 +1,25 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
+use std::rc::Rc;
 
 use anyhow::{bail, Context};
+use async_executor::LocalExecutor;
 use async_io::Async;
 
+use crate::buffer::OutputBuffer;
 use crate::cgroup;
+use crate::output::{self, FillTaskHandle};
 use crate::util;
+use distvirt_guest_protocol::GuestEvent;
 
-/// RAII wrapper around the read end of a pipe.
+/// Newtype wrapper for pipe read-end fds.
+///
+/// `Async<T>` requires `T: AsRawFd + AsFd`. While `OwnedFd` satisfies these
+/// traits, using a distinct type makes it clear at the type level that this
+/// fd is the read end of a pipe (not a socket, file, etc.).
 pub struct PipeFd {
     fd: OwnedFd,
 }
@@ -36,57 +46,35 @@ struct Container {
     id: String,
     mount_point: String,
     pid: Option<libc::pid_t>,
-    /// Read end of stdout pipe (when capture_output is enabled).
-    pub stdout_fd: Option<Async<PipeFd>>,
-    /// Read end of stderr pipe (when capture_output is enabled).
-    pub stderr_fd: Option<Async<PipeFd>>,
     /// Write end of stdin pipe (when stdin forwarding is enabled).
     pub stdin_fd: Option<OwnedFd>,
     /// Path to this container's cgroup (if cgroups are available).
     pub cgroup_path: Option<String>,
+    /// Per-container output buffer (when capture_output is enabled).
+    /// Chunks are produced by the fill task and consumed by a per-connection drain task.
+    pub output_buffer: Option<OutputBuffer>,
+    /// Handle to the fill task that reads pipes and fills the output buffer.
+    pub fill_task_handle: Option<FillTaskHandle>,
 }
 
 pub struct ContainerManager {
     containers: HashMap<String, Container>,
-    /// Aggregate PSI monitor fd on the parent cgroup (if available).
-    psi_fd: Option<Async<OwnedFd>>,
 }
 
-/// Result of reaping a child process.
-pub struct ChildExit {
+/// Request from connection loop to root supervisor to spawn a container task.
+pub struct ContainerTaskRequest {
     pub id: String,
-    pub code: i32,
+    pub pid: libc::pid_t,
 }
 
 impl ContainerManager {
     pub fn new() -> Self {
-        let psi_fd = match cgroup::init_container_cgroup_root() {
-            Ok(()) => match cgroup::setup_psi_monitor("/sys/fs/cgroup/containers") {
-                Ok(fd) => match Async::new_nonblocking(fd) {
-                    Ok(async_fd) => Some(async_fd),
-                    Err(e) => {
-                        log::warn!("failed to wrap PSI fd in Async: {:#}", e);
-                        None
-                    }
-                },
-                Err(e) => {
-                    log::warn!("failed to set up PSI monitor: {:#}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                log::warn!("failed to init cgroup root: {:#}", e);
-                None
-            }
-        };
+        if let Err(e) = cgroup::init_container_cgroup_root() {
+            log::warn!("failed to init cgroup root: {:#}", e);
+        }
         ContainerManager {
             containers: HashMap::new(),
-            psi_fd,
         }
-    }
-
-    pub fn psi_fd(&self) -> Option<&Async<OwnedFd>> {
-        self.psi_fd.as_ref()
     }
 
     /// Mount the block device as ext4 at /containers/<id> and write resolv.conf.
@@ -134,10 +122,10 @@ impl ContainerManager {
                 id,
                 mount_point,
                 pid: None,
-                stdout_fd: None,
-                stderr_fd: None,
                 stdin_fd: None,
                 cgroup_path: None,
+                output_buffer: None,
+                fill_task_handle: None,
             },
         );
         Ok(())
@@ -156,6 +144,7 @@ impl ContainerManager {
         hostname: Option<&str>,
         capture_output: bool,
         stdin: bool,
+        ex: &LocalExecutor<'_>,
     ) -> anyhow::Result<u32> {
         let container = self
             .containers
@@ -186,27 +175,25 @@ impl ContainerManager {
             None
         };
 
-        // Set up cgroup for this container before fork.
-        let cgroup_path = match cgroup::setup_container_cgroup(id) {
-            Ok(path) => Some(path),
-            Err(e) => {
-                log::warn!("failed to create cgroup for container {}: {:#}", id, e);
-                None
-            }
+        // Set up cgroup for this container before clone3.
+        let cgroup_path = cgroup::setup_container_cgroup(id)
+            .with_context(|| format!("create cgroup for container {}", id))?;
+
+        // Open the cgroup directory as an fd for CLONE_INTO_CGROUP.
+        let cgroup_dir_c = CString::new(cgroup_path.as_str())
+            .context("invalid cgroup path")?;
+        let cgroup_dir_fd = unsafe {
+            libc::open(cgroup_dir_c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY)
         };
-
-        // Create a new PID namespace so the container process becomes PID 1.
-        // unshare(CLONE_NEWPID) affects the *next* fork — the child will be PID 1
-        // in the new namespace, while the parent still sees the real PID.
-        if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
-            bail!("unshare(CLONE_NEWPID): {}", std::io::Error::last_os_error());
+        if cgroup_dir_fd < 0 {
+            bail!("open cgroup dir {}: {}", cgroup_path, std::io::Error::last_os_error());
         }
+        // Ensure the fd is closed in the parent even on error paths.
+        let cgroup_dir_fd_owned = unsafe { OwnedFd::from_raw_fd(cgroup_dir_fd) };
 
-        let pid = unsafe { libc::fork() };
-        if pid < 0 {
-            // OwnedFds drop automatically here.
-            bail!("fork: {}", std::io::Error::last_os_error());
-        }
+        // clone3 with CLONE_NEWPID | CLONE_INTO_CGROUP: the child is born
+        // into a new PID namespace (PID 1) and directly into its cgroup.
+        let pid = clone3_into_cgroup(cgroup_dir_fd_owned.as_raw_fd())?;
 
         if pid == 0 {
             // Child process — pass write-end raw fds to child_exec.
@@ -231,31 +218,45 @@ impl ContainerManager {
         }
 
         // Parent — keep read ends, drop write ends (via destructuring).
+        // Wrap pipes in Async and spawn a fill task that reads them into an OutputBuffer.
         if let (Some((stdout_read, _stdout_write)), Some((stderr_read, _stderr_write))) =
             (stdout_pipe, stderr_pipe)
         {
-            container.stdout_fd = Some(
+            let stdout_async = Some(
                 Async::new(PipeFd::new(stdout_read))
                     .context("wrap stdout pipe in Async")?
             );
-            container.stderr_fd = Some(
+            let stderr_async = Some(
                 Async::new(PipeFd::new(stderr_read))
                     .context("wrap stderr pipe in Async")?
             );
+
+            let buffer = OutputBuffer::new(256);
+            let fill_handle = output::spawn_fill_task(
+                id.to_string(),
+                stdout_async,
+                stderr_async,
+                buffer.sender(),
+                ex,
+            );
+            container.output_buffer = Some(buffer);
+            container.fill_task_handle = Some(fill_handle);
         }
 
         // Parent — keep write end of stdin pipe, drop read end.
+        // Set O_NONBLOCK on the write end now. Since dup() shares the open file
+        // description, all future dup'd fds (for relay_stdin) inherit this
+        // automatically — no need to set it again per-connection.
         if let Some((_stdin_read, stdin_write)) = stdin_pipe {
+            let raw_fd = stdin_write.as_raw_fd();
+            let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+            if flags >= 0 {
+                unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            }
             container.stdin_fd = Some(stdin_write);
         }
 
-        // Move child into its cgroup (parent side).
-        if let Some(ref path) = cgroup_path {
-            if let Err(e) = cgroup::move_to_cgroup(path, pid) {
-                log::warn!("failed to move pid {} to cgroup: {:#}", pid, e);
-            }
-        }
-        container.cgroup_path = cgroup_path;
+        container.cgroup_path = Some(cgroup_path);
 
         container.pid = Some(pid);
         log::info!(
@@ -267,68 +268,48 @@ impl ContainerManager {
         Ok(pid as u32)
     }
 
-    /// Reap any exited children and return their container IDs and exit codes.
-    pub fn reap_children(&mut self) -> Vec<ChildExit> {
-        let mut exits = Vec::new();
-        loop {
-            let mut status: libc::c_int = 0;
-            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-            if pid <= 0 {
-                break;
-            }
-
-            let code = if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
-            } else if libc::WIFSIGNALED(status) {
-                128 + libc::WTERMSIG(status)
-            } else {
-                -1
-            };
-
-            // Find which container this PID belongs to.
-            let id = self
-                .containers
-                .values()
-                .find(|c| c.pid == Some(pid))
-                .map(|c| c.id.clone());
-
-            if let Some(id) = id {
-                log::info!("container {} (pid {}) exited with code {}", id, pid, code);
-                if let Some(c) = self.containers.get_mut(&id) {
-                    c.pid = None;
-                }
-                exits.push(ChildExit { id, code });
-            } else {
-                log::warn!("reaped unknown pid {} with code {}", pid, code);
-            }
+    /// Mark a container as exited without calling waitpid (pidfd handles reaping).
+    pub fn mark_exited(&mut self, id: &str) {
+        if let Some(c) = self.containers.get_mut(id) {
+            c.pid = None;
         }
-        exits
     }
 
-    /// Take ownership of the stdout pipe for a container.
-    pub fn take_stdout_fd(&mut self, id: &str) -> Option<Async<PipeFd>> {
-        self.containers.get_mut(id).and_then(|c| c.stdout_fd.take())
+    /// Duplicate the stdin pipe write-end for a container.
+    /// The original fd stays in the container so it survives reconnects.
+    pub fn dup_stdin_fd(&self, id: &str) -> Option<OwnedFd> {
+        self.containers.get(id).and_then(|c| {
+            c.stdin_fd.as_ref().and_then(|fd| {
+                let new_fd = unsafe { libc::dup(fd.as_raw_fd()) };
+                if new_fd < 0 {
+                    log::warn!("dup stdin fd for {}: {}", id, std::io::Error::last_os_error());
+                    None
+                } else {
+                    Some(unsafe { OwnedFd::from_raw_fd(new_fd) })
+                }
+            })
+        })
     }
 
-    /// Take ownership of the stderr pipe for a container.
-    pub fn take_stderr_fd(&mut self, id: &str) -> Option<Async<PipeFd>> {
-        self.containers.get_mut(id).and_then(|c| c.stderr_fd.take())
+    /// Get the output buffer receiver for a container (for spawning a drain task).
+    pub fn output_buffer_receiver(&self, id: &str) -> Option<async_channel::Receiver<Vec<u8>>> {
+        self.containers.get(id).and_then(|c| c.output_buffer.as_ref().map(|b| b.receiver()))
     }
 
-    /// Take ownership of the stdin pipe write-end for a container.
-    pub fn take_stdin_fd(&mut self, id: &str) -> Option<OwnedFd> {
-        self.containers.get_mut(id).and_then(|c| c.stdin_fd.take())
+    /// Take the fill task handle for a container (for signaling on exit).
+    pub fn take_fill_task_handle(&mut self, id: &str) -> Option<FillTaskHandle> {
+        self.containers.get_mut(id).and_then(|c| c.fill_task_handle.take())
     }
 
-    /// Get the raw fd for a container's stdout pipe (without taking ownership).
-    pub fn stdout_raw_fd(&self, id: &str) -> Option<i32> {
-        self.containers.get(id).and_then(|c| c.stdout_fd.as_ref().map(|p| p.as_raw_fd()))
+    /// Return containers that have an output buffer (for drain task setup on connect).
+    pub fn containers_with_output(&self) -> Vec<(String, async_channel::Receiver<Vec<u8>>)> {
+        self.containers.values()
+            .filter_map(|c| {
+                c.output_buffer.as_ref().map(|b| (c.id.clone(), b.receiver()))
+            })
+            .collect()
     }
 
-    /// Get the raw fd for a container's stderr pipe (without taking ownership).
-    pub fn stderr_raw_fd(&self, id: &str) -> Option<i32> {
-        self.containers.get(id).and_then(|c| c.stderr_fd.as_ref().map(|p| p.as_raw_fd()))
-    }
 
     /// Send a signal to all running containers. Logs errors but does not fail.
     pub fn signal_all_running(&self, signal: i32) {
@@ -399,28 +380,129 @@ impl ContainerManager {
             .collect()
     }
 
-    /// Return all container IDs that have capture output enabled (have pipe fds).
-    pub fn captured_container_ids(&self) -> Vec<String> {
-        self.containers
-            .values()
-            .filter(|c| c.stdout_fd.is_some() || c.stderr_fd.is_some())
-            .map(|c| c.id.clone())
-            .collect()
+}
+
+// ---------------------------------------------------------------------------
+// pidfd helpers
+// ---------------------------------------------------------------------------
+
+/// Fork via `clone3` with `CLONE_NEWPID | CLONE_INTO_CGROUP`.
+///
+/// The child is born as PID 1 in a new PID namespace and is placed directly
+/// into the given cgroup (no post-fork race). Returns 0 in the child, child
+/// pid in the parent.
+fn clone3_into_cgroup(cgroup_fd: RawFd) -> anyhow::Result<libc::pid_t> {
+    // CLONE_INTO_CGROUP (0x200000000, Linux 5.7+) — not defined in musl's libc bindings.
+    const CLONE_INTO_CGROUP: u64 = 0x200000000;
+
+    let mut args: libc::clone_args = unsafe { std::mem::zeroed() };
+    args.flags = (libc::CLONE_NEWPID as u64) | CLONE_INTO_CGROUP;
+    args.exit_signal = libc::SIGCHLD as u64;
+    args.cgroup = cgroup_fd as u64;
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            &args as *const libc::clone_args,
+            std::mem::size_of::<libc::clone_args>(),
+        )
+    };
+    if ret < 0 {
+        bail!("clone3: {}", std::io::Error::last_os_error());
+    }
+    Ok(ret as libc::pid_t)
+}
+
+/// Open a pidfd for the given pid (Linux 5.3+, syscall 434 on x86_64).
+fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedFd> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
+    if fd < 0 {
+        bail!(
+            "pidfd_open({}): {}",
+            pid,
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// Wait for exit status via pidfd using `waitid(P_PIDFD, ...)`.
+fn waitid_pidfd(pidfd: &OwnedFd) -> anyhow::Result<i32> {
+    const P_PIDFD: libc::idtype_t = 3;
+    let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::waitid(
+            P_PIDFD,
+            pidfd.as_raw_fd() as libc::id_t,
+            &mut siginfo,
+            libc::WEXITED,
+        )
+    };
+    if ret < 0 {
+        bail!("waitid(P_PIDFD): {}", std::io::Error::last_os_error());
+    }
+    // Extract exit code from siginfo_t.
+    // si_status contains the exit code (for CLD_EXITED) or signal number (for CLD_KILLED/CLD_DUMPED).
+    let si_code = siginfo.si_code;
+    let si_status = unsafe { siginfo.si_status() };
+    let code = if si_code == libc::CLD_EXITED {
+        si_status
+    } else {
+        // Killed by signal — use 128+signal convention.
+        128 + si_status
+    };
+    Ok(code)
+}
+
+// ---------------------------------------------------------------------------
+// Per-container supervised task
+// ---------------------------------------------------------------------------
+
+/// Supervised task for a single container. Waits for the container process to
+/// exit via pidfd, drains output, pushes the exit event, and cleans up.
+pub async fn container_task(
+    id: String,
+    pid: libc::pid_t,
+    containers: Rc<RefCell<ContainerManager>>,
+    event_tx: async_channel::Sender<GuestEvent>,
+) -> anyhow::Result<()> {
+    let pidfd = pidfd_open(pid)?;
+
+    // Set O_NONBLOCK so Async can use epoll on it.
+    let flags = unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
     }
 
-    /// Return references to all active pipe Async wrappers (for readability polling).
-    pub fn pipe_refs(&self) -> Vec<&Async<PipeFd>> {
-        let mut pipes = Vec::new();
-        for c in self.containers.values() {
-            if let Some(ref p) = c.stdout_fd {
-                pipes.push(p);
-            }
-            if let Some(ref p) = c.stderr_fd {
-                pipes.push(p);
-            }
-        }
-        pipes
+    let async_pidfd = Async::new_nonblocking(pidfd)
+        .context("wrap pidfd in Async")?;
+
+    // Wait for process exit (pidfd becomes readable).
+    async_pidfd.readable().await?;
+
+    let code = waitid_pidfd(async_pidfd.get_ref())?;
+    log::info!("container {} (pid {}) exited with code {}", id, pid, code);
+
+    // Mark exited in container manager.
+    containers.borrow_mut().mark_exited(&id);
+
+    // Signal fill task for final output drain.
+    let fill_handle = containers.borrow_mut().take_fill_task_handle(&id);
+    if let Some(handle) = fill_handle {
+        handle.signal_exit().await;
     }
+
+    // Push exit event (buffered, survives disconnects).
+    if let Err(e) = event_tx.send(GuestEvent::ContainerExited {
+        id: id.clone(),
+        code,
+    }).await {
+        log::error!("event buffer send failed (closed): {}", e);
+    }
+
+    // Cleanup: unmount, remove cgroup.
+    containers.borrow_mut().remove(&id);
+
+    Ok(())
 }
 
 /// Runs in the child process after fork. Never returns.
@@ -557,6 +639,33 @@ fn child_exec_inner(
         unsafe { libc::close(console_fd); }
     }
 
+    // Close all fds > 2 that aren't stdin/stdout/stderr.
+    // O_CLOEXEC handles most, but this catches any leaks from the parent
+    // (vsock listener, epoll, inotify, other containers' pipe write-ends).
+    //
+    // Uses raw libc opendir/readdir to avoid std::fs::ReadDir, whose Drop
+    // impl calls closedir and panics if the underlying fd was already closed.
+    unsafe {
+        let path = b"/proc/self/fd\0";
+        let dir = libc::opendir(path.as_ptr() as *const libc::c_char);
+        if !dir.is_null() {
+            let dir_fd = libc::dirfd(dir);
+            loop {
+                let entry = libc::readdir(dir);
+                if entry.is_null() {
+                    break;
+                }
+                let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
+                if let Ok(fd) = name.to_str().unwrap_or("").parse::<i32>() {
+                    if fd > 2 && fd != dir_fd {
+                        libc::close(fd);
+                    }
+                }
+            }
+            libc::closedir(dir);
+        }
+    }
+
     // Set gid before uid (after setuid we may lack permission for setgid).
     if let Some(g) = gid {
         if unsafe { libc::setgid(g) } != 0 {
@@ -598,14 +707,17 @@ fn child_exec_inner(
 /// Looks for `PATH=...` in `env`, splits on ':', and checks each directory
 /// for an executable file with the given name. Returns the first match.
 fn resolve_in_path(name: &str, env: &[String]) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
     let path_val = env.iter().find_map(|e| e.strip_prefix("PATH="))?;
     for dir in path_val.split(':') {
         if dir.is_empty() {
             continue;
         }
         let candidate = format!("{}/{}", dir, name);
-        if std::path::Path::new(&candidate).exists() {
-            return Some(candidate);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && (meta.permissions().mode() & 0o111) != 0 {
+                return Some(candidate);
+            }
         }
     }
     None

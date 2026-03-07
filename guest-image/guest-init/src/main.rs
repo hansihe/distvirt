@@ -1,767 +1,612 @@
+mod buffer;
 mod cgroup;
+mod config_drive;
 mod container;
+mod init;
+mod memory;
 mod net;
+mod output;
+mod session;
 mod util;
 mod vsock;
+mod yamux_driver;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::OwnedFd;
 use std::pin::Pin;
-use std::task::Poll;
+use std::rc::Rc;
+use std::task::{Context, Poll};
 
-use anyhow::Context;
+use anyhow::Context as _;
 use async_executor::LocalExecutor;
-use async_io::Async;
-use futures_lite::future;
-use futures_lite::io::{AsyncRead, AsyncWriteExt};
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 
-use container::ContainerManager;
+use buffer::EventBuffer;
+use container::{ContainerManager, ContainerTaskRequest};
 use distvirt_guest_protocol::{
     GuestEvent, GuestMessage, HostMessage, StreamHeader, VSOCK_CONTROL_PORT,
-    STREAM_STDOUT, STREAM_STDERR, encode_output_chunk,
 };
-use std::os::unix::io::OwnedFd;
-use util::ReadPipeResult;
+use memory::MemoryManager;
 
-fn mount_essential_filesystems() {
-    let mounts: &[(&str, &str, &str, libc::c_ulong, Option<&str>)] = &[
-        ("proc", "/proc", "proc", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None),
-        ("sysfs", "/sys", "sysfs", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None),
-        ("tmpfs", "/tmp", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None),
-        ("devpts", "/dev/pts", "devpts", libc::MS_NOSUID | libc::MS_NOEXEC, Some("gid=5,mode=620")),
-        ("tmpfs", "/dev/shm", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None),
-        ("cgroup2", "/sys/fs/cgroup", "cgroup2", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None),
-    ];
+use session::{CommandResult, LoopExit, Session};
 
-    for &(source, target, fstype, flags, data) in mounts {
-        if let Err(err) = util::mount(source, target, fstype, flags, data) {
-            log::warn!("{:#}", err);
+// ---------------------------------------------------------------------------
+// TaggedTask — wrapper for FuturesUnordered that returns (id, result)
+// ---------------------------------------------------------------------------
+
+struct TaggedTask {
+    id: String,
+    task: async_executor::Task<anyhow::Result<()>>,
+}
+
+impl Future for TaggedTask {
+    type Output = (String, anyhow::Result<()>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.task).poll(cx) {
+            Poll::Ready(result) => Poll::Ready((self.id.clone(), result)),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
-/// Buffered reader for the yamux control stream.
-///
-/// Accumulates bytes from `poll_read` and yields complete length-prefixed JSON
-/// messages. Safe to use inside a droppable select arm because partial read
-/// progress is preserved in the struct, not in stack temporaries.
-struct ControlReader {
-    stream: yamux::Stream,
-    buf: Vec<u8>,
-}
+// ---------------------------------------------------------------------------
+// Connection loop — runs for process lifetime, reconnects internally
+// ---------------------------------------------------------------------------
 
-impl ControlReader {
-    fn new(stream: yamux::Stream) -> Self {
-        ControlReader { stream, buf: Vec::new() }
-    }
-
-    /// Poll for a complete length-prefixed JSON message.
-    ///
-    /// Reads available bytes from the yamux stream into an internal buffer,
-    /// then checks if a complete message is present. Returns `Pending` if
-    /// only a partial message has arrived.
-    fn poll_recv<T: serde::de::DeserializeOwned>(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<anyhow::Result<T>> {
-        // Read whatever is available from the yamux stream.
-        loop {
-            let mut tmp = [0u8; 8192];
-            match Pin::new(&mut self.stream).poll_read(cx, &mut tmp) {
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(anyhow::anyhow!("control stream EOF")));
-                }
-                Poll::Ready(Ok(n)) => {
-                    self.buf.extend_from_slice(&tmp[..n]);
-                }
-                Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Err(anyhow::Error::from(e).context("read control stream")));
-                }
-                Poll::Pending => break,
-            }
-        }
-
-        // Check for a complete message.
-        if self.buf.len() < 4 {
-            return Poll::Pending;
-        }
-        let len = u32::from_le_bytes(self.buf[..4].try_into().unwrap()) as usize;
-        if len > 1024 * 1024 {
-            return Poll::Ready(Err(anyhow::anyhow!("message too large: {} bytes", len)));
-        }
-        if self.buf.len() < 4 + len {
-            return Poll::Pending;
-        }
-
-        let result = serde_json::from_slice(&self.buf[4..4 + len])
-            .context("deserialize message");
-        self.buf.drain(..4 + len);
-        Poll::Ready(result)
-    }
-
-    /// Send a length-prefixed JSON message on the control stream.
-    async fn send<T: serde::Serialize>(&mut self, msg: &T) -> anyhow::Result<()> {
-        vsock::send_msg(&mut self.stream, msg).await
-    }
-}
-
-/// Why the inner event loop exited.
-enum LoopExit {
-    /// Host sent Shutdown — kill containers and reboot.
-    Shutdown,
-    /// Yamux connection lost — wait for reconnect (suspend/resume path).
-    Disconnected,
-}
-
-async fn handle_message(
-    msg: HostMessage,
-    control: &mut ControlReader,
-    containers: &mut ContainerManager,
-    conn: &mut yamux::Connection<Async<std::fs::File>>,
-    output_streams: &mut HashMap<String, yamux::Stream>,
+/// Handle an inbound yamux stream (stdin relay setup).
+/// Returns a task if a stdin relay was spawned (caller must hold it for cancellation).
+async fn handle_yamux_inbound(
+    mut stream: yamux::Stream,
     stdin_streams: &mut HashMap<String, OwnedFd>,
-) -> anyhow::Result<Option<LoopExit>> {
-    match msg {
-        HostMessage::AddContainer {
-            id,
-            device,
-            dns_servers,
-        } => {
-            log::info!("AddContainer: id={}, device={}", id, device);
-            match containers.add(id.clone(), device, &dns_servers) {
-                Ok(()) => {
-                    control.send(&GuestMessage::ContainerAdded { id }).await?;
-                }
-                Err(e) => {
-                    log::error!("AddContainer failed: {:#}", e);
-                    control.send(&GuestMessage::Error {
-                        message: format!("{:#}", e),
-                    }).await?;
-                }
-            }
-        }
-        HostMessage::StartContainer { id, entrypoint, args, env, working_dir, uid, gid, hostname, capture_output, stdin } => {
-            log::info!("StartContainer: id={}, entrypoint={}, capture_output={}, stdin={}", id, entrypoint, capture_output, stdin);
-
-            // If capture_output, open a yamux output stream before forking.
-            if capture_output {
-                let mut stream = std::future::poll_fn(|cx| conn.poll_new_outbound(cx))
-                    .await
-                    .context("open yamux output stream")?;
-
-                vsock::send_msg(&mut stream, &StreamHeader::ContainerOutput {
-                    container_id: id.clone(),
-                }).await.context("send StreamHeader::ContainerOutput")?;
-
-                output_streams.insert(id.clone(), stream);
-            }
-
-            match containers.start(&id, &entrypoint, &args, &env, working_dir.as_deref(), uid, gid, hostname.as_deref(), capture_output, stdin) {
-                Ok(pid) => {
-                    // If stdin was requested, move the stdin pipe write-end into the stdin_streams map.
-                    if stdin {
-                        if let Some(fd) = containers.take_stdin_fd(&id) {
-                            stdin_streams.insert(id.clone(), fd);
-                        }
-                    }
-                    control.send(&GuestMessage::ContainerStarted { id, pid }).await?;
-                }
-                Err(e) => {
-                    log::error!("StartContainer failed: {:#}", e);
-                    output_streams.remove(&id);
-                    control.send(&GuestMessage::Error {
-                        message: format!("{:#}", e),
-                    }).await?;
-                }
-            }
-        }
-        HostMessage::ConfigureNetwork { interface, ip, netmask, gateway } => {
-            log::info!("ConfigureNetwork: {}={}, netmask={}, gw={}", interface, ip, netmask, gateway);
-            match net::configure_network(&interface, &ip, &netmask, &gateway) {
-                Ok(()) => {
-                    control.send(&GuestMessage::NetworkConfigured).await?;
-                }
-                Err(e) => {
-                    log::error!("ConfigureNetwork failed: {:#}", e);
-                    control.send(&GuestMessage::Error {
-                        message: format!("{:#}", e),
-                    }).await?;
-                }
-            }
-        }
-        HostMessage::SignalContainer { id, signal } => {
-            log::info!("SignalContainer: id={}, signal={}", id, signal);
-            match containers.signal_container(&id, signal) {
-                Ok(()) => {
-                    control.send(&GuestMessage::ContainerSignaled { id }).await?;
-                }
-                Err(e) => {
-                    log::error!("SignalContainer failed: {:#}", e);
-                    control.send(&GuestMessage::Error {
-                        message: format!("{:#}", e),
-                    }).await?;
-                }
-            }
-        }
-        HostMessage::SetClock { epoch_secs, epoch_nanos } => {
-            log::info!("SetClock: epoch_secs={}, epoch_nanos={}", epoch_secs, epoch_nanos);
-            let ts = libc::timespec {
-                tv_sec: epoch_secs as libc::time_t,
-                tv_nsec: epoch_nanos as libc::c_long,
-            };
-            let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
-            if ret == 0 {
-                log::info!("system clock set successfully");
-                control.send(&GuestMessage::ClockSet).await?;
+    ex: &LocalExecutor<'_>,
+) -> Option<async_executor::Task<()>> {
+    match vsock::recv_msg::<StreamHeader>(&mut stream).await {
+        Ok(StreamHeader::ContainerInput { container_id }) => {
+            log::info!(
+                "received inbound stdin stream for container {}",
+                container_id
+            );
+            if let Some(stdin_fd) = stdin_streams.remove(&container_id) {
+                Some(ex.spawn(output::relay_stdin(stream, stdin_fd)))
             } else {
-                let err = std::io::Error::last_os_error();
-                log::error!("clock_settime failed: {}", err);
-                control.send(&GuestMessage::Error {
-                    message: format!("clock_settime failed: {}", err),
-                }).await?;
+                log::warn!(
+                    "no stdin pipe for container {}, dropping stream",
+                    container_id
+                );
+                None
             }
         }
-        HostMessage::PrepareSuspend => {
-            log::info!("PrepareSuspend: flushing container output");
-            // Flush all captured container output to yamux before signaling ready.
-            let captured_ids = containers.captured_container_ids();
-            for id in &captured_ids {
-                drain_container_pipes(containers, output_streams, id).await;
-            }
-            // Install a plug qdisc to buffer outbound packets in the kernel.
-            // Buffered packets become part of the snapshotted VM memory so
-            // nothing is lost, and no new frames enter the TAP buffer between
-            // SuspendReady and the vCPU freeze.
-            if let Err(e) = net::plug_qdisc("eth0") {
-                log::warn!("failed to install plug qdisc: {:#}", e);
-            }
-            control.send(&GuestMessage::SuspendReady).await?;
-            log::info!("sent SuspendReady, flushing yamux and closing connection");
-            // Drive the yamux connection to flush the SuspendReady message
-            // through to the underlying transport. Without this, the message
-            // sits in yamux's internal buffer and gets lost when the
-            // connection is dropped, causing the host to see EOF.
-            std::future::poll_fn(|cx| conn.poll_close(cx)).await
-                .map_err(|e| anyhow::anyhow!("yamux close after SuspendReady: {}", e))?;
-            // Close the connection now so that after snapshot restore the guest
-            // is already back in the accept() loop, ready for the new host
-            // connection. The host doesn't read from this connection after
-            // receiving SuspendReady.
-            return Ok(Some(LoopExit::Disconnected));
+        Ok(other) => {
+            log::warn!("unexpected inbound stream header: {:?}, dropping", other);
+            None
         }
-        HostMessage::Shutdown => {
-            log::info!("shutdown requested");
-            return Ok(Some(LoopExit::Shutdown));
+        Err(e) => {
+            log::warn!("failed to read inbound stream header: {:#}", e);
+            None
         }
     }
-    Ok(None)
 }
 
-/// Write pipe data to a container's yamux output stream using output chunk framing.
-async fn write_output_chunk(
-    stream: &mut yamux::Stream,
-    stream_id: u8,
-    data: &[u8],
-) -> anyhow::Result<()> {
-    let chunk = encode_output_chunk(stream_id, data);
-    stream.write_all(&chunk).await.context("write output chunk")?;
-    Ok(())
-}
-
-/// Read available data from a container's stdout/stderr pipes and forward to yamux output streams.
-async fn drain_container_pipes(
-    containers: &mut ContainerManager,
-    output_streams: &mut HashMap<String, yamux::Stream>,
+/// Post-start setup for a newly started container: open output drain stream,
+/// dup stdin pipe into per-connection map, and notify the supervisor.
+async fn handle_container_started(
     id: &str,
+    pid: u32,
+    containers: &Rc<RefCell<ContainerManager>>,
+    handle: &yamux_driver::YamuxHandle,
+    conn_tasks: &mut Vec<async_executor::Task<()>>,
+    stdin_streams: &mut HashMap<String, OwnedFd>,
+    container_task_tx: &async_channel::Sender<ContainerTaskRequest>,
+    ex: &LocalExecutor<'_>,
 ) {
-    if let Some(fd) = containers.stdout_raw_fd(id) {
-        match util::read_pipe(fd) {
-            Ok(ReadPipeResult::Data(data)) => {
-                if let Some(stream) = output_streams.get_mut(id) {
-                    if let Err(e) = write_output_chunk(stream, STREAM_STDOUT, &data).await {
-                        log::warn!("write stdout to yamux for {}: {:#}", id, e);
-                    }
-                }
-            }
-            Ok(ReadPipeResult::Eof) => {
-                containers.take_stdout_fd(id);
-            }
-            Ok(ReadPipeResult::WouldBlock) => {}
-            Err(e) => log::warn!("read stdout pipe for {}: {}", id, e),
-        }
-    }
-    if let Some(fd) = containers.stderr_raw_fd(id) {
-        match util::read_pipe(fd) {
-            Ok(ReadPipeResult::Data(data)) => {
-                if let Some(stream) = output_streams.get_mut(id) {
-                    if let Err(e) = write_output_chunk(stream, STREAM_STDERR, &data).await {
-                        log::warn!("write stderr to yamux for {}: {:#}", id, e);
-                    }
-                }
-            }
-            Ok(ReadPipeResult::Eof) => {
-                containers.take_stderr_fd(id);
-            }
-            Ok(ReadPipeResult::WouldBlock) => {}
-            Err(e) => log::warn!("read stderr pipe for {}: {}", id, e),
-        }
-    }
-}
-
-/// Drain all remaining data from a container's pipes and close the yamux output stream (= EOF).
-async fn drain_container_pipes_final(
-    containers: &mut ContainerManager,
-    output_streams: &mut HashMap<String, yamux::Stream>,
-    id: &str,
-) {
-    if let Some(pipe) = containers.take_stdout_fd(id) {
-        loop {
-            match util::read_pipe(pipe.as_raw_fd()) {
-                Ok(ReadPipeResult::Data(data)) => {
-                    if let Some(stream) = output_streams.get_mut(id) {
-                        if let Err(e) = write_output_chunk(stream, STREAM_STDOUT, &data).await {
-                            log::warn!("write final stdout for {}: {:#}", id, e);
-                            break;
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
-    }
-    if let Some(pipe) = containers.take_stderr_fd(id) {
-        loop {
-            match util::read_pipe(pipe.as_raw_fd()) {
-                Ok(ReadPipeResult::Data(data)) => {
-                    if let Some(stream) = output_streams.get_mut(id) {
-                        if let Err(e) = write_output_chunk(stream, STREAM_STDERR, &data).await {
-                            log::warn!("write final stderr for {}: {:#}", id, e);
-                            break;
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
-    }
-
-    // Close the yamux output stream — the host sees EOF.
-    if let Some(mut stream) = output_streams.remove(id) {
-        if let Err(e) = stream.close().await {
-            log::warn!("close yamux output stream for {}: {:#}", id, e);
-        }
-    }
-}
-
-/// Relay data from a yamux inbound stream to a container's stdin pipe.
-///
-/// Reads from the yamux stream and writes to the pipe fd. When the yamux
-/// stream reaches EOF, the pipe write-end is dropped so the container sees
-/// EOF on stdin.
-async fn relay_stdin(mut yamux_stream: yamux::Stream, stdin_write_fd: OwnedFd) {
-    use std::os::unix::io::AsRawFd;
-    let fd = stdin_write_fd.as_raw_fd();
-    let mut buf = [0u8; 8192];
-    loop {
-        let result = std::future::poll_fn(|cx| {
-            Pin::new(&mut yamux_stream).poll_read(cx, &mut buf)
-        }).await;
-        match result {
-            Ok(0) => break, // EOF from host
-            Ok(n) => {
-                // Write to pipe — blocking write is OK, pipe buffer is 64KB and chunks are small.
-                let written = unsafe {
-                    libc::write(fd, buf.as_ptr() as *const libc::c_void, n)
-                };
-                if written < 0 {
-                    log::warn!("write to stdin pipe: {}", std::io::Error::last_os_error());
-                    break;
+    if let Some(buffer_rx) = containers.borrow().output_buffer_receiver(id) {
+        match handle.open_stream().await {
+            Ok(mut stream) => {
+                if let Err(e) = vsock::send_msg(
+                    &mut stream,
+                    &StreamHeader::ContainerOutput { container_id: id.to_string() },
+                ).await {
+                    log::warn!("send ContainerOutput header for {}: {:#}", id, e);
+                } else {
+                    conn_tasks.push(ex.spawn(output::drain_output_to_yamux(id.to_string(), buffer_rx, stream)));
                 }
             }
             Err(e) => {
-                log::warn!("read from yamux stdin stream: {}", e);
-                break;
+                log::warn!("open yamux output stream for {}: {:#}", id, e);
             }
         }
     }
-    // Drop stdin_write_fd → container sees EOF on stdin.
+    // Dup stdin pipe into per-connection map (original stays for reconnect).
+    if let Some(fd) = containers.borrow().dup_stdin_fd(id) {
+        stdin_streams.insert(id.to_string(), fd);
+    }
+    // Send container task request to supervisor.
+    let _ = container_task_tx.send(ContainerTaskRequest {
+        id: id.to_string(),
+        pid: pid as libc::pid_t,
+    }).await;
 }
 
-/// Which event source became ready.
-enum Ready {
-    Signal,
-    ControlMsg(anyhow::Result<HostMessage>),
-    PipeReady,
-    YamuxEvent,
-    PsiTriggered,
+/// Graceful shutdown: SIGTERM all containers, wait up to 5s, then SIGKILL.
+///
+/// With the pidfd-based container tasks, we don't need signalfd here.
+/// We just signal containers and wait for a timeout — container tasks
+/// will observe the exits via pidfd independently.
+async fn shutdown_containers(containers: &mut ContainerManager) {
+    if !containers.has_running_containers() {
+        return;
+    }
+
+    log::info!("sending SIGTERM to all running containers");
+    containers.signal_all_running(libc::SIGTERM);
+
+    // Give containers time to exit gracefully.
+    async_io::Timer::after(std::time::Duration::from_secs(5)).await;
+
+    if containers.has_running_containers() {
+        log::warn!("sending SIGKILL to remaining containers");
+        containers.signal_all_running(libc::SIGKILL);
+        async_io::Timer::after(std::time::Duration::from_millis(100)).await;
+    }
 }
 
-fn run() -> anyhow::Result<()> {
-    mount_essential_filesystems();
+/// The connection loop: accepts vsock connections, dispatches commands,
+/// reconnects on disconnect. Runs for the process lifetime.
+///
+/// When a container is started, sends a `ContainerTaskRequest` through
+/// `container_task_tx` so the root supervisor can spawn the container task.
+async fn connection_loop(
+    listener: &vsock::VsockListener,
+    containers: Rc<RefCell<ContainerManager>>,
+    event_buffer: &EventBuffer,
+    pre_config_responses: &[GuestMessage],
+    container_task_tx: async_channel::Sender<ContainerTaskRequest>,
+    ex: &LocalExecutor<'_>,
+) -> anyhow::Result<LoopExit> {
+    loop {
+        log::info!("waiting for host connection");
+        let running_containers = containers.borrow().running_container_ids();
+        let Session {
+            handle,
+            yamux_task,
+            mut control,
+            event_stream,
+        } = Session::connect(listener, running_containers, pre_config_responses, ex).await?;
 
-    let sigfd = util::setup_signalfd().context("setup signalfd")?;
+        // All per-connection tasks go here. Dropping this vec cancels them.
+        let mut conn_tasks: Vec<async_executor::Task<()>> = Vec::new();
+        conn_tasks.push(yamux_task);
 
-    log::info!("starting vsock listener on port {}", VSOCK_CONTROL_PORT);
-    let listener = vsock::VsockListener::bind(VSOCK_CONTROL_PORT)
-        .context("bind vsock listener")?;
-
-    let ex = LocalExecutor::new();
-
-    future::block_on(ex.run(async {
-        let sigfd = Async::new_nonblocking(sigfd).context("wrap signalfd in Async")?;
-
-        // Containers persist across reconnects — they keep running through
-        // suspend/resume cycles.
-        let mut containers = ContainerManager::new();
-
-        // Outer reconnect loop: each iteration accepts a new vsock connection.
-        // On cold boot this runs once; on resume after suspend the guest loops
-        // back here to accept the new host connection.
-        loop {
-            log::info!("waiting for host connection");
-            // Blocking accept — OK because nothing useful can happen without
-            // a host connection. Spawned tasks (relay_stdin) from a previous
-            // session are dead (their yamux streams are gone).
-            let accepted = listener.accept().context("accept vsock connection")?;
-            let async_socket = Async::new(accepted).context("wrap vsock fd in Async")?;
-
-            let mut conn = yamux::Connection::new(
-                async_socket,
-                yamux::Config::default(),
-                yamux::Mode::Server,
-            );
-
-            // Accept the first inbound stream — the control stream.
-            let mut control_stream = match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
-                Some(Ok(stream)) => stream,
-                Some(Err(e)) => anyhow::bail!("yamux error accepting control stream: {}", e),
-                None => anyhow::bail!("yamux connection closed before control stream"),
-            };
-
-            // Read the stream header, open event stream, and send Ready while driving yamux.
-            //
-            // Phase 1: Read control stream header (drives conn via future::or).
-            {
-                let drive = async {
-                    loop {
-                        match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
-                            Some(Ok(_)) => log::warn!("unexpected inbound stream during init"),
-                            Some(Err(e)) => return Err::<(), _>(anyhow::Error::from(e)),
-                            None => return Err(anyhow::anyhow!("yamux closed during init")),
-                        }
-                    }
-                };
-                let read_header = async {
-                    let header: StreamHeader = vsock::recv_msg(&mut control_stream)
-                        .await
-                        .context("read StreamHeader on control stream")?;
-                    match header {
-                        StreamHeader::Control => log::info!("control stream established"),
-                        other => anyhow::bail!("expected StreamHeader::Control, got {:?}", other),
-                    }
-                    Ok(())
-                };
-                future::or(drive, read_header).await?;
+        // On resume, release packets buffered by the plug qdisc before suspend.
+        if containers.borrow().has_running_containers() {
+            if let Err(e) = net::resume() {
+                log::warn!("failed to unplug qdisc on resume: {:#}", e);
             }
+        }
 
-            // Phase 2: Open event stream outbound (needs conn.poll_new_outbound).
-            // Uses poll_fn to interleave driving inbound with opening outbound.
-            let mut event_stream = {
-                let mut es_opt: Option<yamux::Stream> = None;
-                std::future::poll_fn(|cx| {
-                    // Drive inbound to process yamux bookkeeping frames.
-                    loop {
-                        match conn.poll_next_inbound(cx) {
-                            Poll::Ready(Some(Ok(_))) => log::warn!("unexpected inbound during event stream open"),
-                            Poll::Ready(Some(Err(e))) => return Poll::Ready(Err::<(), _>(anyhow::Error::from(e))),
-                            Poll::Ready(None) => return Poll::Ready(Err(anyhow::anyhow!("yamux closed during event stream open"))),
-                            Poll::Pending => break,
-                        }
-                    }
-                    match conn.poll_new_outbound(cx) {
-                        Poll::Ready(Ok(s)) => { es_opt = Some(s); Poll::Ready(Ok(())) }
-                        Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow::Error::from(e))),
-                        Poll::Pending => Poll::Pending,
-                    }
-                }).await?;
-                es_opt.expect("poll_fn completed without setting event stream")
-            };
-
-            // Phase 3: Send event stream header and Ready (drives conn via future::or).
-            {
-                let running_containers = containers.running_container_ids();
-                let drive = async {
-                    loop {
-                        match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
-                            Some(Ok(_)) => log::warn!("unexpected inbound stream during init"),
-                            Some(Err(e)) => return Err::<(), _>(anyhow::Error::from(e)),
-                            None => return Err(anyhow::anyhow!("yamux closed during init")),
-                        }
-                    }
-                };
-                let send_ready = async {
-                    vsock::send_msg(&mut event_stream, &StreamHeader::Events)
-                        .await
-                        .context("send StreamHeader::Events")?;
-                    log::info!("event stream opened");
-
-                    if running_containers.is_empty() {
-                        log::info!("host connected, sending Ready (cold boot)");
-                    } else {
-                        log::info!("host reconnected, sending Ready (resume, running: {:?})", running_containers);
-                    }
-                    vsock::send_msg(&mut control_stream, &GuestMessage::Ready {
-                        running_containers,
-                    }).await?;
-                    Ok(())
-                };
-                future::or(drive, send_ready).await?;
+        // Per-connection stdin streams — die with the connection.
+        // On reconnect, populate from all running containers that have stdin.
+        let mut stdin_streams: HashMap<String, OwnedFd> = HashMap::new();
+        for id in containers.borrow().running_container_ids() {
+            if let Some(fd) = containers.borrow().dup_stdin_fd(&id) {
+                stdin_streams.insert(id, fd);
             }
+        }
 
-            // On resume, release packets buffered by the plug qdisc before suspend.
-            if containers.has_running_containers() {
-                if let Err(e) = net::unplug_qdisc("eth0") {
-                    log::warn!("failed to unplug qdisc on resume: {:#}", e);
+        // Spawn event drain task for this connection.
+        conn_tasks.push(ex.spawn(output::drain_events_to_yamux(
+            event_buffer.receiver(),
+            event_stream,
+        )));
+
+        // Spawn output drain tasks for all containers that have output buffers.
+        for (id, buffer_rx) in containers.borrow().containers_with_output() {
+            match handle.open_stream().await {
+                Ok(mut stream) => {
+                    if let Err(e) = vsock::send_msg(
+                        &mut stream,
+                        &StreamHeader::ContainerOutput {
+                            container_id: id.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        log::warn!("send ContainerOutput header for {}: {:#}", id, e);
+                        continue;
+                    }
+                    conn_tasks
+                        .push(ex.spawn(output::drain_output_to_yamux(id, buffer_rx, stream)));
+                }
+                Err(e) => {
+                    log::warn!("open yamux output stream for {}: {:#}", id, e);
                 }
             }
+        }
 
-            let mut control = ControlReader::new(control_stream);
+        let loop_exit = 'event_loop: loop {
+            let yamux_inbound = async { handle.next_inbound().await };
+            let ctrl = std::future::poll_fn(|cx| control.poll_recv::<HostMessage>(cx));
 
-            // Per-connection state — yamux streams die with the connection.
-            let mut output_streams: HashMap<String, yamux::Stream> = HashMap::new();
-            let mut stdin_streams: HashMap<String, OwnedFd> = HashMap::new();
-
-            let loop_exit = 'event_loop: loop {
-                let ready = {
-                    let sig_ready = async {
-                        sigfd.readable().await.ok();
-                        Ready::Signal
-                    };
-                    let yamux_drive = async {
-                        match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
-                            Some(Ok(mut stream)) => {
-                                match vsock::recv_msg::<StreamHeader>(&mut stream).await {
-                                    Ok(StreamHeader::ContainerInput { container_id }) => {
-                                        log::info!("received inbound stdin stream for container {}", container_id);
-                                        if let Some(stdin_fd) = stdin_streams.remove(&container_id) {
-                                            ex.spawn(relay_stdin(stream, stdin_fd)).detach();
-                                        } else {
-                                            log::warn!("no stdin pipe for container {}, dropping stream", container_id);
-                                        }
+            futures::select! {
+                msg = ctrl.fuse() => {
+                    match msg {
+                        Ok(msg) => {
+                            log::info!("received: {:?}", msg);
+                            let resp = {
+                                let mut cm = containers.borrow_mut();
+                                session::execute_command(msg, &mut cm, ex)
+                            };
+                            match resp {
+                                CommandResult::Response(resp) => {
+                                    if let Err(e) = control.send(&resp).await {
+                                        log::error!("send response: {:#}", e);
+                                        break 'event_loop LoopExit::Disconnected;
                                     }
-                                    Ok(other) => {
-                                        log::warn!("unexpected inbound stream header: {:?}, dropping", other);
-                                    }
-                                    Err(e) => {
-                                        log::warn!("failed to read inbound stream header: {:#}", e);
+                                    if let GuestMessage::ContainerStarted { ref id, pid } = resp {
+                                        handle_container_started(
+                                            id, pid, &containers, &handle,
+                                            &mut conn_tasks, &mut stdin_streams,
+                                            &container_task_tx, ex,
+                                        ).await;
                                     }
                                 }
-                            }
-                            Some(Err(e)) => {
-                                log::error!("yamux connection error: {}", e);
-                                return Ready::YamuxEvent;
-                            }
-                            None => {
-                                log::info!("yamux connection closed");
-                                return Ready::YamuxEvent;
-                            }
-                        }
-                        Ready::PipeReady
-                    };
-                    let ctrl = std::future::poll_fn(|cx| {
-                        control.poll_recv::<HostMessage>(cx).map(Ready::ControlMsg)
-                    });
-                    let pipe_ready = async {
-                        let pipes = containers.pipe_refs();
-                        if pipes.is_empty() {
-                            future::pending::<()>().await;
-                            return Ready::PipeReady;
-                        }
-                        let mut readables: Vec<_> = pipes.iter()
-                            .map(|p| p.readable())
-                            .collect();
-                        std::future::poll_fn(|cx| {
-                            for r in readables.iter_mut() {
-                                if Pin::new(r).poll(cx).is_ready() {
-                                    return Poll::Ready(());
+                                CommandResult::PrepareSuspend => {
+                                    if let Err(e) = control.send(&GuestMessage::SuspendReady).await {
+                                        log::error!("send SuspendReady: {:#}", e);
+                                    }
+                                    log::info!("sent SuspendReady, flushing yamux and closing connection");
+                                    if let Err(e) = handle.close().await {
+                                        log::warn!("yamux close after SuspendReady: {}", e);
+                                    }
+                                    break 'event_loop LoopExit::Disconnected;
+                                }
+                                CommandResult::Shutdown => {
+                                    break 'event_loop LoopExit::Shutdown;
                                 }
                             }
-                            Poll::Pending
-                        }).await;
-                        Ready::PipeReady
-                    };
-                    let psi_ready = async {
-                        if let Some(psi) = containers.psi_fd() {
-                            psi.readable().await.ok();
-                            Ready::PsiTriggered
-                        } else {
-                            future::pending::<Ready>().await
                         }
-                    };
-
-                    future::or(
-                        future::or(sig_ready, yamux_drive),
-                        future::or(
-                            future::or(ctrl, pipe_ready),
-                            psi_ready,
-                        ),
-                    ).await
-                };
-
-                match ready {
-                    Ready::Signal => {
-                        util::drain_signalfd(&sigfd);
-
-                        let exits = containers.reap_children();
-                        let mut event_broken = false;
-                        for exit in exits {
-                            // Drive yamux connection while draining to prevent deadlock.
-                            // Without this, write_all() can block waiting for window updates
-                            // that conn.poll_next_inbound() would process.
-                            let drain = drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id);
-                            let drive_yamux = std::future::poll_fn(|cx| {
-                                let _ = conn.poll_next_inbound(cx);
-                                Poll::Pending
-                            });
-                            future::or(drain, drive_yamux).await;
-                            stdin_streams.remove(&exit.id);
-                            containers.remove(&exit.id);
-
-                            if let Err(e) = vsock::send_msg(&mut event_stream, &GuestEvent::ContainerExited {
-                                id: exit.id,
-                                code: exit.code,
-                            }).await {
-                                log::error!("failed to send ContainerExited on event stream: {:#}", e);
-                                event_broken = true;
-                                break;
-                            }
-                        }
-                        if event_broken {
+                        Err(e) => {
+                            log::error!("control stream error: {:#}", e);
                             break 'event_loop LoopExit::Disconnected;
                         }
                     }
-                    Ready::ControlMsg(Ok(msg)) => {
-                        log::info!("received: {:?}", msg);
-                        match handle_message(msg, &mut control, &mut containers, &mut conn, &mut output_streams, &mut stdin_streams).await {
-                            Ok(Some(exit)) => break 'event_loop exit,
-                            Ok(None) => {}
-                            Err(e) => {
-                                log::error!("error handling message: {:#}", e);
-                                let _ = control.send(&GuestMessage::Error {
-                                    message: format!("{:#}", e),
-                                }).await;
+                }
+                stream = yamux_inbound.fuse() => {
+                    match stream {
+                        Some(stream) => {
+                            if let Some(task) = handle_yamux_inbound(stream, &mut stdin_streams, ex).await {
+                                conn_tasks.push(task);
                             }
                         }
-                    }
-                    Ready::ControlMsg(Err(e)) => {
-                        log::error!("control stream error: {:#}", e);
-                        break 'event_loop LoopExit::Disconnected;
-                    }
-                    Ready::PipeReady => {
-                        let captured_ids = containers.captured_container_ids();
-                        for id in &captured_ids {
-                            drain_container_pipes(&mut containers, &mut output_streams, id).await;
+                        None => {
+                            log::info!("yamux connection closed");
+                            break 'event_loop LoopExit::Disconnected;
                         }
                     }
-                    Ready::PsiTriggered => {
-                        log::warn!("memory pressure detected across containers");
-                        // Re-arm the PSI trigger by reading from the fd.
-                        if let Some(psi) = containers.psi_fd() {
-                            let mut buf = [0u8; 256];
-                            unsafe {
-                                libc::read(
-                                    psi.as_raw_fd(),
-                                    buf.as_mut_ptr() as *mut libc::c_void,
-                                    buf.len(),
-                                );
-                            }
-                        }
+                }
+            }
+        };
+
+        match loop_exit {
+            LoopExit::Shutdown => {
+                // Close yamux cleanly so the host-side driver sees a
+                // clean close rather than a broken pipe from VM death.
+                log::info!("flushing yamux and closing connection before shutdown");
+                if let Err(e) = handle.close().await {
+                    log::warn!("yamux close during shutdown: {}", e);
+                }
+                // Cancel all per-connection tasks (drain, stdin relay, yamux driver).
+                drop(conn_tasks);
+                return Ok(LoopExit::Shutdown);
+            }
+            LoopExit::Disconnected => {
+                // Connection lost (suspend or unexpected disconnect).
+                // Cancel all per-connection tasks — old drain tasks, stdin
+                // relays, and the yamux driver are cleaned up here.
+                // Fill tasks keep running. Output buffers retain data.
+                drop(conn_tasks);
+                log::info!(
+                    "connection lost, waiting for reconnect ({} containers still running)",
+                    containers.borrow().running_container_ids().len()
+                );
+                continue;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Root supervisor
+// ---------------------------------------------------------------------------
+
+fn run() -> anyhow::Result<()> {
+    init::mount_essential_filesystems();
+
+    let vm_mem_mib = memory::init::read_memtotal_mib()?;
+    let vm_config = memory::init::VmMemoryConfig::from_vm_mem(vm_mem_mib);
+    memory::init::setup_zram_swap(&vm_config);
+    memory::init::set_tcp_memory_caps(&vm_config);
+
+    log::info!("starting vsock listener on port {}", VSOCK_CONTROL_PORT);
+    let listener =
+        vsock::VsockListener::bind(VSOCK_CONTROL_PORT).context("bind vsock listener")?;
+
+    let ex = LocalExecutor::new();
+
+    async_io::block_on(ex.run(async {
+        // Containers persist across reconnects — they keep running through
+        // suspend/resume cycles.
+        let containers = Rc::new(RefCell::new(ContainerManager::new()));
+
+        // Event buffer persists across reconnects. Events are produced by
+        // container exits and the balloon task, drained to yamux per-connection.
+        let event_buffer = EventBuffer::new();
+
+        // Parse balloon size from kernel cmdline (set by host Firecracker config).
+        let memory_manager = match memory::init::read_cmdline_param("distvirt.balloon_mib") {
+            Some(v) => {
+                log::info!("found distvirt.balloon_mib={} on cmdline", v);
+                match v.parse::<u32>() {
+                    Ok(balloon_mib) => {
+                        log::info!(
+                            "memory manager: balloon={} MiB, vm_mem={} MiB, initial_limit=~{} MiB",
+                            balloon_mib,
+                            vm_mem_mib,
+                            vm_mem_mib
+                                .saturating_sub(balloon_mib)
+                                .saturating_sub(memory::KERNEL_BUFFER_MIB),
+                        );
+                        Some(Rc::new(RefCell::new(MemoryManager::new(
+                            balloon_mib,
+                            vm_mem_mib,
+                        ))))
                     }
-                    Ready::YamuxEvent => {
-                        break 'event_loop LoopExit::Disconnected;
+                    Err(e) => {
+                        log::warn!("failed to parse distvirt.balloon_mib: {}", e);
+                        None
                     }
+                }
+            }
+            None => {
+                log::info!("no distvirt.balloon_mib on cmdline, memory manager disabled");
+                None
+            }
+        };
+
+        // Set initial cgroup memory limits BEFORE creating PSI triggers,
+        // so PSI triggers don't fire spuriously on an unconstrained cgroup.
+        if let Some(ref mm) = memory_manager {
+            let (high_bytes, max_bytes) = mm.borrow_mut().initial_limits();
+            log::info!(
+                "[balloon] setting initial cgroup limits: path={}, high={} MiB, max={} MiB",
+                cgroup::CGROUP_ROOT,
+                high_bytes / (1024 * 1024),
+                max_bytes / (1024 * 1024),
+            );
+            if let Err(e) =
+                cgroup::set_memory_limits(cgroup::CGROUP_ROOT, high_bytes, max_bytes)
+            {
+                log::warn!("failed to set initial cgroup limits: {:#}", e);
+            }
+        }
+
+        // Now that memory limits are set, create async PSI monitor.
+        let async_psi = match cgroup::setup_psi_monitor(cgroup::CGROUP_ROOT) {
+            Ok(triggers) => match cgroup::AsyncPsiMonitor::new(triggers) {
+                Ok(monitor) => Some(Rc::new(monitor)),
+                Err(e) => {
+                    log::warn!("failed to create async PSI monitor: {:#}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                log::warn!("failed to set up PSI triggers: {:#}", e);
+                None
+            }
+        };
+
+        // Set up inotify-based memory.events monitor (wrapped in Rc<RefCell>
+        // so it survives across connection reconnects).
+        let mem_events_holder = Rc::new(RefCell::new(
+            match cgroup::AsyncMemoryEventsMonitor::new(cgroup::CGROUP_ROOT) {
+                Ok(monitor) => Some(monitor),
+                Err(e) => {
+                    log::warn!("failed to create memory.events monitor: {:#}", e);
+                    None
+                }
+            },
+        ));
+
+        // Create channel for balloon sysfs monitor and spawn it (supervised).
+        let (balloon_monitor_tx, balloon_monitor_rx) =
+            async_channel::bounded::<memory::monitor::BalloonChange>(8);
+        let balloon_monitor_task = ex.spawn(async {
+            if let Err(e) = memory::monitor::run(balloon_monitor_tx).await {
+                log::warn!("balloon monitor exited: {:#}", e);
+            }
+        });
+
+        // Spawn the balloon task (supervised, persists across reconnects).
+        let balloon_task = if let (Some(mm), Some(psi)) = (&memory_manager, &async_psi) {
+            let event_tx = event_buffer.sender();
+            Some(ex.spawn(memory::task::run(
+                mm.clone(),
+                psi.clone(),
+                event_tx,
+                mem_events_holder.clone(),
+                balloon_monitor_rx.clone(),
+            )))
+        } else {
+            None
+        };
+
+        // Execute pre-vsock config drive commands (if a config device is present).
+        let pre_config_responses = config_drive::execute_pre_config(
+            &mut containers.borrow_mut(),
+            &ex,
+        );
+
+        // Channel for connection loop to request container task spawning.
+        let (container_task_tx, container_task_rx) =
+            async_channel::bounded::<ContainerTaskRequest>(16);
+
+        // Container tasks, dynamically spawned.
+        let mut container_tasks: FuturesUnordered<TaggedTask> = FuturesUnordered::new();
+
+        // Supervisor loop: runs the connection loop inline and selects over
+        // child completions + new container requests.
+        //
+        // We run connection_loop as a pinned future rather than spawning it,
+        // so it can borrow local state (event_buffer, pre_config_responses, ex)
+        // without lifetime issues.
+        let mut conn_loop = std::pin::pin!(connection_loop(
+            &listener,
+            containers.clone(),
+            &event_buffer,
+            &pre_config_responses,
+            container_task_tx,
+            &ex,
+        ).fuse());
+
+        let mut balloon_monitor_task = std::pin::pin!(balloon_monitor_task.fuse());
+
+        // For the balloon task: if it exists, we want to detect if it exits.
+        // Wrap in a fused future that goes pending if there's no balloon task.
+        let balloon_task_fut = async {
+            match balloon_task {
+                Some(task) => task.await,
+                None => futures::future::pending::<()>().await,
+            }
+        };
+        let mut balloon_task_fut = std::pin::pin!(balloon_task_fut.fuse());
+
+        loop {
+            // Build a future for container task completions that goes pending
+            // when FuturesUnordered is empty (instead of returning None).
+            let container_next = async {
+                if container_tasks.is_empty() {
+                    futures::future::pending::<(String, anyhow::Result<()>)>().await
+                } else {
+                    container_tasks.next().await.unwrap()
                 }
             };
 
-            match loop_exit {
-                LoopExit::Shutdown => {
-                    // Graceful shutdown: SIGTERM all containers, wait up to 5s, then SIGKILL.
-                    if containers.has_running_containers() {
-                        log::info!("sending SIGTERM to all running containers");
-                        containers.signal_all_running(libc::SIGTERM);
-
-                        let deadline = async_io::Timer::after(std::time::Duration::from_secs(5));
-                        futures_lite::pin!(deadline);
-
-                        loop {
-                            if !containers.has_running_containers() {
-                                log::info!("all containers exited after SIGTERM");
-                                break;
-                            }
-
-                            let wait_result = future::or(
-                                async {
-                                    sigfd.readable().await.ok();
-                                    true
-                                },
-                                async {
-                                    (&mut deadline).await;
-                                    false
-                                },
-                            ).await;
-
-                            if !wait_result {
-                                log::warn!("graceful shutdown timeout expired");
-                                break;
-                            }
-
-                            util::drain_signalfd(&sigfd);
-                            let exits = containers.reap_children();
-                            for exit in exits {
-                                drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id).await;
-                                stdin_streams.remove(&exit.id);
-                                containers.remove(&exit.id);
-                                // Control stream is dead in shutdown path, skip sending.
-                            }
+            futures::select! {
+                req = container_task_rx.recv().fuse() => {
+                    match req {
+                        Ok(req) => {
+                            let id = req.id.clone();
+                            let pid = req.pid;
+                            let c = containers.clone();
+                            let task = ex.spawn(container::container_task(
+                                req.id,
+                                req.pid,
+                                c,
+                                event_buffer.sender(),
+                            ));
+                            log::info!("supervisor: spawned container task for {} (pid {})", id, pid);
+                            container_tasks.push(TaggedTask { id, task });
                         }
-
-                        if containers.has_running_containers() {
-                            log::warn!("sending SIGKILL to remaining containers");
-                            containers.signal_all_running(libc::SIGKILL);
-
-                            async_io::Timer::after(std::time::Duration::from_millis(100)).await;
-                            util::drain_signalfd(&sigfd);
-                            let exits = containers.reap_children();
-                            for exit in exits {
-                                drain_container_pipes_final(&mut containers, &mut output_streams, &exit.id).await;
-                                stdin_streams.remove(&exit.id);
-                                containers.remove(&exit.id);
-                            }
+                        Err(_) => {
+                            // Channel closed — connection loop exited.
+                            log::info!("supervisor: container task channel closed");
                         }
                     }
-
-                    // Close yamux cleanly so the host-side driver sees a
-                    // clean close rather than a broken pipe from VM death.
-                    log::info!("flushing yamux and closing connection before shutdown");
-                    if let Err(e) = std::future::poll_fn(|cx| conn.poll_close(cx)).await {
-                        log::warn!("yamux close during shutdown: {}", e);
-                    }
-
-                    // Brief sleep to let virtio-net flush outgoing packets.
-                    async_io::Timer::after(std::time::Duration::from_millis(200)).await;
-                    break; // Exit outer reconnect loop → reboot.
                 }
-                LoopExit::Disconnected => {
-                    // Connection lost (suspend or unexpected disconnect).
-                    // Drop yamux connection and per-connection state, loop back
-                    // to accept a new connection. Containers keep running.
-                    log::info!("connection lost, waiting for reconnect ({} containers still running)",
-                        containers.running_container_ids().len());
-                    // output_streams and stdin_streams are dropped here.
-                    // Spawned relay_stdin tasks will fail on next poll (dead yamux)
-                    // and exit, dropping their OwnedFd stdin pipe write-ends.
-                    continue;
+                result = container_next.fuse() => {
+                    let (id, result) = result;
+                    match result {
+                        Ok(()) => {
+                            log::info!("supervisor: container task {} completed normally", id);
+                        }
+                        Err(e) => {
+                            log::error!("supervisor: container task {} failed: {:#}", id, e);
+                            event_buffer.send(GuestEvent::TaskError {
+                                task: format!("container:{}", id),
+                                message: format!("{:#}", e),
+                            }).await;
+                            break;
+                        }
+                    }
+                }
+                result = conn_loop => {
+                    match result {
+                        Ok(LoopExit::Shutdown) => {
+                            log::info!("supervisor: connection loop returned shutdown");
+
+                            // Signal containers to exit.
+                            shutdown_containers(&mut containers.borrow_mut()).await;
+
+                            // container_task_tx was moved into connection_loop
+                            // and is now dropped, so container_task_rx will
+                            // close once existing sends complete.
+
+                            // Drain remaining container tasks with a timeout.
+                            if !container_tasks.is_empty() {
+                                log::info!(
+                                    "supervisor: waiting for {} container task(s) to finish",
+                                    container_tasks.len()
+                                );
+                                let drain_all = async {
+                                    while let Some((id, result)) = container_tasks.next().await {
+                                        match result {
+                                            Ok(()) => log::info!("supervisor: container task {} completed during shutdown", id),
+                                            Err(e) => log::error!("supervisor: container task {} failed during shutdown: {:#}", id, e),
+                                        }
+                                    }
+                                };
+                                let timeout = async_io::Timer::after(
+                                    std::time::Duration::from_secs(5)
+                                );
+                                futures::pin_mut!(drain_all);
+                                futures::pin_mut!(timeout);
+                                match futures::future::select(drain_all, timeout).await {
+                                    futures::future::Either::Left(_) => {
+                                        log::info!("supervisor: all container tasks drained");
+                                    }
+                                    futures::future::Either::Right(_) => {
+                                        log::warn!("supervisor: timed out waiting for container tasks, {} remaining", container_tasks.len());
+                                    }
+                                }
+                            }
+
+                            // Brief sleep to let virtio-net flush outgoing packets.
+                            async_io::Timer::after(std::time::Duration::from_millis(200)).await;
+                        }
+                        Ok(LoopExit::Disconnected) => {
+                            // connection_loop should never return Disconnected
+                            // (it reconnects internally), but handle it gracefully.
+                            log::warn!("supervisor: connection loop returned Disconnected unexpectedly");
+                        }
+                        Err(e) => {
+                            log::error!("supervisor: connection loop failed: {:#}", e);
+                            event_buffer.send(GuestEvent::TaskError {
+                                task: "connection_loop".to_string(),
+                                message: format!("{:#}", e),
+                            }).await;
+                        }
+                    }
+                    break;
+                }
+                _ = balloon_monitor_task => {
+                    log::error!("supervisor: balloon monitor exited unexpectedly");
+                    event_buffer.send(GuestEvent::TaskError {
+                        task: "balloon_monitor".to_string(),
+                        message: "balloon monitor exited unexpectedly".to_string(),
+                    }).await;
+                    break;
+                }
+                _ = balloon_task_fut => {
+                    log::error!("supervisor: balloon task exited unexpectedly");
+                    event_buffer.send(GuestEvent::TaskError {
+                        task: "balloon_task".to_string(),
+                        message: "balloon task exited unexpectedly".to_string(),
+                    }).await;
+                    break;
                 }
             }
         }
@@ -783,12 +628,18 @@ fn main() {
     }
 
     log::info!("shutting down");
-    unsafe { libc::sync(); }
+    unsafe {
+        libc::sync();
+    }
     // Use reboot (not power-off): Firecracker doesn't support ACPI power-off,
     // so RB_POWER_OFF halts the vCPU but leaves the process running.
     // RB_AUTOBOOT triggers a triple fault which causes KVM/Firecracker to exit.
-    unsafe { libc::reboot(libc::RB_AUTOBOOT); }
+    unsafe {
+        libc::reboot(libc::RB_AUTOBOOT);
+    }
     loop {
-        unsafe { libc::pause(); }
+        unsafe {
+            libc::pause();
+        }
     }
 }

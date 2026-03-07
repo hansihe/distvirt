@@ -1,0 +1,104 @@
+From: distvirt <distvirt@localhost>
+Subject: [PATCH] virtio_balloon: expose num_pages via sysfs with poll notification
+
+Add a read-only "num_pages" sysfs attribute to the virtio_balloon device
+that exposes the current balloon size in balloon pages (4K units).
+When the balloon size changes, sysfs_notify() is called so that
+userspace can monitor changes via poll(EPOLLPRI) / epoll(EPOLLPRI).
+
+This allows guest-init to track balloon size changes without polling
+the file contents on a timer.
+
+Signed-off-by: distvirt <distvirt@localhost>
+---
+ drivers/virtio/virtio_balloon.c | 38 ++++++++++++++++++++++++++++++--
+ 1 file changed, 36 insertions(+), 2 deletions(-)
+
+--- a/drivers/virtio/virtio_balloon.c
++++ b/drivers/virtio/virtio_balloon.c
+@@ -537,6 +537,17 @@
+ 			 &actual);
+ }
+
++static ssize_t num_pages_show(struct device *dev,
++			      struct device_attribute *attr, char *buf)
++{
++	struct virtio_device *vdev = dev_to_virtio(dev);
++	struct virtio_balloon *vb = vdev->priv;
++
++	return sysfs_emit(buf, "%u\n", vb->num_pages);
++}
++
++static DEVICE_ATTR_RO(num_pages);
++
+ static void update_balloon_stats_func(struct work_struct *work)
+ {
+ 	struct virtio_balloon *vb;
+@@ -553,6 +564,7 @@
+ {
+ 	struct virtio_balloon *vb;
+ 	s64 diff;
++	unsigned int old_num_pages;
+
+ 	vb = container_of(work, struct virtio_balloon,
+ 			  update_balloon_size_work);
+@@ -560,6 +572,7 @@
+ 	process_wakeup_event(vb, VIRTIO_BALLOON_WAKEUP_SIGNAL_ADJUST);
+
+ 	diff = towards_target(vb);
++	old_num_pages = vb->num_pages;
+
+ 	if (diff) {
+ 		if (diff > 0)
+@@ -569,10 +582,14 @@
+ 		update_balloon_size(vb);
+ 	}
+
+-	if (diff)
++	if (vb->num_pages != old_num_pages)
++		sysfs_notify(&vb->vdev->dev.kobj, NULL, "num_pages");
++
++	if (diff) {
+ 		queue_work(system_freezable_wq, work);
+-	else
++	} else {
+ 		finish_wakeup_event(vb);
++	}
+ }
+
+ static int init_vqs(struct virtio_balloon *vb)
+@@ -912,11 +929,15 @@
+ 	struct virtio_balloon *vb = container_of(nb,
+ 						 struct virtio_balloon, oom_nb);
+ 	unsigned long *freed = parm;
++	unsigned int old_num_pages = vb->num_pages;
+
+ 	*freed += leak_balloon(vb, VIRTIO_BALLOON_OOM_NR_PAGES) /
+ 		  VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 	update_balloon_size(vb);
+
++	if (vb->num_pages != old_num_pages)
++		sysfs_notify(&vb->vdev->dev.kobj, NULL, "num_pages");
++
+ 	return NOTIFY_OK;
+ }
+
+@@ -970,6 +991,10 @@
+ 	if (err)
+ 		goto out_free_vb;
+
++	err = device_create_file(&vdev->dev, &dev_attr_num_pages);
++	if (err)
++		goto out_del_vqs;
++
+ #ifdef CONFIG_BALLOON_COMPACTION
+ 	vb->vb_dev_info.migratepage = virtballoon_migratepage;
+ #endif
+@@ -1121,6 +1146,7 @@
+ {
+ 	struct virtio_balloon *vb = vdev->priv;
+
++	device_remove_file(&vdev->dev, &dev_attr_num_pages);
+ 	if (virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_REPORTING))
+ 		page_reporting_unregister(&vb->pr_dev_info);
+ 	if (virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_DEFLATE_ON_OOM))

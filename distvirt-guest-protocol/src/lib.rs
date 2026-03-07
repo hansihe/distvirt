@@ -56,13 +56,16 @@ pub enum HostMessage {
 }
 
 /// Messages sent from guest to host over vsock.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GuestMessage {
     Ready {
         /// IDs of containers still running (non-empty on resume after suspend).
         #[serde(default)]
         running_containers: Vec<String>,
+        /// Responses from commands executed via the config drive before vsock connect.
+        #[serde(default)]
+        pre_config_responses: Vec<GuestMessage>,
     },
     /// Guest has flushed output and is ready for vCPU freeze.
     SuspendReady,
@@ -89,6 +92,10 @@ pub enum StreamHeader {
 #[serde(tag = "type")]
 pub enum GuestEvent {
     ContainerExited { id: String, code: i32 },
+    /// Guest requests the host to set the balloon to this size.
+    BalloonSet { amount_mib: u32 },
+    /// A supervised task failed unexpectedly.
+    TaskError { task: String, message: String },
 }
 
 /// Stream identifiers for output chunk framing.
