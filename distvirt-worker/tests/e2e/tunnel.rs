@@ -181,6 +181,15 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         })
         .await?;
 
+    // Register local pod endpoints before launching
+    let pod_b_network = PodNetworkConfig {
+        ip: pod_b_ip,
+        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x03],
+        gateway: Ipv4Addr::new(10, 0, 0, 1),
+        netmask: "255.255.255.0".into(),
+    };
+    register_pod_endpoint(&mut conn_b, "ns-tunnel", &pod_b_network, "worker-b").await?;
+
     // --- Launch pod-B: a long-running process so the fabric has a destination ---
     conn_b
         .send_command(&WorkerCommand::LaunchPod {
@@ -207,6 +216,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                     stdin: false,
                 },
             }],
+            resources: None,
         })
         .await?;
 
@@ -215,6 +225,14 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     })
     .await?;
     eprintln!("e2e: pod-b running on worker-b");
+
+    let pod_a_network = PodNetworkConfig {
+        ip: pod_a_ip,
+        mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+        gateway: Ipv4Addr::new(10, 0, 0, 1),
+        netmask: "255.255.255.0".into(),
+    };
+    register_pod_endpoint(&mut conn_a, "ns-tunnel", &pod_a_network, "worker-a").await?;
 
     // --- Launch pod-A: ping pod-B's IP through the tunnel ---
     conn_a
@@ -248,6 +266,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                     stdin: false,
                 },
             }],
+            resources: None,
         })
         .await?;
 

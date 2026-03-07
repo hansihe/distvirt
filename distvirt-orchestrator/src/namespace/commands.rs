@@ -303,6 +303,18 @@ impl NamespaceStateMachine {
         let mut pod_network = wl_spec.network.clone();
         pod_network.gateway = self.spec.network.gateway;
         pod_network.netmask = prefix_len_to_netmask(self.spec.network.prefix_len);
+        let resources = wl_spec.resources.as_ref().map(|r| {
+            distvirt_worker_protocol::ResourceRequirements {
+                requests: r.requests.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
+                    memory_mib: v.memory_mb,
+                    vcpus: v.vcpus,
+                }),
+                limits: r.limits.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
+                    memory_mib: v.memory_mb,
+                    vcpus: v.vcpus,
+                }),
+            }
+        });
         out.worker_commands.push((
             worker_id.clone(),
             WorkerCommand::LaunchPod {
@@ -310,6 +322,7 @@ impl NamespaceStateMachine {
                 pod_id: pod_id.clone(),
                 network: pod_network,
                 containers: wl_spec.containers.clone(),
+                resources,
             },
         ));
 

@@ -1,3 +1,4 @@
+mod cgroup;
 mod container;
 mod net;
 mod util;
@@ -30,6 +31,7 @@ fn mount_essential_filesystems() {
         ("tmpfs", "/tmp", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None),
         ("devpts", "/dev/pts", "devpts", libc::MS_NOSUID | libc::MS_NOEXEC, Some("gid=5,mode=620")),
         ("tmpfs", "/dev/shm", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None),
+        ("cgroup2", "/sys/fs/cgroup", "cgroup2", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None),
     ];
 
     for &(source, target, fstype, flags, data) in mounts {
@@ -392,6 +394,7 @@ enum Ready {
     ControlMsg(anyhow::Result<HostMessage>),
     PipeReady,
     YamuxEvent,
+    PsiTriggered,
 }
 
 fn run() -> anyhow::Result<()> {
@@ -588,10 +591,21 @@ fn run() -> anyhow::Result<()> {
                         }).await;
                         Ready::PipeReady
                     };
+                    let psi_ready = async {
+                        if let Some(psi) = containers.psi_fd() {
+                            psi.readable().await.ok();
+                            Ready::PsiTriggered
+                        } else {
+                            future::pending::<Ready>().await
+                        }
+                    };
 
                     future::or(
                         future::or(sig_ready, yamux_drive),
-                        future::or(ctrl, pipe_ready),
+                        future::or(
+                            future::or(ctrl, pipe_ready),
+                            psi_ready,
+                        ),
                     ).await
                 };
 
@@ -648,6 +662,20 @@ fn run() -> anyhow::Result<()> {
                         let captured_ids = containers.captured_container_ids();
                         for id in &captured_ids {
                             drain_container_pipes(&mut containers, &mut output_streams, id).await;
+                        }
+                    }
+                    Ready::PsiTriggered => {
+                        log::warn!("memory pressure detected across containers");
+                        // Re-arm the PSI trigger by reading from the fd.
+                        if let Some(psi) = containers.psi_fd() {
+                            let mut buf = [0u8; 256];
+                            unsafe {
+                                libc::read(
+                                    psi.as_raw_fd(),
+                                    buf.as_mut_ptr() as *mut libc::c_void,
+                                    buf.len(),
+                                );
+                            }
                         }
                     }
                     Ready::YamuxEvent => {

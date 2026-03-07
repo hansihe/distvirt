@@ -10,7 +10,7 @@ mod format;
 mod platform;
 mod spec;
 
-use commands::{LegacyCommands, OutputFormat};
+use commands::OutputFormat;
 
 const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   up            Apply a namespace spec (create or update)
@@ -33,10 +33,7 @@ const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
 
 \x1b[1;4mAuth & config:\x1b[0m
   login         Log in and save credentials
-  context       Manage named contexts
-
-\x1b[1;4mOther:\x1b[0m
-  legacy        Legacy in-process commands";
+  context       Manage named contexts";
 
 #[derive(Parser)]
 #[command(
@@ -70,8 +67,6 @@ enum Commands {
     Resource(ResourceCommands),
     #[command(flatten)]
     Auth(AuthCommands),
-    #[command(flatten)]
-    Other(OtherCommands),
 }
 
 /// Layer 1 — task-oriented commands
@@ -238,17 +233,6 @@ enum AuthCommands {
     },
 }
 
-/// Other commands
-#[derive(Subcommand)]
-enum OtherCommands {
-    /// Legacy in-process commands (compose-up, run-image)
-    #[command(hide = true)]
-    Legacy {
-        #[command(subcommand)]
-        command: LegacyCommands,
-    },
-}
-
 #[derive(Subcommand)]
 enum ContextCommands {
     /// Switch to a named context
@@ -286,11 +270,6 @@ async fn main() -> anyhow::Result<()> {
             Some(ContextCommands::Delete { name }) => commands::auth::context_delete(&name)?,
         },
 
-        // Legacy commands run in-process, no gRPC needed
-        Commands::Other(OtherCommands::Legacy { command }) => {
-            commands::legacy::run(command).await?;
-        }
-
         // Render runs locally, no gRPC needed
         Commands::Task(TaskCommands::Render { file }) => {
             commands::namespace::render(&file)?;
@@ -321,13 +300,8 @@ async fn main() -> anyhow::Result<()> {
                     workload,
                     follow,
                 }) => {
-                    commands::streaming::logs(
-                        client,
-                        &namespace_id,
-                        workload.as_deref(),
-                        follow,
-                    )
-                    .await?;
+                    commands::streaming::logs(client, &namespace_id, workload.as_deref(), follow)
+                        .await?;
                 }
                 Commands::Task(TaskCommands::Events {
                     namespace_id,
@@ -385,7 +359,6 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Auth(AuthCommands::Login { .. })
                 | Commands::Auth(AuthCommands::Context { .. })
-                | Commands::Other(OtherCommands::Legacy { .. })
                 | Commands::Task(TaskCommands::Render { .. }) => unreachable!(),
             }
         }

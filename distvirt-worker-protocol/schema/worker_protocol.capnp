@@ -401,11 +401,23 @@ struct RegistryUpdateCmd {
 # 7. Report WorkerEvent.podRunning when all containers are started
 #
 # On failure, reports WorkerEvent.podFailed and cleans up partial state.
+struct ResourceValues {
+  memoryMib @0 :UInt64;
+  vcpus @1 :UInt32;
+}
+
+struct ResourceRequirements {
+  requests @0 :ResourceValues;
+  limits @1 :ResourceValues;
+}
+
 struct LaunchPodCmd {
   namespaceId @0 :Text;
   podId @1 :Text;
   network @2 :PodNetworkConfig;
   containers @3 :List(ContainerSpec);
+  hasResources @4 :Bool;
+  resources @5 :ResourceRequirements;
 }
 
 # Stop a running pod.

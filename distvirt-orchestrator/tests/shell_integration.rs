@@ -107,6 +107,7 @@ fn test_spec() -> NamespaceSpec {
                 netmask: "255.255.255.0".to_string(),
             },
             suspend_on_idle: false,
+            resources: None,
         },
     );
 

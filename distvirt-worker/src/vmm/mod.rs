@@ -17,6 +17,17 @@ pub struct NetConfig {
     pub guest_mac: [u8; 6],
 }
 
+/// Configuration for the virtio-balloon device.
+#[derive(Clone, Debug)]
+pub struct BalloonConfig {
+    /// Size of the balloon in MiB (memory reclaimed from the guest).
+    pub amount_mib: u32,
+    /// Allow the guest to deflate the balloon on OOM.
+    pub deflate_on_oom: bool,
+    /// Interval in seconds for balloon statistics polling (0 = disabled).
+    pub stats_polling_interval_s: u32,
+}
+
 /// Configuration for launching a VM.
 pub struct VmConfig {
     pub kernel_path: PathBuf,
@@ -27,6 +38,8 @@ pub struct VmConfig {
     pub net: Option<NetConfig>,
     /// If true, forward the VM serial console (kernel boot logs) to the host log at debug level.
     pub serial_console: bool,
+    /// Optional balloon device for memory overcommit.
+    pub balloon: Option<BalloonConfig>,
 }
 
 /// Metadata persisted as `metadata.json` in a snapshot directory.
@@ -38,6 +51,9 @@ pub struct SnapshotMetadata {
     pub kernel_path: PathBuf,
     /// Absolute path to the original rootfs image (re-copied into tmpdir on restore).
     pub rootfs_source_path: PathBuf,
+    /// Whether a balloon device was configured (needed for restore to enable `set_balloon`).
+    #[serde(default)]
+    pub balloon_configured: bool,
 }
 
 /// Artifacts produced by a VM snapshot.
@@ -93,5 +109,12 @@ pub trait VmInstance: Send + 'static {
     fn snapshot(&mut self, snapshot_dir: &Path) -> impl Future<Output = anyhow::Result<SnapshotArtifacts>> + Send {
         let _ = snapshot_dir;
         async { anyhow::bail!("snapshot not supported by this VM instance") }
+    }
+
+    /// Update the balloon device size. `amount_mib` is the amount of memory
+    /// to reclaim from the guest.
+    fn set_balloon(&self, amount_mib: u32) -> impl Future<Output = anyhow::Result<()>> + Send {
+        let _ = amount_mib;
+        async { anyhow::bail!("balloon not supported by this VM instance") }
     }
 }

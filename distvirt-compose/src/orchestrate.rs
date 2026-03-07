@@ -190,6 +190,7 @@ pub async fn run_compose(
                 netmask: DEFAULT_NETMASK.to_string(),
             },
             containers: vec![container_spec],
+            resources: None,
         })
         .await
         .with_context(|| format!("send launch pod '{}'", planned.name))?;

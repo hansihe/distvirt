@@ -37,6 +37,8 @@ async fn test_registry_sync() -> anyhow::Result<()> {
     .await?;
 
     // Launch a pod that resolves the name via the gateway DNS
+    register_pod_endpoint(&mut conn, "ns-dns", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-dns".into(),
         pod_id: "pod-dns".into(),
@@ -56,6 +58,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -127,6 +130,8 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     .await?;
 
     // Launch a pod that sends a TCP SYN to the service IP
+    register_pod_endpoint(&mut conn, "ns-tcp-act", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-tcp-act".into(),
         pod_id: "pod-tcp-act".into(),
@@ -146,6 +151,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -218,6 +224,8 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     // Launch backend pod that listens on port 80 at the service VIP.
+    register_pod_endpoint(&mut conn, "ns-svc-fwd", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-fwd".into(),
         pod_id: "pod-backend".into(),
@@ -240,6 +248,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -281,6 +290,8 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     // Launch client pod that sends data to the service VIP
+    register_pod_endpoint(&mut conn, "ns-svc-fwd", &test_pod_network_config_2(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-fwd".into(),
         pod_id: "pod-client".into(),
@@ -303,6 +314,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -382,6 +394,8 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     // Launch backend pod that listens on port 80 at the service VIP.
+    register_pod_endpoint(&mut conn, "ns-svc-buf", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-buf".into(),
         pod_id: "pod-backend".into(),
@@ -404,6 +418,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -422,6 +437,8 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
 
     // Launch client pod BEFORE setting backend — traffic will be buffered
+    register_pod_endpoint(&mut conn, "ns-svc-buf", &test_pod_network_config_2(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-buf".into(),
         pod_id: "pod-client".into(),
@@ -444,6 +461,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 

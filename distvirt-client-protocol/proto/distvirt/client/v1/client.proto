@@ -48,6 +48,17 @@ message WorkloadSpec {
     PodNetworkConfig network = 1;
     repeated ContainerSpec containers = 2;
     bool suspend_on_idle = 3;
+    ResourceRequirements resources = 4;
+}
+
+message ResourceValues {
+    uint64 memory_mb = 1;
+    uint32 vcpus = 2;
+}
+
+message ResourceRequirements {
+    ResourceValues requests = 1;
+    ResourceValues limits = 2;
 }
 
 message ContainerSpec {
@@ -91,8 +102,8 @@ message ContainerConfig {
     repeated string entrypoint = 1;
     repeated string args = 2;
     map<string, string> env = 3;
-    uint64 memory_mb = 4;
-    uint32 vcpus = 5;
+    reserved 4, 5;
+    reserved "memory_mb", "vcpus";
     string working_dir = 6;
     string user = 7;
     string hostname = 8;

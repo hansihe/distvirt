@@ -176,6 +176,7 @@ fn single_service_spec() -> NamespaceSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -204,6 +205,7 @@ fn multi_service_spec() -> NamespaceSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     workloads.insert(
@@ -217,6 +219,7 @@ fn multi_service_spec() -> NamespaceSpec {
                 gateway: Ipv4Addr::new(172, 16, 0, 1),
                 netmask: "255.255.255.0".into(),
             },
+            resources: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -255,6 +258,7 @@ fn activation_only_spec() -> NamespaceSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     let mut services = BTreeMap::new();

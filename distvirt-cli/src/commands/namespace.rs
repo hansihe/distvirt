@@ -255,8 +255,6 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
                 entrypoint,
                 args,
                 env,
-                memory_mb: 0,
-                vcpus: 0,
                 working_dir: svc.working_dir.clone().unwrap_or_default(),
                 user: svc.user.clone().unwrap_or_default(),
                 hostname: svc.hostname.clone().unwrap_or_default(),
@@ -267,6 +265,7 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
             network: Some(PodNetworkConfig { ip, mac }),
             containers: vec![container],
             suspend_on_idle: true,
+            resources: None,
         };
 
         let expose: Vec<ExposeSpec> = svc

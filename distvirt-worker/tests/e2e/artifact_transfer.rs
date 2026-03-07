@@ -83,6 +83,8 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     .await?;
 
     // --- Launch a long-running pod on worker A ---
+    register_pod_endpoint(&mut conn_a, "ns-xfer", &pod_network, "worker-a").await?;
+
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
             namespace_id: "ns-xfer".into(),
@@ -103,6 +105,7 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
                     stdin: false,
                 },
             }],
+            resources: None,
         })
         .await?;
 
@@ -223,6 +226,8 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
         matches!(e, WorkerEvent::NamespaceCreated { .. })
     })
     .await?;
+
+    register_pod_endpoint(&mut conn_b, "ns-xfer", &pod_network, "worker-b").await?;
 
     conn_b
         .send_command(&WorkerCommand::ResumePod {

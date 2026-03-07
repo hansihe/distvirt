@@ -14,6 +14,18 @@ pub struct NamespaceSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceValues {
+    pub memory_mb: u64,
+    pub vcpus: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceRequirements {
+    pub requests: Option<ResourceValues>,
+    pub limits: Option<ResourceValues>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub containers: Vec<ContainerSpec>,
     pub network: PodNetworkConfig,
@@ -21,6 +33,9 @@ pub struct WorkloadSpec {
     /// Enables fast resume from snapshot on re-activation.
     #[serde(default)]
     pub suspend_on_idle: bool,
+    /// Resource requests and limits for this workload.
+    #[serde(default)]
+    pub resources: Option<ResourceRequirements>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

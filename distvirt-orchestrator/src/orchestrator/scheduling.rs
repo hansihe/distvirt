@@ -21,12 +21,17 @@ impl Orchestrator {
             if let Some(worker_id) = self.select_worker_for_pod(&namespace_id) {
                 let pod_id = self.gen_pod_id();
                 if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                    let memory_mb = ns.spec.workloads.get(&req.workload_id)
+                        .and_then(|wl| wl.resources.as_ref())
+                        .and_then(|r| r.limits.as_ref())
+                        .map(|l| l.memory_mb)
+                        .unwrap_or(DEFAULT_POD_MEMORY_MB);
                     let launch_out = ns.step(NamespaceInput::LaunchPod {
                         workload_id: req.workload_id,
                         worker_id: worker_id.clone(),
                         pod_id: pod_id.clone(),
                     }, &mut self.placement_table);
-                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, DEFAULT_POD_MEMORY_MB);
+                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, memory_mb);
                     // Recursively process outputs from LaunchPod (it won't emit more pod_requests).
                     out.merge_namespace(namespace_id.clone(), launch_out);
                 }
@@ -48,6 +53,11 @@ impl Orchestrator {
                 None => continue,
             };
             if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                let memory_mb = ns.spec.workloads.get(&req.workload_id)
+                    .and_then(|wl| wl.resources.as_ref())
+                    .and_then(|r| r.limits.as_ref())
+                    .map(|l| l.memory_mb)
+                    .unwrap_or(DEFAULT_POD_MEMORY_MB);
                 let resume_out = ns.step(NamespaceInput::ResumePod {
                     workload_id: req.workload_id,
                     worker_id: worker_id.clone(),
@@ -58,7 +68,7 @@ impl Orchestrator {
                     pod_id,
                     worker_id,
                     LeaseIntent::PodResume { artifact_id: req.artifact_id },
-                    DEFAULT_POD_MEMORY_MB,
+                    memory_mb,
                 );
                 // Recursively process outputs from ResumePod.
                 out.merge_namespace(namespace_id.clone(), resume_out);
@@ -106,12 +116,17 @@ impl Orchestrator {
             if let Some(worker_id) = self.select_worker_for_pod(&ns_id) {
                 let pod_id = self.gen_pod_id();
                 if let Some(ns) = self.namespaces.get_mut(&ns_id) {
+                    let memory_mb = ns.spec.workloads.get(&wl_id)
+                        .and_then(|wl| wl.resources.as_ref())
+                        .and_then(|r| r.limits.as_ref())
+                        .map(|l| l.memory_mb)
+                        .unwrap_or(DEFAULT_POD_MEMORY_MB);
                     let launch_out = ns.step(NamespaceInput::LaunchPod {
                         workload_id: wl_id,
                         worker_id: worker_id.clone(),
                         pod_id: pod_id.clone(),
                     }, &mut self.placement_table);
-                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, DEFAULT_POD_MEMORY_MB);
+                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, memory_mb);
                     out.merge_namespace(ns_id.clone(), launch_out);
                 }
             }

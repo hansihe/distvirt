@@ -192,6 +192,55 @@ pub fn read_container_config(
     })
 }
 
+pub fn write_resource_values(
+    builder: &mut schema::resource_values::Builder<'_>,
+    val: &ResourceValues,
+) {
+    builder.set_memory_mib(val.memory_mib);
+    builder.set_vcpus(val.vcpus);
+}
+
+pub fn read_resource_values(
+    reader: schema::resource_values::Reader<'_>,
+) -> Result<ResourceValues, capnp::Error> {
+    Ok(ResourceValues {
+        memory_mib: reader.get_memory_mib(),
+        vcpus: reader.get_vcpus(),
+    })
+}
+
+pub fn write_resource_requirements(
+    builder: &mut schema::resource_requirements::Builder<'_>,
+    val: &ResourceRequirements,
+) {
+    if let Some(ref requests) = val.requests {
+        write_resource_values(&mut builder.reborrow().init_requests(), requests);
+    }
+    if let Some(ref limits) = val.limits {
+        write_resource_values(&mut builder.reborrow().init_limits(), limits);
+    }
+}
+
+pub fn read_resource_requirements(
+    reader: schema::resource_requirements::Reader<'_>,
+) -> Result<ResourceRequirements, capnp::Error> {
+    // Cap'n Proto always has default values for struct fields, so we check
+    // if the values are non-zero to determine presence.
+    let requests_reader = reader.get_requests()?;
+    let requests = if requests_reader.get_memory_mib() != 0 || requests_reader.get_vcpus() != 0 {
+        Some(read_resource_values(requests_reader)?)
+    } else {
+        None
+    };
+    let limits_reader = reader.get_limits()?;
+    let limits = if limits_reader.get_memory_mib() != 0 || limits_reader.get_vcpus() != 0 {
+        Some(read_resource_values(limits_reader)?)
+    } else {
+        None
+    };
+    Ok(ResourceRequirements { requests, limits })
+}
+
 pub fn write_container_spec(
     builder: &mut schema::container_spec::Builder<'_>,
     val: &ContainerSpec,
@@ -767,6 +816,7 @@ pub fn write_worker_command(
             pod_id,
             network,
             containers,
+            resources,
         } => {
             let mut b = builder.init_launch_pod();
             b.set_namespace_id(namespace_id.as_ref());
@@ -775,6 +825,12 @@ pub fn write_worker_command(
             let mut list = b.reborrow().init_containers(containers.len() as u32);
             for (i, spec) in containers.iter().enumerate() {
                 write_container_spec(&mut list.reborrow().get(i as u32), spec);
+            }
+            if let Some(res) = resources {
+                b.set_has_resources(true);
+                write_resource_requirements(&mut b.reborrow().init_resources(), res);
+            } else {
+                b.set_has_resources(false);
             }
         }
         WorkerCommand::StopPod {
@@ -958,11 +1014,17 @@ pub fn read_worker_command(
             for i in 0..specs.len() {
                 containers.push(read_container_spec(specs.get(i))?);
             }
+            let resources = if r.get_has_resources() {
+                Some(read_resource_requirements(r.get_resources()?)?)
+            } else {
+                None
+            };
             Ok(WorkerCommand::LaunchPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId::from(r.get_pod_id()?.to_str()?),
                 network: read_pod_network_config(r.get_network()?)?,
                 containers,
+                resources,
             })
         }
         StopPod(r) => {

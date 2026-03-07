@@ -100,6 +100,18 @@ pub enum ActivatorConfig {
     Http2 {},
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceValues {
+    pub memory_mib: u64,
+    pub vcpus: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceRequirements {
+    pub requests: Option<ResourceValues>,
+    pub limits: Option<ResourceValues>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum BackendNeed {
     None,
@@ -256,6 +268,7 @@ pub enum WorkerCommand {
         pod_id: PodId,
         network: PodNetworkConfig,
         containers: Vec<ContainerSpec>,
+        resources: Option<ResourceRequirements>,
     },
     StopPod {
         namespace_id: NamespaceId,

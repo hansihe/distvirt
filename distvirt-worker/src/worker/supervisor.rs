@@ -17,7 +17,7 @@ use crate::io_session::IoEvent;
 use crate::managed_vm::ManagedVm;
 use crate::oci;
 use crate::task_handle::TaskHandle;
-use crate::vmm::{NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
+use crate::vmm::{BalloonConfig, NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
 
 // Timeout escalation chain for pod shutdown. These must satisfy:
 //   GRACEFUL_SHUTDOWN_TIMEOUT < STOP_POD_TIMEOUT
@@ -76,6 +76,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
     pod_id: PodId,
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
+    resources: Option<distvirt_worker_protocol::ResourceRequirements>,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
     match pod_launch(
@@ -90,6 +91,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
         &pod_id,
         network,
         containers,
+        resources,
         &cancel,
     )
     .await
@@ -266,6 +268,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     pod_id: &PodId,
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
+    resources: Option<distvirt_worker_protocol::ResourceRequirements>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<(
     ManagedVm<V::Instance>,
@@ -299,14 +302,40 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         guest_mac: network.mac,
     };
 
+    let (vcpu_count, mem_size_mib) = resources
+        .as_ref()
+        .and_then(|r| r.limits.as_ref())
+        .map(|l| (
+            if l.vcpus > 0 { l.vcpus } else { 1 },
+            if l.memory_mib > 0 { l.memory_mib as u32 } else { 128u32 },
+        ))
+        .unwrap_or((1, 128));
+
+    let balloon = resources
+        .as_ref()
+        .and_then(|r| {
+            let limits = r.limits.as_ref()?;
+            let requests = r.requests.as_ref()?;
+            if requests.memory_mib < limits.memory_mib && limits.memory_mib > 0 {
+                Some(BalloonConfig {
+                    amount_mib: (limits.memory_mib - requests.memory_mib) as u32,
+                    deflate_on_oom: true,
+                    stats_polling_interval_s: 0,
+                })
+            } else {
+                None
+            }
+        });
+
     let vm_config = VmConfig {
         kernel_path: kernel_path.clone(),
         rootfs_image_path: rootfs_image_path.clone(),
         container_image_path: artifact.image_path.clone(),
-        vcpu_count: 1,
-        mem_size_mib: 128,
+        vcpu_count,
+        mem_size_mib,
         net: Some(net_config.clone()),
         serial_console: true,
+        balloon,
     };
 
     let mut instance = tokio::select! {
@@ -826,6 +855,7 @@ mod tests {
                     pod_id,
                     make_pod_network(),
                     make_containers(),
+                    None,
                     suspend_rx,
                 )
                 .await;
@@ -892,6 +922,7 @@ mod tests {
                     pod_id,
                     make_pod_network(),
                     make_containers(),
+                    None,
                     suspend_rx,
                 )
                 .await;
@@ -949,6 +980,7 @@ mod tests {
                 PodId::from("pod1"),
                 make_pod_network(),
                 make_containers(),
+                None,
                 suspend_rx,
             )
             .await;

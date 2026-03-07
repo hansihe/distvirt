@@ -58,6 +58,7 @@ pub(super) fn test_spec() -> NamespaceSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -85,6 +86,7 @@ pub(super) fn test_spec_with_activation() -> NamespaceSpec {
             containers: vec![test_container_spec()],
             network: test_pod_network_config(),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     let mut services = BTreeMap::new();

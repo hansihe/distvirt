@@ -22,6 +22,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/nginx:latest")],
             network: pod_network(10),
             suspend_on_idle: true,
+            resources: None,
         },
     );
     workloads.insert(
@@ -30,6 +31,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/nginx:latest")],
             network: pod_network(11),
             suspend_on_idle: true,
+            resources: None,
         },
     );
 

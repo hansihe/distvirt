@@ -250,6 +250,11 @@ impl<I: VmInstance> ManagedVm<I> {
         Ok((container_id, IoSession::new(stream)))
     }
 
+    /// Update the balloon device size (memory to reclaim from guest, in MiB).
+    pub async fn set_balloon(&self, amount_mib: u32) -> anyhow::Result<()> {
+        self.instance.set_balloon(amount_mib).await
+    }
+
     /// Suspend the VM: handshake with guest, snapshot, then kill.
     ///
     /// Sends `PrepareSuspend` to the guest, waits for `SuspendReady` (with

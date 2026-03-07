@@ -28,6 +28,8 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     // Launch a long-running pod
+    register_pod_endpoint(&mut conn, "ns-suspend", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-suspend".into(),
         pod_id: "pod-suspend".into(),
@@ -47,6 +49,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -147,6 +150,8 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     }
 
     // Resume the pod from the snapshot
+    register_pod_endpoint(&mut conn, "ns-suspend", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-suspend".into(),
         pod_id: "pod-resumed".into(),
@@ -238,6 +243,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     // Launch server pod with a persistent TCP listener (responds "pong" per connection)
+    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-susp-net".into(),
         pod_id: "pod-server".into(),
@@ -260,6 +267,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -292,6 +300,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     // --- Pre-suspend: verify TCP connectivity ---
+    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config_2(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-susp-net".into(),
         pod_id: "pod-client-pre".into(),
@@ -311,6 +321,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -378,6 +389,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     eprintln!("e2e: server pod suspended");
 
     // --- Resume the server pod ---
+    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-susp-net".into(),
         pod_id: "pod-server-resumed".into(),
@@ -417,6 +430,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     // --- Post-resume: verify TCP connectivity ---
+    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config_2(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-susp-net".into(),
         pod_id: "pod-client-post".into(),
@@ -436,6 +451,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -538,6 +554,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     // Launch server pod with a persistent TCP listener
+    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-act-resume".into(),
         pod_id: "pod-server".into(),
@@ -560,6 +578,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -596,6 +615,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     // Pre-suspend sanity check: verify connectivity
+    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config_2(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-act-resume".into(),
         pod_id: "pod-pre-check".into(),
@@ -615,6 +636,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -706,6 +728,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     // Launch client that connects to the service VIP while no backend exists.
+    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config_2(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-act-resume".into(),
         pod_id: "pod-client".into(),
@@ -725,6 +749,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 stdin: false,
             },
         }],
+        resources: None,
     })
     .await?;
 
@@ -743,6 +768,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     eprintln!("e2e: activator signaled BackendNeed::Traffic, resuming server pod");
 
     // Resume the server pod from the snapshot
+    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config(), "test-worker").await?;
+
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-act-resume".into(),
         pod_id: "pod-server-resumed".into(),

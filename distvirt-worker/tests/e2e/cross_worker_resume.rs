@@ -65,6 +65,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     .await?;
 
     // --- Launch pod on worker A ---
+    register_pod_endpoint(&mut conn_a, "ns-shared", &pod_network, "worker-a").await?;
+
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
             namespace_id: "ns-shared".into(),
@@ -85,6 +87,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
                     stdin: false,
                 },
             }],
+            resources: None,
         })
         .await?;
 
@@ -170,6 +173,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     .await?;
 
     // --- Resume pod on worker B from the shared pool ---
+    register_pod_endpoint(&mut conn_b, "ns-shared", &pod_network, "worker-b").await?;
+
     conn_b
         .send_command(&WorkerCommand::ResumePod {
             namespace_id: "ns-shared".into(),

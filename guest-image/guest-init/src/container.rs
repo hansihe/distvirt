@@ -6,6 +6,7 @@ use std::ptr;
 use anyhow::{bail, Context};
 use async_io::Async;
 
+use crate::cgroup;
 use crate::util;
 
 /// RAII wrapper around the read end of a pipe.
@@ -41,10 +42,14 @@ struct Container {
     pub stderr_fd: Option<Async<PipeFd>>,
     /// Write end of stdin pipe (when stdin forwarding is enabled).
     pub stdin_fd: Option<OwnedFd>,
+    /// Path to this container's cgroup (if cgroups are available).
+    pub cgroup_path: Option<String>,
 }
 
 pub struct ContainerManager {
     containers: HashMap<String, Container>,
+    /// Aggregate PSI monitor fd on the parent cgroup (if available).
+    psi_fd: Option<Async<OwnedFd>>,
 }
 
 /// Result of reaping a child process.
@@ -55,9 +60,33 @@ pub struct ChildExit {
 
 impl ContainerManager {
     pub fn new() -> Self {
+        let psi_fd = match cgroup::init_container_cgroup_root() {
+            Ok(()) => match cgroup::setup_psi_monitor("/sys/fs/cgroup/containers") {
+                Ok(fd) => match Async::new_nonblocking(fd) {
+                    Ok(async_fd) => Some(async_fd),
+                    Err(e) => {
+                        log::warn!("failed to wrap PSI fd in Async: {:#}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    log::warn!("failed to set up PSI monitor: {:#}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                log::warn!("failed to init cgroup root: {:#}", e);
+                None
+            }
+        };
         ContainerManager {
             containers: HashMap::new(),
+            psi_fd,
         }
+    }
+
+    pub fn psi_fd(&self) -> Option<&Async<OwnedFd>> {
+        self.psi_fd.as_ref()
     }
 
     /// Mount the block device as ext4 at /containers/<id> and write resolv.conf.
@@ -108,6 +137,7 @@ impl ContainerManager {
                 stdout_fd: None,
                 stderr_fd: None,
                 stdin_fd: None,
+                cgroup_path: None,
             },
         );
         Ok(())
@@ -154,6 +184,15 @@ impl ContainerManager {
             Some(util::create_pipe().context("create stdin pipe")?)
         } else {
             None
+        };
+
+        // Set up cgroup for this container before fork.
+        let cgroup_path = match cgroup::setup_container_cgroup(id) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                log::warn!("failed to create cgroup for container {}: {:#}", id, e);
+                None
+            }
         };
 
         // Create a new PID namespace so the container process becomes PID 1.
@@ -209,6 +248,14 @@ impl ContainerManager {
         if let Some((_stdin_read, stdin_write)) = stdin_pipe {
             container.stdin_fd = Some(stdin_write);
         }
+
+        // Move child into its cgroup (parent side).
+        if let Some(ref path) = cgroup_path {
+            if let Err(e) = cgroup::move_to_cgroup(path, pid) {
+                log::warn!("failed to move pid {} to cgroup: {:#}", pid, e);
+            }
+        }
+        container.cgroup_path = cgroup_path;
 
         container.pid = Some(pid);
         log::info!(
@@ -336,6 +383,9 @@ impl ContainerManager {
                 } else {
                     log::info!("unmounted {}", container.mount_point);
                 }
+            }
+            if container.cgroup_path.is_some() {
+                cgroup::remove_cgroup(&container.id);
             }
         }
     }

@@ -440,8 +440,9 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 pod_id,
                 network,
                 containers,
+                resources,
             } => {
-                self.handle_launch_pod(&namespace_id, pod_id, network, containers, log_opener)
+                self.handle_launch_pod(&namespace_id, pod_id, network, containers, resources, log_opener)
                     .await
             }
             WorkerCommand::StopPod {
@@ -613,6 +614,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         pod_id: PodId,
         network: PodNetworkConfig,
         containers: Vec<ContainerSpec>,
+        resources: Option<distvirt_worker_protocol::ResourceRequirements>,
         log_opener: &LogStreamOpener,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
@@ -647,6 +649,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 pid,
                 network,
                 containers,
+                resources,
                 suspend_rx,
             )
             .await;
@@ -1452,6 +1455,7 @@ mod tests {
             PodId::from("pod1"),
             make_pod_network(),
             make_containers(),
+            None,
             &log_opener,
         )
         .await

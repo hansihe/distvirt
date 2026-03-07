@@ -87,10 +87,22 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         .map(convert_proto_container_spec)
         .collect::<Result<Vec<_>, _>>()?;
 
+    let resources = wl.resources.map(|r| ResourceRequirements {
+        requests: r.requests.map(|v| ResourceValues {
+            memory_mb: v.memory_mb,
+            vcpus: v.vcpus,
+        }),
+        limits: r.limits.map(|v| ResourceValues {
+            memory_mb: v.memory_mb,
+            vcpus: v.vcpus,
+        }),
+    });
+
     Ok(WorkloadSpec {
         containers,
         network: pod_network,
         suspend_on_idle: wl.suspend_on_idle,
+        resources,
     })
 }
 

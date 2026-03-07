@@ -71,6 +71,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/alpine:latest")],
             network: pod_network(10),
             suspend_on_idle: false,
+            resources: None,
         },
     );
 
@@ -108,6 +109,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/nginx:latest")],
             network: pod_network(10),
             suspend_on_idle: true,
+            resources: None,
         },
     );
 
@@ -149,6 +151,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/nginx:latest")],
             network: pod_network(10),
             suspend_on_idle: false,
+            resources: None,
         },
     );
 
@@ -189,6 +192,7 @@ pub fn multi_service_spec() -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/nginx:latest")],
             network: pod_network(10),
             suspend_on_idle: true,
+            resources: None,
         },
     );
 
@@ -274,6 +278,7 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/nginx:latest")],
             network: pod_network(10),
             suspend_on_idle: false,
+            resources: None,
         },
     );
 
@@ -324,6 +329,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/alpine:latest")],
             network: pod_network(10),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     workloads.insert(
@@ -332,6 +338,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
             containers: vec![container_spec("docker.io/library/alpine:latest")],
             network: pod_network(11),
             suspend_on_idle: false,
+            resources: None,
         },
     );
 

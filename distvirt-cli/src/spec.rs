@@ -302,6 +302,23 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
             };
             let pod_mac = ip_to_mac(&pod_ip);
 
+            // Resources (workload-level)
+            let (requests, limits) = resolve_resources(&wl.resources, &spec.defaults);
+            let resources = if requests.is_some() || limits.is_some() {
+                Some(ResourceRequirements {
+                    requests: requests.map(|r| ResourceValues {
+                        memory_mb: r.memory_mb.unwrap_or(0),
+                        vcpus: r.vcpus.unwrap_or(0),
+                    }),
+                    limits: limits.map(|l| ResourceValues {
+                        memory_mb: l.memory_mb.unwrap_or(0),
+                        vcpus: l.vcpus.unwrap_or(0),
+                    }),
+                })
+            } else {
+                None
+            };
+
             // Containers
             let containers: Vec<ContainerSpec> = wl
                 .containers
@@ -313,8 +330,6 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                         .clone()
                         .unwrap_or_else(|| if i == 0 { "main".to_string() } else { format!("container-{}", i) });
 
-                    let (memory_mb, vcpus) = resolve_resources(&wl.resources, &spec.defaults);
-
                     ContainerSpec {
                         name,
                         image: c.image.clone(),
@@ -322,8 +337,6 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                             entrypoint: c.entrypoint.clone().unwrap_or_default(),
                             args: c.args.clone().unwrap_or_default(),
                             env: c.env.clone().unwrap_or_default(),
-                            memory_mb,
-                            vcpus,
                             working_dir: c.working_dir.clone().unwrap_or_default(),
                             user: c.user.clone().unwrap_or_default(),
                             hostname: c.hostname.clone().unwrap_or_default(),
@@ -339,15 +352,6 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                 );
             }
 
-            if let Some(ref res) = wl.resources {
-                if res.requests.is_some() {
-                    log::warn!(
-                        "workload '{}': resources.requests is not yet in client protocol; only limits are applied",
-                        wid
-                    );
-                }
-            }
-
             workloads.insert(
                 wid.clone(),
                 WorkloadSpec {
@@ -357,6 +361,7 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                     }),
                     containers,
                     suspend_on_idle,
+                    resources,
                 },
             );
 
@@ -443,21 +448,20 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
 fn resolve_resources(
     workload_res: &Option<SpecResources>,
     defaults: &Option<SpecDefaults>,
-) -> (u64, u32) {
-    // Priority: workload limits > workload requests > default limits > default requests > 0
+) -> (Option<SpecResourceValues>, Option<SpecResourceValues>) {
     let default_res = defaults.as_ref().and_then(|d| d.resources.as_ref());
 
     let limits = workload_res
         .as_ref()
-        .and_then(|r| r.limits.as_ref())
-        .or_else(|| workload_res.as_ref().and_then(|r| r.requests.as_ref()))
-        .or_else(|| default_res.and_then(|r| r.limits.as_ref()))
-        .or_else(|| default_res.and_then(|r| r.requests.as_ref()));
+        .and_then(|r| r.limits.clone())
+        .or_else(|| default_res.and_then(|r| r.limits.clone()));
 
-    match limits {
-        Some(v) => (v.memory_mb.unwrap_or(0), v.vcpus.unwrap_or(0)),
-        None => (0, 0),
-    }
+    let requests = workload_res
+        .as_ref()
+        .and_then(|r| r.requests.clone())
+        .or_else(|| default_res.and_then(|r| r.requests.clone()));
+
+    (requests, limits)
 }
 
 fn resolve_activation(
@@ -675,8 +679,11 @@ workloads:
         assert_eq!(cfg.working_dir, "/app");
         assert_eq!(cfg.user, "1000:1000");
         assert_eq!(cfg.hostname, "api");
-        assert_eq!(cfg.memory_mb, 512);
-        assert_eq!(cfg.vcpus, 2);
+        // Resources are now on the workload level
+        let res = api.resources.as_ref().unwrap();
+        let limits = res.limits.as_ref().unwrap();
+        assert_eq!(limits.memory_mb, 512);
+        assert_eq!(limits.vcpus, 2);
 
         // Check activation on api service
         let api_svc = &proto.services["api"];

@@ -83,6 +83,7 @@ async fn test_add_workload_to_existing_namespace() {
             containers: vec![container_spec("docker.io/library/alpine:latest")],
             network: pod_network(11),
             suspend_on_idle: false,
+            resources: None,
         },
     );
     new_spec.services.insert(

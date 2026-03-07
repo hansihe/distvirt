@@ -6,7 +6,7 @@ use anyhow::{bail, Context};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use super::{NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
+use super::{BalloonConfig, NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
 use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
 
@@ -158,6 +158,21 @@ impl Vmm for Firecracker {
         .await
         .context("configure machine")?;
 
+        // Configure balloon device if requested.
+        if let Some(ref balloon) = config.balloon {
+            api_request("PUT",
+                &api_socket,
+                "/balloon",
+                &serde_json::json!({
+                    "amount_mib": balloon.amount_mib,
+                    "deflate_on_oom": balloon.deflate_on_oom,
+                    "stats_polling_interval_s": balloon.stats_polling_interval_s
+                }),
+            )
+            .await
+            .context("configure balloon")?;
+        }
+
         // Configure network interface if requested.
         let tap_name = if let Some(ref net) = config.net {
             let tap_name =
@@ -217,6 +232,7 @@ impl Vmm for Firecracker {
             _tmpdir: tmpdir,
             kernel_path: config.kernel_path.clone(),
             rootfs_source_path: config.rootfs_image_path.clone(),
+            balloon_configured: config.balloon.is_some(),
         };
 
         // Spawn serial console reader.
@@ -356,6 +372,7 @@ impl Vmm for Firecracker {
             _tmpdir: tmpdir,
             kernel_path: metadata.kernel_path.clone(),
             rootfs_source_path: metadata.rootfs_source_path.clone(),
+            balloon_configured: metadata.balloon_configured,
         })
     }
 }
@@ -372,6 +389,8 @@ pub struct FirecrackerInstance {
     kernel_path: PathBuf,
     /// Stored for snapshot metadata — the original rootfs image path (re-copied on restore).
     rootfs_source_path: PathBuf,
+    /// Whether a balloon device was configured at launch (needed for set_balloon/snapshot).
+    balloon_configured: bool,
 }
 
 impl Drop for FirecrackerInstance {
@@ -440,6 +459,20 @@ impl VmInstance for FirecrackerInstance {
         Ok(())
     }
 
+    async fn set_balloon(&self, amount_mib: u32) -> anyhow::Result<()> {
+        if !self.balloon_configured {
+            bail!("balloon device not configured for this VM");
+        }
+        api_request("PATCH",
+            &self.api_socket,
+            "/balloon",
+            &serde_json::json!({"amount_mib": amount_mib}),
+        )
+        .await
+        .context("set balloon size")?;
+        Ok(())
+    }
+
     async fn snapshot(&mut self, snapshot_dir: &Path) -> anyhow::Result<SnapshotArtifacts> {
         tokio::fs::create_dir_all(snapshot_dir)
             .await
@@ -494,6 +527,7 @@ impl VmInstance for FirecrackerInstance {
         let metadata = SnapshotMetadata {
             kernel_path: self.kernel_path.clone(),
             rootfs_source_path: self.rootfs_source_path.clone(),
+            balloon_configured: self.balloon_configured,
         };
         let metadata_json =
             serde_json::to_vec_pretty(&metadata).context("serialize snapshot metadata")?;

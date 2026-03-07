@@ -5,8 +5,9 @@ use std::time::Duration;
 use futures_lite::io::AsyncReadExt;
 
 use distvirt_worker_protocol::{
-    NetworkConfig, OrchestratorConnection, PodNetworkConfig, PoolInfo, WorkerAccepted,
-    WorkerCommand, WorkerConnection, WorkerEvent, WorkerId,
+    EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig, OrchestratorConnection,
+    PodNetworkConfig, PoolInfo, WorkerAccepted, WorkerCommand, WorkerConnection, WorkerEvent,
+    WorkerId,
 };
 
 /// Returns `true` if the E2E env var is set, otherwise prints a skip message.
@@ -243,3 +244,30 @@ pub async fn recv_until<F: Fn(&WorkerEvent) -> bool>(
 }
 
 pub const EVENT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Register a pod endpoint in the fabric before launching the pod.
+///
+/// In production, the orchestrator sends EndpointUpdate before LaunchPod so the
+/// fabric's endpoint table already has an entry when `add_tap_port` calls
+/// `attach_port`. Without this, `attach_port` races and logs spurious errors.
+pub async fn register_pod_endpoint(
+    conn: &mut OrchestratorConnection,
+    namespace_id: &str,
+    pod_network: &PodNetworkConfig,
+    worker_id: &str,
+) -> anyhow::Result<()> {
+    conn.send_command(&WorkerCommand::EndpointUpdate {
+        namespace_id: namespace_id.into(),
+        upserted: vec![EndpointSpec {
+            ip: pod_network.ip,
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: WorkerId::from(worker_id),
+                }),
+            },
+        }],
+        removed_ips: vec![],
+    })
+    .await?;
+    Ok(())
+}
