@@ -94,6 +94,16 @@ pub async fn prepare_image(
 }
 
 async fn pull_image(channel: &Channel, namespace: &str, image_ref: &str) -> anyhow::Result<()> {
+    // Check if the image already exists locally (e.g. imported via `ctr image import`).
+    let mut images = ImagesClient::new(channel.clone());
+    let req = GetImageRequest {
+        name: image_ref.to_string(),
+    };
+    if images.get(with_namespace!(req, namespace)).await.is_ok() {
+        log::info!("image {} already exists locally, skipping pull", image_ref);
+        return Ok(());
+    }
+
     let arch = match consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",

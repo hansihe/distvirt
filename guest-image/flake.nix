@@ -54,6 +54,25 @@
         echo "updated $CONFIG"
       '';
 
+      testContainers = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+        pname = "test-containers";
+        version = "0.1.0";
+        src = pkgs.lib.cleanSource root;
+        cargoLock.lockFile = root + "/Cargo.lock";
+        buildAndTestSubdir = "guest-image/test-containers";
+        cargoBuildProfileFlag = "--profile guest";
+      };
+
+      testContainerImage = pkgs.dockerTools.buildImage {
+        name = "distvirt-test-containers";
+        tag = "latest";
+        copyToRoot = pkgs.buildEnv {
+          name = "test-containers-root";
+          paths = [ testContainers ];
+          pathsToLink = [ "/bin" ];
+        };
+      };
+
       guestRootfsImage = pkgs.runCommand "guest-rootfs.ext4" {
         nativeBuildInputs = [ pkgs.e2fsprogs ];
       } ''
@@ -68,7 +87,7 @@
     in
     {
       packages.${system} = {
-        inherit guestKernel guestInit guestRootfsImage kernel-olddefconfig;
+        inherit guestKernel guestInit guestRootfsImage kernel-olddefconfig testContainers testContainerImage;
       };
     };
 }

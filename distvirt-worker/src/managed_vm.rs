@@ -22,7 +22,7 @@ use crate::vsock_client::{DriverExitSignal, GuestSession};
 /// control stream. If the guest were to send messages out-of-order, replies
 /// would be misattributed. The event stream exists precisely to keep async
 /// events (container exits) off the control stream.
-pub(crate) struct ManagedVm<I> {
+pub struct ManagedVm<I> {
     instance: I,
     session: GuestSession,
     yamux_driver: Option<TaskHandle<anyhow::Result<()>>>,

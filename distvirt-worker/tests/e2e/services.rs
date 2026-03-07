@@ -138,10 +138,16 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-tcp-act".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80 || true".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec![
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "trigger\n".into(),
+                    "--timeout".into(), "5".into(),
+                ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -155,13 +161,9 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait for PodRunning
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { .. })
-    })
-    .await?;
-
-    // Wait for the TCP activator to signal backend need
+    // Wait for the TCP activator to signal backend need.
+    // Note: ServiceBackendNeed may arrive before PodRunning because the SYN
+    // is sent as soon as the guest network is up, so we must wait for it first.
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::ServiceBackendNeed { need: BackendNeed::Traffic, .. })
     })
@@ -174,7 +176,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
         event
     );
 
-    // Wait for pod exit (nc -w 1 will time out after 1 second)
+    // Wait for pod exit (test-containers send --timeout 5 will time out)
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodExited { .. })
     })
@@ -232,12 +234,15 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-backend".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
-                    "-c".into(),
-                    "nc -l -w 5 -p 80".into(),
+                    "recv".into(),
+                    "--port".into(), "80".into(),
+                    "--expected".into(), "hello-service\n".into(),
+                    "--response".into(), "ok".into(),
+                    "--timeout".into(), "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -298,12 +303,15 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
-                    "-c".into(),
-                    "echo hello-service | nc -w 5 10.0.0.99 80".into(),
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "hello-service\n".into(),
+                    "--timeout".into(), "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -318,13 +326,13 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait for backend pod to exit (nc -l exits after first connection)
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+    // Wait for backend pod to exit — test-containers recv exits 0 on data match
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend")
     })
     .await?;
 
-    // Read backend logs — should contain the data sent by client
+    // Drain the backend log stream (for debug output)
     let mut log_data = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -337,13 +345,14 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         }
     })
     .await;
-
     let log_str = String::from_utf8_lossy(&log_data);
     eprintln!("backend log output: {:?}", log_str);
+
+    // Verify backend exited successfully (exit code 0 means data matched)
     assert!(
-        log_str.contains("hello-service"),
-        "expected 'hello-service' in backend log output, got: {:?}",
-        log_str
+        matches!(&event, WorkerEvent::PodExited { exit_code: 0, .. }),
+        "expected backend to exit with code 0 (data match), got: {:?}",
+        event
     );
 
     shutdown_worker(&mut conn, worker_handle).await?;
@@ -402,12 +411,15 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-backend".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
-                    "-c".into(),
-                    "nc -l -w 5 -p 80".into(),
+                    "recv".into(),
+                    "--port".into(), "80".into(),
+                    "--expected".into(), "hello-buffered\n".into(),
+                    "--response".into(), "ok".into(),
+                    "--timeout".into(), "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -445,12 +457,15 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
-                    "-c".into(),
-                    "echo hello-buffered | nc -w 5 10.0.0.99 80".into(),
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "hello-buffered\n".into(),
+                    "--timeout".into(), "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -498,13 +513,13 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait for backend pod to exit (nc -l exits after first connection)
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
+    // Wait for backend pod to exit — test-containers recv exits 0 on data match
+    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend")
     })
     .await?;
 
-    // Read backend logs — should contain data sent by client
+    // Drain the backend log stream (for debug output)
     let mut log_data = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -517,13 +532,14 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         }
     })
     .await;
-
     let log_str = String::from_utf8_lossy(&log_data);
     eprintln!("backend log output: {:?}", log_str);
+
+    // Verify backend exited successfully (exit code 0 means data matched)
     assert!(
-        log_str.contains("hello-buffered"),
-        "expected 'hello-buffered' in backend log output, got: {:?}",
-        log_str
+        matches!(&event, WorkerEvent::PodExited { exit_code: 0, .. }),
+        "expected backend to exit with code 0 (data match), got: {:?}",
+        event
     );
 
     shutdown_worker(&mut conn, worker_handle).await?;

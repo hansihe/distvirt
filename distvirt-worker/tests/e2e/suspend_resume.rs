@@ -251,12 +251,14 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-server".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
-                    "-c".into(),
-                    "while true; do echo pong | nc -l -p 80; done".into(),
+                    "serve".into(),
+                    "--port".into(), "80".into(),
+                    "--response".into(), "pong".into(),
+                    "--timeout".into(), "120".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -308,10 +310,16 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client-pre".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec![
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "ping\n".into(),
+                    "--timeout".into(), "30".into(),
+                ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -438,10 +446,16 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client-post".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec![
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "ping\n".into(),
+                    "--timeout".into(), "30".into(),
+                ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -562,12 +576,14 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-server".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
-                    "-c".into(),
-                    "while true; do echo pong | nc -l -p 80; done".into(),
+                    "serve".into(),
+                    "--port".into(), "80".into(),
+                    "--response".into(), "pong".into(),
+                    "--timeout".into(), "120".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -623,10 +639,16 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-pre-check".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "nc -w 1 10.0.0.99 80".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec![
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "ping\n".into(),
+                    "--timeout".into(), "30".into(),
+                ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -736,10 +758,16 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "nc -w 3 10.0.0.99 80".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec![
+                    "send".into(),
+                    "--host".into(), "10.0.0.99".into(),
+                    "--port".into(), "80".into(),
+                    "--data".into(), "ping\n".into(),
+                    "--timeout".into(), "30".into(),
+                ],
                 env: vec![],
                 working_dir: None,
                 uid: None,
