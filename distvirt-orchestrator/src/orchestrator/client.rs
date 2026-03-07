@@ -252,6 +252,40 @@ impl Orchestrator {
                     out,
                 );
             }
+            ClientCommand::DrainWorker { worker_id } => {
+                if let Some(ws) = self.workers.get_mut(&worker_id) {
+                    ws.conditions.insert(
+                        "draining".to_string(),
+                        WorkerCondition {
+                            active: true,
+                            message: "worker is draining, no new pods will be scheduled".to_string(),
+                        },
+                    );
+                    out.client_events.push((client_id, ClientEvent::Ok));
+                } else {
+                    out.client_events.push((
+                        client_id,
+                        ClientEvent::Error {
+                            message: format!("worker '{}' not found", worker_id.0),
+                        },
+                    ));
+                }
+            }
+            ClientCommand::UndrainWorker { worker_id } => {
+                if let Some(ws) = self.workers.get_mut(&worker_id) {
+                    ws.conditions.remove("draining");
+                    // Re-evaluate waiting workloads now that this worker is available again.
+                    self.schedule_waiting_pods(out);
+                    out.client_events.push((client_id, ClientEvent::Ok));
+                } else {
+                    out.client_events.push((
+                        client_id,
+                        ClientEvent::Error {
+                            message: format!("worker '{}' not found", worker_id.0),
+                        },
+                    ));
+                }
+            }
         }
     }
 }

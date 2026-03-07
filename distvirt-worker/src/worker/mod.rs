@@ -530,7 +530,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 endpoints,
             } => {
                 let worker_id = self.worker_id.clone()
-                    .expect("worker_id not set (handshake not completed)");
+                    .ok_or_else(|| FatalError::InternalInvariant("worker_id not set (handshake not completed)".into()))?;
                 // Borrow separate fields to avoid conflicting mutable/immutable borrows on self.
                 let activator_runtime = self.activator_runtime.as_ref();
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
@@ -544,7 +544,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 removed_ips,
             } => {
                 let worker_id = self.worker_id.clone()
-                    .expect("worker_id not set (handshake not completed)");
+                    .ok_or_else(|| FatalError::InternalInvariant("worker_id not set (handshake not completed)".into()))?;
                 let activator_runtime = self.activator_runtime.as_ref();
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))

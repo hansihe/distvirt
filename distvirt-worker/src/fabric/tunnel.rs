@@ -129,7 +129,8 @@ impl TunnelTransport {
 
         let encryption = if encrypted {
             let builder = noise_builder();
-            let keypair = builder.generate_keypair().unwrap();
+            let keypair = builder.generate_keypair()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise keypair generation failed: {}", e)))?;
             Some(EncryptionConfig { keypair })
         } else {
             None
@@ -170,22 +171,22 @@ impl TunnelTransport {
         endpoint: SocketAddr,
         peer_public_key: Option<&[u8; 32]>,
         is_initiator: bool,
-    ) {
+    ) -> Result<(), io::Error> {
         let noise = match (&self.encryption, peer_public_key) {
             (Some(enc), Some(remote_pub)) => {
                 let builder = noise_builder()
                     .local_private_key(&enc.keypair.private)
-                    .expect("noise: local_private_key failed")
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: local_private_key failed: {}", e)))?
                     .remote_public_key(remote_pub)
-                    .expect("noise: remote_public_key failed");
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: remote_public_key failed: {}", e)))?;
                 let hs = if is_initiator {
                     builder
                         .build_initiator()
-                        .expect("noise: build_initiator failed")
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: build_initiator failed: {}", e)))?
                 } else {
                     builder
                         .build_responder()
-                        .expect("noise: build_responder failed")
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: build_responder failed: {}", e)))?
                 };
                 Some(NoiseSession::Handshaking(hs))
             }
@@ -204,6 +205,8 @@ impl TunnelTransport {
         if is_initiator && self.encryption.is_some() {
             self.send_handshake_msg(&worker_id);
         }
+
+        Ok(())
     }
 
     /// Deregister a remote worker.
@@ -399,14 +402,23 @@ async fn recv_loop(
                     // Check if handshake is now complete — transition to transport mode.
                     let finished = hs.is_handshake_finished();
                     if finished {
-                        let old = peer.noise.take().unwrap();
+                        let Some(old) = peer.noise.take() else {
+                            log::error!("tunnel: handshake finished but noise state missing for {}", worker_id);
+                            continue;
+                        };
                         if let NoiseSession::Handshaking(hs) = old {
-                            let transport = hs.into_transport_mode()
-                                .expect("noise: into_transport_mode failed");
-                            peer.noise = Some(NoiseSession::Transport(transport));
-                            log::info!("tunnel: handshake with {} complete, transport mode active", worker_id);
-                            // Notify egress loops.
-                            let _ = handshake_done_tx.send_modify(|v| *v += 1);
+                            match hs.into_transport_mode() {
+                                Ok(transport) => {
+                                    peer.noise = Some(NoiseSession::Transport(transport));
+                                    log::info!("tunnel: handshake with {} complete, transport mode active", worker_id);
+                                    // Notify egress loops.
+                                    let _ = handshake_done_tx.send_modify(|v| *v += 1);
+                                }
+                                Err(e) => {
+                                    log::error!("tunnel: into_transport_mode failed for {}: {}", worker_id, e);
+                                    // peer.noise is now None — peer is broken but recv loop survives
+                                }
+                            }
                         }
                     }
                     continue;
@@ -590,8 +602,8 @@ mod tests {
         let addr_a = transport_a.local_addr().unwrap();
         let addr_b = transport_b.local_addr().unwrap();
 
-        transport_a.add_peer("worker-b".into(), addr_b, None, false);
-        transport_b.add_peer("worker-a".into(), addr_a, None, false);
+        transport_a.add_peer("worker-b".into(), addr_b, None, false).unwrap();
+        transport_b.add_peer("worker-a".into(), addr_a, None, false).unwrap();
 
         let segment_id = 42;
 
@@ -648,8 +660,8 @@ mod tests {
         let addr_a = transport_a.local_addr().unwrap();
         let addr_b = transport_b.local_addr().unwrap();
 
-        transport_a.add_peer("worker-b".into(), addr_b, None, false);
-        transport_b.add_peer("worker-a".into(), addr_a, None, false);
+        transport_a.add_peer("worker-b".into(), addr_b, None, false).unwrap();
+        transport_b.add_peer("worker-a".into(), addr_a, None, false).unwrap();
 
         let (port_a_seg1, _h1) = transport_a.create_namespace_port("worker-b", 1).unwrap();
         let (port_a_seg2, _h2) = transport_a.create_namespace_port("worker-b", 2).unwrap();
@@ -707,7 +719,7 @@ mod tests {
         let addr = transport.local_addr().unwrap();
 
         // Register segment 10 only.
-        transport.add_peer("peer".into(), addr, None, false);
+        transport.add_peer("peer".into(), addr, None, false).unwrap();
         let (_port, _handle) = transport.create_namespace_port("peer", 10).unwrap();
 
         // Send a datagram with segment_id=99 directly to the socket.
@@ -754,8 +766,8 @@ mod tests {
         // Determine initiator by lexicographic key comparison.
         let a_initiates = pub_a < pub_b;
 
-        transport_a.add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates);
-        transport_b.add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates);
+        transport_a.add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates).unwrap();
+        transport_b.add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates).unwrap();
 
         // Give the handshake some time to complete.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -815,8 +827,8 @@ mod tests {
 
         let a_initiates = pub_a < pub_b;
 
-        transport_a.add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates);
-        transport_b.add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates);
+        transport_a.add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates).unwrap();
+        transport_b.add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

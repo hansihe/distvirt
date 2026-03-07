@@ -2,61 +2,95 @@
 
 ## Overview
 
-The orchestrator is the central control plane for distvirt. It manages workers, drives namespace lifecycle, handles scale-to-zero activation, and exposes a client protocol (gRPC) for CLI/UI control.
+The orchestrator is the central control plane for distvirt. It manages workers, drives namespace lifecycle, handles scale-to-zero activation, and exposes a client protocol (gRPC) for CLI/UI control. The primary use case is scale-to-zero staging environments where idle services consume no resources and activate transparently on first traffic.
 
-The orchestrator is a **pure state machine** at its core. All logic lives in a synchronous `step(input) -> output` function with no I/O. An async shell dispatches inputs from network connections and timers, and sends outputs to workers and clients. This separation is the foundation for testing, model checking, and fuzzing.
+The orchestrator is a **pure state machine** at its core. All logic lives in a synchronous `step(input) -> output` function with no I/O. An async shell dispatches inputs from network connections and timers, and sends outputs to workers and clients. This separation enables:
 
-### Implementation Status
+- **Deterministic unit tests**: Feed a sequence of inputs, assert state and outputs.
+- **Property-based testing**: Generate random input sequences, check invariants after every step.
+- **Model checking**: Stateright exhaustively explores all interleavings.
+- **Fuzz testing**: Coverage-guided fuzzer drives the step function.
+- **Reasoning**: No hidden state changes from async timing, channel backpressure, etc.
 
-The core orchestrator (namespace/workload/service state machines, worker management, gRPC server, suspend/resume lifecycle, log/event streaming) is implemented and functional. The following features described in this document are **stubs or not yet wired**:
-
-- **Splice / Unsplice** — handlers exist but are no-ops (return Ok without modifying state). Planned.
-- **CloneNamespace** — returns "not yet implemented" error. Planned.
-- **WatchNamespaceStatus** — defined in the proto but not yet wired to the event streaming system
+See [Upcoming Work & Open Questions](#upcoming-work--open-questions) for unimplemented features and known issues.
 
 ---
 
-## Core Architecture
+## Developer Experience Contract
+
+### Latency Targets
+
+| Operation | Target | Notes |
+|---|---|---|
+| Resume from snapshot | < 200ms end-to-end | Firecracker restore ~5-10ms + fabric flush |
+| Cold start (VM boot) | < 2s to pod running | ~100ms VM boot + app startup |
+| Activation response (resume) | < 500ms from SYN to first response | Resume + buffer flush + TCP handshake |
+| Activation response (cold) | < 5s from SYN to first response | Boot + app startup + buffer flush |
+| Buffer timeout | Must exceed activation latency | Default: 30s |
+
+The core DX contract: **hitting a dormant service feels like a slow first request, not an error**. HTTP clients with default timeouts (30-60s) should never see a connection failure due to activation.
+
+### Status Visibility
+
+`dv status` reads active conditions from all entity types:
+
+```
+Namespace: staging/myapp
+Workers: 3 — Pressure: normal
+
+  web          running   (worker-east, pod-42)
+  api          suspended
+  worker       dormant, snapshot evicted     ← snapshot-lost condition
+  migrations   failed: ImagePullError (5/5)  ← failed condition
+
+Services:
+  web:8080     active    (BackendNeed::Active)
+  api:8080     idle
+  worker:9090  idle
+```
+
+### Defaults for Staging
+
+- Every service gets `activation: { idle_timeout: 30s }` unless explicitly overridden
+- Every workload gets `suspend_on_idle: true` unless explicitly overridden
+- A freshly deployed staging environment has zero running pods until traffic arrives
+
+---
+
+## Architecture
 
 ### Two-Layer Design
 
 The orchestrator has two layers:
 
-1. **Outer layer** — routes inputs to the correct namespace state machine, manages worker connections, handles cross-namespace operations (clone, list), generates pod IDs, and selects workers for pod scheduling.
+1. **Outer layer** — routes inputs to the correct namespace state machine, manages worker connections, handles cross-namespace operations (clone, list), generates pod IDs, selects workers for pod scheduling, allocates network segment IDs, and maintains the inter-worker mesh registry.
 2. **Namespace state machine** — a pure, self-contained state machine for a single namespace. All service lifecycle, activation, suspend/resume, and reconciliation logic lives here.
 
 This separation keeps the per-namespace state machine small and independently testable. Cross-namespace interactions are minimal (limited to clones) and handled at the outer layer.
 
-```rust
-struct Orchestrator {
-    namespaces: HashMap<NamespaceId, NamespaceStateMachine>,
-    workers: HashMap<WorkerId, WorkerState>,
-    clients: HashSet<ClientId>,
-    next_pod_id: u64,
-}
-```
-
-The outer layer receives top-level inputs and dispatches to namespace state machines:
-
-```rust
-/// Top-level inputs to the orchestrator.
-enum OrchestratorInput {
-    ClientConnected { client_id: ClientId },
-    ClientDisconnected { client_id: ClientId },
-    ClientCommand { client_id: ClientId, command: ClientCommand },
-    WorkerConnected { worker_id: WorkerId, capabilities: WorkerCapabilities, wg_config: Option<WorkerWgConfig> },
-    WorkerDisconnected { worker_id: WorkerId },
-    NamespaceInput { namespace_id: NamespaceId, input: NamespaceInput },
-}
-```
-
 Most inputs are routed directly to a namespace. `WorkerDisconnected` fans out a `WorkerLost` event to every namespace that had pods on that worker. `CreateNamespace` instantiates a new state machine. `ListNamespaces` reads across all state machines.
 
-The outer layer also handles pod scheduling: when a namespace emits a `PodRequest`, the outer layer selects a worker, generates a pod ID, and injects `LaunchPod` back into the namespace. Similarly for `ResumeRequest`, the outer layer generates a new pod ID and injects `ResumePod`.
+The outer layer also handles pod scheduling: when a namespace emits a `PodRequest`, the outer layer selects a worker, generates a pod ID, and injects `LaunchPod` back into the namespace. Similarly for `ResumeRequest`.
+
+### Worker Mesh Networking
+
+Workers form a mesh network to carry fabric traffic between namespaces spanning multiple workers. The orchestrator maintains a **worker registry** — a list of all workers with their tunnel endpoints and assigned network segments — and broadcasts it to all workers whenever the segment set changes.
+
+Each namespace is assigned a unique **segment ID** (`u16`, allocated by the outer layer, skipping 0). Workers use segment IDs to route fabric traffic to the correct namespace. The segment ID is freed when the namespace is destroyed.
+
+The worker registry entry contains:
+- `worker_id` — identifies the worker
+- `endpoint` — `public_endpoint:tunnel_listen_port`
+- `public_key` — from the worker's `tunnel_config` (separate from WireGuard)
+- `segments` — list of segment IDs for namespaces assigned to this worker
+
+The registry is pushed as `WorkerCommand::WorkerRegistrySync` to all workers on: worker connect/disconnect, namespace create/delete (segment set changes).
+
+This is distinct from WireGuard config (used for developer network access) — the tunnel config is for worker-to-worker mesh connectivity.
 
 ### Per-Namespace State Machine — Three-Layer Split
 
-The namespace state machine is split into three layers to keep each piece small and independently testable:
+The namespace state machine is split into three layers:
 
 1. **NamespaceStateMachine** (thin coordinator): fabric management, namespace lifecycle, event routing between sub-state-machines, WireGuard peer management.
 2. **WorkloadStateMachine**: pod lifecycle (scheduling, launching, running, suspend/resume). Driven by demand signals from services.
@@ -64,1171 +98,550 @@ The namespace state machine is split into three layers to keep each piece small 
 
 Multiple services can share a single workload. The coordinator maintains the mapping and forwards signals between them.
 
-This split reduces the model-checking state space from O(states^N) (monolithic, all services interleaved) to O(states × N) (each sub-SM checked independently).
-
-```rust
-struct NamespaceStateMachine {
-    namespace_id: NamespaceId,
-    spec: NamespaceSpec,
-    status: NamespaceStatus,
-    workers: HashMap<WorkerId, NamespaceWorkerState>,
-
-    /// Derived from ServiceSpec.workload_id. Multiple services can share
-    /// a workload (e.g. multiple entry points into the same pod).
-    service_workload: HashMap<ServiceId, WorkloadId>,
-    workloads: HashMap<WorkloadId, WorkloadStateMachine>,
-    services: HashMap<ServiceId, ServiceStateMachine>,
-
-    /// Tracks all active pods and their workload/worker association.
-    pods: HashMap<PodId, PodInfo>,
-    /// WireGuard peer IP allocation and tracking for developer network access.
-    wg_peer_manager: WireGuardPeerManager,
-}
-
-/// Workload sub-state-machine. Manages the pod lifecycle for one workload.
-struct WorkloadStateMachine {
-    workload_id: WorkloadId,
-    state: WorkloadState,
-    /// Number of services currently requesting this workload be running.
-    demand_count: u32,
-    /// Whether to suspend instead of stop when demand drops to zero.
-    suspend_on_idle: bool,
-}
-
-/// Service sub-state-machine. Manages activation, idle timeout, and
-/// backend routing for one service.
-struct ServiceStateMachine {
-    service_id: ServiceId,
-    state: ServiceState,
-    workload_id: WorkloadId,
-    has_activation: bool,
-    idle_timeout: Duration,
-}
-```
-
-The coordinator dispatches external inputs and routes internal signals between sub-SMs:
-
-```rust
-/// Inputs to a single namespace state machine.
-enum NamespaceInput {
-    WorkerEvent { worker_id: WorkerId, event: WorkerEvent },
-    WorkerLost { worker_id: WorkerId },
-    TimerFired { timer_key: TimerKey },
-    // Client commands that target this namespace
-    UpdateSpec { client_id: ClientId, spec: NamespaceSpec },
-    Delete { client_id: ClientId },
-    GetStatus { client_id: ClientId },
-    Splice { client_id: ClientId, workload_id: WorkloadId, worker_id: WorkerId },
-    Unsplice { client_id: ClientId, workload_id: WorkloadId },
-    StreamLogs { client_id: ClientId, service_id: Option<ServiceId> },
-    /// Outer layer injects this when it has selected a worker and
-    /// generated a pod ID for a workload's PodRequest.
-    LaunchPod { workload_id: WorkloadId, worker_id: WorkerId, pod_id: PodId },
-    /// Outer layer injects this to resume a suspended workload from snapshot.
-    ResumePod { workload_id: WorkloadId, worker_id: WorkerId, pod_id: PodId, snapshot_id: SnapshotId },
-    /// Developer network access via WireGuard.
-    Connect { client_id: ClientId, client_public_key: [u8; 32], worker_wg_public_key: [u8; 32], worker_endpoint: String },
-    Disconnect { client_id: ClientId, client_public_key: [u8; 32] },
-}
-
-struct NamespaceOutput {
-    worker_commands: Vec<(WorkerId, WorkerCommand)>,
-    client_events: Vec<(ClientId, ClientEvent)>,
-    timers_set: Vec<(TimerKey, Duration)>,
-    timers_cancel: Vec<TimerKey>,
-    /// Workloads that need a pod. The outer layer selects a worker,
-    /// generates a pod ID, and injects LaunchPod back.
-    pod_requests: Vec<PodRequest>,
-    /// Workloads that need to resume from snapshot. The outer layer
-    /// generates a pod ID and injects ResumePod back.
-    resume_requests: Vec<ResumeRequest>,
-    /// State machine events for observability/streaming.
-    events: Vec<SmNamespaceEvent>,
-    /// True when the namespace has been fully destroyed and should
-    /// be removed from the outer layer.
-    destroyed: bool,
-}
-
-struct PodRequest {
-    workload_id: WorkloadId,
-}
-
-struct ResumeRequest {
-    workload_id: WorkloadId,
-    snapshot_id: SnapshotId,
-    worker_id: WorkerId,
-}
-```
-
-#### Sub-SM Input/Output Types
-
-The coordinator communicates with sub-SMs via typed internal signals:
-
-```rust
-/// Inputs to the workload sub-state-machine.
-enum WorkloadInput {
-    /// A service needs this workload running.
-    DemandUp,
-    /// A service no longer needs this workload running.
-    DemandDown,
-    /// Outer layer has assigned a pod and worker — launch it.
-    /// The workload doesn't select workers; the outer layer does.
-    LaunchPod { worker_id: WorkerId, pod_id: PodId },
-    /// Outer layer has generated a pod_id for resuming from snapshot.
-    ResumePod { worker_id: WorkerId, pod_id: PodId, snapshot_id: SnapshotId },
-    /// Pod is now running (from worker event).
-    PodRunning { pod_id: PodId },
-    /// Pod exited or failed (from worker event).
-    PodGone { pod_id: PodId },
-    /// Pod was successfully suspended to snapshot.
-    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId },
-    /// Pod suspend operation failed.
-    PodSuspendFailed { pod_id: PodId },
-    /// Worker hosting this workload's pod disconnected.
-    WorkerLost { worker_id: WorkerId },
-    /// Timer fired (launch timeout, suspend timeout, or resume timeout).
-    TimerFired { timer_key: TimerKey },
-}
-
-/// Outputs from the workload sub-state-machine.
-enum WorkloadOutput {
-    /// The workload needs a pod — outer layer should select a worker,
-    /// generate a pod ID, and inject LaunchPod back.
-    PodRequest,
-    /// The workload needs to resume from snapshot — outer layer should
-    /// generate a pod ID and inject ResumePod back.
-    ResumeRequest { snapshot_id: SnapshotId, worker_id: WorkerId },
-    /// The workload's pod is now running and reachable.
-    BecameReady { pod_id: PodId, worker_id: WorkerId },
-    /// The workload's pod is no longer available.
-    BecameUnready,
-    /// Worker commands to emit.
-    WorkerCommand(WorkerId, WorkerCommand),
-    /// Timer management.
-    TimerSet(TimerKey, Duration),
-    TimerCancel(TimerKey),
-}
-
-/// Inputs to the service sub-state-machine.
-enum ServiceInput {
-    /// The service's workload became ready (pod running).
-    WorkloadReady { pod_id: PodId, worker_id: WorkerId, backend: ServiceBackend },
-    /// The service's workload became unready (pod lost).
-    WorkloadUnready,
-    /// Activation event from worker (first traffic hit).
-    ServiceActivation,
-    /// Ongoing backend need signal from worker.
-    ServiceBackendNeed { need: BackendNeed },
-    /// Timer fired (idle timeout).
-    TimerFired { timer_key: TimerKey },
-}
-
-/// Outputs from the service sub-state-machine.
-enum ServiceOutput {
-    /// This service needs its workload running.
-    DemandUp,
-    /// This service no longer needs its workload running.
-    DemandDown,
-    /// Worker command to emit to a specific worker.
-    WorkerCommand(WorkerId, WorkerCommand),
-    /// Worker command to emit to all active workers in the namespace.
-    BroadcastWorkerCommand(WorkerCommand),
-    /// Timer management.
-    TimerSet(TimerKey, Duration),
-    TimerCancel(TimerKey),
-}
-```
-
-The coordinator's `step` function is thin routing logic:
-
-```rust
-impl NamespaceStateMachine {
-    /// Pure state transition. No I/O, no async, no side effects.
-    pub fn step(&mut self, input: NamespaceInput) -> NamespaceOutput {
-        let mut out = NamespaceOutput::default();
-
-        // 1. Route input to the appropriate sub-SM(s).
-        // 2. Collect sub-SM outputs.
-        // 3. Forward internal signals (e.g. ServiceOutput::DemandUp
-        //    becomes WorkloadInput::DemandUp).
-        // 4. Forward WorkloadOutput::BecameReady to all services
-        //    mapped to that workload.
-        // 5. Broadcast service commands to all active workers.
-        // 6. Collect worker commands, timer ops, events
-        //    into NamespaceOutput.
-
-        out
-    }
-}
-```
+This split reduces the model-checking state space from O(states^N) (monolithic, all services interleaved) to O(states × N) (each sub-SM checked independently). WorkloadStateMachine has ~7 states; ServiceStateMachine has ~4 × 3 `BackendNeed` values. Both are small enough for exhaustive stateright exploration.
 
 ### Async Shell
 
-The async runtime is a thin shell that dispatches inputs and sends outputs:
-
-```rust
-struct OrchestratorShell {
-    orchestrator: Orchestrator,
-    workers: HashMap<WorkerId, WorkerHandle>,
-    clients: HashMap<ClientId, ClientSender>,
-    msg_tx: mpsc::UnboundedSender<ShellMsg>,
-    msg_rx: mpsc::UnboundedReceiver<ShellMsg>,
-    timer_handles: HashMap<TimerKey, tokio::task::JoinHandle<()>>,
-    timer_ns: HashMap<TimerKey, NamespaceId>,
-    // ... log/event subscriber management
-}
-```
-
-The shell:
+The async runtime is a thin shell that:
 - Manages tokio timers (spawns/aborts for each timer key from SM output)
 - Routes worker protocol events → SM inputs
 - Routes SM outputs → worker commands (via worker protocol writers)
 - Manages client request/response matching via oneshot channels
 - Buffers and distributes log streams to subscribers
-- Distributes SM events to subscribers for gRPC streaming
+- Distributes SM events to gRPC streaming subscribers
 
-### Why Pure
+### Two-Layer Worker State
 
-- **Deterministic unit tests**: Feed a sequence of inputs, assert state and outputs.
-- **Property-based testing**: Generate random input sequences, check invariants after every step.
-- **Fuzz testing**: Coverage-guided fuzzer drives the step function, finds edge cases.
-- **Model checking**: Stateright can exhaustively explore all interleavings.
-- **Reasoning**: No hidden state changes from async timing, channel backpressure, etc.
-- **Per-namespace isolation**: Each namespace state machine is independently testable.
-- **Sub-SM isolation**: Workload and service state machines have tiny state spaces (~7 and ~4 states respectively), enabling exhaustive model checking that would be intractable on the monolithic design.
+Worker state is split between two levels:
+
+**`WorkerState`** (global, in `Orchestrator.workers`) — cluster-scoped:
+- Capabilities (`available_memory_mb`, pools, public endpoint)
+- `wg_config` — WireGuard config (listen port, public key) for developer network access
+- `tunnel_config` — inter-worker mesh tunnel config (listen port, public key)
+- `transfer_listen_port` — port for artifact transfers between workers
+- Worker conditions (from protocol events)
+- `pressure: WorkerPressure` — raw normalized scores per dimension
+- `pressure_bands: PressureBands` — hysteresis state per dimension
+- `psi: Option<WorkerPsi>` — cached PSI metrics from last `PressureUpdate`
+
+**`NamespaceWorkerState`** (namespace-scoped, in `NamespaceStateMachine.workers`):
+- `fabric_status: FabricStatus` — Creating/Active/Destroying for this namespace
+- `primary_pool_id: Option<PoolId>` — resolved at assignment time for suspend operations
+- `pressure_band: PressureBand` — propagated from global `WorkerState.pressure_bands.max_band()`
+
+Propagation is one-directional (global → namespace) via `propagate_pressure_to_namespaces()` after each pressure recomputation. The namespace SM never writes back to global state.
+
+**Scheduling reads global state** (`select_worker_for_pod` reads `Orchestrator.workers`). **Idle timeout reads namespace state** (`pressure_adjusted_idle_timeout` reads `NamespaceWorkerState.pressure_band`).
 
 ---
 
-## Data Model
+## Core Abstractions
 
-### Namespace Spec (Desired State)
+Four cross-cutting abstractions shape the design:
 
-The namespace spec is the declarative description of what should exist. Frontends (compose, k8s-lite) produce this; the orchestrator reconciles toward it.
+### Worker Pressure Score
 
-Workloads and services are both **top-level** in the spec. A workload describes what to run — when scheduled, it becomes a pod (a microVM that can host multiple containers). A service is a network entity that NATs to its backing pod, referenced via `workload_id`. This binding is mutable — changing a service's `workload_id` retargets it. Multiple services can share a single workload.
+**Problem**: N independent signals (PSI at multiple averages, pool watermarks, pod count, memory committed) each wired to M policy decisions creates an N×M matrix of threshold tuning with inconsistent behavior.
 
-```rust
-struct NamespaceSpec {
-    network: NetworkConfig,
-    workloads: HashMap<WorkloadId, WorkloadSpec>,
-    services: HashMap<ServiceId, ServiceSpec>,
-}
+**Design**: A normalized `WorkerPressure` per resource dimension (compute, memory, storage, network), each 0.0–1.0. Each dimension is the **max** of its available inputs, normalized. On non-Linux workers (libkrun/macOS), PSI inputs are absent — the score falls back to static accounting. Same thresholds, same policy code, no special-casing.
 
-struct WorkloadSpec {
-    containers: Vec<ContainerSpec>,
-    network: PodNetworkConfig,             // pod IP (assigned by orchestrator)
-    /// If true, suspend the pod instead of stopping it when demand drops to zero.
-    /// Enables fast resume from snapshot on re-activation.
-    suspend_on_idle: bool,
-}
+Input mapping:
+- `compute`: PSI cpu some_avg10 / 100 (no static fallback — 0.0 without PSI)
+- `memory`: max(PSI memory some_avg10 / 100, pods_memory_committed / available_memory_mb)
+- `storage`: max(PSI io some_avg10 / 100, pool_used / pool_capacity)
+- `network`: fabric tunnel utilization (future extension, initially 0.0)
 
-struct ContainerSpec {
-    name: String,
-    image: String,
-    config: ContainerConfig,
-}
+#### Hysteresis
 
-struct ServiceSpec {
-    workload_id: WorkloadId,               // which workload backs this service
-    ip: Ipv4Addr,                          // service IP (assigned by orchestrator)
-    policy: ServicePolicy,
-    activation: Option<ActivationSpec>,    // None = always-on
-    // expose: Vec<ExposeSpec>,            // future
-}
+Pressure band thresholds use hysteresis to prevent oscillation at boundaries:
 
-struct ActivationSpec {
-    idle_timeout: Duration,                // orchestrator-side idle timer
-}
-```
-
-### Namespace State (Actual State)
-
-```rust
-enum NamespaceStatus {
-    /// Waiting for initial worker assignment and CreateNamespace ack.
-    Creating,
-    /// Fabric is up, services are being reconciled.
-    Active,
-    /// DestroyNamespace sent to all workers, waiting for cleanup.
-    Destroying,
-}
-
-/// Per-worker state within a namespace. A namespace's fabric can span
-/// multiple workers (e.g. during splice).
-struct NamespaceWorkerState {
-    /// Status of the fabric segment on this worker.
-    fabric_status: FabricStatus,
-    /// Pods hosted on this worker for this namespace.
-    pods: HashSet<PodId>,
-}
-
-enum FabricStatus {
-    /// CreateNamespace sent, waiting for NamespaceCreated.
-    Creating,
-    /// Fabric segment is up and ready for pods.
-    Active,
-    /// DestroyNamespace sent, waiting for cleanup.
-    Destroying,
-}
-
-/// Tracks pod-to-workload and pod-to-worker associations at the namespace level.
-struct PodInfo {
-    workload_id: WorkloadId,
-    worker_id: WorkerId,
-}
-```
-
-### Worker Events
-
-The orchestrator defines its own view of worker events, separate from the wire protocol. The namespace coordinator unpacks these and routes specific events to the appropriate sub-SM:
-
-```rust
-enum WorkerEvent {
-    NamespaceCreated,
-    NamespaceFailed { error: String },
-    NamespaceDestroyed,
-    PodRunning { pod_id: PodId },
-    PodExited { pod_id: PodId, exit_code: i32 },
-    PodFailed { pod_id: PodId, error: String },
-    PodSuspended { pod_id: PodId, snapshot_id: SnapshotId },
-    PodSuspendFailed { pod_id: PodId, error: String },
-    ServiceActivation { service_id: ServiceId },
-    ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
-}
-```
-
-The coordinator maps `PodRunning`, `PodExited`, `PodFailed` to `WorkloadInput::PodRunning` / `WorkloadInput::PodGone`. It maps `PodSuspended` and `PodSuspendFailed` to the corresponding workload inputs. `ServiceActivation` and `ServiceBackendNeed` are routed to the appropriate service SM.
-
-### BackendNeed
-
-`BackendNeed` is a signal from the worker's protocol activator indicating the current traffic level for a service. The orchestrator uses this to drive idle timeout and scale-down decisions.
-
-```rust
-enum BackendNeed {
-    /// No meaningful traffic. The backend may be released / scaled to zero.
-    None,
-    /// Pulse signal: meaningful traffic detected (e.g. TCP SYN). The
-    /// orchestrator should ensure a backend is running. If no further
-    /// Traffic or Active signal arrives within the idle timeout, the
-    /// orchestrator may release the backend.
-    Traffic,
-    /// Level signal: active sessions require a backend (e.g. open H2
-    /// streams). The backend must stay up as long as this is asserted.
-    /// Cleared when the last active session ends.
-    Active,
-}
-```
-
-The worker reports `BackendNeed` via two distinct events:
-- **`ServiceActivation`** — first traffic hits a service with no backend at all. Triggers pod launch.
-- **`ServiceBackendNeed`** — ongoing signal from the protocol activator about traffic level. Drives idle timeout reset/scale-down while a backend exists.
-
-### Workload State Machine
-
-Each workload manages the pod lifecycle independently, driven by demand signals from services. The workload supports an optional **suspend-on-idle** mode where instead of stopping the pod when demand drops to zero, the pod is suspended to a snapshot and can be resumed quickly on re-activation.
-
-```
-                    +---------------+
-                    |  Dormant      |  no services need this workload
-                    +-------+-------+
-                            | DemandUp (demand_count 0 -> 1)
-                            v
-               +------------------------------+
-               |  WaitingForCapacity          |
-               |  emits PodRequest            |
-               +------------+-----------------+
-                            | LaunchPod (from outer layer)
-                            v
-                  +-------------------------+
-                  |  Launching              |
-                  |  pod starting up        |
-                  |  (60s launch timeout)   |
-                  +------------+------------+
-                               | PodRunning
-                               | -> emit BecameReady
-                               v
-                  +-------------------------+
-     DemandDown   |  Running               |  PodGone / WorkerLost
-     (demand_count|  pod running, demand>0 |  -> emit BecameUnready
-      -> 0)       +------------+------------+  -> WaitingForCapacity
-                  |                              (if demand > 0)
-                  |                              or Dormant
-                  v (if suspend_on_idle)
-                  +-------------------------+
-                  |  Suspending             |
-                  |  SuspendPod sent        |
-                  |  (30s suspend timeout)  |
-                  +------------+------------+
-                               | PodSuspended
-                               v
-                  +-------------------------+
-     DemandUp     |  Suspended              |
-     (demand -> 1)|  snapshot on worker     |
-     -> emit      +------------+------------+
-        ResumeRequest          | ResumePod (from outer layer)
-                               v
-                  +-------------------------+
-                  |  Resuming               |
-                  |  RestorePod sent        |
-                  |  (60s resume timeout)   |
-                  +------------+------------+
-                               | PodRunning
-                               | -> delete snapshot
-                               | -> emit BecameReady
-                               v
-                  +-------------------------+
-                  |  Running                |
-                  +-------------------------+
-
-Without suspend_on_idle:
-  DemandDown (demand -> 0) -> StopPod -> Dormant (emit BecameUnready)
-```
-
-The workload doesn't know about activation, idle timeouts, service routing, or worker selection — it only knows whether any service needs it running (demand_count > 0). Pod ID generation and worker selection are the outer layer's responsibility.
-
-```rust
-enum WorkloadState {
-    /// No services need this workload. No pod running.
-    Dormant,
-    /// At least one service needs this workload, but no pod assigned yet.
-    /// Emits PodRequest. Transitions to Launching when the outer layer
-    /// injects LaunchPod with an assigned worker and pod ID.
-    WaitingForCapacity,
-    /// Pod is starting up. Waiting for PodRunning from worker.
-    Launching {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        launch_timeout: TimerKey,
-    },
-    /// Pod is running. Stays here as long as demand_count > 0.
-    Running {
-        pod_id: PodId,
-        worker_id: WorkerId,
-    },
-    /// Pod is being suspended. SuspendPod sent, waiting for PodSuspended.
-    Suspending {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        snapshot_id: SnapshotId,
-        suspend_timeout: TimerKey,
-    },
-    /// Pod is suspended. Snapshot exists on worker.
-    Suspended {
-        worker_id: WorkerId,
-        snapshot_id: SnapshotId,
-    },
-    /// Pod is being resumed from snapshot. ResumePod sent, waiting for PodRunning.
-    Resuming {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        snapshot_id: SnapshotId,
-        resume_timeout: TimerKey,
-    },
-}
-```
-
-Key behaviors:
-- **DemandUp while Suspended**: emits `ResumeRequest` (fast path via snapshot restore instead of cold boot).
-- **DemandUp while Suspending**: noted via demand_count; on `PodSuspended`, immediately emits `ResumeRequest`.
-- **DemandDown while Resuming**: on `PodRunning`, immediately re-suspends or stops (depending on `suspend_on_idle`).
-- **PodGone while Resuming**: deletes the (potentially corrupted) snapshot and falls back to cold boot via `PodRequest`.
-- **WorkerLost while Suspended**: snapshot is gone with the worker; falls back to `WaitingForCapacity` (cold boot) if demand > 0.
-
-### Service State Machine
-
-Each service manages activation, idle timeout, and backend routing. It signals demand to its workload via the coordinator:
-
-```
-                    +---------------+
-                    |  Pending      |  spec exists, nothing on worker yet
-                    +-------+-------+
-                            | CreateService
-                            v
-               +-------------------------+
-    +-------->|  Idle (with activation)  |<-----------------+
-    |         |  service entity exists,  |                  |
-    |         |  workload not demanded   |                  |
-    |         +------------+-------------+                  |
-    |                      | ServiceActivation              |
-    |                      | -> emit DemandUp               |
-    |                      v                                |
-    |         +-------------------------+                   |
-    |         |  NeedBackend            |                   |
-    |         |  waiting for workload   |                   |
-    |         |  to become ready        |                   |
-    |         +------------+------------+                   |
-    |                      | WorkloadReady                  |
-    |                      | + UpdateServiceBackend         |
-    |                      | + ServiceReady                 |
-    |                      v                                |
-    |         +-------------------------+   idle timeout    |
-    |         |  Active                 |   expired &       |
-    |         |  workload running,      +---BackendNeed-----+
-    |         |  traffic flowing        |   ::None
-    |         +------------+------------+   + emit DemandDown
-    |                      |                + UpdateServiceBackend(None)
-    |                      | WorkloadUnready
-    |                      | (unexpected pod loss)
-    +-----------<----------+
-      re-activate (back to Idle or NeedBackend)
-
-Without activation (always-on):
-  Pending -> NeedBackend (emit DemandUp) -> Active -> (re-activate on loss)
-```
-
-Note: `NeedBackend` is typically short-lived — if the workload is already `Running` (shared by another service that already demanded it), the coordinator immediately forwards `WorkloadReady` and the service transitions straight to `Active`.
-
-**Idle timeout lifecycle**: When a service is `Active` and receives `ServiceBackendNeed(None)`, the service starts its idle timer. If `ServiceBackendNeed(Traffic)` or `ServiceBackendNeed(Active)` arrives before the timer fires, the timer is cancelled. If the timer fires while `BackendNeed` is still `None`, the service emits `DemandDown` + `UpdateServiceBackend(None)` and transitions back to `Idle`. If this was the last service demanding the workload (demand_count drops to 0), the workload suspends or stops the pod depending on `suspend_on_idle`.
-
-```rust
-enum ServiceState {
-    /// Spec exists but service entity hasn't been created on any worker yet.
-    Pending,
-    /// Service entity exists on worker(s), workload not demanded.
-    /// Only valid for services with activation enabled.
-    Idle,
-    /// Service needs a backend but workload isn't ready yet.
-    /// DemandUp has been emitted; waiting for WorkloadReady.
-    NeedBackend,
-    /// Workload is running, service is routing traffic to it.
-    Active {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        backend_need: BackendNeed,
-        idle_timer: Option<TimerKey>,
-    },
-}
-```
-
-Note that `pod_id` and `worker_id` in `ServiceState::Active` are cached copies from the `WorkloadReady` signal — the source of truth for pod location is the `WorkloadStateMachine`.
-
-Service commands (`UpdateServiceBackend`, `ServiceReady`) are emitted as `BroadcastWorkerCommand`, meaning they are sent to all active workers in the namespace rather than a specific worker. This ensures all workers have consistent service routing state.
-
-### Coupling Interface
-
-The workload and service sub-SMs communicate through exactly four signals, routed by the coordinator:
-
-| Signal | Direction | Meaning |
+| Band | Enter At | Leave At |
 |---|---|---|
-| `DemandUp` | Service → Workload | A service needs the workload running. Increments `demand_count`. |
-| `DemandDown` | Service → Workload | A service no longer needs the workload. Decrements `demand_count`. |
-| `BecameReady` | Workload → Service(s) | Pod is running. Carries `pod_id`, `worker_id`, and `ServiceBackend`. |
-| `BecameUnready` | Workload → Service(s) | Pod is no longer available (exited, failed, worker lost, suspending). |
+| Normal | — | — |
+| Elevated | 0.50 | 0.40 |
+| High | 0.80 | 0.70 |
+| Critical | 0.95 | 0.85 |
 
-The coordinator maintains `service_workload: HashMap<ServiceId, WorkloadId>` and fans out workload signals to all services mapped to that workload.
+The hysteresis state is per-dimension. The effective band for policy decisions is the **maximum** band across all dimensions.
 
-### Worker State
+#### Policy Band Effects
 
-Worker state is tracked at the outer layer (not per-namespace):
+**Scheduling** — the max band across all dimensions determines eligibility:
 
-```rust
-struct WorkerState {
-    capabilities: WorkerCapabilities,
-    /// Namespaces this worker is assigned to.
-    namespaces: HashSet<NamespaceId>,
-    /// WireGuard configuration, if the worker supports it.
-    wg_config: Option<WorkerWgConfig>,
-}
+| Band | Scheduling Effect |
+|---|---|
+| Normal | Full priority |
+| Elevated | Deprioritize |
+| High | Exclude |
+| Critical | Exclude |
 
-struct WorkerCapabilities {
-    max_pods: u32,
-    available_memory_mb: u64,
-    /// Worker's public endpoint (IP or hostname) for WireGuard connections.
-    public_endpoint: String,
-}
+**Dimension-specific responses**:
 
-struct WorkerWgConfig {
-    listen_port: u16,
-    public_key: [u8; 32],
-}
-```
+| Dimension | Elevated | High | Critical |
+|---|---|---|---|
+| compute | Shorten idle timeout | Preempt priority 3–4 | Preempt priority 2–4 |
+| memory | Shorten idle timeout | Preempt priority 3–4 | Preempt priority 2–4 |
+| storage | Proactive snapshot migration | Aggressive eviction | Emergency eviction |
+| network | (future) | (future) | (future) |
+
+**Idle timeout under pressure** (compute/memory only):
+
+| Pressure Band | Idle Timeout |
+|---|---|
+| Normal | Configured timeout |
+| Elevated | 75% of configured |
+| High | 25% of configured (minimum 5s floor) |
+| Critical | Immediate (5s floor) |
+
+The 5s floor prevents thrashing where a workload activates, immediately idles, activates again.
+
+#### Update Cadence
+
+Pressure scores are recomputed on: periodic `PoolCapacityUpdate` events (30s), `PressureUpdate` events (10s periodic + immediate on threshold crossings), and pod start/stop. The pressure score is a derived value in the orchestrator's `WorkerState`.
 
 ---
 
-## Timers
+### Transition Intents
 
-The pure state machine needs a way to express "fire this timer in N seconds" without real time. Timers use **semantic keys** — each timer is identified by its purpose, not an opaque ID.
+**Problem**: A state transition is in flight (async) when a contradicting signal arrives, and the system has no place to record the signal until the transition completes. Examples: traffic arrives while mid-suspend, `ForceDeactivate` during pod launch, spec change during resume.
 
-```rust
-enum TimerKey {
-    /// Idle timeout for a service with activation.
-    /// Owned by ServiceStateMachine.
-    IdleTimeout { service_id: ServiceId },
-    /// Launch timeout — pod took too long to start (60s).
-    /// Owned by WorkloadStateMachine.
-    LaunchTimeout { workload_id: WorkloadId, pod_id: PodId },
-    /// Suspend timeout — pod took too long to suspend (30s).
-    /// Owned by WorkloadStateMachine.
-    SuspendTimeout { workload_id: WorkloadId, pod_id: PodId },
-    /// Resume timeout — pod took too long to resume from snapshot (60s).
-    /// Owned by WorkloadStateMachine.
-    ResumeTimeout { workload_id: WorkloadId, pod_id: PodId },
-}
+**Design**: Every in-flight transition state carries a **pending intent slot** — a priority-ordered enum:
+
+```
+PendingIntent: None < Demand < Deactivate < Restart
 ```
 
-Each timer is owned by a specific sub-SM. The coordinator routes `TimerFired` to the owning sub-SM based on the `TimerKey` variant. Setting a new timer with the same key implicitly cancels the previous one. The `NamespaceOutput` has both `timers_set` and `timers_cancel` for explicit lifecycle management.
+When a transition completes, the state machine checks the pending intent before choosing the next state:
 
-### Timeout Constants
+- `Suspending` completes + `Demand` → emit `ResumeRequest` immediately (skip `Suspended` state)
+- `Suspending` completes + `Deactivate` → enter `Suspended`/`Dormant` as normal
+- `Suspending` completes + `Restart` → go Dormant, relaunch with new spec
+- `Launching` completes + `Deactivate` → immediately begin deactivation
+- `Launching` completes + `Restart` → stop pod, relaunch with new spec
+- `Resuming` completes + `Deactivate` → immediately begin deactivation
+- `Resuming` completes + `Restart` → stop pod, relaunch with new spec
 
-| Timer | Duration | Purpose |
+**Conflict resolution**: Later signals upgrade the intent — a new signal only replaces the current intent if it has higher priority.
+
+The principle: **never discard a signal because the system is busy — record it as an intent and resolve it when the transition completes.**
+
+---
+
+### Condition Model
+
+**Problem**: Policy-relevant state is scattered across enum variants, log messages, and implicit behavior. Status display and event streaming need custom visibility logic for each failure mode.
+
+**Design**: A uniform `conditions: HashMap<String, String>` on all entity types (workers, workloads, services). Each condition has a key and message.
+
+**Worker conditions**: `storage/pool/<id>/pressure-soft`, `storage/pool/<id>/pressure-hard`, `pressure/compute`, `pressure/memory`, `draining`, `pool/<id>/degraded`, `unresponsive`.
+
+**Workload conditions**: `failed` (exceeded max retries), `retry-backoff` (during backoff delay), `preempted` (evicted for higher-priority workload), `snapshot-lost` (snapshot evicted, will cold-start).
+
+**Service conditions**: `activation-pending` (traffic buffered, waiting for backend), `backend-not-ready` (pod running but app not ready — future, needs readiness probes).
+
+**Observability**: `dv status` = snapshot all active conditions per entity. `dv events` = stream of condition transitions. Alerting = condition active longer than threshold. The condition model subsumes most status visibility in one mechanism.
+
+---
+
+### Resource Leases
+
+**Problem**: Resources (pod slots, memory, artifact entries) are claimed during async operations that can fail. On failure, resources are "leaked." Concurrent scheduling can race past capacity limits.
+
+**Design**: A `LeaseTable` keyed by `PodId` with automatic expiry. Leases carry `worker_id`, `LeaseIntent` (PodLaunch or PodResume), and `memory_mb`.
+
+**Lifecycle**:
+1. **Grant**: When the orchestrator dispatches `LaunchPod`/`ResumePod`, it grants a lease. Available capacity is immediately decremented.
+2. **Commit**: When `PodRunning` arrives, the lease converts to actual occupancy.
+3. **Expire**: On timeout or worker disconnect, the capacity reservation is automatically released.
+4. **Release**: On pod stop/fail/suspend, the lease is released.
+
+Leases prevent overcommit when multiple pods are being scheduled simultaneously. They also unify artifact write consistency — `ArtifactWriteStarted` grants a lease; `ArtifactWriteCommitted` commits it; worker disconnect expires all writing leases.
+
+---
+
+## Scheduling & Capacity
+
+### Worker Selection
+
+When a workload needs a pod (`PodRequest`), the orchestrator selects a worker via two-phase selection:
+
+1. **Hard constraints** (filter):
+   - `fabric_status == Active` for the namespace
+   - Not draining
+   - Pressure score below High threshold on all dimensions
+
+2. **Soft preferences** (rank):
+   - Lowest pressure band, then fewest pods
+   - Snapshot locality (prefer worker holding the snapshot for resume)
+
+3. **Reserve capacity** (lease):
+   - Grant a pod slot lease on the selected worker
+   - Lease deadline = launch timeout (60s)
+
+When no worker has capacity, the workload stays in `WaitingForCapacity` and preemption is considered.
+
+### Preemption
+
+Preemption is namespace-scoped. Priority is derived from runtime state, not spec-declared:
+
+| Priority | Description | Preemptable? |
 |---|---|---|
-| `LaunchTimeout` | 60s | Pod failed to start — kill and retry or go dormant |
-| `SuspendTimeout` | 30s | Suspend didn't complete — force-kill pod |
-| `ResumeTimeout` | 60s | Resume didn't complete — kill pod, delete snapshot, retry |
-| `IdleTimeout` | configurable (default 30s) | No traffic — scale down to idle |
+| 1 (highest) | **Activated** — traffic just arrived, client is blocked waiting | Never |
+| 2 | **Active with traffic** — BackendNeed::Active/Traffic, sessions in progress | Never |
+| 3 | **Active but idle** — running, BackendNeed::None, idle timer ticking | Yes |
+| 4 | **Always-on, no traffic** — running by policy, no current demand signal | Yes |
+| 5 (lowest) | **Suspended** — consuming storage only | Evict snapshot if storage-pressured |
 
-### Stale Timer Handling
+**Preemption flow**: When `select_worker_for_pod` finds no worker with capacity, the orchestrator scans same-namespace workloads for running preemptable candidates (priority 3–4), selects a victim, and dispatches `ForceDeactivate`. The victim follows the normal deactivation path (suspend or stop). The waiting workload is naturally retried by `schedule_waiting_pods()` once the victim's slot frees.
 
-Timer fires are treated as **hints, not commands**. Each sub-SM checks whether its current state still warrants the timer's action:
+One preemption per scheduling attempt (avoids cascading evictions). Under elevated pressure (score > 0.8), preemption can be triggered proactively even when pod count hasn't hit a hard limit.
 
-- `IdleTimeout` fires but service is already `Idle` → no-op (ServiceStateMachine).
-- `IdleTimeout` fires but `backend_need` is `Active` → no-op (timer should have been cancelled, but this is a safe fallback).
-- `LaunchTimeout` fires but workload is already `Running` → no-op (WorkloadStateMachine).
-- `SuspendTimeout` fires but workload is already `Suspended` → no-op.
-- `ResumeTimeout` fires but workload is already `Running` → no-op.
+### Worker Drain
 
-This makes the system naturally tolerant of races between timer fires and state transitions. The semantic key structure also makes cleanup easy — destroying a namespace cancels all timers with keys that belong to it.
-
-### Async Shell Timer Integration
-
-The async shell maintains a mapping from `TimerKey` to a `tokio::task::JoinHandle`. When the output contains `timers_set`, it spawns a new sleep task (aborting any existing one for the same key). When the sleep completes, it sends `NamespaceInput::TimerFired { timer_key }` to the state machine. Timer cancellation aborts the join handle.
+Drain uses the existing condition model — `DrainWorker` sets a `"draining"` condition on `WorkerState.conditions`. Scheduling excludes draining workers. Existing pods deactivate on their normal idle timeout. `UndrainWorker` clears the condition and triggers `schedule_waiting_pods` to pick up waiting workloads.
 
 ---
 
-## Event Streaming
+## Lifecycle & Activation
 
-The state machine emits structured events during state transitions for observability. These are separate from the command outputs — they describe what happened, not what to do.
+### Service Activation Flow
 
-```rust
-enum SmNamespaceEvent {
-    Workload { workload_id: WorkloadId, event: SmWorkloadEvent },
-    Service { service_id: ServiceId, workload_id: WorkloadId, event: SmServiceEvent },
-}
+1. Traffic arrives at a service IP on the fabric
+2. Protocol activator (TCP/H2/Postgres) inspects the packet — meaningful traffic (TCP SYN, H2 HEADERS) → `ServiceActivation` event
+3. Service SM: Idle → NeedBackend, sets `activation-pending` condition
+4. Reconciliation computes effective demand from service states, sends `SetDemand` to workload
+5. Workload SM: Dormant → WaitingForCapacity → Launching → Running
+6. Reconciliation sees workload Running + service NeedBackend → sends `WorkloadReady` to service
+7. Service SM: NeedBackend → Active, `UpdateServiceBackend` + `ServiceReady` sent to workers
+8. Service clears `activation-pending` condition, fabric flushes buffered packets
 
-enum SmWorkloadEvent {
-    DemandChanged { demanding_services: u32 },
-    PodLaunching { pod_id: PodId, worker_id: WorkerId },
-    PodRunning { pod_id: PodId, worker_id: WorkerId },
-    PodStopped { exit_code: i32 },
-    PodFailed { reason: String },
-    PodSuspending { pod_id: PodId, worker_id: WorkerId },
-    PodSuspended { worker_id: WorkerId, snapshot_id: SnapshotId },
-    PodSuspendFailed { reason: String },
-    PodResuming { pod_id: PodId, worker_id: WorkerId },
-}
+### Idle Timeout
 
-enum SmServiceEvent {
-    Activated { trigger: ServiceActivationTrigger },
-    BackendReady,
-    IdleTimerStarted { timeout: Duration },
-    IdleTimerCancelled { reason: IdleTimerCancelReason },
-    IdleTimeoutFired,
-    Deactivated { reason: ServiceDeactivationReason },
-}
+1. Protocol activator signals `BackendNeed::None` (TCP: no recent SYNs; H2: last stream closed)
+2. Service SM starts idle timer (configurable per-service, default 30s)
+3. Effective timeout adjusted by pressure band
+4. If `BackendNeed::Traffic` or `BackendNeed::Active` arrives before timeout → cancel timer
+5. If timeout fires → `UpdateServiceBackend(None)`, service returns to Idle, emits `DemandDown`
+6. If this was the last service demanding the workload (current_demand → 0):
+   - `suspend_on_idle == true`: workload suspends (snapshot for fast resume)
+   - `suspend_on_idle == false`: workload stops, goes Dormant
+
+### Active Flow Tracking
+
+Workers report `EndpointFlowStatus { ip, has_active_flows }` when active TCP flows begin or end on a workload's endpoint. The workload SM tracks `has_active_flows: bool`, which feeds into demand calculation: `effective_demand = service_demand + has_active_flows`. This ensures a workload stays Running as long as traffic is flowing, even if no service explicitly `wants_backend()` (e.g., during idle timer transitions).
+
+### Shared Workload Demand
+
+Multiple services can back the same workload. Demand is derived by reconciliation — the workload runs as long as any service `wants_backend()` or `has_active_flows` is true. When a workload is already Running and a second service enters NeedBackend, the coordinator immediately forwards `WorkloadReady` and the service transitions straight to Active.
+
+### Activation Racing with Suspend
+
+If traffic arrives while a workload is mid-suspend, the service transitions to NeedBackend. Reconciliation computes increased demand and sends `SetDemand` to the workload, which upgrades the pending intent to `PendingIntent::Demand`. When `PodSuspended` arrives, the state machine sees the pending demand and immediately emits `ResumeRequest` — skipping the `Suspended` state entirely.
+
+### Suspend Timeout Behavior
+
+When a suspend exceeds its timeout:
+1. The orchestrator emits `StopPod` — the VM is killed, no snapshot produced
+2. If the workload had a prior snapshot that diverged (resumed, ran, re-suspend failed): set `snapshot-lost` condition
+3. The workload transitions to Dormant; next activation will cold-start
+4. If `pending == PendingIntent::Demand`, the workload immediately re-launches via cold start
+
+The orchestrator does **not** retry the suspend. Suspend failures are typically caused by conditions that won't resolve on immediate retry.
+
+### Pod Failure & Retry
+
+#### Exponential Backoff
+
+On pod start failure (`PodFailed`/`PodExited` during launch, or launch timeout), the workload retries with exponential backoff (`2^min(failures-1, 5)` seconds):
+
+```
+Failure 1: 1s delay
+Failure 2: 2s delay
+Failure 3: 4s delay
+Failure 4: 8s delay
+Failure 5: 16s delay → Failed state
 ```
 
-Events are collected in `NamespaceOutput::events` and forwarded to the async shell. The shell distributes them to gRPC `StreamEvents` subscribers. This enables real-time monitoring of namespace lifecycle without polling.
+After 5 consecutive failures (MAX_RETRIES), the workload transitions to a `Failed` terminal state:
+- Stops retrying automatically
+- Services remain in `NeedBackend`
+- `failed` condition set with last error and attempt count
+- `retry-backoff` condition active during backoff delays
+
+#### Auto-Recovery on Spec Update
+
+When a workload is in `Failed` state and its spec changes (new image, changed env), the orchestrator clears the `failed` condition and retries. The intent: "I fixed the image, try again." This does not require a separate `dv restart`.
+
+#### Interaction with Preemption
+
+A workload in `Failed` state does not block capacity — it's not consuming a pod slot. The `failed` condition surfaces in `dv status` so the developer can fix the root cause.
 
 ---
 
-## Developer Network Access (WireGuard)
+## Spec Reconciliation
 
-The orchestrator supports connecting developer machines directly to a namespace's network via WireGuard. This enables developers to reach services by their internal IPs from their local machine.
+When `UpdateNamespace` delivers a new spec, the orchestrator diffs against current state and reconciles:
 
-### WireGuard Peer Manager
+| Change | Impact |
+|---|---|
+| New service added | Create service entity on workers, start in Idle or NeedBackend |
+| Service removed | Destroy service entity, emit DemandDown if active |
+| New workload added | Add to workload map, wait for services to demand it |
+| Workload removed | Stop pod if running, clean up services pointing to it |
+| Image changed | Restart the workload (stop old pod, launch new with new image) |
+| Service policy changed | Update service entity on workers |
+| `suspend_on_idle` changed | Update workload flag, takes effect on next idle transition |
+| `idle_timeout` changed | Update service timeout, reset timer if active |
+| Network config changed | Complex — may require namespace recreation |
 
-Each namespace has a `WireGuardPeerManager` that allocates IPs from the top of the namespace's subnet downward:
+### Image Change → Restart
 
-```rust
-struct WireGuardPeerManager {
-    peers: HashMap<[u8; 32], WgPeerInfo>,  // client_public_key -> info
-    next_host_offset: u16,                 // IP allocation counter
-    subnet: Ipv4Addr,
-    prefix_len: u8,
-}
-```
+On image change detection during reconciliation, the orchestrator stops the current pod and re-launches with the new image. For staging, a hard cut (stop then start) is sufficient. If a workload is mid-transition, the `PendingIntent::Restart` intent ensures the new image is applied when the transition completes.
 
-### Connect Flow
+### Endpoint Sync & Registry Sync
 
-1. Client sends `Connect { namespace_id, client_public_key }` (X25519 public key).
-2. Outer layer looks up the namespace's active worker and its WireGuard config.
-3. Routes to namespace SM as `NamespaceInput::Connect { ..., worker_wg_public_key, worker_endpoint }`.
-4. Namespace's `WireGuardPeerManager` allocates a client IP (idempotent by public key).
-5. Emits `AddWireGuardPeer` worker command and returns `ConnectResult` with server public key, endpoint, client IP, and subnet.
-6. Client configures local WireGuard interface with this info.
+The namespace maintains two separate broadcast systems for workers:
 
-### Disconnect Flow
+**Endpoint Sync** — workload/service IP→backend mappings for traffic routing. Built from all pods, services, and WireGuard peers. Sent as `WorkerCommand::EndpointSync` (full sync) or `WorkerCommand::EndpointUpdate` (incremental upsert). Full sync is sent when a worker's fabric becomes Active. Incremental updates are sent on pod state changes and service backend changes.
 
-1. Client sends `Disconnect { namespace_id, client_public_key }`.
-2. `WireGuardPeerManager` removes the peer and emits `RemoveWireGuardPeer` worker command.
+**Registry Sync** — DNS-like service name→IP entries (`RegistryEntry { name, ip }`). Sent as `WorkerCommand::RegistrySync` to all active workers. Emitted on namespace becoming Active, service configuration changes, and worker loss. Naturally idempotent.
 
----
-
-## Worker Capacity Management
-
-The orchestrator currently uses a simple worker scheduling model. Pod scheduling is handled at the outer layer:
-
-1. When a namespace emits a `PodRequest`, the outer layer calls `select_worker_for_pod()` which picks the first worker with an active fabric segment for that namespace.
-2. If no worker is available, the workload stays in `WaitingForCapacity`.
-3. When a new worker connects, the outer layer scans all namespaces for workloads in `WaitingForCapacity` and schedules them.
-
-Resume requests are simpler — the snapshot is on a specific worker, so the outer layer just generates a new pod ID and injects `ResumePod` targeting that worker.
-
-### Future: Capacity Manager
-
-A more sophisticated capacity manager is planned:
-
-```rust
-struct CapacityManager {
-    headroom_policy: HeadroomPolicy,
-    pending_workers: Vec<ProvisioningWorker>,
-    waiting: Vec<(NamespaceId, CapacityRequest)>,
-}
-```
-
-This would add proactive worker provisioning (keep spare capacity) and reactive provisioning (provision when blocked). See the "Open Design Questions" section.
+Both systems have per-worker variants (`emit_endpoint_sync_to_worker`, `emit_registry_sync_to_worker`) used when a single worker joins an existing namespace.
 
 ---
 
-## Reconciliation
+## Failure Handling
 
-The orchestrator is a **level-triggered controller**. On every input, it can re-evaluate the desired vs actual state for affected resources and emit commands to close the gap. This makes it naturally idempotent and resilient to missed events.
+### Worker Disconnect
 
-The coordinator routes inputs to the appropriate sub-SM and forwards internal signals between them. The forwarding logic handles the full chain: a `ServiceOutput::DemandUp` gets routed to the workload SM, which may emit `PodRequest` (bubbled up to the outer layer) or `BecameReady` (fanned out to all services on the workload).
+When a worker disconnects, the outer layer fans out `WorkerLost` to every namespace that had the worker:
 
-### Registry Sync
+1. **WorkloadStateMachine** handles based on current state:
+   - `Running` → emits `BecameUnready`, transitions to `WaitingForCapacity` (if demand > 0) or `Dormant`
+   - `Suspended` → snapshot is lost with the worker, falls back to cold boot
+   - `Launching`/`Suspending`/`Resuming` → cancels timeouts, transitions based on demand
+2. **ServiceStateMachine** receives `WorkloadUnready`:
+   - If activation-enabled → transition to `Idle`, emit `DemandDown`
+   - If always-on → stay in `NeedBackend`
+3. Coordinator removes the worker from its `workers` map, cancels associated timers
+4. All leases for that worker are released
+5. Worker registry is re-broadcast to remaining workers
 
-Rather than emitting individual service update commands per service, the namespace broadcasts a full **RegistrySync** — the complete set of service entries (IP, backend info) — to all active workers in the namespace. This is emitted on key state transitions:
+### Worker Reconnection
 
-- Namespace becomes Active (initial reconciliation)
-- A service backend changes (pod ready, backend cleared)
-- Worker loss (surviving workers get updated registry)
+If a worker connects with an ID that already exists (e.g., worker process restarted while orchestrator kept running), the orchestrator first processes a full disconnect for the old instance — releasing leases, fanning out `WorkerLost`, cleaning up state — then treats it as a fresh connection. This ensures no stale state leaks across reconnections.
 
-This approach is simpler and naturally idempotent — workers always converge to the correct state regardless of missed individual updates.
+### Fabric Creation Failure
+
+When a worker fails to create the namespace fabric (`NamespaceFailed { error }`), the namespace handles this at the coordinator level. The worker's `NamespaceWorkerState` is cleaned up. If no workers have active fabric, the namespace may be unable to serve traffic until another worker succeeds.
+
+### Namespace Deletion
+
+Namespace deletion is a **stateful teardown**:
+
+1. Namespace transitions to `Destroying`: cancels all timers, stops accepting new inputs, emits `DestroyNamespace` to every worker
+2. As each worker confirms destruction (or disconnects), the namespace removes it
+3. When `self.workers` is empty, the namespace sets `destroyed: true`
+4. The outer layer removes the namespace
+
+While in `Destroying`, the namespace only processes worker events and worker loss.
+
+### Storage & Eviction
+
+#### Eviction Priority
+
+When storage pressure exceeds thresholds, evict in order (easiest to hardest):
+
+1. **SharedRO artifacts with no active consumers** — cache entries, freely evictable
+2. **CopyOnUse templates with no local working copies** — re-fetchable
+3. **SharedRO artifacts with active consumers** — only if re-fetchable
+4. **Snapshots of suspended workloads (LRU)** — workload sets `snapshot-lost` condition, can still cold-start
+5. **Exclusive artifacts for suspended pods** — same consequence as #4
+6. **Exclusive artifacts for running pods** — never evict without stopping the pod
+
+#### Snapshot-Lost Degradation
+
+When a snapshot is evicted (sole copy lost):
+- The workload spec is preserved — cold start is still possible on next activation
+- `snapshot-lost` condition set: "storage pressure evicted snapshot, will cold-start on next activation"
+- Condition cleared on next successful suspend
+
+#### Artifact Write Consistency
+
+Artifact writes use the lease model:
+- `ArtifactWriteStarted` → lease granted (status: Writing, not readable)
+- `ArtifactWriteCommitted` → lease committed (status: Ready)
+- Never schedule a resume from a Writing artifact
+- On worker disconnect, all Writing leases expire
+
+### Orchestrator Death
+
+When the orchestrator dies, **all cluster state is lost**. Workers detect the disconnect and immediately tear down all resources. On restart, the orchestrator starts with a clean slate. Workers reconnect as fresh. Namespaces must be re-created by clients.
+
+This is a deliberate simplicity choice. No state persistence, no WAL, no recovery protocol. This avoids a large class of consistency problems.
 
 ---
 
 ## Client Protocol
 
+### Command/Event Model
+
 The orchestrator exposes a control API over gRPC (tonic). The gRPC layer translates between protobuf messages and the SM's internal types.
 
-### Commands (Client -> Orchestrator)
+**Commands** (Client → Orchestrator): `CreateNamespace`, `UpdateNamespace`, `DeleteNamespace`, `GetNamespaceStatus`, `ListNamespaces`, `Splice`, `Unsplice`, `CloneNamespace`, `ListWorkers`, `GetWorker`, `ListPods`, `StreamLogs`, `Connect`, `Disconnect`, `DeactivateWorkload`, `DrainWorker`, `UndrainWorker`.
 
-```rust
-enum ClientCommand {
-    // Namespace lifecycle
-    CreateNamespace { namespace_id: NamespaceId, spec: NamespaceSpec },
-    UpdateNamespace { namespace_id: NamespaceId, spec: NamespaceSpec },
-    DeleteNamespace { namespace_id: NamespaceId },
-    GetNamespaceStatus { namespace_id: NamespaceId },
-    ListNamespaces,
+**Events** (Orchestrator → Client): `NamespaceStatus`, `NamespaceList`, `WorkerList`, `WorkerStatus`, `PodList`, `LogChunk`, `Error`, `Ok`, `ConnectResult`, `DeactivateWorkloadResult`.
 
-    // Splice: route a workload to a local worker (planned)
-    Splice { namespace_id: NamespaceId, workload_id: WorkloadId, worker_id: WorkerId },
-    Unsplice { namespace_id: NamespaceId, workload_id: WorkloadId },
+### gRPC Service Shape
 
-    // Namespace cloning
-    CloneNamespace {
-        source_namespace_id: NamespaceId,
-        target_namespace_id: NamespaceId,
-    },
-
-    // Worker/pod queries
-    ListWorkers,
-    GetWorker { worker_id: WorkerId },
-    ListPods { namespace_id: NamespaceId },
-
-    // Observability
-    StreamLogs { namespace_id: NamespaceId, service_id: Option<ServiceId> },
-
-    // Developer network access
-    Connect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
-    Disconnect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
-}
-```
-
-### Events (Orchestrator -> Client)
-
-```rust
-enum ClientEvent {
-    NamespaceStatus { namespace_id: NamespaceId, status: NamespaceStatusReport },
-    NamespaceList { namespaces: Vec<NamespaceStatusReport> },
-    WorkerList { workers: Vec<WorkerStatusReport> },
-    WorkerStatus { worker: WorkerStatusReport },
-    PodList { pods: Vec<PodStatusReport> },
-    LogChunk { namespace_id: NamespaceId, service_id: ServiceId, data: Vec<u8> },
-    Error { message: String },
-    Ok,
-    ConnectResult {
-        server_public_key: [u8; 32],
-        endpoint: String,
-        client_ip: String,
-        subnet: String,
-    },
-}
-
-struct NamespaceStatusReport {
-    namespace_id: NamespaceId,
-    status: NamespaceStatus,
-    services: HashMap<ServiceId, ServiceStatusReport>,
-}
-
-struct ServiceStatusReport {
-    service_state: String,              // "pending", "idle", "need_backend", "active"
-    workload_id: WorkloadId,
-    workload_state: String,             // "dormant", "waiting_for_capacity", "launching",
-                                        // "running", "suspending", "suspended", "resuming"
-    pod_id: Option<PodId>,
-    worker_id: Option<WorkerId>,
-    backend_need: Option<BackendNeed>,
-    activation_enabled: bool,
-}
-
-struct WorkerStatusReport {
-    worker_id: WorkerId,
-    max_pods: u32,
-    available_memory_mb: u64,
-    active_pods: u32,
-}
-
-struct PodStatusReport {
-    pod_id: PodId,
-    workload_id: WorkloadId,
-    worker_id: WorkerId,
-    ip: String,
-    state: PodStatus,  // Launching, Running, Suspending, Suspended, Resuming
-}
-```
-
-### gRPC Service
-
-The gRPC layer (tonic) defines unary and streaming RPCs:
-
-**Unary RPCs**: `CreateNamespace`, `UpdateNamespace`, `DeleteNamespace`, `GetNamespaceStatus`, `ListNamespaces`, `Splice`, `Unsplice`, `CloneNamespace`, `ListWorkers`, `GetWorker`, `ListPods`, `ConnectNetwork`, `DisconnectNetwork`.
+**Unary RPCs**: Namespace CRUD, splice, clone, worker/pod queries, network connect/disconnect, drain/undrain.
 
 **Streaming RPCs**: `StreamLogs` (workload log output), `StreamEvents` (namespace state machine events).
 
 All unary RPCs use a pattern where the gRPC handler creates a temporary client connection, sends a command, and waits for the response via a oneshot channel. Streaming RPCs subscribe through the shell handle and receive events via unbounded channels.
 
-### Client Sessions
+### Imperative Commands
 
-Clients maintain persistent connections for streaming (logs, events). The outer layer tracks connected clients via `ClientConnected`/`ClientDisconnected` inputs. When a client disconnects, any active log subscriptions for that client are cleaned up. Commands are idempotent so clients can reconnect and retry.
+The policy is primarily spec-driven, but operators need escape hatches:
 
----
+| Command | Effect | Persistent? |
+|---|---|---|
+| `dv restart <workload>` | Stop pod, clear `failed` condition, reset retries, re-launch if demand > 0 | No — one-shot |
+| `dv stop <workload>` | Stop pod, set `stopped` condition, suppress all demand | Yes — until `dv start` or spec update |
+| `dv start <workload>` | Clear `stopped` condition, allow demand signals through | No — one-shot |
+| `dv drain <worker>` | Set `draining` condition, exclude from scheduling | Yes — until `dv undrain` or reconnect |
+| `dv undrain <worker>` | Clear `draining` condition | No — one-shot |
 
-## Splice (Planned)
-
-Splice allows a user to inject a local pod into a remote namespace, replacing a workload's backend with a locally-running instance. This is the primary developer experience feature — edit code locally, have it receive real traffic from the staging environment.
-
-Splice/unsplice handlers exist in the codebase but are currently no-ops (return Ok without modifying state). The design is outlined below for future implementation.
-
-### State Model
-
-Splice operates at the **workload level**, not the service level. The pod belongs to the workload, and moving it automatically updates all services that share that workload.
-
-### Planned Flow
-
-1. User runs a local distvirt worker on their machine, connects to orchestrator.
-2. User sends `Splice { namespace_id, workload_id, local_worker_id }`.
-3. Namespace coordinator:
-   - Adds the local worker to `self.workers` if not already present.
-   - Sends `CreateNamespace` to the local worker (if first time this worker participates in this namespace).
-   - Waits for `NamespaceCreated` from the local worker.
-   - Stops the existing pod on the cloud worker (if running).
-   - Updates fabric routes between workers.
-   - Launches the pod on the local worker instead.
-   - On `PodRunning` → emits `BecameReady` with the new worker_id.
-4. From the perspective of other services, nothing changed — same service IP, traffic just routes through the tunnel now.
-
-### Requirements
-
-- **Multi-worker fabric tunneling**: route destinations need a real transport (likely a yamux stream between workers, or orchestrator-mediated relay).
-- **Worker-to-worker or worker-to-orchestrator-to-worker frame forwarding**: simplest initial approach is orchestrator-mediated relay. Direct worker-to-worker tunnels are an optimization.
+**Design principles**:
+1. Imperative commands set conditions/intents, not new state machine states
+2. Spec updates override manual stops (matches auto-recovery for `failed`)
+3. All commands are reflected in `dv status` and `dv events` via the condition model
 
 ---
 
-## Namespace Clones
+## Splice & Clones (Planned)
 
-Clone creates a new namespace from an existing one with an exact copy of the spec. The clone is an independent, isolated copy — namespaces are isolated at the network level, so from the perspective of workloads they see no difference between the clone and the original environment. IPs, MACs, and all network config are identical between source and clone since each namespace has its own isolated fabric.
+### Splice
 
-The clone preserves the source's activation policies as-is: always-on services spin up immediately in the clone, activation-enabled services start idle and activate on demand.
+Splice allows injecting a local pod into a remote namespace, replacing a workload's backend with a locally-running instance. The primary developer experience feature — edit code locally, receive real traffic from the staging environment.
 
-Clones are independent — once created, the clone's spec is decoupled from the source. Updating or destroying the source has no effect on the clone.
+Splice operates at the **workload level**, not the service level. Moving the pod automatically updates all services sharing that workload.
 
-Currently returns "not yet implemented" error. When implemented, `NamespaceStatus` will gain a `Cloning` variant.
+**Planned flow**: User runs a local distvirt worker, sends `Splice { namespace_id, workload_id, local_worker_id }`. The coordinator adds the local worker to the namespace, creates the fabric segment, stops the existing cloud pod, launches on the local worker. Other services see no change — same service IP, traffic routes through the tunnel.
 
-### Planned Flow
+**Requirements**: Multi-worker fabric tunneling (likely yamux stream between workers or orchestrator-mediated relay).
 
-1. Client sends `CloneNamespace { source, target }`.
-2. Outer layer:
-   - Sets source namespace status to `Cloning { pending_destroy: false }`.
-   - Copies `NamespaceSpec` from source namespace's state machine (exact copy, including network config).
-   - Creates a new `NamespaceStateMachine` for the target with the copied spec.
-   - Returns source namespace to `Active` (or transitions to `Destroying` if `pending_destroy` was set during the clone).
-3. The target namespace state machine proceeds normally — creates its own isolated fabric, reconciles services. Always-on services immediately emit `DemandUp`; activation-enabled services start in `Idle`.
+### Namespace Clones
 
-### Clone + Destroy Interaction
+Clone creates a new namespace from an existing one with an exact copy of the spec. The clone is an independent, isolated copy — namespaces are isolated at the network level. IPs, MACs, and network config are identical between source and clone since each has its own isolated fabric.
 
-If a `Delete` command arrives while the namespace is in `Cloning` state:
-- The state machine sets `pending_destroy: true` instead of immediately destroying.
-- When the clone operation completes, the outer layer checks `pending_destroy` and transitions to `Destroying`.
-- This avoids races where a clone reads partially-destroyed state.
+The clone preserves activation policies as-is: always-on services spin up immediately, activation-enabled services start idle. Once created, the clone's spec is decoupled from the source.
 
-### Snapshot-Accelerated Clones (Future)
+**Clone + destroy interaction**: If `Delete` arrives during `Cloning`, `pending_destroy: true` is set instead of immediately destroying. When the clone completes, the outer layer checks and transitions to `Destroying`. This avoids reading partially-destroyed state.
 
-For faster clone activation, the orchestrator can snapshot source workload pods and restore them in the clone. This builds on the existing suspend/resume infrastructure:
+**Snapshot-accelerated clones** (future): Instead of cold-booting, restore from source pod snapshots. Firecracker restore is ~5-10ms vs ~100ms+ cold boot. Network config is identical, so no reconfiguration needed.
 
-- Instead of cold-booting from the image, restore from the source workload's pod snapshot.
-- Firecracker snapshot restore is ~5-10ms vs ~100ms+ cold boot.
-- Network config is identical, so the restored VM needs no reconfiguration.
-
-### Cost Model
-
-Without snapshots: a clone is just metadata + service entities. Essentially free.
-With snapshots: clone creation triggers snapshot of each source workload's pod (one-time cost), then each activation in the clone is a fast restore.
-
----
-
-## Failure Model
-
-### Worker Disconnect
-
-When a worker disconnects, the outer layer fans out a `WorkerLost` event to every namespace state machine that had the worker in its `workers` map. The coordinator routes this through the sub-SM layers:
-
-1. **Coordinator** forwards `WorkerLost` to all workload SMs with pods on that worker.
-2. **WorkloadStateMachine** handles it based on current state:
-   - `Running` → emits `BecameUnready`, transitions to `WaitingForCapacity` (if demand > 0) or `Dormant`.
-   - `Launching` → cancels launch timeout, emits `BecameUnready`, transitions based on demand.
-   - `Suspending` → cancels suspend timeout, transitions based on demand (BecameUnready was already emitted on entry).
-   - `Suspended` → snapshot is lost with the worker, transitions to `WaitingForCapacity` (cold boot) if demand > 0, else `Dormant`.
-   - `Resuming` → cancels resume timeout, emits `BecameUnready`, transitions based on demand.
-3. **Coordinator** forwards `BecameUnready` to all services mapped to affected workloads.
-4. **ServiceStateMachine** receives `WorkloadUnready`:
-   - If activation-enabled → transition to `Idle` (ready to re-activate on next traffic), emit `DemandDown`.
-   - If always-on → stay in `NeedBackend` (will get `WorkloadReady` when workload re-launches).
-5. Coordinator removes the worker from its `workers` map.
-6. Cancels any timers associated with pods on that worker.
-7. No commands are sent to the disconnected worker.
-
-### Namespace Deletion
-
-Namespace deletion is a **stateful teardown**, not fire-and-forget. This matters because a namespace can span multiple workers (especially with splice), and each worker must clean up its fabric segment and pods.
-
-1. Client sends `Delete { client_id }`.
-2. Namespace transitions to `Destroying`:
-   - Cancels all timers (idle timeouts, launch timeouts, suspend timeouts, resume timeouts).
-   - Stops accepting new inputs (activation events, spec updates).
-   - Emits `DestroyNamespace` to every worker in `self.workers`.
-3. As each worker confirms destruction (or disconnects), the namespace removes it from `self.workers`.
-4. When `self.workers` is empty, the namespace sets `destroyed: true` in its output.
-5. The outer layer removes the namespace from its map.
-
-While in `Destroying`, the namespace ignores all inputs except `WorkerEvent` (to process destruction confirmations) and `WorkerLost` (to remove disconnected workers). This ensures cleanup completes even if workers are slow to respond.
-
-### Orchestrator Death
-
-When the orchestrator dies, **all cluster state is lost**. Workers detect the orchestrator disconnect and immediately tear down all their resources (namespaces, pods, fabric segments). Workers then enter a reconnect loop, attempting to re-establish a connection to the orchestrator.
-
-On orchestrator restart, it starts with a clean slate. Workers reconnect and register as fresh workers with no existing state. Namespaces must be re-created by clients.
-
-This is a deliberate simplicity choice. The orchestrator is the single source of truth. There is no state persistence, no WAL, no recovery protocol. This avoids a large class of consistency problems and keeps the system simple.
-
-### Service Creation Failure
-
-The workload and service sub-SMs define failure transitions regardless of whether the worker protocol currently sends such events. The workload SM handles `PodGone` gracefully — emitting `BecameUnready` and transitioning to `Dormant` or `WaitingForCapacity` depending on demand. The service SM handles `WorkloadUnready` by transitioning back to `Idle` or `NeedBackend`. This ensures the orchestrator is ready when the worker protocol adds failure events, and makes each sub-SM robust under model checking (stateright can inject failures at any point).
-
----
-
-## Namespace Spec Frontends
-
-Frontends run client-side (in the CLI) and translate their format into `NamespaceSpec`.
-
-### Compose Frontend
-
-Parses `docker-compose.yml`, maps to `NamespaceSpec`. Each compose service produces **both** a `WorkloadSpec` and a `ServiceSpec` with matching names. The compose frontend synthesizes both entities — the orchestrator sees the same flat workloads + services model regardless of the frontend.
-
-| Compose concept | NamespaceSpec mapping |
-|---|---|
-| `services.<name>` | Creates `WorkloadSpec` with name `<name>` and `ServiceSpec` with name `<name>` pointing at `workload_id: <name>` |
-| `services.<name>.image` | `WorkloadSpec.containers[0].image` |
-| `services.<name>.command` | `WorkloadSpec.containers[0].config.entrypoint/args` |
-| `services.<name>.environment` | `WorkloadSpec.containers[0].config.env` |
-| `services.<name>.ports` | `ServiceSpec.expose` |
-| `services.<name>.depends_on` | Launch ordering hint (not modeled in spec, handled by orchestrator) |
-| Network assignment | Orchestrator auto-assigns IPs/MACs from namespace subnet (service IPs and pod IPs separately) |
-
-### K8s-Lite Frontend (Future)
-
-Subset of Kubernetes resources. Like the compose frontend, the k8s-lite frontend synthesizes both `WorkloadSpec` and `ServiceSpec` entries from k8s resources:
-
-| K8s resource | NamespaceSpec mapping |
-|---|---|
-| `Deployment` | `WorkloadSpec` (containers from pod template) + `ServiceSpec` if a matching k8s `Service` exists |
-| `Service` (ClusterIP) | `ServiceSpec.network` (virtual IP) with `workload_id` pointing at the backing `Deployment`'s workload |
-| `ConfigMap` | Injected into `WorkloadSpec.containers[].config.env` or volume mount |
-| `Ingress` | `ServiceSpec.expose` |
-
-Only enough to cover the common case. Not a full k8s implementation.
+**Cost model**: Without snapshots, a clone is just metadata + service entities (essentially free). With snapshots, creation triggers one-time snapshot of source pods, then each activation is a fast restore.
 
 ---
 
 ## Testing Strategy
 
-The workload/service split is designed primarily to improve testability. Each sub-SM has a tiny state space that can be model-checked exhaustively, while the coordinator is thin routing logic testable with property-based tests.
+### Four Layers
 
-### Key Payoff: Independent Model Checking
+1. **Stateright model checking** — exhaustive DFS exploration of reachable states
+   - Workload SM: 15 scenarios (timer consistency, demand bounds, pending intent invariants, retry/failure reachability, ForceDeactivate)
+   - Service SM: 4 scenarios (idle timer consistency, activation reachability)
+   - Namespace SM: 11 scenarios (referential integrity, multi-SM coordination, spec update restart, worker loss)
 
-The monolithic design had state space O(states^N) — all services interleaved. The split gives O(states × N):
+2. **Proptest** — randomized input sequences with invariant checking
+   - PodMap shadow consistency, namespace invariant fuzzing, orchestrator panic testing
 
-- **WorkloadStateMachine**: ~7 states (Dormant, WaitingForCapacity, Launching, Running, Suspending, Suspended, Resuming). With demand_count, the full state space is still small enough for exhaustive stateright exploration.
-- **ServiceStateMachine**: ~4 states (Pending, Idle, NeedBackend, Active) × 3 backend_need values. Also tiny.
-- **Coordinator**: Pure routing logic (no business decisions). Testable with proptest — generate random signal sequences, verify signals are forwarded correctly.
+3. **Scenario tests** — mock workers over real shell/protocol stack with paused time
+   - ~60 scenarios across: activation, suspend/resume, failure recovery, fabric routing, preemption, pressure, registry, worker lifecycle, multi-service, snapshot placement, spec reconciliation, transition intents, drain
 
-Each sub-SM can be checked in isolation with a mock environment, then composition correctness is verified at the coordinator level.
+4. **Shell integration** — end-to-end lifecycle with yamux/capnp handshake
 
-### Layer 1: Deterministic Unit Tests
+### Debug Invariant Checking
 
-Direct step-by-step tests of sub-SMs and the full coordinator. Feed specific input sequences, assert exact state and outputs.
+In debug builds, `check_invariants()` runs after every orchestrator step. It verifies:
+- Bidirectional consistency: if a namespace lists a worker, that worker must list the namespace (and vice versa)
+- All leases reference existing workers
+- No stale references across the two-layer worker state
 
-```rust
-#[test]
-fn workload_demand_lifecycle() {
-    let mut wl = WorkloadStateMachine::new(wl_id(), false);
-    assert!(matches!(wl.state, WorkloadState::Dormant));
+This catches state corruption early during development and testing.
 
-    // First service demands the workload
-    let out = wl.step(WorkloadInput::DemandUp, &ns_id());
-    assert!(matches!(wl.state, WorkloadState::WaitingForCapacity));
+### Methodology
 
-    // Outer layer assigns pod
-    let out = wl.step(WorkloadInput::LaunchPod {
-        worker_id: w1(), pod_id: p1(),
-    }, &ns_id());
-    assert!(matches!(wl.state, WorkloadState::Launching { .. }));
-
-    // Pod starts running
-    let out = wl.step(WorkloadInput::PodRunning { pod_id: p1() }, &ns_id());
-    assert!(matches!(wl.state, WorkloadState::Running { .. }));
-    assert!(out.iter().any(|o| matches!(o, WorkloadOutput::BecameReady { .. })));
-
-    // Last service drops demand
-    let out = wl.step(WorkloadInput::DemandDown, &ns_id());
-    assert!(matches!(wl.state, WorkloadState::Dormant));
-    assert!(out.iter().any(|o| matches!(o, WorkloadOutput::BecameUnready)));
-}
-
-#[test]
-fn workload_suspend_resume_lifecycle() {
-    let mut wl = WorkloadStateMachine::new(wl_id(), true); // suspend_on_idle
-    // ... get to Running state ...
-
-    // Last service drops demand -> suspend instead of stop
-    let out = wl.step(WorkloadInput::DemandDown, &ns_id());
-    assert!(matches!(wl.state, WorkloadState::Suspending { .. }));
-    assert!(out.iter().any(|o| matches!(o, WorkloadOutput::BecameUnready)));
-
-    // Worker confirms suspend
-    let out = wl.step(WorkloadInput::PodSuspended {
-        pod_id: p1(), snapshot_id: snap1(),
-    }, &ns_id());
-    assert!(matches!(wl.state, WorkloadState::Suspended { .. }));
-
-    // New demand -> resume from snapshot
-    let out = wl.step(WorkloadInput::DemandUp, &ns_id());
-    assert!(out.iter().any(|o| matches!(o, WorkloadOutput::ResumeRequest { .. })));
-}
-```
-
-### Layer 2: Property-Based Testing (proptest)
-
-Generate random sequences of valid inputs and check invariants hold after every step. Tests are written at three levels:
-
-**Sub-SM level** — test each sub-SM in isolation:
-
-```rust
-proptest! {
-    #[test]
-    fn workload_invariants(inputs in vec(arb_workload_input(), 0..100)) {
-        let mut wl = WorkloadStateMachine::new(wl_id(), false);
-        for input in inputs {
-            let outputs = wl.step(input, &ns_id());
-            // demand_count never goes negative
-            // BecameReady only emitted when transitioning to Running
-            // BecameUnready only emitted when leaving Running/Launching/Resuming
-            // PodRequest only emitted when in WaitingForCapacity
-            // ResumeRequest only emitted when in Suspended
-            check_workload_invariants(&wl, &outputs);
-        }
-    }
-}
-```
-
-**Coordinator level** — test signal routing correctness:
-
-```rust
-proptest! {
-    #[test]
-    fn coordinator_routing(inputs in vec(arb_namespace_input(), 0..200)) {
-        let mut ns = NamespaceStateMachine::new(ns_id(), arb_spec());
-        for input in inputs {
-            let output = ns.step(input);
-            check_coordinator_invariants(&ns, &output);
-        }
-    }
-}
-
-fn check_coordinator_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutput) {
-    // No commands sent to workers not in our workers map
-    // Every service's workload_id points to a valid workload
-    // A service in Active state has a workload in Running state
-    // DemandUp/DemandDown are always balanced (demand_count never goes negative)
-    // BecameReady/BecameUnready are forwarded to all services on the workload
-    // Idle timer is set when BackendNeed::None is received for an active service with activation
-    // Idle timer is cancelled when BackendNeed::Traffic or BackendNeed::Active arrives
-    // WorkerLost triggers BecameUnready for all workloads on that worker
-    // Stale timer fires are no-ops
-    // A workload in WaitingForCapacity always has a corresponding PodRequest output
-}
-```
-
-### Layer 3: Fuzz Testing (cargo-fuzz)
-
-Coverage-guided fuzzing of each sub-SM's step function. Separate fuzz targets for workload, service, and coordinator.
-
-### Layer 4: Model Checking (Stateright)
-
-This is where the split pays off most. Each sub-SM is small enough for exhaustive exploration.
-
-State space for WorkloadStateMachine: ~7 states × demand_count range. Still exhaustible despite the suspend/resume additions.
-
-State space for ServiceStateMachine: ~4 states × 3 backend_need × idle_timer presence. Easily exhaustible.
-
-The coordinator is thin routing logic — no business decisions, just signal forwarding. Composition correctness reduces to:
-1. Each sub-SM is correct in isolation (verified by stateright).
-2. The coordinator routes signals correctly (verified by proptest).
-3. The `service_workload` mapping is maintained correctly (verified by proptest invariants).
-
-### Integration / E2E Tests
-
-The existing e2e test infrastructure (see `distvirt-worker/tests/e2e.rs`) covers the worker side. Orchestrator e2e tests would:
-- Spin up an in-process orchestrator + worker (like compose does today).
-- Send client commands, verify end-to-end behavior.
-- These are slow and non-exhaustive, but verify the async shell + real worker integration.
-
-### Test Priority
-
-1. **Pure step tests**: Write these as you implement each feature. Fast, easy, high coverage. Test sub-SMs individually first, then coordinator integration.
-2. **proptest invariants**: Set up the framework early for each sub-SM. Continuously add invariants as you discover them. These find the "I didn't think of that combination" bugs.
-3. **Stateright models**: Build for workload SM and service SM independently. The tiny state spaces make exhaustive checking fast (~seconds). This is now practical where the monolithic design was not.
-4. **Fuzz harness**: Set up once per sub-SM, run in CI. Finds edge cases proptest misses through coverage guidance.
+Write stateright model properties first, then implement SM changes to satisfy them. Proptest catches edge cases the model's action space doesn't cover. Scenario tests verify the full stack.
 
 ---
 
-## Open Design Questions
+## Upcoming Work & Open Questions
 
-1. **Worker scheduling policy**: `select_worker_for_pod()` currently picks the first active worker. Needs a real strategy: round-robin, least-loaded, locality-aware (splice prefers same region), bin-packing vs spreading.
-2. **Fabric tunnel transport**: Orchestrator-mediated relay (simple, higher latency) vs direct worker-to-worker tunnels (complex, lower latency). Start with relay. Required for splice.
-3. **Snapshot storage**: Where do VM snapshots live? Currently local to the worker (fast, not portable). Shared storage would enable cross-worker resume but adds complexity.
-4. **Spec diffing**: When `UpdateNamespace` changes a service's image, what happens? Rolling update (launch new pod, drain old)? Or hard cut (stop old, launch new)?
-5. **Capacity manager**: Currently simple (first available worker). Planned: proactive headroom provisioning, scale-down of idle workers. What headroom policy values work in practice?
-6. **Provisioner interface**: Future capacity manager would emit `ProvisionWorker`/`TerminateWorker` outputs. The async shell maps these to infrastructure APIs. What's the right abstraction boundary?
+### Known Issues
+
+1. **No application readiness signal** — `PodRunning` means VM booted + guest agent connected, not that the application is ready. Traffic forwarded during app startup causes connection refused / 502 errors. This directly threatens the "feels like a slow first request" DX contract. Options: readiness probe (TCP/HTTP check, separate `PodReady` event), protocol activator implicit check, or defer to application.
+
+2. **No worker heartbeat / liveness detection** — Worker loss is detected only by TCP drop. A hung worker (connected but not processing) is invisible. Fix: Use `PoolCapacityUpdate` (30s) as implicit heartbeat. If no message within 60s, set `unresponsive` condition; after further timeout, treat as disconnected.
+
+3. **No pool degradation handling** — A worker's storage pool can become degraded while the worker remains connected. Suspend operations will fail, burning the timeout. Fix: Workers report pool health via conditions; orchestrator excludes degraded workers from suspend-target selection.
+
+4. **Hardcoded per-pod resource sizing** — `available_memory_mb` is derived from `/proc/meminfo`, but per-pod sizes (`vcpus=1`, `memory=128MB`) are hardcoded. Resource leases track in-flight operations with these fictional sizes.
+
+5. **Buffer overflow during slow cold starts** — The fabric buffers up to 64 frames with a 30s timeout. For workloads with slow startup, the buffer can fill. Consider making buffer size configurable per-service.
+
+### Unimplemented Features
+
+- **Imperative commands** (`dv restart/stop/start`) — design defined (see [Client Protocol](#imperative-commands)), not yet implemented. `DeactivateWorkload` and `DrainWorker`/`UndrainWorker` are implemented.
+- **Splice / Unsplice** — handlers are no-ops
+- **CloneNamespace** — returns error
+- **WatchNamespaceStatus** — proto defined, not wired
+
+### Post-V1 Open Questions
+
+- **Affinity / anti-affinity** — co-location or spreading preferences for workloads
+- **Resume on different worker** — cross-worker snapshot transfer when holding worker is pressured
+- **Bin-packing vs spreading** — staging favors packing (fewer active workers); resilience favors spreading. Pressure scores naturally encourage spreading.
+- **Cross-namespace preemption** — depends on isolation/tenancy model and namespace resource quotas
+- **Always-on preemption** — what happens when a workload with no activation spec is preempted? Options: stay in `WaitingForCapacity`, or add activation retroactively.
+- **Cross-worker failure retry** — try different worker on Nth retry to diagnose worker-specific vs workload-specific failures
+- **Cross-worker snapshot migration before eviction** — transfer to a less-pressured worker before evicting entirely
+- **Partial spec updates** — full spec vs diffs (full is simpler, no merge logic)
+- **Graceful drain on suspend** — configurable drain period between backend removal and suspend
+- **Worker provisioner interface** — emit `ProvisionWorker` output that shell maps to infrastructure API
+- **Suspend failure retry** — single retry before fallback-to-stop
+- **Per-pod resource sizing in spec** — once pods vary in size, preemption becomes a bin-packing problem
+- **Namespace-level resource quotas** — bound per-namespace consumption
+
+---
+
+## Design Notes for Implementers
+
+### `current_demand`, `needs_successful_boot`, and `PendingIntent`
+
+Three mechanisms work together for demand management:
+
+- **`current_demand`**: set authoritatively by reconciliation via `SetDemand { count }`. Computed as `effective_demand = service_demand + has_active_flows` where `service_demand` is the count of mapped services with `wants_backend() == true`, and `has_active_flows` contributes 1 if active TCP flows exist on the workload's endpoint. No incremental DemandUp/DemandDown — demand is always consistent with actual service and flow states.
+- **`needs_successful_boot`**: once demand goes 0→non-zero, the workload is committed to reaching Running before it can go Dormant via SetDemand(0). Also set on WorkerLost and PodGone. Cleared on PodRunning→Running or entering Failed. Prevents demand fluctuations during boot/retry from prematurely stopping the workload.
+- **`PendingIntent`**: captures contradicting signals during transitions. Consumed once when the transition completes.
+
+### The `Pending` Service State
+
+`ServiceState::Pending` serves dual duty: initial state (pre-reconciliation) and temporary placeholder during `mem::replace`. The reconciliation logic only matches on `(Pending, Dormant)` — it should also handle `(Pending, Suspended)` for correctness after worker loss.
+
+### Suspend Timeout and `snapshot-lost`
+
+The `Suspending` state carries `artifact_id` — but this is the *new* artifact being written, not a prior one. The prior artifact was deleted on successful resume. So suspend timeout after resume never has a prior snapshot to lose. In practice, `snapshot-lost` matters for the eviction case (storage pressure deletes a Suspended workload's artifact), not the suspend-timeout case.
+
+### Timers
+
+The pure state machine uses **semantic timer keys** — each timer is identified by its purpose (`IdleTimeout`, `LaunchTimeout`, `SuspendTimeout`, `ResumeTimeout`, `RetryBackoffTimeout`). Timer fires are treated as **hints, not commands** — each sub-SM checks whether its current state still warrants the timer's action. This makes the system naturally tolerant of races between timer fires and state transitions.
+
+### Namespace Spec Frontends
+
+Frontends run client-side (in the CLI) and translate their format into `NamespaceSpec`. The compose frontend maps each compose service to both a `WorkloadSpec` and a `ServiceSpec`. A future k8s-lite frontend would map Deployments and Services similarly.
+
+### Developer Network Access (WireGuard)
+
+Each namespace has a `WireGuardPeerManager` that allocates IPs from the top of the namespace's subnet for developer machine access. The connect flow: client sends public key → namespace allocates IP → `AddWireGuardPeer` sent to worker → client configures local WireGuard interface with server key, endpoint, and assigned IP.

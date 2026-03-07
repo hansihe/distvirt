@@ -303,11 +303,9 @@ impl EndpointTable {
     }
 
     /// Attach a port to a LocalPod endpoint. Returns buffered frames to flush.
-    ///
-    /// Panics if no LocalPod endpoint exists for the IP.
-    pub fn attach_port(&mut self, ip: Ipv4Addr, port_id: PortId) -> Vec<Vec<u8>> {
+    pub fn attach_port(&mut self, ip: Ipv4Addr, port_id: PortId) -> Result<Vec<Vec<u8>>, String> {
         let endpoint = self.by_ip.get_mut(&ip)
-            .expect("attach_port: no endpoint for IP");
+            .ok_or_else(|| format!("attach_port: no endpoint for IP {}", ip))?;
         match &mut endpoint.backend {
             EndpointBackend::LocalPod { port_id: pid } => {
                 *pid = Some(port_id);
@@ -317,9 +315,9 @@ impl EndpointTable {
                 }
                 let frames: Vec<Vec<u8>> = endpoint.buffer.drain(..).collect();
                 endpoint.buffer_start = None;
-                frames
+                Ok(frames)
             }
-            _ => panic!("attach_port: endpoint for {} is not LocalPod", ip),
+            _ => Err(format!("attach_port: endpoint for {} is not LocalPod", ip)),
         }
     }
 

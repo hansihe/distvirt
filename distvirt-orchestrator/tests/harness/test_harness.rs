@@ -252,6 +252,34 @@ impl TestHarness {
         self.send_event_to_workload(ns_id, &wl_id, event);
     }
 
+    /// Send a DrainWorker client command for the given worker.
+    pub async fn drain_worker(&mut self, worker_id: &WorkerId) {
+        let client_id = ClientId(self.next_client_id);
+        self.next_client_id += 1;
+        self.shell
+            .client_command(
+                client_id,
+                ClientCommand::DrainWorker {
+                    worker_id: worker_id.clone(),
+                },
+            )
+            .await;
+    }
+
+    /// Send an UndrainWorker client command for the given worker.
+    pub async fn undrain_worker(&mut self, worker_id: &WorkerId) {
+        let client_id = ClientId(self.next_client_id);
+        self.next_client_id += 1;
+        self.shell
+            .client_command(
+                client_id,
+                ClientCommand::UndrainWorker {
+                    worker_id: worker_id.clone(),
+                },
+            )
+            .await;
+    }
+
     /// Send a PressureUpdate event from a worker with the given memory PSI some_avg10 value,
     /// then converge. CPU and IO PSI default to 0.
     pub async fn send_pressure_update(&mut self, worker_id: &WorkerId, memory_psi_pct: f64) {

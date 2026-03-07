@@ -138,6 +138,26 @@ impl TestHarness {
         );
     }
 
+    pub fn assert_worker_draining(&self, worker_id: &WorkerId) {
+        let ws = self.orchestrator().workers.get(worker_id)
+            .unwrap_or_else(|| panic!("worker {:?} not found", worker_id));
+        assert!(
+            ws.conditions.contains_key("draining"),
+            "worker {:?}: expected 'draining' condition, got conditions: {:?}",
+            worker_id, ws.conditions
+        );
+    }
+
+    pub fn assert_worker_not_draining(&self, worker_id: &WorkerId) {
+        let ws = self.orchestrator().workers.get(worker_id)
+            .unwrap_or_else(|| panic!("worker {:?} not found", worker_id));
+        assert!(
+            !ws.conditions.contains_key("draining"),
+            "worker {:?}: expected no 'draining' condition, but it is set",
+            worker_id
+        );
+    }
+
     pub fn assert_worker_count(&self, expected: usize) {
         let actual = self.orchestrator().workers.len();
         assert_eq!(

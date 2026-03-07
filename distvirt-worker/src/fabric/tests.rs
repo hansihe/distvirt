@@ -1002,3 +1002,51 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
     let fp = FabricPacket::new(&received).unwrap();
     assert_eq!(fp.ipv4_dst(), remote_pod_ip);
 }
+
+// --- PortGuard integration test ---
+
+#[tokio::test]
+async fn port_guard_drop_returns_endpoint_to_buffering() {
+    let fabric = make_test_fabric();
+
+    let pod_ip = Ipv4Addr::new(10, 0, 0, 50);
+    create_local_pod_endpoint(&fabric, pod_ip);
+
+    // Add a port for pod_ip.
+    let (port0, handle0) = make_test_port();
+    let (sender_port, sender_handle) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    let (_sender_id, _sender_task) = fabric.add_port_raw_with_ip(sender_port, IP_A);
+    let (_pod_port_id, pod_task) = fabric.add_port_raw_with_ip(port0, pod_ip);
+
+    // Sanity: frames route to the port.
+    let frame = make_ipv4_frame(pod_ip);
+    sender_handle.inject_tx.send(frame).await.unwrap();
+    let received = try_recv(&handle0).await;
+    assert!(received.is_some(), "frame should reach pod port before drop");
+
+    // Drop the TaskHandle — this aborts the port read loop, which drops
+    // the PortGuard, which calls detach_port.
+    drop(pod_task);
+
+    // Wait for async cleanup.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify the endpoint went back to buffering: send another frame.
+    // It shouldn't arrive at the (now closed) port, and should be buffered.
+    let frame2 = make_ipv4_frame(pod_ip);
+    sender_handle.inject_tx.send(frame2).await.unwrap();
+
+    // The old port handle should NOT receive a new frame.
+    assert_no_frame(&handle0).await;
+
+    // Verify that the endpoint table is in buffering mode by checking
+    // that frames are buffered (we can verify by adding a new port and
+    // getting the buffered frames).
+    let (port_new, handle_new) = make_test_port();
+    create_local_pod_endpoint(&fabric, pod_ip);
+    let (_new_id, _new_task) = fabric.add_port_raw_with_ip(port_new, pod_ip);
+
+    let flushed = try_recv(&handle_new).await;
+    assert!(flushed.is_some(), "new port should receive the buffered frame from after drop");
+}

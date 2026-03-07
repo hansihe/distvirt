@@ -116,12 +116,15 @@ impl TunnelManager {
                     .public_key()
                     .map_or(false, |our_key| our_key < &info.public_key[..]);
 
-                self.transport.add_peer(
+                if let Err(e) = self.transport.add_peer(
                     worker_id.clone(),
                     endpoint,
                     Some(&info.public_key),
                     is_initiator,
-                );
+                ) {
+                    log::error!("tunnel: failed to add peer {}: {}", worker_id, e);
+                    continue;
+                }
 
                 let mut peer = PeerState {
                     endpoint,

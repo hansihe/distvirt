@@ -182,7 +182,13 @@ impl<P: FramePort> Fabric<P> {
             let (pod_buffered, service_flushes) = {
                 let mut et = self.ctx.inner.endpoint_table.lock().expect("poisoned");
                 // Attach port to LocalPod endpoint, getting buffered frames.
-                let pod_buffered = et.attach_port(ip, port_id);
+                let pod_buffered = match et.attach_port(ip, port_id) {
+                    Ok(frames) => frames,
+                    Err(e) => {
+                        log::error!("fabric: attach_port failed for {}: {}", ip, e);
+                        vec![]
+                    }
+                };
                 // Also flush service buffers whose backend IP matches.
                 let service_flushes = et.flush_by_backend_ip(&ip);
                 (pod_buffered, service_flushes)

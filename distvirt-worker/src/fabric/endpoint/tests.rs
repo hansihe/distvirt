@@ -128,7 +128,7 @@ fn forwards_when_ready() {
         None,
     );
     // Attach a fake port so the LocalPod is reachable.
-    table.attach_port(POD_IP, 99);
+    table.attach_port(POD_IP, 99).unwrap();
 
     let (action, activate, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
     assert!(matches!(
@@ -623,7 +623,7 @@ fn local_pod_attach_flushes_buffer() {
     }
 
     // Attach port — should return buffered frames.
-    let frames = table.attach_port(LOCAL_POD_IP, 42);
+    let frames = table.attach_port(LOCAL_POD_IP, 42).unwrap();
     assert_eq!(frames.len(), 3);
 
     // Now should forward to the port.
@@ -650,7 +650,7 @@ fn local_pod_detach_returns_to_pending() {
         None,
     );
 
-    table.attach_port(LOCAL_POD_IP, 42);
+    table.attach_port(LOCAL_POD_IP, 42).unwrap();
 
     // Detach port.
     table.detach_port(42);
@@ -683,10 +683,301 @@ fn local_pod_get_port_id() {
     assert!(table.get_port_id(&LOCAL_POD_IP).is_none());
 
     // Attach port.
-    table.attach_port(LOCAL_POD_IP, 42);
+    table.attach_port(LOCAL_POD_IP, 42).unwrap();
     assert_eq!(table.get_port_id(&LOCAL_POD_IP), Some(42));
 
     // Detach port.
     table.detach_port(42);
     assert!(table.get_port_id(&LOCAL_POD_IP).is_none());
+}
+
+// --- gc_flow_trackers tests ---
+
+#[test]
+fn gc_flow_trackers_reports_no_active_flows_after_closed_linger() {
+    use distvirt_worker_protocol::EndpointPlacement;
+
+    let mut table = EndpointTable::new();
+    table.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip: LOCAL_POD_IP,
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: distvirt_worker_protocol::WorkerId::from(OWN_WORKER),
+                }),
+            },
+        }],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+    // Attach port so the endpoint gets a FlowTracker (Ready state).
+    table.attach_port(LOCAL_POD_IP, 99).unwrap();
+
+    // Feed a TCP SYN to create an active flow.
+    let syn_frame = make_tcp_frame_for_service(
+        [10, 0, 0, 1],
+        LOCAL_POD_IP.octets(),
+        12345,
+        80,
+    );
+    let (action, _, flow_change) = table.lookup_and_buffer(LOCAL_POD_IP, &syn_frame, false);
+    assert!(matches!(action, EndpointAction::LocalPod { .. }));
+    // SYN creates an active flow: transition from false→true.
+    assert!(flow_change.is_some());
+    assert!(flow_change.unwrap().has_active_flows);
+
+    // Feed a RST to close the flow.
+    let rst_frame = {
+        use etherparse::PacketBuilder;
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], LOCAL_POD_IP.octets(), 64)
+            .tcp(12345, 80, 1000, 65535);
+        let mut ip_packet = Vec::new();
+        builder.write(&mut ip_packet, &[]).unwrap();
+        ip_packet[20 + 13] = 0x04; // RST
+        with_fabric_header(0, 0, &ip_packet)
+    };
+    let (_, _, flow_change) = table.lookup_and_buffer(LOCAL_POD_IP, &rst_frame, false);
+    // RST closes the flow: transition from true→false.
+    assert!(flow_change.is_some());
+    assert!(!flow_change.unwrap().has_active_flows);
+
+    // GC before CLOSED_LINGER — no change (flow still in Closed state, lingering).
+    let changes = table.gc_flow_trackers();
+    assert!(changes.is_empty(), "GC before linger should not produce changes");
+
+    // GC after CLOSED_LINGER — flow is removed, but has_active_flows was already false.
+    // No transition because it was already false→false.
+    // (The flow tracker retains the Closed flow during linger, but has_active_flows
+    // already reports false for Closed flows.)
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let changes = table.gc_flow_trackers();
+    assert!(changes.is_empty(), "no transition since has_active_flows was already false");
+}
+
+#[test]
+fn gc_flow_trackers_no_change_with_active_flows() {
+    use distvirt_worker_protocol::EndpointPlacement;
+
+    let mut table = EndpointTable::new();
+    table.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip: LOCAL_POD_IP,
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: distvirt_worker_protocol::WorkerId::from(OWN_WORKER),
+                }),
+            },
+        }],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+    table.attach_port(LOCAL_POD_IP, 99).unwrap();
+
+    // Feed a TCP SYN — flow is active (Opening).
+    let syn_frame = make_tcp_frame_for_service(
+        [10, 0, 0, 1],
+        LOCAL_POD_IP.octets(),
+        12345,
+        80,
+    );
+    table.lookup_and_buffer(LOCAL_POD_IP, &syn_frame, false);
+
+    // GC with still-active flow — no changes.
+    let changes = table.gc_flow_trackers();
+    assert!(changes.is_empty(), "GC with active flows should return empty vec");
+}
+
+// --- Config transition tests ---
+
+#[test]
+fn unplaced_pod_to_local_pod_preserves_buffer() {
+    use distvirt_worker_protocol::EndpointPlacement;
+
+    let mut table = EndpointTable::new();
+
+    // Create unplaced pod.
+    table.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip: LOCAL_POD_IP,
+            kind: EndpointKind::Pod { placement: None },
+        }],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+
+    // Buffer frames.
+    for _ in 0..3 {
+        let (action, _, _) = table.lookup_and_buffer(LOCAL_POD_IP, FRAME, false);
+        assert!(matches!(action, EndpointAction::Buffered { .. }));
+    }
+
+    // Update to LocalPod.
+    table.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip: LOCAL_POD_IP,
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: distvirt_worker_protocol::WorkerId::from(OWN_WORKER),
+                }),
+            },
+        }],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+
+    // Attach port — should return the 3 buffered frames.
+    let frames = table.attach_port(LOCAL_POD_IP, 42).unwrap();
+    assert_eq!(frames.len(), 3, "buffered frames should be preserved across UnplacedPod → LocalPod transition");
+}
+
+#[test]
+fn unplaced_pod_to_remote_segment_emits_flush() {
+    use distvirt_worker_protocol::EndpointPlacement;
+
+    let mut table = EndpointTable::new();
+
+    // Create unplaced pod.
+    table.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip: LOCAL_POD_IP,
+            kind: EndpointKind::Pod { placement: None },
+        }],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+
+    // Buffer frames.
+    for _ in 0..2 {
+        table.lookup_and_buffer(LOCAL_POD_IP, FRAME, false);
+    }
+
+    // Update to remote placement.
+    let effects = table.apply_endpoint_update(
+        vec![EndpointSpec {
+            ip: LOCAL_POD_IP,
+            kind: EndpointKind::Pod {
+                placement: Some(EndpointPlacement {
+                    worker_id: distvirt_worker_protocol::WorkerId::from("other-worker"),
+                }),
+            },
+        }],
+        vec![],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+
+    assert!(
+        effects.iter().any(|e| matches!(e, EndpointSyncEffect::FlushPodBuffer { ip } if *ip == LOCAL_POD_IP)),
+        "should emit FlushPodBuffer when transitioning from UnplacedPod with buffered frames to RemoteSegment"
+    );
+}
+
+#[test]
+fn service_backend_ip_change_clears_buffer_and_resets_to_pending() {
+    let mut table = EndpointTable::new();
+
+    // Create service with backend A.
+    sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
+    sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(POD_IP), &mut passthrough_processor);
+
+    // Buffer frames while Pending.
+    for _ in 0..3 {
+        table.lookup_and_buffer(SVC_IP, FRAME, false);
+    }
+
+    // Change backend to a different IP (same service_id, same activator → reuses processor).
+    let new_pod_ip = Ipv4Addr::new(172, 16, 0, 131);
+    sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(new_pod_ip), &mut passthrough_processor);
+
+    // Mark ready — buffer should have been cleared by the IP change.
+    let result = table.mark_service_ready("svc1");
+    match result.unwrap() {
+        MarkReadyResult::Passthrough { frames, .. } => {
+            assert_eq!(frames.len(), 0, "buffer should be cleared when backend IP changes");
+        }
+        _ => panic!("expected Passthrough result"),
+    }
+}
+
+#[test]
+fn service_remove_backend_clears_buffer_and_resets() {
+    let mut table = EndpointTable::new();
+
+    sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut passthrough_processor);
+    sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), Some(POD_IP), &mut passthrough_processor);
+
+    // Buffer frames.
+    for _ in 0..2 {
+        table.lookup_and_buffer(SVC_IP, FRAME, false);
+    }
+
+    // Remove backend (set to None).
+    sync_update_backend(&mut table, "svc1", SVC_IP, default_policy(), None, &mut passthrough_processor);
+
+    // Should be back to Buffering state.
+    let (action, activate, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
+    assert!(matches!(action, EndpointAction::Buffered { .. }));
+    // Activation debounce should have been reset.
+    assert!(activate, "activation should fire after backend removal resets debounce");
+}
+
+#[test]
+fn service_created_with_ready_backend_emits_service_ready() {
+    let mut table = EndpointTable::new();
+
+    let effects = table.apply_endpoint_sync(
+        vec![EndpointSpec {
+            ip: SVC_IP,
+            kind: EndpointKind::Service {
+                service_id: ServiceId::from("svc-ready"),
+                policy: default_policy(),
+                backend: Some(EndpointPodBackend {
+                    pod_ip: POD_IP,
+                    placement: None,
+                    ready: true,
+                }),
+            },
+        }],
+        OWN_WORKER,
+        &mut passthrough_processor,
+        None,
+    );
+
+    assert!(
+        effects.iter().any(|e| matches!(e, EndpointSyncEffect::ServiceReady { service_id } if service_id == "svc-ready")),
+        "creating a service with ready: true should emit ServiceReady"
+    );
+}
+
+// --- Buffer timeout tests ---
+
+#[test]
+fn buffer_timeout_drops_frames_after_expiry() {
+    let policy = ServicePolicy {
+        buffer_frames: 64,
+        timeout_ms: 1,
+        activator: None,
+    };
+    let mut table = EndpointTable::new();
+    sync_create_service(&mut table, "svc1", SVC_IP, policy.clone(), &mut passthrough_processor);
+
+    // First frame is accepted (starts the timer).
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
+    assert!(matches!(action, EndpointAction::Buffered { .. }));
+
+    // Wait for timeout to expire.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Second frame should be dropped (timeout expired, buffer cleared).
+    let (action, _, _) = table.lookup_and_buffer(SVC_IP, FRAME, false);
+    assert!(
+        matches!(action, EndpointAction::Drop { .. }),
+        "frame after timeout should be dropped, got {:?}", action
+    );
 }

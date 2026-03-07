@@ -213,13 +213,17 @@ impl Orchestrator {
         let ns = self.namespaces.get(namespace_id)?;
         ns.workers
             .iter()
-            // Hard constraints: must be active, must not be at High or Critical pressure.
+            // Hard constraints: must be active, not draining, must not be at High or Critical pressure.
             .filter(|(wid, ws)| {
                 if ws.fabric_status != FabricStatus::Active {
                     return false;
                 }
-                // Check global worker pressure bands.
+                // Check global worker state.
                 if let Some(global_ws) = self.workers.get(*wid) {
+                    // Exclude draining workers.
+                    if global_ws.conditions.contains_key("draining") {
+                        return false;
+                    }
                     global_ws.pressure_bands.max_band() < PressureBand::High
                 } else {
                     false
@@ -409,6 +413,42 @@ mod tests {
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
         assert_eq!(selected, workers[1], "should skip inactive worker");
+    }
+
+    #[test]
+    fn test_select_worker_excludes_draining() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        // w-0: draining
+        orch.workers.get_mut(&workers[0]).unwrap().conditions.insert(
+            "draining".to_string(),
+            WorkerCondition {
+                active: true,
+                message: "draining".to_string(),
+            },
+        );
+        // w-1: normal
+
+        let selected = orch.select_worker_for_pod(&ns_id).unwrap();
+        assert_eq!(selected, workers[1], "should exclude draining worker");
+    }
+
+    #[test]
+    fn test_select_worker_none_when_all_draining() {
+        let (mut orch, ns_id, workers) = setup_orchestrator(2);
+
+        for w in &workers {
+            orch.workers.get_mut(w).unwrap().conditions.insert(
+                "draining".to_string(),
+                WorkerCondition {
+                    active: true,
+                    message: "draining".to_string(),
+                },
+            );
+        }
+
+        let selected = orch.select_worker_for_pod(&ns_id);
+        assert!(selected.is_none(), "should return None when all workers are draining");
     }
 
     #[test]

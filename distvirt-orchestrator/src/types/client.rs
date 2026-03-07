@@ -22,6 +22,8 @@ pub enum ClientCommand {
     Connect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
     Disconnect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
     DeactivateWorkload { namespace_id: NamespaceId, workload_id: WorkloadId },
+    DrainWorker { worker_id: WorkerId },
+    UndrainWorker { worker_id: WorkerId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
