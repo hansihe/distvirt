@@ -1268,6 +1268,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "distvirt-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "distvirt-orchestrator",
+ "distvirt-worker",
+ "distvirt-worker-protocol",
+ "env_logger",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "distvirt-worker"
 version = "0.1.0"
 dependencies = [

@@ -36,10 +36,10 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-suspend".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sleep".into()],
-                args: vec!["3600".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["sleep".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,

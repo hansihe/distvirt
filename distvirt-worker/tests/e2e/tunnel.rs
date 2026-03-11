@@ -203,10 +203,10 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
             },
             containers: vec![ContainerSpec {
                 container_id: "ctr-b".into(),
-                image_ref: "docker.io/library/alpine:latest".into(),
+                image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
                 config: ContainerConfig {
-                    entrypoint: vec!["/bin/sleep".into()],
-                    args: vec!["60".into()],
+                    entrypoint: vec!["/bin/test-containers".into()],
+                    args: vec!["sleep".into()],
                     env: vec![],
                     working_dir: None,
                     uid: None,

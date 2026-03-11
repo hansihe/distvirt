@@ -1,15 +1,15 @@
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use distvirt_guest_protocol::GuestEvent;
 use distvirt_worker_protocol::{
     ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId, PodNetworkConfig,
     PoolId, ArtifactId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::fabric::{Fabric, FabricPort};
@@ -80,7 +80,7 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
     resources: Option<distvirt_worker_protocol::ResourceRequirements>,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
-    match pod_launch(
+    let result = pod_launch(
         &*vmm,
         &*image_provider,
         &fabric,
@@ -95,46 +95,8 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static>
         resources,
         &cancel,
     )
-    .await
-    {
-        Ok((vm, io_session, port_task)) => {
-            // Emit PodRunning event.
-            send_event(
-                &event_tx,
-                WorkerEvent::PodRunning {
-                    namespace_id: namespace_id.clone(),
-                    pod_id: pod_id.clone(),
-                },
-            )
-            .await;
-            pod_monitor(vm, io_session, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
-        }
-        Err(e) => {
-            if cancel.is_cancelled() {
-                log::info!("pod '{}': launch cancelled", pod_id);
-                send_event(
-                    &event_tx,
-                    WorkerEvent::PodExited {
-                        namespace_id,
-                        pod_id: pod_id.clone(),
-                        exit_code: -1,
-                    },
-                )
-                .await;
-            } else {
-                log::error!("pod '{}': launch failed: {:#}", pod_id, e);
-                send_event(
-                    &event_tx,
-                    WorkerEvent::PodFailed {
-                        namespace_id,
-                        pod_id: pod_id.clone(),
-                        error: format!("{:#}", e),
-                    },
-                )
-                .await;
-            }
-        }
-    }
+    .await;
+    run_pod_supervisor(result, cancel, event_tx, namespace_id, pod_id, suspend_rx, "launch").await;
 }
 
 /// Top-level resume supervisor: restores a pod from a snapshot and monitors it.
@@ -151,7 +113,7 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
     snapshot: SnapshotArtifacts,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
-    match pod_restore(
+    let result = pod_restore(
         &*vmm,
         &fabric,
         &event_tx,
@@ -162,8 +124,27 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
         &cancel,
     )
     .await
-    {
-        Ok((vm, port_task)) => {
+    .map(|(vm, port_task)| (vm, None, port_task));
+    run_pod_supervisor(result, cancel, event_tx, namespace_id, pod_id, suspend_rx, "resume").await;
+}
+
+/// Shared supervisor logic: on success emits `PodRunning` and delegates to `pod_monitor`;
+/// on failure emits `PodExited` (if cancelled) or `PodFailed`.
+async fn run_pod_supervisor<I: VmInstance>(
+    setup_result: anyhow::Result<(
+        ManagedVm<I>,
+        Option<(crate::io_session::IoSession, yamux::Stream)>,
+        Option<TaskHandle<()>>,
+    )>,
+    cancel: CancellationToken,
+    event_tx: mpsc::Sender<WorkerEvent>,
+    namespace_id: NamespaceId,
+    pod_id: PodId,
+    suspend_rx: mpsc::Receiver<SuspendRequest>,
+    phase: &str,
+) {
+    match setup_result {
+        Ok((vm, io_session, port_task)) => {
             send_event(
                 &event_tx,
                 WorkerEvent::PodRunning {
@@ -172,11 +153,11 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
                 },
             )
             .await;
-            pod_monitor(vm, None, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
+            pod_monitor(vm, io_session, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
         }
         Err(e) => {
             if cancel.is_cancelled() {
-                log::info!("pod '{}': resume cancelled", pod_id);
+                log::info!("pod '{}': {} cancelled", pod_id, phase);
                 send_event(
                     &event_tx,
                     WorkerEvent::PodExited {
@@ -187,7 +168,7 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static>(
                 )
                 .await;
             } else {
-                log::error!("pod '{}': resume failed: {:#}", pod_id, e);
+                log::error!("pod '{}': {} failed: {:#}", pod_id, phase, e);
                 send_event(
                     &event_tx,
                     WorkerEvent::PodFailed {
@@ -217,14 +198,9 @@ async fn pod_restore<V: Vmm + 'static>(
     ManagedVm<V::Instance>,
     Option<TaskHandle<()>>,
 )> {
-    let net_config = NetConfig {
-        guest_ip: network.ip.to_string(),
-        netmask: network.netmask.clone(),
-        gateway: network.gateway.to_string(),
-        guest_mac: network.mac,
-    };
+    let net_config = NetConfig::from(&network);
 
-    let mut instance = tokio::select! {
+    let instance = tokio::select! {
         result = vmm.restore(&snapshot, Some(&net_config)) => {
             result.context("restore VM from snapshot")?
         }
@@ -234,23 +210,7 @@ async fn pod_restore<V: Vmm + 'static>(
     };
     log::info!("worker: pod '{}' VM restored from snapshot", pod_id);
 
-    let port_task = if let Some(tap) = instance.take_tap() {
-        let tap_name = tap.name.clone();
-        let (_port_id, task) = fabric
-            .add_tap_port(tap, network.ip, network.mac)
-            .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
-        log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
-        Some(task)
-    } else {
-        None
-    };
-
-    let vm = tokio::select! {
-        result = ManagedVm::connect(instance) => { result? }
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during VM connect after restore");
-        }
-    };
+    let (vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
 
     Ok((vm, port_task))
 }
@@ -296,12 +256,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         container.config
     };
 
-    let net_config = NetConfig {
-        guest_ip: network.ip.to_string(),
-        netmask: network.netmask.clone(),
-        gateway: network.gateway.to_string(),
-        guest_mac: network.mac,
-    };
+    let net_config = NetConfig::from(&network);
 
     let (vcpu_count, mem_size_mib) = resources
         .as_ref()
@@ -340,7 +295,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         initial_commands: vec![],
     };
 
-    let mut instance = tokio::select! {
+    let instance = tokio::select! {
         result = vmm.launch(&vm_config) => {
             result.context("launch VM")?
         }
@@ -350,56 +305,62 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     };
     log::info!("worker: pod '{}' VM launched", pod_id);
 
-    let port_task = if let Some(tap) = instance.take_tap() {
-        let tap_name = tap.name.clone();
-        let (_port_id, task) = fabric
-            .add_tap_port(tap, network.ip, network.mac)
-            .map_err(|e| anyhow::anyhow!("fabric add_port for {}: {}", tap_name, e))?;
-        log::info!("worker: pod '{}' TAP {} added to fabric", pod_id, tap_name);
-        Some(task)
-    } else {
-        None
-    };
+    let (mut vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
 
-    let mut vm = tokio::select! {
-        result = ManagedVm::connect(instance) => { result? }
-        _ = cancel.cancelled() => {
-            // instance is moved into connect(); on cancel, connect() is dropped,
-            // which drops instance → FirecrackerInstance::drop sends SIGKILL.
-            anyhow::bail!("cancelled during VM connect");
-        }
-    };
+    // Take exit signal again for the setup phase below (setup_instance consumed
+    // the first one for the connect phase).
+    let mut vm_exit_rx = vm.take_exit_signal();
+    let mut vm_died = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
 
-    vm.configure_network("eth0", &net_config).await?;
+    let io_session = tokio::select! {
+        result = async {
+            vm.configure_network("eth0", &net_config).await?;
 
-    let dns_servers = vec![network.gateway.to_string()];
+            let dns_servers = vec![network.gateway.to_string()];
 
-    let container_id = &container.container_id;
-    vm.add_container(container_id, "/dev/vdb", &dns_servers)
-        .await?;
+            let container_id = &container.container_id;
+            vm.add_container(container_id, "/dev/vdb", &dns_servers)
+                .await?;
 
-    vm.start_container(container_id, &config).await?;
+            vm.start_container(container_id, &config).await?;
 
-    // Set up log streaming via yamux log streams.
-    let io_session = if config.capture_output {
-        match vm.accept_output_stream().await {
-            Ok((_cid, session)) => {
-                let header = LogStreamHeader {
-                    namespace_id: namespace_id.clone(),
-                    pod_id: pod_id.clone(),
-                    container_id: container_id.to_string(),
-                };
-                match log_opener.open_log_stream(&header).await {
-                    Ok(log_stream) => Some((session, log_stream)),
+            // Set up log streaming via yamux log streams.
+            let io_session = if config.capture_output {
+                match vm.accept_output_stream().await {
+                    Ok((_cid, session)) => {
+                        let header = LogStreamHeader {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            container_id: container_id.to_string(),
+                        };
+                        match log_opener.open_log_stream(&header).await {
+                            Ok(log_stream) => Some((session, log_stream)),
+                            Err(e) => {
+                                log::error!("pod '{}': failed to open log stream: {:#}", pod_id, e);
+                                send_event(
+                                    event_tx,
+                                    WorkerEvent::PodLogStreamError {
+                                        namespace_id: namespace_id.clone(),
+                                        pod_id: pod_id.clone(),
+                                        container_id: container_id.to_string(),
+                                        phase: "open_stream".to_string(),
+                                        error: format!("{:#}", e),
+                                    },
+                                )
+                                .await;
+                                None
+                            }
+                        }
+                    }
                     Err(e) => {
-                        log::error!("pod '{}': failed to open log stream: {:#}", pod_id, e);
+                        log::error!("pod '{}': failed to accept output stream: {:#}", pod_id, e);
                         send_event(
                             event_tx,
                             WorkerEvent::PodLogStreamError {
                                 namespace_id: namespace_id.clone(),
                                 pod_id: pod_id.clone(),
                                 container_id: container_id.to_string(),
-                                phase: "open_stream".to_string(),
+                                phase: "connect".to_string(),
                                 error: format!("{:#}", e),
                             },
                         )
@@ -407,28 +368,70 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                         None
                     }
                 }
-            }
-            Err(e) => {
-                log::error!("pod '{}': failed to accept output stream: {:#}", pod_id, e);
-                send_event(
-                    event_tx,
-                    WorkerEvent::PodLogStreamError {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        container_id: container_id.to_string(),
-                        phase: "connect".to_string(),
-                        error: format!("{:#}", e),
-                    },
-                )
-                .await;
+            } else {
                 None
-            }
+            };
+
+            Ok::<_, anyhow::Error>(io_session)
+        } => { result? }
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled during VM setup");
         }
+        _ = &mut vm_died => {
+            anyhow::bail!("VM process exited during setup");
+        }
+    };
+
+    Ok((vm, io_session, port_task))
+}
+
+/// Wire a freshly launched/restored VM instance into the fabric and establish
+/// the yamux control connection.
+///
+/// Create a future that resolves when the VM process exits, or pends forever if no signal available.
+async fn wait_for_vm_exit(rx: &mut Option<watch::Receiver<Option<ExitStatus>>>) {
+    match rx.as_mut() {
+        Some(rx) => {
+            let _ = rx.wait_for(|s| s.is_some()).await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Shared between `pod_launch` and `pod_restore`: takes the TAP, adds it to
+/// the fabric, then connects `ManagedVm` while racing against cancellation
+/// and unexpected VM death.
+async fn setup_instance<I: VmInstance>(
+    mut instance: I,
+    fabric: &Fabric<FabricPort>,
+    pod_id: &PodId,
+    network: &PodNetworkConfig,
+    cancel: &CancellationToken,
+) -> anyhow::Result<(ManagedVm<I>, Option<TaskHandle<()>>)> {
+    let port_task = if let Some(port) = instance.take_fabric_port() {
+        let (_port_id, task) = fabric.add_port_raw_with_ip(port, network.ip);
+        log::info!("worker: pod '{}' network port added to fabric", pod_id);
+        Some(task)
     } else {
         None
     };
 
-    Ok((vm, io_session, port_task))
+    // Take exit signal before instance is moved into ManagedVm::connect,
+    // so we can detect VM death during setup immediately.
+    let mut vm_exit_rx = instance.take_exit_signal();
+    let mut vm_died = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
+
+    let vm = tokio::select! {
+        result = ManagedVm::connect(instance) => { result? }
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled during VM connect");
+        }
+        _ = &mut vm_died => {
+            anyhow::bail!("VM process exited during setup");
+        }
+    };
+
+    Ok((vm, port_task))
 }
 
 /// Timeout for suspend handshake with guest.
@@ -471,6 +474,25 @@ async fn pod_monitor<I: VmInstance>(
         })
     });
 
+    // Take the event dispatch and get our own receiver for watching state.
+    // _dispatch must be kept alive so the background task continues running.
+    let _dispatch = vm.take_event_dispatch();
+    let mut rx = match _dispatch {
+        Some(ref d) => d.subscribe(),
+        None => {
+            // This shouldn't happen, but handle gracefully.
+            log::error!("pod '{}': no event dispatch available", pod_id);
+            let _ = vm.force_kill().await;
+            send_event(&event_tx, WorkerEvent::PodFailed {
+                namespace_id,
+                pod_id,
+                error: "no event dispatch available".to_string(),
+            }).await;
+            return;
+        }
+    };
+    let mut last_balloon: Option<u32> = None;
+
     // Take the driver exit signal so we can select on driver death without
     // moving the TaskHandle out of vm. drain_yamux_driver() still works.
     let mut driver_exit = vm.take_driver_exit_signal();
@@ -480,6 +502,10 @@ async fn pod_monitor<I: VmInstance>(
             None => std::future::pending().await,
         }
     });
+
+    // Take the VM process exit signal so we can detect unexpected VM death.
+    let mut vm_exit_rx = vm.take_exit_signal();
+    let mut vm_exit_fut = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
 
     // Create a future that completes when the port task exits, or pends forever if there is none.
     let mut port_task = port_task;
@@ -492,54 +518,68 @@ async fn pod_monitor<I: VmInstance>(
 
     let event = loop {
         tokio::select! {
-            // Event-driven path: handle guest events (container exit, balloon, errors).
-            result = vm.recv_event() => {
-                match result {
-                    Ok(GuestEvent::ContainerExited { id, code }) => {
-                        log::info!("pod '{}': container {} exited with code {}", pod_id, id, code);
-                        // Gracefully shut down the VM.
-                        match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => {
-                                log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
-                                let _ = vm.force_kill().await;
-                            }
-                            Err(_) => {
-                                log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
-                                let _ = vm.force_kill().await;
-                            }
+            // Event-driven path: react to state changes from EventDispatch.
+            _ = rx.changed() => {
+                let state = rx.borrow().clone();
+
+                // 1. Fatal task error → force kill.
+                if let Some((ref task, ref message)) = state.task_error {
+                    log::error!("pod '{}': guest task error: task={}, message={}", pod_id, task, message);
+                    let _ = vm.force_kill().await;
+                    break WorkerEvent::PodFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error: format!("guest task error: task={}, message={}", task, message),
+                    };
+                }
+
+                // 2. Container exit → graceful shutdown.
+                if !state.exited.is_empty() {
+                    // Use the first exited container's code as the pod exit code.
+                    let (id, code) = state.exited.iter().next().unwrap();
+                    let code = *code;
+                    log::info!("pod '{}': container {} exited with code {}", pod_id, id, code);
+                    drop(state);
+                    match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8), &mut rx)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
+                            let _ = vm.force_kill().await;
                         }
-                        break WorkerEvent::PodExited {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            exit_code: code,
-                        };
+                        Err(_) => {
+                            log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
+                            let _ = vm.force_kill().await;
+                        }
                     }
-                    Ok(GuestEvent::BalloonSet { amount_mib }) => {
+                    break WorkerEvent::PodExited {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        exit_code: code,
+                    };
+                }
+
+                // 3. Balloon adjustment.
+                if state.balloon_mib != last_balloon {
+                    if let Some(amount_mib) = state.balloon_mib {
                         log::info!("pod '{}': guest requests balloon={} MiB", pod_id, amount_mib);
                         if let Err(e) = vm.set_balloon(amount_mib).await {
                             log::warn!("pod '{}': set_balloon failed: {:#}", pod_id, e);
                         }
-                        continue;
                     }
-                    Ok(GuestEvent::TaskError { task, message }) => {
-                        log::error!("pod '{}': guest task error: task={}, message={}", pod_id, task, message);
-                        let _ = vm.force_kill().await;
-                        break WorkerEvent::PodFailed {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            error: format!("guest task error: task={}, message={}", task, message),
-                        };
-                    }
-                    Err(e) => {
-                        log::error!("pod '{}': recv_event error: {:#}", pod_id, e);
-                        let _ = vm.force_kill().await;
-                        break WorkerEvent::PodFailed {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            error: format!("{:#}", e),
-                        };
-                    }
+                    last_balloon = state.balloon_mib;
+                }
+
+                // 4. Stream closed → force kill.
+                if state.stream_closed {
+                    let error = state.stream_error.clone()
+                        .unwrap_or_else(|| "event stream closed unexpectedly".to_string());
+                    log::error!("pod '{}': {}", pod_id, error);
+                    let _ = vm.force_kill().await;
+                    break WorkerEvent::PodFailed {
+                        namespace_id: namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        error,
+                    };
                 }
             }
 
@@ -567,6 +607,17 @@ async fn pod_monitor<I: VmInstance>(
                     namespace_id: namespace_id.clone(),
                     pod_id: pod_id.clone(),
                     error: "port task exited unexpectedly".to_string(),
+                };
+            }
+
+            // Fatal: VM process exited unexpectedly.
+            _ = &mut vm_exit_fut => {
+                log::error!("pod '{}': VM process exited unexpectedly", pod_id);
+                vm.drain_yamux_driver();
+                break WorkerEvent::PodFailed {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    error: "VM process exited unexpectedly".to_string(),
                 };
             }
 
@@ -635,7 +686,7 @@ async fn pod_monitor<I: VmInstance>(
             // Cancellation: graceful shutdown requested.
             _ = cancel.cancelled() => {
                 log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
-                match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8))).await {
+                match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8), &mut rx)).await {
                     Ok(Ok(())) => {
                         log::info!("pod '{}': graceful shutdown complete", pod_id);
                     }
@@ -694,7 +745,6 @@ mod tests {
 
     use crate::fabric::{Fabric, FabricPort};
     use crate::image_provider::{ImageProvider, PreparedArtifact};
-    use crate::tap::TapDevice;
     use crate::vmm::{VmConfig, VmInstance, Vmm};
 
     // -----------------------------------------------------------------------
@@ -716,13 +766,10 @@ mod tests {
         async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
             panic!("StubVmInstance::connect_vsock called");
         }
-        fn tap(&self) -> Option<&TapDevice> {
+        fn take_fabric_port(&mut self) -> Option<FabricPort> {
             None
         }
-        fn take_tap(&mut self) -> Option<TapDevice> {
-            None
-        }
-        async fn wait(&mut self) -> anyhow::Result<()> {
+        async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }
         async fn kill(&mut self) -> anyhow::Result<()> {
@@ -769,13 +816,10 @@ mod tests {
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("MockVmInstance: vsock already connected"))
         }
-        fn tap(&self) -> Option<&TapDevice> {
+        fn take_fabric_port(&mut self) -> Option<FabricPort> {
             None
         }
-        fn take_tap(&mut self) -> Option<TapDevice> {
-            None
-        }
-        async fn wait(&mut self) -> anyhow::Result<()> {
+        async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }
         async fn kill(&mut self) -> anyhow::Result<()> {
@@ -1021,6 +1065,75 @@ mod tests {
                 assert_eq!(exit_code, -1, "cancelled pod should exit with -1");
             }
             other => panic!("expected PodExited(-1), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pod_lifecycle_with_test_vmm() {
+        use crate::vmm::guest_sim::ContainerBehavior;
+        use crate::vmm::test_vmm::TestVmm;
+
+        let vmm = Arc::new(TestVmm::new(ContainerBehavior::ExitImmediately(0)));
+        let image_provider = Arc::new(MockImageProvider);
+        let fabric = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 1), 24));
+        let cancel = CancellationToken::new();
+        let log_opener = make_log_opener();
+        let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
+
+        let ns_id = NamespaceId::from("ns1");
+        let pod_id = PodId::from("pod1");
+
+        tokio::spawn({
+            let ns_id = ns_id.clone();
+            let pod_id = pod_id.clone();
+            let cancel = cancel.clone();
+            async move {
+                let (_suspend_tx, suspend_rx) = mpsc::channel(1);
+                pod_supervisor(
+                    vmm,
+                    image_provider,
+                    fabric,
+                    PathBuf::from("/fake/kernel"),
+                    PathBuf::from("/fake/rootfs"),
+                    log_opener,
+                    cancel,
+                    bg_event_tx,
+                    ns_id,
+                    pod_id,
+                    make_pod_network(),
+                    make_containers(),
+                    None,
+                    suspend_rx,
+                )
+                .await;
+            }
+        });
+
+        // First event should be PodRunning.
+        let event = tokio::time::timeout(Duration::from_secs(10), bg_event_rx.recv())
+            .await
+            .expect("timeout waiting for PodRunning")
+            .expect("channel closed");
+        match event {
+            WorkerEvent::PodRunning { namespace_id, pod_id } => {
+                assert_eq!(namespace_id, "ns1");
+                assert_eq!(pod_id, "pod1");
+            }
+            other => panic!("expected PodRunning, got {:?}", other),
+        }
+
+        // Second event should be PodExited with code 0.
+        let event = tokio::time::timeout(Duration::from_secs(10), bg_event_rx.recv())
+            .await
+            .expect("timeout waiting for PodExited")
+            .expect("channel closed");
+        match event {
+            WorkerEvent::PodExited { namespace_id, pod_id, exit_code } => {
+                assert_eq!(namespace_id, "ns1");
+                assert_eq!(pod_id, "pod1");
+                assert_eq!(exit_code, 0);
+            }
+            other => panic!("expected PodExited(0), got {:?}", other),
         }
     }
 }

@@ -27,7 +27,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
-use crate::tap::TapDevice;
 use crate::task_handle::TaskHandle;
 use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
 use crate::packet::{FabricPacket, ip_packet_src, ip_packet_protocol, ip_packet_transport_ports, rewrite_ipv4_dst};
@@ -91,34 +90,6 @@ pub struct Fabric<P: FramePort = Port> {
     next_port_id: AtomicUsize,
     _gateway_ingress_task: Mutex<Option<TaskHandle<()>>>,
     _gc_task: Mutex<Option<TaskHandle<()>>>,
-}
-
-impl Fabric<Port> {
-    /// Add a TAP device as a port, pre-register its IP, flush any buffered
-    /// frames for `pod_ip`, and start the forwarding task.
-    #[allow(dead_code)]
-    pub fn add_port_with_ip(
-        &self,
-        tap: TapDevice,
-        pod_ip: Ipv4Addr,
-        guest_mac: [u8; 6],
-    ) -> std::io::Result<(PortId, TaskHandle<()>)> {
-        let port = Port::new(tap, guest_mac)?;
-        Ok(self.add_port_inner(port, Some(pod_ip)))
-    }
-}
-
-impl Fabric<FabricPort> {
-    /// Add a TAP device as a port, wrapping it in `FabricPort::Tap`.
-    pub fn add_tap_port(
-        &self,
-        tap: TapDevice,
-        pod_ip: Ipv4Addr,
-        guest_mac: [u8; 6],
-    ) -> std::io::Result<(PortId, TaskHandle<()>)> {
-        let port = Port::new(tap, guest_mac)?;
-        Ok(self.add_port_inner(FabricPort::Tap(port), Some(pod_ip)))
-    }
 }
 
 impl<P: FramePort> Fabric<P> {

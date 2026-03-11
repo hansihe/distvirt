@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+use std::process::ExitStatus;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context};
+use tokio::sync::watch;
 
 use distvirt_guest_protocol::{GuestEvent, GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 use distvirt_worker_protocol::ContainerConfig;
@@ -8,7 +11,95 @@ use distvirt_worker_protocol::ContainerConfig;
 use crate::io_session::IoSession;
 use crate::vmm::{NetConfig, SnapshotArtifacts, VmInstance};
 use crate::task_handle::TaskHandle;
-use crate::vsock_client::{DriverExitSignal, GuestSession};
+use crate::vsock_client::{DriverExitSignal, GuestEventStream, GuestSession};
+
+// ---------------------------------------------------------------------------
+// EventDispatch — single background consumer of the guest event stream
+// ---------------------------------------------------------------------------
+
+/// Accumulated state from guest events. Updated by the background dispatch task.
+#[derive(Clone, Debug, Default)]
+pub struct EventDispatchState {
+    /// Containers that have exited, with their exit codes.
+    pub exited: HashMap<String, i32>,
+    /// Latest balloon size requested by the guest (last-value-wins).
+    pub balloon_mib: Option<u32>,
+    /// Fatal task error from guest-init. Set once, never cleared.
+    pub task_error: Option<(String, String)>,
+    /// Set to true when the event stream closes or errors.
+    pub stream_closed: bool,
+    /// If the stream closed with an error, the message.
+    pub stream_error: Option<String>,
+}
+
+/// Owns the background task that reads the guest event stream and publishes
+/// state via a `watch` channel.
+pub struct EventDispatch {
+    state_rx: watch::Receiver<EventDispatchState>,
+    _task: TaskHandle<()>,
+}
+
+impl EventDispatch {
+    /// Spawn the background dispatch task that consumes the event stream.
+    pub fn spawn(mut stream: GuestEventStream) -> Self {
+        let (state_tx, state_rx) = watch::channel(EventDispatchState::default());
+
+        let task = TaskHandle::spawn(async move {
+            loop {
+                match stream.next().await {
+                    Ok(Some(GuestEvent::ContainerExited { id, code })) => {
+                        log::info!("EventDispatch: container {} exited with code {}", id, code);
+                        state_tx.send_modify(|s| {
+                            s.exited.insert(id, code);
+                        });
+                    }
+                    Ok(Some(GuestEvent::BalloonSet { amount_mib })) => {
+                        state_tx.send_modify(|s| {
+                            s.balloon_mib = Some(amount_mib);
+                        });
+                    }
+                    Ok(Some(GuestEvent::TaskError { task, message })) => {
+                        log::error!("EventDispatch: task error: task={}, message={}", task, message);
+                        state_tx.send_modify(|s| {
+                            if s.task_error.is_none() {
+                                s.task_error = Some((task, message));
+                            }
+                        });
+                    }
+                    Ok(None) => {
+                        log::info!("EventDispatch: event stream closed cleanly");
+                        state_tx.send_modify(|s| {
+                            s.stream_closed = true;
+                        });
+                        break;
+                    }
+                    Err(e) => {
+                        let msg = format!("{:#}", e);
+                        log::error!("EventDispatch: event stream error: {}", msg);
+                        state_tx.send_modify(|s| {
+                            s.stream_closed = true;
+                            s.stream_error = Some(msg);
+                        });
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self { state_rx, _task: task }
+    }
+
+    /// Get an independent receiver for watching state changes.
+    pub fn subscribe(&self) -> watch::Receiver<EventDispatchState> {
+        self.state_rx.clone()
+    }
+
+    /// Read current state without affecting any receiver's seen marker.
+    #[allow(dead_code)]
+    pub fn borrow(&self) -> watch::Ref<'_, EventDispatchState> {
+        self.state_rx.borrow()
+    }
+}
 
 /// A launched VM with an established yamux session.
 ///
@@ -28,6 +119,7 @@ pub struct ManagedVm<I> {
     yamux_driver: Option<TaskHandle<anyhow::Result<()>>>,
     driver_exit_signal: Option<DriverExitSignal>,
     started_containers: Vec<String>,
+    event_dispatch: Option<EventDispatch>,
 }
 
 impl<I: VmInstance> ManagedVm<I> {
@@ -47,7 +139,7 @@ impl<I: VmInstance> ManagedVm<I> {
             .context("establish yamux session")?;
 
         let msg: GuestMessage = session.recv().await.context("receive Ready")?;
-        match msg {
+        let started_containers = match msg {
             GuestMessage::Ready { running_containers, pre_config_responses } => {
                 if running_containers.is_empty() {
                     log::info!("guest is ready");
@@ -57,15 +149,21 @@ impl<I: VmInstance> ManagedVm<I> {
                 if !pre_config_responses.is_empty() {
                     log::info!("guest executed {} config drive command(s): {:?}", pre_config_responses.len(), pre_config_responses);
                 }
+                running_containers
             }
             other => bail!("expected Ready, got {:?}", other),
-        }
+        };
 
         // Accept the event stream — the guest opens it before sending Ready,
         // so it is the first item in the incoming stream queue.
         session.accept_event_stream().await.context("accept event stream")?;
 
-        let mut vm = Self { instance, session, yamux_driver: Some(yamux_driver), driver_exit_signal: Some(driver_exit_signal), started_containers: Vec::new() };
+        // Take the event stream and spawn the background dispatch task.
+        let event_stream = session.take_event_stream()
+            .context("event stream not available after accept")?;
+        let event_dispatch = EventDispatch::spawn(event_stream);
+
+        let mut vm = Self { instance, session, yamux_driver: Some(yamux_driver), driver_exit_signal: Some(driver_exit_signal), started_containers, event_dispatch: Some(event_dispatch) };
         vm.set_clock().await.context("set guest clock")?;
         Ok(vm)
     }
@@ -77,6 +175,22 @@ impl<I: VmInstance> ManagedVm<I> {
     /// inside `ManagedVm` so `drain_yamux_driver` always works.
     pub fn take_driver_exit_signal(&mut self) -> Option<DriverExitSignal> {
         self.driver_exit_signal.take()
+    }
+
+    /// Take the event dispatch out of the VM.
+    ///
+    /// Used by callers (e.g. pod_monitor) that need to watch guest event
+    /// state independently. The background task continues running.
+    pub fn take_event_dispatch(&mut self) -> Option<EventDispatch> {
+        self.event_dispatch.take()
+    }
+
+    /// Take the VM process exit signal.
+    ///
+    /// Used by callers (e.g. pod_monitor) that need to `select!` on
+    /// unexpected VM process death.
+    pub fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
+        self.instance.take_exit_signal()
     }
 
     /// Set the guest's system clock to the host's current wall-clock time.
@@ -227,40 +341,6 @@ impl<I: VmInstance> ManagedVm<I> {
         }
     }
 
-    /// Wait for a container to exit.
-    pub async fn wait_container_exit(&mut self) -> anyhow::Result<(String, i32)> {
-        let mut event: GuestEvent = self
-            .session
-            .recv_event()
-            .await
-            .context("receive ContainerExited event")?;
-        loop {
-            match event {
-                GuestEvent::ContainerExited { id, code } => {
-                    log::info!("container {} exited with code {}", id, code);
-                    self.started_containers.retain(|c| c != &id);
-                    return Ok((id, code));
-                }
-                GuestEvent::BalloonSet { .. } | GuestEvent::TaskError { .. } => {
-                    // Skip non-exit events, keep waiting.
-                    event = self
-                        .session
-                        .recv_event()
-                        .await
-                        .context("receive ContainerExited event")?;
-                }
-            }
-        }
-    }
-
-    /// Receive the next raw event from the guest event stream.
-    pub async fn recv_event(&mut self) -> anyhow::Result<GuestEvent> {
-        self.session
-            .recv_event()
-            .await
-            .context("receive guest event")
-    }
-
     /// Accept the next output stream opened by the guest.
     pub async fn accept_output_stream(&mut self) -> anyhow::Result<(String, IoSession)> {
         let (container_id, stream) = self
@@ -321,14 +401,20 @@ impl<I: VmInstance> ManagedVm<I> {
 
     /// Gracefully shut down containers, then the VM.
     ///
-    /// Sends SIGTERM to each started container, waits for ContainerExited
-    /// events up to `timeout`, then sends Shutdown to the guest.
-    pub async fn graceful_shutdown(&mut self, timeout: Duration) -> anyhow::Result<()> {
+    /// Sends SIGTERM to each started container, waits for the `EventDispatch`
+    /// state to show all containers exited (up to `timeout`), then sends
+    /// Shutdown to the guest.
+    ///
+    /// The caller passes its own `watch::Receiver` (obtained from
+    /// `EventDispatch::subscribe()`). This avoids any event-stream race:
+    /// the dispatch task updates state concurrently, and `wait_for` holds
+    /// the borrow across predicate check and re-registration.
+    pub async fn graceful_shutdown(
+        &mut self,
+        timeout: Duration,
+        rx: &mut watch::Receiver<EventDispatchState>,
+    ) -> anyhow::Result<()> {
         // Signal all started containers with SIGTERM (best-effort).
-        // We fire-and-forget each signal because the VM may already be
-        // dying. The 500ms timeout on the ack drain is a compromise: long
-        // enough for a healthy guest to respond, short enough to not block
-        // shutdown if the guest is unresponsive.
         for id in self.started_containers.clone() {
             let _ = self.session.send(&HostMessage::SignalContainer {
                 id,
@@ -338,29 +424,35 @@ impl<I: VmInstance> ManagedVm<I> {
             let _ = tokio::time::timeout(Duration::from_millis(500), self.session.recv::<GuestMessage>()).await;
         }
 
-        // Wait for ContainerExited events on the event stream until all
-        // containers are accounted for or timeout.
-        let mut remaining = self.started_containers.len();
-        if remaining > 0 {
-            let deadline = tokio::time::Instant::now() + timeout;
-            while remaining > 0 {
-                match tokio::time::timeout_at(deadline, self.session.recv_event::<GuestEvent>()).await {
-                    Ok(Ok(GuestEvent::ContainerExited { id, code })) => {
-                        log::info!("container {} exited with code {} during graceful shutdown", id, code);
-                        remaining -= 1;
+        // Wait until all started containers appear in the exited map.
+        let started = self.started_containers.clone();
+        if !started.is_empty() {
+            // Map the result to a simple enum so we drop the watch::Ref
+            // before potentially re-borrowing rx.
+            let timed_out = {
+                let result = tokio::time::timeout(timeout, rx.wait_for(|s| {
+                    started.iter().all(|c| s.exited.contains_key(c))
+                })).await;
+                match result {
+                    Ok(Ok(_ref)) => {
+                        drop(_ref);
+                        false
                     }
-                    Ok(Ok(GuestEvent::BalloonSet { .. })) | Ok(Ok(GuestEvent::TaskError { .. })) => {
-                        // Ignore non-exit events during shutdown.
+                    Ok(Err(_)) => {
+                        log::warn!("event dispatch closed during graceful shutdown");
+                        false
                     }
-                    Ok(Err(e)) => {
-                        log::warn!("recv error during graceful shutdown: {:#}", e);
-                        break;
-                    }
-                    Err(_) => {
-                        log::warn!("{} container(s) did not exit within timeout", remaining);
-                        break;
-                    }
+                    Err(_) => true,
                 }
+            };
+            if !timed_out {
+                log::info!("all containers exited during graceful shutdown");
+            } else {
+                let state = rx.borrow();
+                let remaining: Vec<_> = started.iter()
+                    .filter(|c| !state.exited.contains_key(*c))
+                    .collect();
+                log::warn!("{} container(s) did not exit within timeout: {:?}", remaining.len(), remaining);
             }
         }
 
@@ -373,7 +465,7 @@ impl<I: VmInstance> ManagedVm<I> {
             .send(&HostMessage::Shutdown)
             .await
             .context("send Shutdown")?;
-        self.instance.wait().await.context("wait for VM")?;
+        let _status = self.instance.wait().await.context("wait for VM")?;
         // Abort the yamux driver now that the VM is dead.
         self.drain_yamux_driver();
         Ok(())
@@ -391,7 +483,7 @@ impl<I: VmInstance> ManagedVm<I> {
     /// Called after the VM is dead — the underlying socket is gone so
     /// there is nothing useful for the driver to do. Abort immediately
     /// instead of waiting for it to notice the broken socket.
-    fn drain_yamux_driver(&mut self) {
+    pub fn drain_yamux_driver(&mut self) {
         if let Some(driver) = self.yamux_driver.take() {
             driver.abort();
         }

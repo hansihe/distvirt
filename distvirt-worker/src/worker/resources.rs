@@ -4,29 +4,9 @@ use distvirt_worker_protocol::PsiMetrics;
 /// Creates the directory if needed. Returns (0, 0) on any error.
 pub(crate) fn pool_disk_stats(path: &std::path::Path) -> (u64, u64) {
     let _ = std::fs::create_dir_all(path);
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = match CString::new(path.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return (0, 0),
-        };
-        unsafe {
-            let mut stat: libc::statvfs = std::mem::zeroed();
-            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-                let capacity = stat.f_blocks as u64 * stat.f_frsize as u64;
-                let available = stat.f_bavail as u64 * stat.f_frsize as u64;
-                (capacity, available)
-            } else {
-                (0, 0)
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        (0, 0)
-    }
+    crate::linux::fs::disk_stats(path)
+        .map(|s| (s.capacity_bytes, s.available_bytes))
+        .unwrap_or((0, 0))
 }
 
 /// Detect total host memory in MB by reading `/proc/meminfo`.

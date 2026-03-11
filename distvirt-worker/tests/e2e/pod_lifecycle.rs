@@ -38,10 +38,10 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-echo".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/echo".into()],
-                args: vec!["hello".into(), "world".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["echo".into(), "hello".into(), "world".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -116,10 +116,10 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-exit".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "exit 42".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["exit-code".into(), "--code".into(), "42".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -182,10 +182,10 @@ async fn test_stop_pod() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-stop".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sleep".into()],
-                args: vec!["3600".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["sleep".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -256,10 +256,10 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-force".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sleep".into()],
-                args: vec!["3600".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["sleep".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -317,10 +317,10 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-destroy".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sleep".into()],
-                args: vec!["3600".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["sleep".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,
@@ -447,10 +447,10 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-env".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "echo MY_VAR=$MY_VAR && pwd".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["env-check".into(), "--var".into(), "MY_VAR".into(), "--pwd".into()],
                 env: vec!["MY_VAR=hello_from_env".into()],
                 working_dir: Some("/tmp".into()),
                 uid: None,

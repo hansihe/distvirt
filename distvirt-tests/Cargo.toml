@@ -1,0 +1,13 @@
+[package]
+name = "distvirt-tests"
+version = "0.1.0"
+edition = "2024"
+
+[dev-dependencies]
+distvirt-orchestrator = { path = "../distvirt-orchestrator" }
+distvirt-worker = { path = "../distvirt-worker" }
+distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "io-util", "test-util"] }
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"

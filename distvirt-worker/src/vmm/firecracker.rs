@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 
 use super::{NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
-use crate::tap::TapDevice;
+use crate::fabric::{FabricPort, Port};
+use crate::linux::net::PersistentTap;
 use crate::task_handle::TaskHandle;
 
 /// Firecracker VMM implementation.
@@ -23,79 +25,116 @@ impl Firecracker {
     }
 }
 
+/// Copy a file and ensure the destination is writable.
+///
+/// Firecracker needs writable disk images, but the source may live in a
+/// read-only location (e.g. Nix store). Each VM gets its own copy.
+async fn copy_file_writable(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    tokio::fs::copy(src, dest)
+        .await
+        .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
+    let mut perms = tokio::fs::metadata(dest).await?.permissions();
+    perms.set_readonly(false);
+    tokio::fs::set_permissions(dest, perms).await?;
+    Ok(())
+}
+
+/// Result of spawning the Firecracker process (before any API calls).
+struct SpawnedFirecracker {
+    child: tokio::process::Child,
+    serial_stdout: Option<tokio::process::ChildStdout>,
+    api_socket: PathBuf,
+    vsock_uds_path: PathBuf,
+}
+
+/// Spawn the Firecracker process with cwd = `working_dir`, wait for the API
+/// socket, and return the child + captured stdout (if serial console is on).
+async fn spawn_firecracker(
+    bin: &Path,
+    working_dir: &Path,
+    serial_console: bool,
+) -> anyhow::Result<SpawnedFirecracker> {
+    let api_socket = working_dir.join("firecracker.sock");
+    let vsock_uds_path = working_dir.join("vsock.sock");
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.current_dir(working_dir);
+    cmd.arg("--api-sock").arg("./firecracker.sock");
+    if serial_console {
+        cmd.stdout(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null());
+    }
+    cmd.stderr(Stdio::null());
+    let mut child = cmd.spawn().context("spawn firecracker")?;
+
+    let serial_stdout = if serial_console {
+        child.stdout.take()
+    } else {
+        None
+    };
+
+    wait_for_file(&api_socket, Duration::from_secs(5))
+        .await
+        .context("waiting for firecracker API socket")?;
+
+    Ok(SpawnedFirecracker {
+        child,
+        serial_stdout,
+        api_socket,
+        vsock_uds_path,
+    })
+}
+
+/// Spawn the pidfd-based exit monitor for a child process.
+/// Returns a watch receiver that fires with the exit status, plus the
+/// background task handle.
+fn spawn_exit_monitor(
+    child: &tokio::process::Child,
+) -> (watch::Receiver<Option<ExitStatus>>, TaskHandle<()>) {
+    let pid = child.id().expect("child has pid");
+    let (exit_tx, exit_rx) = watch::channel(None);
+    let handle = TaskHandle::spawn(async move {
+        let status = wait_for_exit_pidfd(pid).await;
+        let _ = exit_tx.send(Some(status));
+    });
+    (exit_rx, handle)
+}
+
+/// Spawn the serial console line-logging task.
+fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHandle<()> {
+    TaskHandle::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log::debug!("[serial] {}", line);
+        }
+    })
+}
+
 impl Vmm for Firecracker {
     type Instance = FirecrackerInstance;
 
     async fn launch(&self, config: &VmConfig) -> anyhow::Result<FirecrackerInstance> {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
-        // Copy rootfs image to tmpdir — Firecracker needs a writable rootfs,
-        // but the source may be in a read-only location (e.g. Nix store).
-        // Each VM gets its own copy to allow independent filesystem mutations.
-        let rootfs_path = tmpdir.path().join("rootfs.ext4");
-        tokio::fs::copy(&config.rootfs_image_path, &rootfs_path)
-            .await
-            .with_context(|| {
-                format!("copy rootfs from {}", config.rootfs_image_path.display())
-            })?;
-        // Ensure the copy is writable (source may be read-only, e.g. from nix store).
-        let mut perms = tokio::fs::metadata(&rootfs_path).await?.permissions();
-        perms.set_readonly(false);
-        tokio::fs::set_permissions(&rootfs_path, perms).await?;
+        // Copy rootfs and container images into tmpdir (writable copies).
+        copy_file_writable(&config.rootfs_image_path, &tmpdir.path().join("rootfs.ext4")).await?;
+        copy_file_writable(&config.container_image_path, &tmpdir.path().join("container.ext4")).await?;
 
-        // Copy container image to tmpdir so all per-VM state is self-contained.
-        let container_path = tmpdir.path().join("container.ext4");
-        tokio::fs::copy(&config.container_image_path, &container_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "copy container from {}",
-                    config.container_image_path.display()
-                )
-            })?;
-        let mut perms = tokio::fs::metadata(&container_path).await?.permissions();
-        perms.set_readonly(false);
-        tokio::fs::set_permissions(&container_path, perms).await?;
-
-        let api_socket = tmpdir.path().join("firecracker.sock");
-        let vsock_uds_path = tmpdir.path().join("vsock.sock");
-
-        // Start firecracker process. Container output is captured separately via vsock I/O sessions.
-        // When serial_console is enabled, pipe stdout so we can forward kernel boot logs.
-        // Set working directory to tmpdir so Firecracker uses relative paths.
-        // This makes snapshots portable — restore just needs the same file layout.
-        let mut cmd = tokio::process::Command::new(&self.firecracker_bin);
-        cmd.current_dir(tmpdir.path());
-        cmd.arg("--api-sock").arg("./firecracker.sock");
-        if config.serial_console {
-            cmd.stdout(Stdio::piped());
-        } else {
-            cmd.stdout(Stdio::null());
-        }
-        cmd.stderr(Stdio::null());
-        let mut child = cmd.spawn().context("spawn firecracker")?;
-
-        // Take stdout for serial console.
-        let serial_stdout = if config.serial_console {
-            child.stdout.take()
-        } else {
-            None
-        };
-
-        // Wait for API socket to appear.
-        wait_for_file(&api_socket, Duration::from_secs(5))
-            .await
-            .context("waiting for firecracker API socket")?;
+        // Spawn Firecracker and wait for API socket.
+        let spawned = spawn_firecracker(&self.firecracker_bin, tmpdir.path(), config.serial_console).await?;
+        let SpawnedFirecracker { child, serial_stdout, api_socket, vsock_uds_path } = spawned;
 
         // Configure the VM via the API.
         //
         // Boot args for the microVM kernel:
         //   console=ttyS0  — serial console for boot logs (captured via stdout)
         //   reboot=k       — use keyboard controller reset (prevents triple-fault reboot loop)
-        //   panic=1        — reboot 1s after kernel panic (fast failure detection)
+        //   panic=-1       — reboot immediately on kernel panic (no delay)
         //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
         //   init=/sbin/init — our custom init binary (not systemd)
-        let mut boot_args = "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init".to_string();
+        let mut boot_args = "console=ttyS0 reboot=k panic=-1 pci=off init=/sbin/init".to_string();
         if let Some(ref balloon) = config.balloon {
             boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
         }
@@ -210,19 +249,16 @@ impl Vmm for Firecracker {
         }
 
         // Configure network interface if requested.
-        let tap_name = if let Some(ref net) = config.net {
-            let tap_name =
-                crate::tap::create_persistent_tap().context("create TAP device")?;
-
-            crate::tap::bring_interface_up(&tap_name)
-                .context("bring TAP interface up")?;
+        let tap = if let Some(ref net) = config.net {
+            let tap = PersistentTap::create().context("create TAP device")?;
+            tap.bring_up().context("bring TAP interface up")?;
 
             api_request("PUT",
                 &api_socket,
                 "/network-interfaces/eth0",
                 &serde_json::json!({
                     "iface_id": "eth0",
-                    "host_dev_name": tap_name,
+                    "host_dev_name": tap.name(),
                     "guest_mac": format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
                         net.guest_mac[0], net.guest_mac[1], net.guest_mac[2],
                         net.guest_mac[3], net.guest_mac[4], net.guest_mac[5])
@@ -233,10 +269,10 @@ impl Vmm for Firecracker {
 
             log::info!(
                 "configured network: tap={}, guest_ip={}",
-                tap_name,
+                tap.name(),
                 net.guest_ip
             );
-            Some(tap_name)
+            Some(tap)
         } else {
             None
         };
@@ -251,38 +287,32 @@ impl Vmm for Firecracker {
         .await
         .context("start instance")?;
 
-        // Open AF_PACKET socket on the TAP for host-side L2 frame I/O.
-        let tap = if let Some(ref name) = tap_name {
-            Some(crate::tap::open_packet_socket(name).context("open packet socket on TAP")?)
+        // Open AF_PACKET socket on the TAP and wrap as FabricPort.
+        let fabric_port = if let Some(tap) = tap {
+            let guest_mac = config.net.as_ref().unwrap().guest_mac;
+            let socket = tap.into_packet_socket().context("open packet socket on TAP")?;
+            Some(FabricPort::Tap(Port::new(socket, guest_mac)))
         } else {
             None
         };
 
-        let mut instance = FirecrackerInstance {
+        let (exit_rx, _exit_monitor) = spawn_exit_monitor(&child);
+        let _serial_task = serial_stdout.map(spawn_serial_task);
+
+        Ok(FirecrackerInstance {
             child,
             vsock_uds_path,
             api_socket,
-            tap,
-            serial_stdout,
-            _serial_task: None,
+            fabric_port,
+            _serial_task,
+            exit_rx,
+            _exit_monitor,
             _tmpdir: tmpdir,
             kernel_path: config.kernel_path.clone(),
             rootfs_source_path: config.rootfs_image_path.clone(),
             balloon_configured: config.balloon.is_some(),
-        };
-
-        // Spawn serial console reader.
-        if let Some(stdout) = instance.serial_stdout.take() {
-            instance._serial_task = Some(TaskHandle::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    log::debug!("[serial] {}", line);
-                }
-            }));
-        }
-
-        Ok(instance)
+            serial_console: config.serial_console,
+        })
     }
 
     async fn restore(
@@ -296,31 +326,11 @@ impl Vmm for Firecracker {
         // 1. Create new tmpdir.
         let tmpdir = tempfile::tempdir().context("create tmpdir for restore")?;
 
-        // 2. Copy rootfs from original source path into tmpdir.
-        let rootfs_dest = tmpdir.path().join("rootfs.ext4");
-        tokio::fs::copy(&metadata.rootfs_source_path, &rootfs_dest)
-            .await
-            .with_context(|| {
-                format!("copy rootfs from {}", metadata.rootfs_source_path.display())
-            })?;
-        let mut perms = tokio::fs::metadata(&rootfs_dest).await?.permissions();
-        perms.set_readonly(false);
-        tokio::fs::set_permissions(&rootfs_dest, perms).await?;
+        // 2. Copy rootfs from original source path and container.ext4 from snapshot.
+        copy_file_writable(&metadata.rootfs_source_path, &tmpdir.path().join("rootfs.ext4")).await?;
+        copy_file_writable(&snapshot_dir.join("container.ext4"), &tmpdir.path().join("container.ext4")).await?;
 
-        // 3. Copy container.ext4 from snapshot dir into tmpdir.
-        tokio::fs::copy(
-            snapshot_dir.join("container.ext4"),
-            tmpdir.path().join("container.ext4"),
-        )
-        .await
-        .context("copy container.ext4 from snapshot")?;
-        let mut perms = tokio::fs::metadata(tmpdir.path().join("container.ext4"))
-            .await?
-            .permissions();
-        perms.set_readonly(false);
-        tokio::fs::set_permissions(tmpdir.path().join("container.ext4"), perms).await?;
-
-        // 4. Copy snapshot.bin and mem.bin from snapshot dir into tmpdir.
+        // 3. Copy snapshot.bin and mem.bin from snapshot dir into tmpdir.
         tokio::fs::copy(
             snapshot_dir.join("snapshot.bin"),
             tmpdir.path().join("snapshot.bin"),
@@ -334,35 +344,21 @@ impl Vmm for Firecracker {
         .await
         .context("copy mem.bin from snapshot")?;
 
-        // 5. Create fresh TAP if networking is configured.
-        let tap_name = if net.is_some() {
-            let name = crate::tap::create_persistent_tap()
-                .context("create TAP device for restore")?;
-            crate::tap::bring_interface_up(&name)
-                .context("bring TAP interface up for restore")?;
-            log::info!("restore: created TAP {}", name);
-            Some(name)
+        // 4. Create fresh TAP if networking is configured.
+        let tap = if net.is_some() {
+            let tap = PersistentTap::create().context("create TAP device for restore")?;
+            tap.bring_up().context("bring TAP interface up for restore")?;
+            log::info!("restore: created TAP {}", tap.name());
+            Some(tap)
         } else {
             None
         };
 
-        // 6. Spawn Firecracker with cwd = tmpdir.
-        let api_socket = tmpdir.path().join("firecracker.sock");
-        let vsock_uds_path = tmpdir.path().join("vsock.sock");
+        // 5. Spawn Firecracker and wait for API socket.
+        let spawned = spawn_firecracker(&self.firecracker_bin, tmpdir.path(), metadata.serial_console).await?;
+        let SpawnedFirecracker { child, serial_stdout, api_socket, vsock_uds_path } = spawned;
 
-        let mut cmd = tokio::process::Command::new(&self.firecracker_bin);
-        cmd.current_dir(tmpdir.path());
-        cmd.arg("--api-sock").arg("./firecracker.sock");
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
-        let child = cmd.spawn().context("spawn firecracker for restore")?;
-
-        // 7. Wait for API socket.
-        wait_for_file(&api_socket, Duration::from_secs(5))
-            .await
-            .context("waiting for firecracker API socket (restore)")?;
-
-        // 8. Load snapshot with network overrides.
+        // 6. Load snapshot with network overrides.
         let mut load_body = serde_json::json!({
             "snapshot_path": "./snapshot.bin",
             "mem_backend": {
@@ -373,28 +369,30 @@ impl Vmm for Firecracker {
         });
 
         // Add network overrides if we have a TAP.
-        if let Some(ref tap) = tap_name {
+        if let Some(ref tap) = tap {
             load_body["network_overrides"] = serde_json::json!([
                 {
                     "iface_id": "eth0",
-                    "host_dev_name": tap,
+                    "host_dev_name": tap.name(),
                 }
             ]);
         }
 
-        api_request("PUT",&api_socket, "/snapshot/load", &load_body)
+        api_request("PUT", &api_socket, "/snapshot/load", &load_body)
             .await
             .context("load snapshot")?;
 
-        // 9. Open AF_PACKET socket on the new TAP.
-        let tap = if let Some(ref name) = tap_name {
-            Some(
-                crate::tap::open_packet_socket(name)
-                    .context("open packet socket on TAP (restore)")?,
-            )
+        // 7. Open AF_PACKET socket on the new TAP and wrap as FabricPort.
+        let fabric_port = if let (Some(tap), Some(net_cfg)) = (tap, net) {
+            let socket = tap.into_packet_socket()
+                .context("open packet socket on TAP (restore)")?;
+            Some(FabricPort::Tap(Port::new(socket, net_cfg.guest_mac)))
         } else {
             None
         };
+
+        let (exit_rx, _exit_monitor) = spawn_exit_monitor(&child);
+        let _serial_task = serial_stdout.map(spawn_serial_task);
 
         log::info!("VM restored from snapshot at {}", snapshot_dir.display());
 
@@ -402,13 +400,15 @@ impl Vmm for Firecracker {
             child,
             vsock_uds_path,
             api_socket,
-            tap,
-            serial_stdout: None,
-            _serial_task: None,
+            fabric_port,
+            _serial_task,
+            exit_rx,
+            _exit_monitor,
             _tmpdir: tmpdir,
             kernel_path: metadata.kernel_path.clone(),
             rootfs_source_path: metadata.rootfs_source_path.clone(),
             balloon_configured: metadata.balloon_configured,
+            serial_console: metadata.serial_console,
         })
     }
 }
@@ -417,9 +417,12 @@ pub struct FirecrackerInstance {
     child: tokio::process::Child,
     vsock_uds_path: PathBuf,
     api_socket: PathBuf,
-    tap: Option<TapDevice>,
-    serial_stdout: Option<tokio::process::ChildStdout>,
+    fabric_port: Option<FabricPort>,
     _serial_task: Option<TaskHandle<()>>,
+    /// Watch channel that fires when the VM process exits (via pidfd).
+    exit_rx: watch::Receiver<Option<ExitStatus>>,
+    /// Background task monitoring the process via pidfd.
+    _exit_monitor: TaskHandle<()>,
     _tmpdir: tempfile::TempDir,
     /// Stored for snapshot metadata — needed to reconstruct the VM on restore.
     kernel_path: PathBuf,
@@ -427,6 +430,8 @@ pub struct FirecrackerInstance {
     rootfs_source_path: PathBuf,
     /// Whether a balloon device was configured at launch (needed for set_balloon/snapshot).
     balloon_configured: bool,
+    /// Whether serial console output is enabled.
+    serial_console: bool,
 }
 
 impl Drop for FirecrackerInstance {
@@ -477,22 +482,27 @@ impl VmInstance for FirecrackerInstance {
         }
     }
 
-    fn tap(&self) -> Option<&TapDevice> {
-        self.tap.as_ref()
+    fn take_fabric_port(&mut self) -> Option<FabricPort> {
+        self.fabric_port.take()
     }
 
-    fn take_tap(&mut self) -> Option<TapDevice> {
-        self.tap.take()
-    }
-
-    async fn wait(&mut self) -> anyhow::Result<()> {
-        self.child.wait().await.context("wait for firecracker")?;
-        Ok(())
+    async fn wait(&mut self) -> anyhow::Result<ExitStatus> {
+        self.exit_rx
+            .wait_for(|s| s.is_some())
+            .await
+            .map_err(|_| anyhow::anyhow!("exit monitor task dropped"))?;
+        // Reap the child properly (should return immediately since process is dead).
+        let status = self.child.wait().await.context("wait for firecracker")?;
+        Ok(status)
     }
 
     async fn kill(&mut self) -> anyhow::Result<()> {
         self.child.kill().await.context("kill firecracker")?;
         Ok(())
+    }
+
+    fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
+        Some(self.exit_rx.clone())
     }
 
     async fn set_balloon(&mut self, amount_mib: u32) -> anyhow::Result<()> {
@@ -564,6 +574,7 @@ impl VmInstance for FirecrackerInstance {
             kernel_path: self.kernel_path.clone(),
             rootfs_source_path: self.rootfs_source_path.clone(),
             balloon_configured: self.balloon_configured,
+            serial_console: self.serial_console,
         };
         let metadata_json =
             serde_json::to_vec_pretty(&metadata).context("serialize snapshot metadata")?;
@@ -699,6 +710,13 @@ fn parse_content_length(headers: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Asynchronously wait for a process to exit using Linux's `pidfd_open` syscall.
+///
+/// Delegates to [`crate::linux::process::wait_for_exit_pidfd`].
+async fn wait_for_exit_pidfd(pid: u32) -> ExitStatus {
+    crate::linux::process::wait_for_exit_pidfd(pid).await
 }
 
 async fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Result<()> {

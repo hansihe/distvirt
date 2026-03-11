@@ -1,13 +1,18 @@
 pub mod firecracker;
+pub mod guest_sim;
+pub mod test_vmm;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 use distvirt_guest_protocol::HostMessage;
+use distvirt_worker_protocol::PodNetworkConfig;
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 
-use crate::tap::TapDevice;
+use crate::fabric::FabricPort;
 
 /// Network configuration for a VM.
 #[derive(Clone)]
@@ -16,6 +21,17 @@ pub struct NetConfig {
     pub netmask: String,
     pub gateway: String,
     pub guest_mac: [u8; 6],
+}
+
+impl From<&PodNetworkConfig> for NetConfig {
+    fn from(pnc: &PodNetworkConfig) -> Self {
+        NetConfig {
+            guest_ip: pnc.ip.to_string(),
+            netmask: pnc.netmask.clone(),
+            gateway: pnc.gateway.to_string(),
+            guest_mac: pnc.mac,
+        }
+    }
 }
 
 /// Configuration for the virtio-balloon device.
@@ -58,6 +74,9 @@ pub struct SnapshotMetadata {
     /// Whether a balloon device was configured (needed for restore to enable `set_balloon`).
     #[serde(default)]
     pub balloon_configured: bool,
+    /// Whether serial console output was enabled (needed for restore to pipe stdout).
+    #[serde(default)]
+    pub serial_console: bool,
 }
 
 /// Artifacts produced by a VM snapshot.
@@ -98,14 +117,21 @@ pub trait Vmm: Send + Sync {
 pub trait VmInstance: Send + 'static {
     /// Connect to the guest's vsock on the given port.
     fn connect_vsock(&self, port: u32) -> impl Future<Output = anyhow::Result<UnixStream>> + Send;
-    /// Get the TAP device for host-side L2 frame I/O, if networking is configured.
-    fn tap(&self) -> Option<&TapDevice>;
-    /// Take ownership of the TAP device, if networking is configured.
-    fn take_tap(&mut self) -> Option<TapDevice>;
+    /// Take the fabric port for host-side network I/O, if networking is configured.
+    fn take_fabric_port(&mut self) -> Option<FabricPort>;
     /// Wait for the VM process to exit.
-    fn wait(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn wait(&mut self) -> impl Future<Output = anyhow::Result<ExitStatus>> + Send;
     /// Kill the VM process.
     fn kill(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Take a signal that fires when the VM process exits.
+    ///
+    /// Used by callers that need to `select!` on process death alongside
+    /// other futures. The receiver resolves to `Some(ExitStatus)` when
+    /// the process exits.
+    fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
+        None
+    }
 
     /// Snapshot the VM to the given directory. Pauses vCPUs, writes snapshot
     /// files, and copies the container disk. The caller should kill the VM

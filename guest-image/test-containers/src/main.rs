@@ -60,6 +60,32 @@ enum Command {
         #[arg(long, default_value = "1000")]
         interval_ms: u64,
     },
+    /// Sleep until SIGTERM, then exit cleanly. Replaces /bin/sleep for PID1.
+    Sleep,
+    /// Print arguments to stdout and exit. Replaces /bin/echo.
+    Echo {
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Exit immediately with the given code. Replaces /bin/sh -c "exit N".
+    ExitCode {
+        #[arg(long)]
+        code: i32,
+    },
+    /// Print environment variables and working directory. Replaces /bin/sh env-printing one-liners.
+    EnvCheck {
+        /// Environment variable names to print (as NAME=value)
+        #[arg(long)]
+        var: Vec<String>,
+        /// Also print working directory
+        #[arg(long, default_value = "false")]
+        pwd: bool,
+    },
+    /// Perform a DNS lookup and print the result. Replaces /bin/sh nslookup one-liners.
+    DnsLookup {
+        #[arg(long)]
+        host: String,
+    },
 }
 
 fn main() {
@@ -69,6 +95,11 @@ fn main() {
         Command::Recv { port, expected, response, timeout } => cmd_recv(port, &expected, &response, timeout),
         Command::Serve { port, response, max_connections, timeout } => cmd_serve(port, &response, max_connections, timeout),
         Command::MemStress { target_mib, step_mib, interval_ms } => cmd_mem_stress(target_mib, step_mib, interval_ms),
+        Command::Sleep => cmd_sleep(),
+        Command::Echo { args } => cmd_echo(&args),
+        Command::ExitCode { code } => process::exit(code),
+        Command::EnvCheck { var, pwd } => cmd_env_check(&var, pwd),
+        Command::DnsLookup { host } => cmd_dns_lookup(&host),
     }
 }
 
@@ -255,6 +286,49 @@ fn read_rss_kib() -> usize {
         .unwrap_or(0);
     // Page size is typically 4KiB.
     rss_pages * 4
+}
+
+fn cmd_sleep() {
+    unsafe {
+        libc::signal(libc::SIGTERM, {
+            extern "C" fn handler(_: libc::c_int) {
+                process::exit(0);
+            }
+            handler as libc::sighandler_t
+        });
+    }
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+fn cmd_echo(args: &[String]) {
+    println!("{}", args.join(" "));
+}
+
+fn cmd_env_check(vars: &[String], pwd: bool) {
+    for name in vars {
+        let val = std::env::var(name).unwrap_or_default();
+        println!("{name}={val}");
+    }
+    if pwd {
+        println!("{}", std::env::current_dir().unwrap().display());
+    }
+}
+
+fn cmd_dns_lookup(host: &str) {
+    use std::net::ToSocketAddrs;
+    match (host, 0u16).to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                println!("{}", addr.ip());
+            }
+        }
+        Err(e) => {
+            eprintln!("dns lookup failed for {host}: {e}");
+            // Exit 0 like the original `nslookup ... || true`
+        }
+    }
 }
 
 fn cmd_recv(port: u16, expected: &str, response: &str, timeout_secs: u64) {

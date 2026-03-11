@@ -270,33 +270,48 @@ async fn main() -> Result<()> {
 
     eprintln!("  [testbench] waiting for guest balloon requests, container exit, or Ctrl+C...");
 
-    // Event-driven balloon loop: recv_event returns raw GuestEvents.
-    // BalloonSet events trigger host-side balloon adjustment.
-    // ContainerExited means the workload finished.
+    // Take the event dispatch and subscribe for state changes.
+    let _dispatch = vm.take_event_dispatch().expect("event dispatch not available");
+    let mut rx = _dispatch.subscribe();
+    let mut last_balloon: Option<u32> = None;
+
     let mut container_exited = false;
+    let mut exit_code = 0i32;
     loop {
         tokio::select! {
-            result = vm.recv_event() => {
-                match result {
-                    Ok(distvirt_guest_protocol::GuestEvent::ContainerExited { id, code }) => {
-                        eprintln!("  [testbench] container {} exited (code={})", id, code);
-                        container_exited = true;
-                        break;
-                    }
-                    Ok(distvirt_guest_protocol::GuestEvent::BalloonSet { amount_mib }) => {
+            result = rx.changed() => {
+                if result.is_err() {
+                    eprintln!("  [testbench] event dispatch closed");
+                    break;
+                }
+                let state = rx.borrow().clone();
+
+                if let Some((ref task, ref message)) = state.task_error {
+                    eprintln!("  [testbench] guest task error: task={}, message={}", task, message);
+                }
+
+                if !state.exited.is_empty() {
+                    let (id, code) = state.exited.iter().next().unwrap();
+                    eprintln!("  [testbench] container {} exited (code={})", id, code);
+                    exit_code = *code;
+                    container_exited = true;
+                    break;
+                }
+
+                if state.balloon_mib != last_balloon {
+                    if let Some(amount_mib) = state.balloon_mib {
                         eprintln!("  [balloon] guest requests balloon={} MiB", amount_mib);
                         match vm.set_balloon(amount_mib).await {
                             Ok(()) => eprintln!("  [balloon] set to {} MiB", amount_mib),
                             Err(e) => eprintln!("  [balloon] set_balloon failed: {:#}", e),
                         }
                     }
-                    Ok(distvirt_guest_protocol::GuestEvent::TaskError { task, message }) => {
-                        eprintln!("  [testbench] guest task error: task={}, message={}", task, message);
-                    }
-                    Err(e) => {
-                        eprintln!("  [testbench] recv_event error: {:#}", e);
-                        break;
-                    }
+                    last_balloon = state.balloon_mib;
+                }
+
+                if state.stream_closed {
+                    eprintln!("  [testbench] event stream closed");
+                    break;
                 }
             }
             _ = shutdown.cancelled() => {
@@ -308,6 +323,7 @@ async fn main() -> Result<()> {
     }
 
     // Shutdown.
+    let _ = exit_code;
     if container_exited {
         eprintln!("  [testbench] shutting down VM...");
         match vm.shutdown().await {
@@ -316,7 +332,7 @@ async fn main() -> Result<()> {
         }
     } else {
         eprintln!("  [testbench] graceful shutdown (timeout=5s)...");
-        match vm.graceful_shutdown(Duration::from_secs(5)).await {
+        match vm.graceful_shutdown(Duration::from_secs(5), &mut rx).await {
             Ok(()) => eprintln!("  [testbench] VM shut down cleanly"),
             Err(e) => {
                 eprintln!(

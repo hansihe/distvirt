@@ -1,11 +1,9 @@
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 
+use crate::linux::net::PacketSocket;
 use crate::packet::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM, IP_PROTO_TCP, IP_PROTO_UDP};
-use crate::tap::TapDevice;
 
 /// Unique identifier for a port within the fabric.
 pub type PortId = usize;
@@ -18,14 +16,12 @@ pub trait FramePort: Send + Sync + 'static {
     fn send_frame(&self, buf: &[u8]) -> impl std::future::Future<Output = io::Result<usize>> + Send;
 }
 
-/// An async port wrapping a TapDevice's AF_PACKET socket.
+/// An async port wrapping a PacketSocket's AF_PACKET socket.
 ///
-/// Uses tokio's `AsyncFd` for readiness notification, then performs
-/// non-blocking `recv`/`send` via libc.
+/// Uses tokio's `AsyncFd` (inside `PacketSocket`) for readiness notification,
+/// then performs non-blocking `recv`/`send` via libc.
 pub struct Port {
-    async_fd: AsyncFd<OwnedFd>,
-    /// The underlying TapDevice (kept alive for Drop cleanup).
-    _tap: TapDevice,
+    socket: PacketSocket,
     /// Guest MAC address — used as the destination MAC when sending frames
     /// to the guest via the AF_PACKET socket. This sets `pkt_type` to
     /// `PACKET_HOST` on the guest's receive path. If we used broadcast MAC
@@ -36,44 +32,15 @@ pub struct Port {
 }
 
 impl Port {
-    /// Create a new async port from a TapDevice.
+    /// Create a new async port from a PacketSocket.
     ///
     /// `guest_mac` is the MAC address configured on the guest's network interface.
     /// It is used as the destination MAC when injecting frames into the TAP device.
-    /// Sets O_NONBLOCK on the socket fd before wrapping in AsyncFd.
-    pub fn new(tap: TapDevice, guest_mac: [u8; 6]) -> io::Result<Self> {
-        // Set non-blocking mode on the socket fd.
-        let raw_fd = tap.socket.as_raw_fd();
-        let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
-        if flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let ret = unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // We need to separate the OwnedFd from the TapDevice for AsyncFd,
-        // but TapDevice must stay alive (it cleans up the TAP on Drop).
-        // Use dup() to create a second fd for AsyncFd.
-        let dup_fd = unsafe { libc::dup(raw_fd) };
-        if dup_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // Set non-blocking on the dup'd fd too.
-        let flags2 = unsafe { libc::fcntl(dup_fd, libc::F_GETFL) };
-        if flags2 >= 0 {
-            unsafe { libc::fcntl(dup_fd, libc::F_SETFL, flags2 | libc::O_NONBLOCK) };
-        }
-        let owned_dup = unsafe { OwnedFd::from_raw_fd(dup_fd) };
-
-        let async_fd = AsyncFd::new(owned_dup)?;
-
-        Ok(Port {
-            async_fd,
-            _tap: tap,
+    pub fn new(socket: PacketSocket, guest_mac: [u8; 6]) -> Self {
+        Port {
+            socket,
             guest_mac,
-        })
+        }
     }
 
     /// Size of the virtio-net header prepended by AF_PACKET with PACKET_VNET_HDR.
@@ -94,50 +61,6 @@ impl Port {
     const ETHERTYPE_IPV4: u16 = 0x0800;
     const ARP_REQUEST: u16 = 1;
     const ARP_REPLY: u16 = 2;
-
-    /// Asynchronously receive raw bytes from the AF_PACKET socket.
-    async fn recv_raw(&self, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.async_fd.readable().await?;
-
-            match guard.try_io(|inner| {
-                let fd = inner.as_raw_fd();
-                let n = unsafe {
-                    libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-                };
-                if n < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(n as usize)
-                }
-            }) {
-                Ok(result) => return result,
-                Err(_would_block) => continue,
-            }
-        }
-    }
-
-    /// Asynchronously send raw bytes to the AF_PACKET socket.
-    async fn send_raw(&self, buf: &[u8]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.async_fd.writable().await?;
-
-            match guard.try_io(|inner| {
-                let fd = inner.as_raw_fd();
-                let n = unsafe {
-                    libc::send(fd, buf.as_ptr() as *const libc::c_void, buf.len(), 0)
-                };
-                if n < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(n as usize)
-                }
-            }) {
-                Ok(result) => return result,
-                Err(_would_block) => continue,
-            }
-        }
-    }
 
     /// Build and send an ARP reply for an ARP request received from the guest.
     ///
@@ -192,7 +115,7 @@ impl Port {
         arp_out[18..24].copy_from_slice(sender_mac);
         arp_out[24..28].copy_from_slice(sender_ip);
 
-        self.send_raw(&reply).await?;
+        self.socket.send(&reply).await?;
         Ok(())
     }
 }
@@ -205,7 +128,7 @@ impl FramePort for Port {
     async fn recv_frame(&self, buf: &mut [u8]) -> io::Result<usize> {
         let mut tap_buf = [0u8; Self::VNET_HDR_SZ + 1514]; // max Ethernet frame + vnet
         loop {
-            let n = self.recv_raw(&mut tap_buf).await?;
+            let n = self.socket.recv(&mut tap_buf).await?;
 
             if n < Self::TAP_HDR_SZ {
                 continue; // too short for vnet + ethernet header
@@ -297,7 +220,7 @@ impl FramePort for Port {
         // IP packet.
         tap_frame.extend_from_slice(ip_packet);
 
-        self.send_raw(&tap_frame).await
+        self.socket.send(&tap_frame).await
     }
 }
 

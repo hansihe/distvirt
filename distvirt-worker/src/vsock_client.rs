@@ -14,9 +14,40 @@ use crate::task_handle::TaskHandle;
 /// `TaskHandle` out of `ManagedVm`, so `drain_yamux_driver` always works.
 pub type DriverExitSignal = oneshot::Receiver<Result<(), String>>;
 
-use distvirt_guest_protocol::StreamHeader;
+use distvirt_guest_protocol::{GuestEvent, StreamHeader};
 
 type YamuxStream = yamux::Stream;
+
+/// Wrapper around the raw yamux event stream that encapsulates the
+/// length-prefixed JSON framing protocol.
+pub struct GuestEventStream {
+    stream: YamuxStream,
+}
+
+impl GuestEventStream {
+    /// Read the next event from the stream.
+    ///
+    /// Returns `Ok(None)` on clean EOF (stream closed by guest).
+    pub async fn next(&mut self) -> anyhow::Result<Option<GuestEvent>> {
+        let mut len_buf = [0u8; 4];
+        match self.stream.read_exact(&mut len_buf).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(anyhow::Error::from(e).context("read event length")),
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > 1024 * 1024 {
+            bail!("event message too large: {} bytes", len);
+        }
+        let mut buf = vec![0u8; len];
+        self.stream
+            .read_exact(&mut buf)
+            .await
+            .context("read event payload")?;
+        let event = serde_json::from_slice(&buf).context("deserialize event message")?;
+        Ok(Some(event))
+    }
+}
 
 /// Host-side yamux session to the guest over vsock.
 ///
@@ -216,27 +247,10 @@ impl GuestSession {
         }
     }
 
-    /// Receive a length-prefixed JSON message from the event stream.
-    pub async fn recv_event<T: serde::de::DeserializeOwned>(&mut self) -> anyhow::Result<T> {
-        let events = self
-            .events
-            .as_mut()
-            .context("event stream not established")?;
-        let mut len_buf = [0u8; 4];
-        events
-            .read_exact(&mut len_buf)
-            .await
-            .context("read event length")?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > 1024 * 1024 {
-            bail!("event message too large: {} bytes", len);
-        }
-        let mut buf = vec![0u8; len];
-        events
-            .read_exact(&mut buf)
-            .await
-            .context("read event payload")?;
-        serde_json::from_slice(&buf).context("deserialize event message")
+    /// Take the event stream out of the session, returning a `GuestEventStream`
+    /// wrapper that encapsulates the framing protocol.
+    pub fn take_event_stream(&mut self) -> Option<GuestEventStream> {
+        self.events.take().map(|stream| GuestEventStream { stream })
     }
 
     /// Open a new yamux stream for forwarding stdin to a container.

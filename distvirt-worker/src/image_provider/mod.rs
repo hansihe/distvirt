@@ -2,6 +2,7 @@ pub(crate) mod containerd;
 pub(crate) mod image;
 pub mod containerd_overlayfs;
 pub mod rootfs_dir;
+pub mod stub;
 
 use std::any::Any;
 use std::future::Future;

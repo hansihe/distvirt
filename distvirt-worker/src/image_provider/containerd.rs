@@ -35,16 +35,8 @@ pub struct PreparedImage {
 impl Drop for PreparedImage {
     fn drop(&mut self) {
         // Unmount the rootfs. Avoid unwrap — panicking in Drop can abort.
-        if let Some(path_str) = self.rootfs_path.to_str() {
-            if let Ok(path_c) = std::ffi::CString::new(path_str) {
-                unsafe {
-                    libc::umount2(path_c.as_ptr(), libc::MNT_DETACH);
-                }
-            } else {
-                log::warn!("PreparedImage drop: rootfs path contains null byte, skipping umount");
-            }
-        } else {
-            log::warn!("PreparedImage drop: rootfs path is not valid UTF-8, skipping umount");
+        if let Err(e) = crate::linux::mount::umount_detach(&self.rootfs_path) {
+            log::warn!("PreparedImage drop: umount {:?}: {}", self.rootfs_path, e);
         }
         let _ = std::fs::remove_dir(&self.rootfs_path);
 
@@ -351,12 +343,6 @@ async fn mount_rootfs(
     }
 
     let mount = &mounts[0];
-    let source_c =
-        std::ffi::CString::new(mount.source.as_str()).context("mount source")?;
-    let target_c =
-        std::ffi::CString::new(mount_dir.to_str()
-            .ok_or_else(|| anyhow::anyhow!("mount dir is not valid UTF-8: {:?}", mount_dir))?)
-            .context("mount target")?;
     let options = mount.options.join(",");
     log::debug!(
         "snapshot mount: source={:?}, type={:?}, target={:?}, options={:?}",
@@ -366,13 +352,12 @@ async fn mount_rootfs(
     // Containerd returns "bind" type for single-layer images, which needs
     // MS_BIND flag rather than a filesystem type string.
     let is_bind = mount.r#type == "bind";
-    let mut flags = libc::MS_RDONLY;
-    let fstype_c;
-    if is_bind {
+    let mut flags: libc::c_ulong = libc::MS_RDONLY;
+    let fstype = if is_bind {
         flags |= libc::MS_BIND;
-        fstype_c = std::ffi::CString::new("").context("mount type")?;
+        ""
     } else {
-        fstype_c = std::ffi::CString::new(mount.r#type.as_str()).context("mount type")?;
+        mount.r#type.as_str()
     };
 
     // Parse option flags like "rbind" and "ro" into mount flags.
@@ -385,28 +370,8 @@ async fn mount_rootfs(
         }
     }
     let data_str = data_options.join(",");
-    let options_c = std::ffi::CString::new(data_str.as_str()).context("mount options")?;
 
-    let ret = unsafe {
-        libc::mount(
-            source_c.as_ptr(),
-            target_c.as_ptr(),
-            fstype_c.as_ptr(),
-            flags,
-            options_c.as_ptr() as *const libc::c_void,
-        )
-    };
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        bail!(
-            "mount at {:?}: {} (source={:?}, type={:?}, options={:?})",
-            mount_dir,
-            err,
-            mount.source,
-            mount.r#type,
-            options
-        );
-    }
+    crate::linux::mount::mount(&mount.source, &mount_dir, fstype, flags, &data_str)?;
 
     log::info!("mounted rootfs view at {:?}", mount_dir);
     Ok((mount_dir, view_key))

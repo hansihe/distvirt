@@ -57,6 +57,8 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     tunnel_manager: Option<TunnelManager>,
     /// Assigned worker ID from handshake (set after WorkerAccepted).
     worker_id: Option<WorkerId>,
+    /// Use channel-based gateway instead of TUN (for sim tests, no root).
+    sim_gateway: bool,
 }
 
 impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
@@ -96,7 +98,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             pools,
             tunnel_manager: None,
             worker_id: None,
+            sim_gateway: false,
         }
+    }
+
+    /// Enable channel-based gateway (no TUN device, no root required).
+    pub fn with_sim_gateway(mut self) -> Self {
+        self.sim_gateway = true;
+        self
     }
 
     /// Look up a pool's root directory by ID.
@@ -573,13 +582,22 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
     ) -> Result<(), FatalError> {
         let segment_id = network.segment_id;
 
-        let (ns, event) = NamespaceState::new(
-            &self.worker_token,
-            &self.bg_event_tx,
-            &self.adapter_manager,
-            &namespace_id,
-            network,
-        )?;
+        let (ns, event) = if self.sim_gateway {
+            NamespaceState::new_sim(
+                &self.worker_token,
+                &self.bg_event_tx,
+                &namespace_id,
+                network,
+            )?
+        } else {
+            NamespaceState::new(
+                &self.worker_token,
+                &self.bg_event_tx,
+                &self.adapter_manager,
+                &namespace_id,
+                network,
+            )?
+        };
 
         // Notify tunnel manager if this namespace has a segment_id.
         if let Some(seg) = segment_id {
@@ -1115,7 +1133,6 @@ mod tests {
 
     use crate::fabric::{Fabric, FabricPort};
     use crate::image_provider::{ImageProvider, PreparedArtifact};
-    use crate::tap::TapDevice;
     use crate::vmm::{VmConfig, VmInstance, Vmm};
 
     // -----------------------------------------------------------------------
@@ -1137,13 +1154,10 @@ mod tests {
         async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
             panic!("StubVmInstance::connect_vsock called");
         }
-        fn tap(&self) -> Option<&TapDevice> {
+        fn take_fabric_port(&mut self) -> Option<FabricPort> {
             None
         }
-        fn take_tap(&mut self) -> Option<TapDevice> {
-            None
-        }
-        async fn wait(&mut self) -> anyhow::Result<()> {
+        async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }
         async fn kill(&mut self) -> anyhow::Result<()> {
@@ -1393,13 +1407,10 @@ mod tests {
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("MockVmInstance: vsock already connected"))
         }
-        fn tap(&self) -> Option<&TapDevice> {
+        fn take_fabric_port(&mut self) -> Option<FabricPort> {
             None
         }
-        fn take_tap(&mut self) -> Option<TapDevice> {
-            None
-        }
-        async fn wait(&mut self) -> anyhow::Result<()> {
+        async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }
         async fn kill(&mut self) -> anyhow::Result<()> {

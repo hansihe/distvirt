@@ -131,31 +131,117 @@ async fn handle_container_started(
     }).await;
 }
 
-/// Graceful shutdown: SIGTERM all containers, wait up to 5s, then SIGKILL.
-///
-/// With the pidfd-based container tasks, we don't need signalfd here.
-/// We just signal containers and wait for a timeout — container tasks
-/// will observe the exits via pidfd independently.
-async fn shutdown_containers(containers: &mut ContainerManager) {
+/// Graceful shutdown: SIGTERM all containers, reactively wait for exits
+/// via pidfd-based container tasks, then SIGKILL any stragglers.
+async fn shutdown_containers(
+    containers: &mut ContainerManager,
+    container_tasks: &mut FuturesUnordered<TaggedTask>,
+) {
     if !containers.has_running_containers() {
         return;
     }
 
-    log::info!("sending SIGTERM to all running containers");
+    let running = containers.running_container_ids();
+    log::info!("sending SIGTERM to {} running containers: {:?}", running.len(), running);
     containers.signal_all_running(libc::SIGTERM);
 
-    // Give containers time to exit gracefully.
-    async_io::Timer::after(std::time::Duration::from_secs(5)).await;
+    // Reactively wait for container exits with a 2s timeout.
+    // Containers are PID 1 in their own PID namespaces, so they only
+    // receive SIGTERM if they registered a handler — most won't. We keep
+    // the timeout short and escalate to SIGKILL quickly.
+    let deadline = async_io::Timer::after(std::time::Duration::from_secs(2));
+    futures::pin_mut!(deadline);
+
+    while containers.has_running_containers() {
+        let next_exit = async {
+            if container_tasks.is_empty() {
+                futures::future::pending::<(String, anyhow::Result<()>)>().await
+            } else {
+                container_tasks.next().await.unwrap()
+            }
+        };
+
+        match futures::future::select(std::pin::pin!(next_exit), &mut deadline).await {
+            futures::future::Either::Left(((id, result), _)) => {
+                match result {
+                    Ok(()) => log::info!("shutdown: container task {} exited after SIGTERM", id),
+                    Err(e) => log::error!("shutdown: container task {} failed after SIGTERM: {:#}", id, e),
+                }
+                log::info!("shutdown: {} containers still running", containers.running_container_ids().len());
+            }
+            futures::future::Either::Right(_) => {
+                log::warn!(
+                    "shutdown: timed out (2s) waiting for containers to exit, {} still running: {:?}",
+                    containers.running_container_ids().len(),
+                    containers.running_container_ids(),
+                );
+                break;
+            }
+        }
+    }
 
     if containers.has_running_containers() {
         log::warn!("sending SIGKILL to remaining containers");
         containers.signal_all_running(libc::SIGKILL);
-        async_io::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        // Brief poll for SIGKILL exits.
+        let kill_deadline = async_io::Timer::after(std::time::Duration::from_millis(200));
+        futures::pin_mut!(kill_deadline);
+        while containers.has_running_containers() {
+            let next_exit = async {
+                if container_tasks.is_empty() {
+                    futures::future::pending::<(String, anyhow::Result<()>)>().await
+                } else {
+                    container_tasks.next().await.unwrap()
+                }
+            };
+            match futures::future::select(std::pin::pin!(next_exit), &mut kill_deadline).await {
+                futures::future::Either::Left(((id, result), _)) => {
+                    match result {
+                        Ok(()) => log::info!("shutdown: container task {} exited after SIGKILL", id),
+                        Err(e) => log::error!("shutdown: container task {} failed after SIGKILL: {:#}", id, e),
+                    }
+                }
+                futures::future::Either::Right(_) => break,
+            }
+        }
     }
 }
 
 /// The connection loop: accepts vsock connections, dispatches commands,
 /// reconnects on disconnect. Runs for the process lifetime.
+/// Workaround for Firecracker not re-enabling THRE interrupt after snapshot
+/// restore (firecracker#5730).
+///
+/// Before suspend: `uart_suspend()` calls `tcflow(TCOOFF)` which makes the
+/// kernel's 8250 driver call `serial8250_stop_tx`, clearing the THRI bit in
+/// IER.
+///
+/// After resume: `uart_resume()` calls `tcflow(TCOON)` which triggers
+/// `serial8250_start_tx`, setting THRI in IER — a clean 0→1 transition that
+/// properly re-arms the THRE interrupt in Firecracker's emulated UART.
+fn uart_tty_flow(action: libc::c_int) {
+    let path = std::ffi::CString::new("/dev/ttyS0").unwrap();
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    if fd < 0 {
+        return;
+    }
+    unsafe {
+        libc::tcflow(fd, action);
+        libc::close(fd);
+    }
+}
+
+fn uart_suspend() {
+    uart_tty_flow(libc::TCOOFF);
+    log::info!("uart: suspended serial TX (TCOOFF)");
+}
+
+fn uart_resume() {
+    uart_tty_flow(libc::TCOON);
+    log::info!("uart: resumed serial TX (TCOON)");
+}
+
 ///
 /// When a container is started, sends a `ContainerTaskRequest` through
 /// `container_task_tx` so the root supervisor can spawn the container task.
@@ -181,8 +267,9 @@ async fn connection_loop(
         let mut conn_tasks: Vec<async_executor::Task<()>> = Vec::new();
         conn_tasks.push(yamux_task);
 
-        // On resume, release packets buffered by the plug qdisc before suspend.
+        // On resume, kick UART and release packets buffered by the plug qdisc.
         if containers.borrow().has_running_containers() {
+            uart_resume();
             if let Err(e) = net::resume() {
                 log::warn!("failed to unplug qdisc on resume: {:#}", e);
             }
@@ -259,6 +346,7 @@ async fn connection_loop(
                                         log::error!("send SuspendReady: {:#}", e);
                                     }
                                     log::info!("sent SuspendReady, flushing yamux and closing connection");
+                                    uart_suspend();
                                     if let Err(e) = handle.close().await {
                                         log::warn!("yamux close after SuspendReady: {}", e);
                                     }
@@ -295,7 +383,7 @@ async fn connection_loop(
             LoopExit::Shutdown => {
                 // Close yamux cleanly so the host-side driver sees a
                 // clean close rather than a broken pipe from VM death.
-                log::info!("flushing yamux and closing connection before shutdown");
+                log::info!("connection_loop: received Shutdown, closing yamux before returning");
                 if let Err(e) = handle.close().await {
                     log::warn!("yamux close during shutdown: {}", e);
                 }
@@ -421,14 +509,22 @@ fn run() -> anyhow::Result<()> {
             },
         ));
 
-        // Create channel for balloon sysfs monitor and spawn it (supervised).
+        // Create channel for balloon sysfs monitor and spawn both monitor
+        // and balloon task only when memory management is enabled (i.e.
+        // distvirt.balloon_mib was present on the kernel command line).
         let (balloon_monitor_tx, balloon_monitor_rx) =
             async_channel::bounded::<memory::monitor::BalloonChange>(8);
-        let balloon_monitor_task = ex.spawn(async {
-            if let Err(e) = memory::monitor::run(balloon_monitor_tx).await {
-                log::warn!("balloon monitor exited: {:#}", e);
-            }
-        });
+        let balloon_monitor_task = if memory_manager.is_some() {
+            Some(ex.spawn(async {
+                if let Err(e) = memory::monitor::run(balloon_monitor_tx).await {
+                    log::warn!("balloon monitor exited: {:#}", e);
+                }
+            }))
+        } else {
+            drop(balloon_monitor_tx);
+            log::info!("balloon monitor disabled (no distvirt.balloon_mib)");
+            None
+        };
 
         // Spawn the balloon task (supervised, persists across reconnects).
         let balloon_task = if let (Some(mm), Some(psi)) = (&memory_manager, &async_psi) {
@@ -472,10 +568,16 @@ fn run() -> anyhow::Result<()> {
             &ex,
         ).fuse());
 
-        let mut balloon_monitor_task = std::pin::pin!(balloon_monitor_task.fuse());
+        // For supervised tasks: wrap in fused futures that go pending if
+        // the task was not spawned (balloon disabled).
+        let balloon_monitor_fut = async {
+            match balloon_monitor_task {
+                Some(task) => task.await,
+                None => futures::future::pending::<()>().await,
+            }
+        };
+        let mut balloon_monitor_fut = std::pin::pin!(balloon_monitor_fut.fuse());
 
-        // For the balloon task: if it exists, we want to detect if it exits.
-        // Wrap in a fused future that goes pending if there's no balloon task.
         let balloon_task_fut = async {
             match balloon_task {
                 Some(task) => task.await,
@@ -536,10 +638,11 @@ fn run() -> anyhow::Result<()> {
                 result = conn_loop => {
                     match result {
                         Ok(LoopExit::Shutdown) => {
-                            log::info!("supervisor: connection loop returned shutdown");
+                            log::info!("supervisor: connection loop returned shutdown, beginning container shutdown");
 
-                            // Signal containers to exit.
-                            shutdown_containers(&mut containers.borrow_mut()).await;
+                            // Signal containers to exit, reactively waiting for pidfd exits.
+                            shutdown_containers(&mut containers.borrow_mut(), &mut container_tasks).await;
+                            log::info!("supervisor: shutdown_containers complete");
 
                             // container_task_tx was moved into connection_loop
                             // and is now dropped, so container_task_rx will
@@ -592,7 +695,7 @@ fn run() -> anyhow::Result<()> {
                     }
                     break;
                 }
-                _ = balloon_monitor_task => {
+                _ = balloon_monitor_fut => {
                     log::error!("supervisor: balloon monitor exited unexpectedly");
                     event_buffer.send(GuestEvent::TaskError {
                         task: "balloon_monitor".to_string(),

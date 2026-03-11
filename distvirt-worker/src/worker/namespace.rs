@@ -228,6 +228,124 @@ impl NamespaceState {
         Ok((ns, event))
     }
 
+    /// Create a namespace with channel-based egress (no TUN, no root required).
+    pub(crate) fn new_sim(
+        worker_token: &CancellationToken,
+        bg_event_tx: &mpsc::Sender<WorkerEvent>,
+        namespace_id: &NamespaceId,
+        network: distvirt_worker_protocol::NetworkConfig,
+    ) -> Result<(NamespaceState, WorkerEvent), FatalError> {
+        let fabric = Fabric::<FabricPort>::new(network.gateway, network.prefix_len);
+
+        let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
+
+        let (fabric_event_tx, mut fabric_event_rx) = mpsc::channel::<FabricEvent>(64);
+        fabric.set_event_channel(fabric_event_tx);
+
+        let tables = fabric.tables();
+
+        let pod_gateway_ip = network.gateway.octets();
+        let (gateway, egress_tx, ingress_rx, internet_rx, internet_tx) =
+            FabricGateway::new_channel(Arc::clone(&registry), pod_gateway_ip, network.prefix_len)
+                .map_err(|e| {
+                    FatalError::InternalInvariant(format!("create fabric gateway: {:#}", e))
+                })?;
+        fabric.set_gateway(egress_tx, ingress_rx);
+
+        let ns_token = worker_token.child_token();
+        let ns_cancel = ns_token.clone();
+        let gateway_ns_id = namespace_id.clone();
+
+        let gateway_event_tx = bg_event_tx.clone();
+        let gateway_task = TaskHandle::spawn(async move {
+            // Keep channel endpoints alive for the gateway's lifetime.
+            let _internet_rx = internet_rx;
+            let _internet_tx = internet_tx;
+            gateway.run().await;
+            log::error!(
+                "namespace '{}': gateway exited, cancelling all pods",
+                gateway_ns_id
+            );
+            send_event(
+                &gateway_event_tx,
+                WorkerEvent::NamespaceFailed {
+                    namespace_id: gateway_ns_id.clone(),
+                    error: "gateway exited unexpectedly".to_string(),
+                },
+            )
+            .await;
+            ns_cancel.cancel();
+        });
+
+        let bridge_event_tx = bg_event_tx.clone();
+        let bridge_ns_id = namespace_id.clone();
+        let event_bridge_task = TaskHandle::spawn(async move {
+            while let Some(event) = fabric_event_rx.recv().await {
+                match event {
+                    FabricEvent::EndpointActivation { dst_ip, service_id } => {
+                        let svc_id = service_id.map(ServiceId::from);
+                        if let Err(e) = bridge_event_tx
+                            .try_send(WorkerEvent::EndpointActivation {
+                                namespace_id: bridge_ns_id.clone(),
+                                ip: dst_ip,
+                                service_id: svc_id,
+                            })
+                        {
+                            log::warn!("worker: dropped EndpointActivation event: {}", e);
+                        }
+                    }
+                    FabricEvent::EndpointFlowStatus { ip, has_active_flows } => {
+                        if let Err(e) = bridge_event_tx
+                            .try_send(WorkerEvent::EndpointFlowStatus {
+                                namespace_id: bridge_ns_id.clone(),
+                                ip,
+                                has_active_flows,
+                            })
+                        {
+                            log::warn!("worker: dropped EndpointFlowStatus event: {}", e);
+                        }
+                    }
+                    FabricEvent::ServiceBackendNeed { service_id, dst_ip: _, need } => {
+                        if let Err(e) = bridge_event_tx
+                            .send(WorkerEvent::ServiceBackendNeed {
+                                namespace_id: bridge_ns_id.clone(),
+                                service_id: ServiceId::from(service_id),
+                                need,
+                            }).await
+                        {
+                            log::warn!("worker: failed to send ServiceBackendNeed event: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+
+        log::info!(
+            "worker: created sim namespace '{}' with fabric + channel gateway",
+            namespace_id
+        );
+
+        let ns = NamespaceState {
+            fabric: Arc::new(fabric),
+            tables,
+            _gateway_task: gateway_task,
+            _event_bridge_task: event_bridge_task,
+            _adapter_tasks: Vec::new(),
+            _adapter_ports: Vec::new(),
+            registry,
+            pods: HashMap::new(),
+            segment_id: network.segment_id,
+            adapter_port_id: None,
+            token: ns_token,
+        };
+
+        let event = WorkerEvent::NamespaceCreated {
+            namespace_id: namespace_id.clone(),
+        };
+
+        Ok((ns, event))
+    }
+
     /// Destroy this namespace: cancel all pods and await their supervisors.
     pub(crate) async fn destroy(
         self,

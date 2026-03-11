@@ -45,10 +45,10 @@ async fn test_registry_sync() -> anyhow::Result<()> {
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-dns".into(),
-            image_ref: "docker.io/library/alpine:latest".into(),
+            image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/sh".into()],
-                args: vec!["-c".into(), "nslookup myservice 2>&1 || true".into()],
+                entrypoint: vec!["/bin/test-containers".into()],
+                args: vec!["dns-lookup".into(), "--host".into(), "myservice".into()],
                 env: vec![],
                 working_dir: None,
                 uid: None,

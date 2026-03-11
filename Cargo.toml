@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["distvirt-worker", "distvirt-worker-protocol", "distvirt-guest-protocol", "distvirt-cli", "distvirt-compose", "distvirt-activator", "guest-image/guest-init", "guest-image/test-containers", "distvirt-orchestrator", "distvirt-client-protocol"]
+members = ["distvirt-worker", "distvirt-worker-protocol", "distvirt-guest-protocol", "distvirt-cli", "distvirt-compose", "distvirt-activator", "guest-image/guest-init", "guest-image/test-containers", "distvirt-orchestrator", "distvirt-client-protocol", "distvirt-tests"]
 exclude = ["activators/test-echo", "activators/tcp", "activators/spin", "activators/http2", "activators/postgres", "activators/activator-types"]
 
 [profile.guest]

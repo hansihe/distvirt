@@ -71,8 +71,11 @@
         tag = "latest";
         copyToRoot = pkgs.buildEnv {
           name = "test-containers-root";
-          paths = [ testContainers ];
-          pathsToLink = [ "/bin" ];
+          paths = [
+            testContainers
+            (pkgs.runCommand "base-dirs" {} "mkdir -p $out/tmp")
+          ];
+          pathsToLink = [ "/bin" "/tmp" ];
         };
       };
 

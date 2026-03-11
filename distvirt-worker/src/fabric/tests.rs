@@ -1050,3 +1050,549 @@ async fn port_guard_drop_returns_endpoint_to_buffering() {
     let flushed = try_recv(&handle_new).await;
     assert!(flushed.is_some(), "new port should receive the buffered frame from after drop");
 }
+
+// --- UDP frame helper ---
+
+/// Build a valid IPv4+UDP fabric frame [fabric_hdr(3)][IP+UDP+payload].
+fn make_udp_frame(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    use etherparse::PacketBuilder;
+
+    let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).udp(src_port, dst_port);
+
+    let mut ip_packet = Vec::new();
+    builder.write(&mut ip_packet, payload).unwrap();
+
+    with_fabric_header(0, 0, &ip_packet)
+}
+
+/// Build a minimal DNS A-record query in wire format.
+fn make_dns_query(id: u16, name: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // Header: ID
+    buf.extend_from_slice(&id.to_be_bytes());
+    // Flags: standard query (RD set)
+    buf.push(0x01);
+    buf.push(0x00);
+    // QDCOUNT = 1
+    buf.push(0x00);
+    buf.push(0x01);
+    // ANCOUNT, NSCOUNT, ARCOUNT = 0
+    buf.extend_from_slice(&[0u8; 6]);
+
+    // QNAME: length-prefixed labels
+    for label in name.split('.') {
+        buf.push(label.len() as u8);
+        buf.extend_from_slice(label.as_bytes());
+    }
+    buf.push(0); // terminator
+
+    // QTYPE = A (1)
+    buf.push(0x00);
+    buf.push(0x01);
+    // QCLASS = IN (1)
+    buf.push(0x00);
+    buf.push(0x01);
+
+    buf
+}
+
+// =========================================================================
+// Phase 1: Flow tracking integration tests
+// =========================================================================
+
+#[tokio::test]
+async fn flow_event_on_tcp_syn_to_local_pod() {
+    let fabric = make_test_fabric();
+    let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
+    fabric.set_event_channel(event_tx);
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
+
+    // Send TCP SYN from IP_A to IP_B.
+    let syn = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x02);
+    handle0.inject_tx.send(syn).await.unwrap();
+
+    // Drain the forwarded frame.
+    let _ = try_recv(&handle1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Should get EndpointFlowStatus { has_active_flows: true } for IP_B.
+    let event = try_recv_event(&mut event_rx).await;
+    assert!(
+        matches!(event, Some(FabricEvent::EndpointFlowStatus { ip, has_active_flows: true }) if ip == IP_B),
+        "expected EndpointFlowStatus(active=true) for IP_B, got {:?}",
+        event
+    );
+}
+
+#[tokio::test]
+async fn flow_event_inactive_after_rst() {
+    let fabric = make_test_fabric();
+    let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
+    fabric.set_event_channel(event_tx);
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
+
+    // Send TCP SYN → active.
+    let syn = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x02);
+    handle0.inject_tx.send(syn).await.unwrap();
+    let _ = try_recv(&handle1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let event = try_recv_event(&mut event_rx).await;
+    assert!(
+        matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: true, .. })),
+        "first event should be active=true"
+    );
+
+    // Send TCP RST → inactive.
+    let rst = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x04);
+    handle0.inject_tx.send(rst).await.unwrap();
+    let _ = try_recv(&handle1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let event = try_recv_event(&mut event_rx).await;
+    assert!(
+        matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: false, .. })),
+        "second event should be active=false"
+    );
+}
+
+#[tokio::test]
+async fn no_flow_event_on_non_tcp() {
+    let fabric = make_test_fabric();
+    let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
+    fabric.set_event_channel(event_tx);
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
+
+    // Send UDP frame from IP_A to IP_B.
+    let udp = make_udp_frame(IP_A.octets(), IP_B.octets(), 5000, 5001, b"hello");
+    handle0.inject_tx.send(udp).await.unwrap();
+
+    // Frame should be delivered.
+    let received = try_recv(&handle1).await;
+    assert!(received.is_some(), "UDP frame should be delivered");
+
+    // No EndpointFlowStatus event (flow tracking is TCP-only).
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let event = try_recv_event(&mut event_rx).await;
+    assert!(
+        !matches!(event, Some(FabricEvent::EndpointFlowStatus { .. })),
+        "UDP traffic should not produce flow status events"
+    );
+}
+
+#[tokio::test]
+async fn dnat_rewrite_does_not_double_count_flows() {
+    let fabric = make_test_fabric();
+    let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
+    fabric.set_event_channel(event_tx);
+
+    // Create a passthrough service with ready backend.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(&mut st, "svc-flow", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-flow", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        st.mark_service_ready("svc-flow");
+    }
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
+
+    // Send TCP SYN to service VIP → DNAT → re-dispatch to backend.
+    let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
+    handle0.inject_tx.send(syn).await.unwrap();
+
+    // Frame should arrive at backend.
+    let received = try_recv(&handle1).await;
+    assert!(received.is_some(), "frame should reach backend");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Collect all flow status events — should be at most one.
+    let mut flow_events = Vec::new();
+    while let Some(event) = try_recv_event(&mut event_rx).await {
+        if matches!(event, FabricEvent::EndpointFlowStatus { .. }) {
+            flow_events.push(event);
+        }
+    }
+    assert!(
+        flow_events.len() <= 1,
+        "expected at most 1 flow status event (skip_flow_tracking on re-dispatch), got {}",
+        flow_events.len()
+    );
+}
+
+// =========================================================================
+// Phase 2: Service edge case tests
+// =========================================================================
+
+#[tokio::test]
+async fn service_ready_backend_unreachable_buffers() {
+    let fabric = make_test_fabric();
+
+    // Create service with backend IP, mark ready, but do NOT register a port for the backend IP.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(&mut st, "svc-unreach", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-unreach", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        st.mark_service_ready("svc-unreach");
+    }
+
+    // Only register the client port.
+    let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+
+    // Send frame to VIP — backend not reachable, should be buffered.
+    let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
+    handle0.inject_tx.send(syn).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Client should not receive anything (frame was buffered, not bounced).
+    assert_no_frame(&handle0).await;
+
+    // Now add the backend port → should flush the buffered frame.
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
+
+    let received = try_recv(&handle1).await;
+    assert!(received.is_some(), "buffered frame should flush to newly added backend port");
+}
+
+#[tokio::test]
+async fn service_buffer_capacity_drops_excess() {
+    let fabric = make_test_fabric();
+
+    let small_policy = ServicePolicy {
+        buffer_frames: 2,
+        timeout_ms: 30000,
+        activator: None,
+    };
+
+    // Create service with buffer_frames=2.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(&mut st, "svc-cap", SVC_IP, small_policy.clone(), &mut passthrough_processor);
+    }
+
+    let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+
+    // Send 5 frames — only first 2 should be buffered.
+    for i in 0..5u16 {
+        let frame = make_tcp_frame(
+            CLIENT_IP.octets(), SVC_IP.octets(),
+            10000 + i, 80, 0x02,
+        );
+        handle0.inject_tx.send(frame).await.unwrap();
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Add backend port first, then mark ready so flush_service_frames can deliver.
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
+
+    // Mark ready with backend — returns buffered frames.
+    let flush_data = {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_update_backend(&mut st, "svc-cap", SVC_IP, small_policy, Some(POD_IP), &mut passthrough_processor);
+        st.mark_service_ready("svc-cap")
+    };
+
+    // Manually flush the frames through the fabric (as worker code does).
+    if let Some(super::MarkReadyResult::Passthrough { frames, backend_ip, service_ip, .. }) = flush_data {
+        fabric.flush_service_frames(frames, backend_ip, service_ip);
+    }
+
+    // Wait for async flush to complete.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Count flushed frames.
+    let mut count = 0;
+    while try_recv(&handle1).await.is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 2, "only 2 frames should be buffered (capacity limit)");
+}
+
+#[tokio::test]
+async fn service_buffer_timeout_clears() {
+    let fabric = make_test_fabric();
+
+    let short_timeout_policy = ServicePolicy {
+        buffer_frames: 64,
+        timeout_ms: 1, // 1ms timeout
+        activator: None,
+    };
+
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(&mut st, "svc-timeout", SVC_IP, short_timeout_policy.clone(), &mut passthrough_processor);
+    }
+
+    let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+
+    // Send first frame — starts buffer timer.
+    let frame1 = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 10000, 80, 0x02);
+    handle0.inject_tx.send(frame1).await.unwrap();
+
+    // Wait for timeout to expire.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Send second frame — buffer has timed out, should be dropped.
+    let frame2 = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 10001, 80, 0x02);
+    handle0.inject_tx.send(frame2).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Mark ready + add backend port → verify no frames delivered (all expired/dropped).
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_update_backend(&mut st, "svc-timeout", SVC_IP, short_timeout_policy, Some(POD_IP), &mut passthrough_processor);
+        st.mark_service_ready("svc-timeout");
+    }
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
+
+    assert_no_frame(&handle1).await;
+}
+
+#[tokio::test]
+async fn no_gateway_drops_external_frames() {
+    // Create fabric WITHOUT setting a gateway.
+    let fabric = make_test_fabric();
+
+    let (port0, handle0) = make_test_port();
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, IP_A);
+    create_local_pod_endpoint(&fabric, IP_B);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
+
+    // Send frame to external IP — should be silently dropped (no panic, no delivery).
+    let frame = make_ipv4_frame(EXTERNAL_IP);
+    handle0.inject_tx.send(frame).await.unwrap();
+
+    // Neither port should receive it.
+    assert_no_frame(&handle1).await;
+    // No panics = success.
+}
+
+// =========================================================================
+// Phase 3: Gateway DNS via channel
+// =========================================================================
+
+#[tokio::test]
+async fn gateway_dns_local_resolve() {
+    use super::gateway::{DnsRegistry, FabricGateway};
+    use std::sync::RwLock;
+
+    // Create registry with a local name.
+    let registry: DnsRegistry = std::sync::Arc::new(RwLock::new(
+        [("myservice".to_string(), Ipv4Addr::new(10, 0, 0, 99))].into_iter().collect(),
+    ));
+
+    let gw_ip = [10, 0, 0, 1];
+    let prefix_len = 24;
+
+    let (gateway, fabric_egress_tx, fabric_ingress_rx, _internet_rx, _internet_tx) =
+        FabricGateway::new_channel(registry, gw_ip, prefix_len).unwrap();
+
+    // Create fabric with gateway_ip = 10.0.0.1 (must match gw_ip for routing).
+    let fabric: Fabric<TestPort> = Fabric::new(Ipv4Addr::new(10, 0, 0, 1), prefix_len);
+    let (event_tx, _event_rx) = tokio_mpsc::channel(64);
+    fabric.set_event_channel(event_tx);
+    fabric.set_gateway(fabric_egress_tx, fabric_ingress_rx);
+
+    // Spawn gateway.
+    let gw_handle = tokio::spawn(async move { gateway.run().await });
+
+    // Create a pod port.
+    let pod_ip = Ipv4Addr::new(10, 0, 0, 10);
+    let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, pod_ip);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, pod_ip);
+
+    // Build DNS query for "myservice".
+    let dns_query = make_dns_query(0x1234, "myservice");
+
+    // Send UDP packet from pod to gateway IP:53.
+    let dns_frame = make_udp_frame(pod_ip.octets(), gw_ip, 5353, 53, &dns_query);
+    handle0.inject_tx.send(dns_frame).await.unwrap();
+
+    // Wait for DNS response to arrive back at pod port.
+    // The gateway needs to process: fabric→egress_rx→smoltcp→DNS forwarder→smoltcp→ingress_tx→fabric→pod_port.
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        async {
+            loop {
+                if let Some(frame) = try_recv(&handle0).await {
+                    return frame;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        },
+    )
+    .await;
+
+    assert!(response.is_ok(), "should receive DNS response within timeout");
+    let response = response.unwrap();
+
+    // Parse the response: skip fabric header + IP + UDP headers to get DNS payload.
+    let fp = FabricPacket::new(&response).unwrap();
+    let ip_pkt = fp.ip_packet();
+    let ihl = ((ip_pkt[0] & 0x0f) as usize) * 4;
+    let udp_payload = &ip_pkt[ihl + 8..]; // skip UDP header (8 bytes)
+
+    // Verify DNS response: ID should match, QR bit should be set, and answer should contain 10.0.0.99.
+    assert_eq!(udp_payload[0], 0x12, "DNS ID high byte");
+    assert_eq!(udp_payload[1], 0x34, "DNS ID low byte");
+    assert_ne!(udp_payload[2] & 0x80, 0, "QR bit should be set (response)");
+
+    // Last 4 bytes of the answer section should be the IP 10.0.0.99.
+    let len = udp_payload.len();
+    assert_eq!(&udp_payload[len - 4..], &[10, 0, 0, 99], "DNS A record should be 10.0.0.99");
+
+    gw_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_subnet_filter_drops_external_dst() {
+    use super::gateway::FabricGateway;
+
+    let registry = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let gw_ip = [10, 0, 0, 1];
+    let prefix_len = 24;
+
+    let (gateway, _fabric_egress_tx, mut fab_rx, _internet_rx, inet_tx) =
+        FabricGateway::new_channel(registry, gw_ip, prefix_len).unwrap();
+
+    let gw_handle = tokio::spawn(async move { gateway.run().await });
+
+    // Inject packet with dst IP outside pod subnet (8.8.8.8) from internet side.
+    let external_frame = make_ipv4_frame_full(
+        Ipv4Addr::new(1, 2, 3, 4),
+        Ipv4Addr::new(8, 8, 8, 8),
+    );
+    inet_tx.send(external_frame).await.unwrap();
+
+    // Should NOT arrive on fabric ingress.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        fab_rx.recv(),
+    )
+    .await;
+    assert!(result.is_err() || result.unwrap().is_none(), "external dst should be filtered out");
+
+    // Inject packet with dst IP inside pod subnet (10.0.0.50).
+    let internal_frame = make_ipv4_frame_full(
+        Ipv4Addr::new(1, 2, 3, 4),
+        Ipv4Addr::new(10, 0, 0, 50),
+    );
+    inet_tx.send(internal_frame).await.unwrap();
+
+    // Should arrive on fabric ingress.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        fab_rx.recv(),
+    )
+    .await;
+    assert!(result.is_ok() && result.unwrap().is_some(), "in-subnet dst should pass through");
+
+    gw_handle.abort();
+}
+
+// =========================================================================
+// Phase 4: flush_service_frames NAT integration
+// =========================================================================
+
+#[tokio::test]
+async fn flush_populates_nat_for_return_traffic() {
+    let fabric = make_test_fabric();
+
+    // Create a service with backend but do NOT register the backend port yet.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(&mut st, "svc-flush-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
+        table_update_backend(&mut st, "svc-flush-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        st.mark_service_ready("svc-flush-nat");
+    }
+
+    // Add client port.
+    let (port0, handle0) = make_test_port();
+    create_local_pod_endpoint(&fabric, CLIENT_IP);
+    let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
+
+    // Send TCP SYN from client to service VIP → buffered (backend port not yet added).
+    let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
+    handle0.inject_tx.send(syn).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Now add backend port → triggers flush_by_backend_ip with DNAT.
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
+
+    // Drain DNAT'd frame.
+    let flushed = try_recv(&handle1).await;
+    assert!(flushed.is_some(), "flushed frame should arrive at backend");
+
+    // Now send return traffic from backend → client. If flush_service_frames
+    // correctly inserted reverse NAT entries, SNAT should rewrite src from POD_IP to SVC_IP.
+    let syn_ack = make_tcp_frame(POD_IP.octets(), CLIENT_IP.octets(), 80, 12345, 0x12);
+    handle1.inject_tx.send(syn_ack).await.unwrap();
+
+    let return_frame = try_recv(&handle0).await;
+    assert!(return_frame.is_some(), "return frame should arrive at client");
+    let return_frame = return_frame.unwrap();
+    let fp = FabricPacket::new(&return_frame).unwrap();
+    assert_eq!(
+        fp.ipv4_src(), SVC_IP,
+        "return traffic src should be SNAT'd from backend IP to service VIP"
+    );
+    assert_eq!(fp.ipv4_dst(), CLIENT_IP, "return traffic dst should be unchanged");
+}
