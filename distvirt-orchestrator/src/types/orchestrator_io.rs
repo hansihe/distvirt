@@ -10,6 +10,11 @@ pub enum OrchestratorInput {
     WorkerConnected { worker_id: WorkerId, capabilities: WorkerCapabilities, wg_config: Option<WorkerWgConfig>, tunnel_config: Option<WorkerTunnelConfig> },
     WorkerDisconnected { worker_id: WorkerId },
     NamespaceInput { namespace_id: NamespaceId, input: NamespaceInput },
+    WorkerPressureUpdate { worker_id: WorkerId, cpu: PsiMetrics, memory: PsiMetrics, io: PsiMetrics },
+    WorkerPoolCapacityUpdate { worker_id: WorkerId, pools: Vec<PoolInfo> },
+    WorkerArtifactTransferReceived { worker_id: WorkerId, transfer_id: u64, dest_artifact_id: ArtifactId, dest_pool_id: PoolId, size_bytes: u64 },
+    WorkerTransferFailed { worker_id: WorkerId, transfer_id: u64, source_artifact_id: ArtifactId, dest_artifact_id: ArtifactId, error: String },
+    WorkerConditionUpdate { worker_id: WorkerId, key: String, active: bool, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

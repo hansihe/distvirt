@@ -95,6 +95,50 @@ impl Orchestrator {
             } => {
                 self.route_namespace_input(namespace_id, input, &mut out);
             }
+            OrchestratorInput::WorkerPressureUpdate {
+                worker_id,
+                cpu,
+                memory,
+                io,
+            } => {
+                self.handle_worker_pressure_update(worker_id, cpu, memory, io, &mut out);
+            }
+            OrchestratorInput::WorkerPoolCapacityUpdate {
+                worker_id,
+                pools,
+            } => {
+                self.handle_worker_pool_capacity_update(worker_id, pools, &mut out);
+            }
+            OrchestratorInput::WorkerArtifactTransferReceived {
+                worker_id: _,
+                transfer_id: _,
+                dest_artifact_id,
+                dest_pool_id: _,
+                size_bytes: _,
+            } => {
+                if let Some(placement) = self.placement_table.get_mut(&dest_artifact_id) {
+                    if placement.status == ArtifactStatus::Writing {
+                        placement.status = ArtifactStatus::Ready;
+                    }
+                }
+            }
+            OrchestratorInput::WorkerTransferFailed {
+                worker_id: _,
+                transfer_id: _,
+                source_artifact_id: _,
+                dest_artifact_id,
+                error: _,
+            } => {
+                self.placement_table.remove(&dest_artifact_id);
+            }
+            OrchestratorInput::WorkerConditionUpdate {
+                worker_id,
+                key,
+                active,
+                message,
+            } => {
+                self.handle_worker_condition_update(worker_id, key, active, message, &mut out);
+            }
         }
 
         #[cfg(debug_assertions)]

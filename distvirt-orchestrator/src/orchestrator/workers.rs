@@ -79,4 +79,69 @@ impl Orchestrator {
         // Push updated worker registry to remaining workers.
         self.push_worker_registry(out);
     }
+
+    pub(crate) fn handle_worker_pressure_update(
+        &mut self,
+        worker_id: WorkerId,
+        cpu: PsiMetrics,
+        memory: PsiMetrics,
+        io: PsiMetrics,
+        out: &mut OrchestratorOutput,
+    ) {
+        if let Some(ws) = self.workers.get_mut(&worker_id) {
+            ws.psi = Some(WorkerPsi {
+                cpu,
+                memory,
+                io,
+            });
+        }
+        self.recompute_worker_pressure(&worker_id);
+        self.schedule_waiting_pods(out);
+    }
+
+    pub(crate) fn handle_worker_pool_capacity_update(
+        &mut self,
+        worker_id: WorkerId,
+        pools: Vec<PoolInfo>,
+        out: &mut OrchestratorOutput,
+    ) {
+        if let Some(ws) = self.workers.get_mut(&worker_id) {
+            for new_pool in &pools {
+                if let Some(existing) = ws.capabilities.pools.iter_mut().find(|p| p.pool_id == new_pool.pool_id) {
+                    existing.capacity_bytes = new_pool.capacity_bytes;
+                    existing.available_bytes = new_pool.available_bytes;
+                }
+            }
+        }
+        self.recompute_worker_pressure(&worker_id);
+        self.schedule_waiting_pods(out);
+    }
+
+    pub(crate) fn handle_worker_condition_update(
+        &mut self,
+        worker_id: WorkerId,
+        key: String,
+        active: bool,
+        message: String,
+        out: &mut OrchestratorOutput,
+    ) {
+        if let Some(ws) = self.workers.get_mut(&worker_id) {
+            if active {
+                ws.conditions.insert(
+                    key.clone(),
+                    WorkerCondition {
+                        active: true,
+                        message,
+                    },
+                );
+            } else {
+                ws.conditions.remove(&key);
+            }
+        }
+        // When a condition is cleared (e.g. "draining" removed), previously
+        // ineligible workers may now accept pods.
+        if !active {
+            self.schedule_waiting_pods(out);
+        }
+    }
 }

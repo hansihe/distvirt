@@ -107,25 +107,11 @@ async fn test_high_pressure_blocks_scheduling() {
     // Release pressure.
     cluster.inject_pressure(&w1, 0.0).await;
 
-    // BUG: PressureUpdate handler in OrchestratorShell (shell/mod.rs) calls
-    // recompute_worker_pressure() but never calls schedule_waiting_pods().
-    // When pressure drops from High/Critical to Normal/Elevated, workloads stuck
-    // in WaitingForCapacity should be reconsidered for scheduling, but they aren't.
-    //
-    // Expected: workload transitions to Running after pressure release.
-    // Actual: workload stays in WaitingForCapacity until something else triggers
-    // schedule_waiting_pods (e.g. a namespace create/delete/update).
+    // PressureUpdate now flows through Orchestrator::step(), which calls
+    // schedule_waiting_pods() after recomputing pressure. Workloads stuck in
+    // WaitingForCapacity are automatically reconsidered when pressure drops.
     cluster.converge().await;
-    // TODO: This should be assert_workload_running once the bug is fixed.
-    cluster.assert_workload_waiting_for_capacity("ns", "echo");
-
-    // Workaround: delete + recreate to trigger schedule_waiting_pods and verify
-    // the worker IS schedulable at the released pressure level.
-    cluster.delete_namespace("ns").await;
-    cluster.converge().await;
-    cluster.create_namespace("ns2", always_on_spec()).await;
-    cluster.converge().await;
-    cluster.assert_workload_running("ns2", "echo");
+    cluster.assert_workload_running("ns", "echo");
 }
 
 /// Under high pressure, activating a second workload should preempt the idle first one.
@@ -165,16 +151,8 @@ async fn test_basic_preemption_e2e() {
     // PSI would decrease. Inject released pressure.
     cluster.inject_pressure(&w1, 0.0).await;
 
-    // BUG: Same schedule_waiting_pods issue as test_high_pressure_blocks_scheduling.
-    // After preemption frees capacity and pressure drops, wl-b should be rescheduled
-    // automatically. Instead it stays WaitingForCapacity because PressureUpdate
-    // doesn't trigger schedule_waiting_pods.
+    // PressureUpdate flows through step() → schedule_waiting_pods(), so wl-b
+    // is automatically rescheduled when pressure drops after preemption.
     cluster.converge().await;
-    // TODO: This should be assert_workload_running once the bug is fixed.
-    cluster.assert_workload_waiting_for_capacity("ns", "wl-b");
-
-    // Workaround: update_namespace triggers process_namespace_output →
-    // schedule_waiting_pods, allowing wl-b to be scheduled at the released pressure.
-    cluster.update_namespace("ns", spec).await;
     cluster.assert_workload_running("ns", "wl-b");
 }

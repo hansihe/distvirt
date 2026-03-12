@@ -565,133 +565,19 @@ impl OrchestratorShell {
             _ => {}
         }
 
+        // Convert ShellMsg to OrchestratorInput and feed through orchestrator.step().
+        //
+        // IMPORTANT: All state mutations must go through orchestrator.step() so that
+        // the state machine can trigger downstream reactions (scheduling, pressure
+        // propagation, etc). The shell should only:
+        //   - Manage shell-local state (self.workers, self.clients, self.timer_handles)
+        //   - Convert external events into OrchestratorInput variants
+        //   - Dispatch OrchestratorOutput side effects (send commands, set timers)
+        //
+        // Do NOT directly mutate self.orchestrator fields here — add an
+        // OrchestratorInput variant and handle it in Orchestrator::step() instead.
         let input = match msg {
             ShellMsg::WorkerEvent { worker_id, event } => {
-                // Handle worker-scoped events directly (not routed to namespace SM).
-                // Handle PSI pressure updates.
-                if let distvirt_worker_protocol::WorkerEvent::PressureUpdate {
-                    ref cpu,
-                    ref memory,
-                    ref io,
-                } = event
-                {
-                    if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
-                        log::debug!(
-                            "worker {} pressure update: cpu={:.1} mem={:.1} io={:.1}",
-                            worker_id.0,
-                            cpu.some_avg10,
-                            memory.some_avg10,
-                            io.some_avg10,
-                        );
-                        ws.psi = Some(crate::types::WorkerPsi {
-                            cpu: cpu.clone(),
-                            memory: memory.clone(),
-                            io: io.clone(),
-                        });
-                    }
-                    self.orchestrator.recompute_worker_pressure(&worker_id);
-                    return;
-                }
-
-                // Handle pool capacity updates directly (worker-scoped, not routed to namespace SM).
-                if let distvirt_worker_protocol::WorkerEvent::PoolCapacityUpdate {
-                    ref pools,
-                } = event
-                {
-                    if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
-                        log::debug!(
-                            "worker {} pool capacity update: {} pool(s)",
-                            worker_id.0,
-                            pools.len()
-                        );
-                        for new_pool in pools {
-                            if let Some(existing) = ws.capabilities.pools.iter_mut().find(|p| p.pool_id == new_pool.pool_id) {
-                                existing.capacity_bytes = new_pool.capacity_bytes;
-                                existing.available_bytes = new_pool.available_bytes;
-                            }
-                        }
-                    }
-                    // Recompute pressure after pool capacity change.
-                    self.orchestrator.recompute_worker_pressure(&worker_id);
-                    return;
-                }
-
-                // Handle artifact transfer events directly (not namespace-scoped).
-                if let distvirt_worker_protocol::WorkerEvent::ArtifactTransferReceived {
-                    transfer_id,
-                    ref dest_artifact_id,
-                    ref dest_pool_id,
-                    size_bytes,
-                    ..
-                } = event
-                {
-                    log::info!(
-                        "worker {} artifact transfer received: transfer_id={} artifact={} pool={} size={}",
-                        worker_id.0, transfer_id, dest_artifact_id, dest_pool_id, size_bytes,
-                    );
-                    // Update placement from Writing to Ready.
-                    if let Some(placement) = self.orchestrator.placement_table.get_mut(dest_artifact_id) {
-                        if placement.status == ArtifactStatus::Writing {
-                            placement.status = ArtifactStatus::Ready;
-                            log::info!(
-                                "placement table: artifact {} updated to Ready",
-                                dest_artifact_id,
-                            );
-                        }
-                    }
-                    return;
-                }
-
-                if let distvirt_worker_protocol::WorkerEvent::TransferFailed {
-                    transfer_id,
-                    ref source_artifact_id,
-                    ref dest_artifact_id,
-                    ref error,
-                    ..
-                } = event
-                {
-                    log::error!(
-                        "worker {} artifact transfer failed: transfer_id={} src={} dest={} error={}",
-                        worker_id.0, transfer_id, source_artifact_id, dest_artifact_id, error,
-                    );
-                    // Remove the Writing placement entry.
-                    if let Some(removed) = self.orchestrator.placement_table.remove(dest_artifact_id) {
-                        log::info!(
-                            "placement table: removed Writing entry for artifact {} (transfer failed)",
-                            dest_artifact_id,
-                        );
-                        let _ = removed;
-                    }
-                    return;
-                }
-
-                // Handle worker-scoped conditions directly (not routed to namespace SM).
-                if let distvirt_worker_protocol::WorkerEvent::WorkerCondition {
-                    ref key,
-                    active,
-                    ref message,
-                } = event
-                {
-                    if let Some(ws) = self.orchestrator.workers.get_mut(&worker_id) {
-                        if active {
-                            log::info!(
-                                "worker {} condition asserted: {} — {}",
-                                worker_id.0, key, message
-                            );
-                            ws.conditions.insert(
-                                key.clone(),
-                                WorkerCondition {
-                                    active: true,
-                                    message: message.clone(),
-                                },
-                            );
-                        } else {
-                            log::info!("worker {} condition deasserted: {}", worker_id.0, key);
-                            ws.conditions.remove(key);
-                        }
-                    }
-                    return;
-                }
                 self.convert_worker_event(worker_id, event)
             }
             ShellMsg::WorkerDisconnected { worker_id } => {

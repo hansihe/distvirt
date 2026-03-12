@@ -133,12 +133,58 @@ impl OrchestratorShell {
                 log::debug!("tunnel status event from worker {}", worker_id.0);
                 None
             }
-            // WorkerCondition, PoolCapacityUpdate, PressureUpdate, and transfer events are handled directly in handle_msg (needs &mut self).
-            ProtoEvent::WorkerCondition { .. } => unreachable!(),
-            ProtoEvent::PoolCapacityUpdate { .. } => unreachable!(),
-            ProtoEvent::PressureUpdate { .. } => unreachable!(),
-            ProtoEvent::ArtifactTransferReceived { .. } => unreachable!(),
-            ProtoEvent::TransferFailed { .. } => unreachable!(),
+            ProtoEvent::PressureUpdate { cpu, memory, io } => {
+                log::debug!(
+                    "worker {} pressure update: cpu={:.1} mem={:.1} io={:.1}",
+                    worker_id.0, cpu.some_avg10, memory.some_avg10, io.some_avg10,
+                );
+                Some(OrchestratorInput::WorkerPressureUpdate { worker_id, cpu, memory, io })
+            }
+            ProtoEvent::PoolCapacityUpdate { pools } => {
+                log::debug!(
+                    "worker {} pool capacity update: {} pool(s)",
+                    worker_id.0, pools.len(),
+                );
+                Some(OrchestratorInput::WorkerPoolCapacityUpdate { worker_id, pools })
+            }
+            ProtoEvent::ArtifactTransferReceived {
+                transfer_id,
+                dest_artifact_id,
+                dest_pool_id,
+                size_bytes,
+                ..
+            } => {
+                log::info!(
+                    "worker {} artifact transfer received: transfer_id={} artifact={} pool={} size={}",
+                    worker_id.0, transfer_id, dest_artifact_id, dest_pool_id, size_bytes,
+                );
+                Some(OrchestratorInput::WorkerArtifactTransferReceived {
+                    worker_id, transfer_id, dest_artifact_id, dest_pool_id, size_bytes,
+                })
+            }
+            ProtoEvent::TransferFailed {
+                transfer_id,
+                source_artifact_id,
+                dest_artifact_id,
+                error,
+                ..
+            } => {
+                log::error!(
+                    "worker {} artifact transfer failed: transfer_id={} src={} dest={} error={}",
+                    worker_id.0, transfer_id, source_artifact_id, dest_artifact_id, error,
+                );
+                Some(OrchestratorInput::WorkerTransferFailed {
+                    worker_id, transfer_id, source_artifact_id, dest_artifact_id, error,
+                })
+            }
+            ProtoEvent::WorkerCondition { key, active, message } => {
+                if active {
+                    log::info!("worker {} condition asserted: {} — {}", worker_id.0, key, message);
+                } else {
+                    log::info!("worker {} condition deasserted: {}", worker_id.0, key);
+                }
+                Some(OrchestratorInput::WorkerConditionUpdate { worker_id, key, active, message })
+            }
             // Unified endpoint events — routed directly to domain event handlers.
             ProtoEvent::EndpointActivation { namespace_id, ip, service_id } => {
                 Some(OrchestratorInput::NamespaceInput {
