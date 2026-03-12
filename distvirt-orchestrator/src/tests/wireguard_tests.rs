@@ -485,7 +485,7 @@ fn test_deactivate_workload_active_idle() {
 
     // Get pod_id from launching state.
     let pod_id = match &orch.namespaces[&ns_id("ns1")].workloads[&wl_id()].state {
-        WorkloadState::Launching { pod_id, .. } => pod_id.clone(),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
         _ => panic!("expected Launching"),
     };
 
@@ -590,7 +590,7 @@ fn test_deactivate_workload_with_demand_refused() {
     });
 
     let pod_id = match &orch.namespaces[&ns_id("ns1")].workloads[&wl_id()].state {
-        WorkloadState::Launching { pod_id, .. } => pod_id.clone(),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
         _ => panic!("expected Launching"),
     };
 

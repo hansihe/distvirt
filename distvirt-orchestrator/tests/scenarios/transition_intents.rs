@@ -26,7 +26,7 @@ async fn test_demand_during_suspend_immediate_resume() {
 
     // Capture the pod_id and artifact_id from suspending state
     let (pod_id, artifact_id) = match h.workload_state("ns", "web") {
-        WorkloadState::Suspending { pod_id, artifact_id, .. } => (pod_id.clone(), artifact_id.clone()),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Suspending { artifact_id, .. }, .. }, .. } => (pod_id.clone(), artifact_id.clone()),
         other => panic!("expected Suspending, got {:?}", other),
     };
 
@@ -66,7 +66,7 @@ async fn test_demand_during_suspend_immediate_resume() {
     // Fixed: Workload correctly transitions through Suspended → Resuming → Running.
     let state = h.workload_state("ns", "web");
     assert!(
-        matches!(state, WorkloadState::Resuming { .. } | WorkloadState::Running { .. }),
+        matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Resuming { .. }, .. }, .. } | WorkloadState::Active { pod: PodSlot { pod_state: PodState::Running, .. }, .. }),
         "Expected Resuming or Running after demand-during-suspend, got {:?}",
         state
     );
@@ -219,7 +219,7 @@ async fn test_spec_change_during_suspend() {
     h.assert_workload_suspending("ns", "web");
 
     let (pod_id, artifact_id) = match h.workload_state("ns", "web") {
-        WorkloadState::Suspending { pod_id, artifact_id, .. } => (pod_id.clone(), artifact_id.clone()),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Suspending { artifact_id, .. }, .. }, .. } => (pod_id.clone(), artifact_id.clone()),
         other => panic!("expected Suspending, got {:?}", other),
     };
 

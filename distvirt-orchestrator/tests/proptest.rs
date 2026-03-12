@@ -303,37 +303,19 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
         );
     }
 
-    // Workloads in Launching/Running must reference pods in the pods map.
+    // Workloads in Active (Launching/Running/etc) must reference pods in the pods map.
     for (wl_id, wl) in &ns.workloads {
         match &wl.state {
-            WorkloadState::Launching {
-                pod_id, worker_id, ..
-            } => {
+            WorkloadState::Active { pod: PodSlot { pod_id, worker_id, .. }, .. } => {
                 assert!(
                     ns.pod_map.contains(pod_id),
-                    "Workload {:?} in Launching references unknown pod {:?}",
+                    "Workload {:?} in Active references unknown pod {:?}",
                     wl_id,
                     pod_id
                 );
                 assert!(
                     ns.workers.contains_key(worker_id),
-                    "Workload {:?} in Launching references unknown worker {:?}",
-                    wl_id,
-                    worker_id
-                );
-            }
-            WorkloadState::Running {
-                pod_id, worker_id, ..
-            } => {
-                assert!(
-                    ns.pod_map.contains(pod_id),
-                    "Workload {:?} in Running references unknown pod {:?}",
-                    wl_id,
-                    pod_id
-                );
-                assert!(
-                    ns.workers.contains_key(worker_id),
-                    "Workload {:?} in Running references unknown worker {:?}",
+                    "Workload {:?} in Active references unknown worker {:?}",
                     wl_id,
                     worker_id
                 );
@@ -347,17 +329,14 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
         if let ServiceState::Active { pod_id, worker_id, .. } = &svc.state {
             let wl = ns.workloads.get(&svc.workload_id);
             assert!(
-                matches!(
-                    wl.map(|w| &w.state),
-                    Some(WorkloadState::Running { .. })
-                ),
+                wl.map(|w| w.state.is_running()).unwrap_or(false),
                 "Service {:?} is Active but workload {:?} is not Running",
                 sid,
                 svc.workload_id
             );
             // Pod and worker should match the workload's.
             if let Some(wl) = wl {
-                if let WorkloadState::Running { pod_id: wl_pid, worker_id: wl_wid, .. } = &wl.state {
+                if let WorkloadState::Active { pod: PodSlot { pod_id: wl_pid, worker_id: wl_wid, pod_state: PodState::Running }, .. } = &wl.state {
                     assert_eq!(pod_id, wl_pid, "Service {:?} pod_id doesn't match workload", sid);
                     assert_eq!(worker_id, wl_wid, "Service {:?} worker_id doesn't match workload", sid);
                 }

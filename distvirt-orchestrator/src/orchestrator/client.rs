@@ -174,8 +174,9 @@ impl Orchestrator {
                                 .workloads
                                 .get(&info.workload_id)
                                 .map_or(false, |wl| match &wl.state {
-                                    WorkloadState::Running {
-                                        pod_id: running_pod, ..
+                                    WorkloadState::Active {
+                                        pod: PodSlot { pod_id: running_pod, pod_state: PodState::Running, .. },
+                                        ..
                                     } => running_pod == pod_id,
                                     _ => false,
                                 });

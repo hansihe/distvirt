@@ -110,7 +110,7 @@ async fn test_basic_preemption() {
     // wl-b should be in WaitingForCapacity since worker is still high-pressure.
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
-        matches!(wl_a_state, WorkloadState::Dormant | WorkloadState::Suspending { .. } | WorkloadState::Suspended { .. }),
+        matches!(wl_a_state, WorkloadState::Dormant | WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. } | WorkloadState::Suspended { .. }),
         "wl-a should be deactivating/dormant after preemption, got {:?}", wl_a_state
     );
 
@@ -230,7 +230,7 @@ async fn test_preempted_workload_can_reactivate() {
     // wl-a should be preempted.
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
-        !matches!(wl_a_state, WorkloadState::Running { .. }),
+        !wl_a_state.is_running(),
         "wl-a should not be Running after preemption, got {:?}", wl_a_state
     );
 

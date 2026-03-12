@@ -29,7 +29,7 @@ async fn test_fabric_route_update_on_pod_launch() {
     // Determine which worker got the pod.
     let state = h.workload_state("ns1", "echo");
     let pod_worker_id = match state {
-        distvirt_orchestrator::types::WorkloadState::Running { worker_id, .. } => {
+        distvirt_orchestrator::types::WorkloadState::Active { pod: distvirt_orchestrator::types::PodSlot { worker_id, pod_state: distvirt_orchestrator::types::PodState::Running, .. }, .. } => {
             worker_id.clone()
         }
         _ => panic!("expected Running"),
@@ -78,7 +78,7 @@ async fn test_fabric_route_lifecycle_with_suspend_resume() {
     // Determine which worker hosts the pod.
     let state = h.workload_state("ns1", "web");
     let pod_worker_id = match state {
-        distvirt_orchestrator::types::WorkloadState::Running { worker_id, .. } => {
+        distvirt_orchestrator::types::WorkloadState::Active { pod: distvirt_orchestrator::types::PodSlot { worker_id, pod_state: distvirt_orchestrator::types::PodState::Running, .. }, .. } => {
             worker_id.clone()
         }
         _ => panic!("expected Running"),

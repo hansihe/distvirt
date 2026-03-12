@@ -379,7 +379,7 @@ async fn test_remove_only_active_service_drops_demand() {
     // suspend_on_idle=true → workload should begin suspending/suspended immediately.
     let state = h.workload_state("ns", "shared");
     assert!(
-        matches!(state, WorkloadState::Suspending { .. } | WorkloadState::Suspended { .. }),
+        matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. } | WorkloadState::Suspended { .. }),
         "workload should begin deactivation immediately after service removal, got {:?}",
         state,
     );

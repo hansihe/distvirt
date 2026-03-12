@@ -35,7 +35,7 @@ impl NamespaceStateMachine {
 
         match (svc_state, wl_state) {
             (ServiceState::Pending, wl) => {
-                let is_running = matches!(wl, WorkloadState::Running { .. });
+                let is_running = wl.is_running();
 
                 // Broadcast an endpoint update for this service.
                 self.emit_endpoint_update_for_service(svc_id, out);
@@ -145,7 +145,7 @@ impl NamespaceStateMachine {
             None => return,
         };
 
-        let is_running = matches!(wl.state, WorkloadState::Running { .. });
+        let is_running = wl.state.is_running();
         let needs_boot = wl.needs_successful_boot;
 
         // Collect service IDs mapped to this workload.
@@ -159,9 +159,10 @@ impl NamespaceStateMachine {
         if is_running {
             // Extract pod_id/worker_id for WorkloadReady.
             let (pod_id, worker_id) = match &wl.state {
-                WorkloadState::Running { pod_id, worker_id } => {
-                    (pod_id.clone(), worker_id.clone())
-                }
+                WorkloadState::Active {
+                    pod: PodSlot { pod_id, worker_id, pod_state: PodState::Running },
+                    ..
+                } => (pod_id.clone(), worker_id.clone()),
                 _ => unreachable!(),
             };
 

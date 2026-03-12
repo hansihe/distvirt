@@ -127,7 +127,7 @@ async fn test_pod_exit_during_suspend() {
     let pod_id = {
         let state = h.workload_state("ns1", "web");
         match state {
-            WorkloadState::Suspending { pod_id, .. } => {
+            WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Suspending { .. }, .. }, .. } => {
                 pod_id.clone()
             }
             _ => panic!("expected Suspending state"),
@@ -177,7 +177,7 @@ async fn test_pod_exited_during_suspend() {
     let pod_id = {
         let state = h.workload_state("ns1", "web");
         match state {
-            WorkloadState::Suspending { pod_id, .. } => {
+            WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Suspending { .. }, .. }, .. } => {
                 pod_id.clone()
             }
             _ => panic!("expected Suspending state"),
@@ -242,7 +242,7 @@ async fn test_delete_during_resume() {
 
     // Get the pod_id before deleting namespace.
     let pod_id = match h.workload_state("ns", "web") {
-        WorkloadState::Resuming { pod_id, .. } => pod_id.clone(),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Resuming { .. }, .. }, .. } => pod_id.clone(),
         other => panic!("expected Resuming, got {:?}", other),
     };
 
@@ -304,7 +304,7 @@ async fn test_spec_change_during_resume() {
     h.assert_workload_resuming("ns", "web");
 
     let pod_id = match h.workload_state("ns", "web") {
-        WorkloadState::Resuming { pod_id, .. } => pod_id.clone(),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Resuming { .. }, .. }, .. } => pod_id.clone(),
         other => panic!("expected Resuming, got {:?}", other),
     };
 

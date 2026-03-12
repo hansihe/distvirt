@@ -165,7 +165,7 @@ impl Orchestrator {
             };
 
             // Must be Running to be a clean preemption target.
-            if !matches!(wl.state, WorkloadState::Running { .. }) {
+            if !wl.state.is_running() {
                 continue;
             }
 

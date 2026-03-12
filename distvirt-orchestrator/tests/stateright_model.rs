@@ -463,9 +463,8 @@ impl Model for NamespaceModel {
                 // Workload-level events.
                 if let Some(wl) = wl_snap {
                     match &wl.state {
-                        WorkloadState::Launching {
-                            pod_id,
-                            worker_id: launch_wid,
+                        WorkloadState::Active {
+                            pod: PodSlot { pod_id, worker_id: launch_wid, pod_state: PodState::Launching { .. } },
                             ..
                         } => {
                             if wid.0 == launch_wid.0 {
@@ -484,9 +483,8 @@ impl Model for NamespaceModel {
                                 });
                             }
                         }
-                        WorkloadState::Running {
-                            pod_id,
-                            worker_id: active_wid,
+                        WorkloadState::Active {
+                            pod: PodSlot { pod_id, worker_id: active_wid, pod_state: PodState::Running },
                             ..
                         } => {
                             if wid.0 == active_wid.0 {
@@ -499,10 +497,8 @@ impl Model for NamespaceModel {
                                 });
                             }
                         }
-                        WorkloadState::Suspending {
-                            pod_id,
-                            worker_id: suspend_wid,
-                            artifact_id,
+                        WorkloadState::Active {
+                            pod: PodSlot { pod_id, worker_id: suspend_wid, pod_state: PodState::Suspending { artifact_id, .. } },
                             ..
                         } => {
                             if wid.0 == suspend_wid.0 {
@@ -534,9 +530,8 @@ impl Model for NamespaceModel {
                             // No pod events in suspended state — resume is
                             // triggered by demand, not worker events.
                         }
-                        WorkloadState::Resuming {
-                            pod_id,
-                            worker_id: resume_wid,
+                        WorkloadState::Active {
+                            pod: PodSlot { pod_id, worker_id: resume_wid, pod_state: PodState::Resuming { .. } },
                             ..
                         } => {
                             if wid.0 == resume_wid.0 {
@@ -611,7 +606,7 @@ impl Model for NamespaceModel {
         if self.enable_service_addition
             && !state.service_added
             && ns.status == NamespaceStatus::Active
-            && ns.workloads.values().any(|wl| matches!(wl.state, WorkloadState::Running { .. }))
+            && ns.workloads.values().any(|wl| wl.state.is_running())
         {
             actions.push(ModelAction::AddService);
         }
@@ -799,10 +794,7 @@ impl Model for NamespaceModel {
                 let ns = &state.namespace;
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
-                        WorkloadState::Launching { worker_id, .. }
-                        | WorkloadState::Running { worker_id, .. }
-                        | WorkloadState::Suspending { worker_id, .. }
-                        | WorkloadState::Resuming { worker_id, .. } => {
+                        WorkloadState::Active { pod: PodSlot { worker_id, .. }, .. } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
                             }
@@ -821,10 +813,7 @@ impl Model for NamespaceModel {
                 let ns = &state.namespace;
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
-                        WorkloadState::Launching { pod_id, .. }
-                        | WorkloadState::Running { pod_id, .. }
-                        | WorkloadState::Suspending { pod_id, .. }
-                        | WorkloadState::Resuming { pod_id, .. } => {
+                        WorkloadState::Active { pod: PodSlot { pod_id, .. }, .. } => {
                             if !ns.pods.contains_key(pod_id) {
                                 return false;
                             }
@@ -857,10 +846,7 @@ impl Model for NamespaceModel {
                 let ns = &state.namespace;
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
-                        WorkloadState::Launching { worker_id, .. }
-                        | WorkloadState::Running { worker_id, .. }
-                        | WorkloadState::Suspending { worker_id, .. }
-                        | WorkloadState::Resuming { worker_id, .. } => {
+                        WorkloadState::Active { pod: PodSlot { worker_id, .. }, .. } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
                             }
@@ -893,7 +879,7 @@ impl Model for NamespaceModel {
                     .namespace
                     .workloads
                     .values()
-                    .any(|w| matches!(w.state, WorkloadState::Running { .. }))
+                    .any(|w| w.state.is_running())
             }),
             // Reachability: Can reach Idle after Active (idle timeout scale-down).
             Property::<Self>::sometimes("can reach idle after active", |_model, state| {
@@ -968,7 +954,7 @@ impl Model for NamespaceModel {
                     for (_, svc) in &ns.services {
                         if matches!(svc.state, ServiceState::Pending) {
                             if let Some(wl) = ns.workloads.get(&svc.workload_id) {
-                                if matches!(wl.state, WorkloadState::Running { .. }) {
+                                if wl.state.is_running() {
                                     return false;
                                 }
                             }

@@ -24,7 +24,7 @@ impl TestHarness {
     pub fn assert_workload_running(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_state(ns_id, wl_id);
         assert!(
-            matches!(state, WorkloadState::Running { .. }),
+            state.is_running(),
             "workload '{}/{}': expected Running, got {:?}",
             ns_id, wl_id, state
         );
@@ -105,7 +105,7 @@ impl TestHarness {
     pub fn assert_workload_launching(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_state(ns_id, wl_id);
         assert!(
-            matches!(state, WorkloadState::Launching { .. }),
+            matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }),
             "workload '{}/{}': expected Launching, got {:?}",
             ns_id, wl_id, state
         );
@@ -114,7 +114,7 @@ impl TestHarness {
     pub fn assert_workload_suspending(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_state(ns_id, wl_id);
         assert!(
-            matches!(state, WorkloadState::Suspending { .. }),
+            matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. }),
             "workload '{}/{}': expected Suspending, got {:?}",
             ns_id, wl_id, state
         );
@@ -123,7 +123,7 @@ impl TestHarness {
     pub fn assert_workload_resuming(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_state(ns_id, wl_id);
         assert!(
-            matches!(state, WorkloadState::Resuming { .. }),
+            matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Resuming { .. }, .. }, .. }),
             "workload '{}/{}': expected Resuming, got {:?}",
             ns_id, wl_id, state
         );

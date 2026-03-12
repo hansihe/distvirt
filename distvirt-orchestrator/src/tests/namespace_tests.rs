@@ -169,7 +169,7 @@ fn test_update_spec_removes_service() {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id: pod_id.clone() },
     }, &mut pt);
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Running { .. }));
+    assert!(get_workload_state(&ns).is_running());
 
     // Update spec with no services/workloads — svc1 should be removed.
     let empty_spec = NamespaceSpec {
@@ -199,7 +199,7 @@ fn test_update_spec_removes_launching_service() {
 
     // Reconcile to get the service launching.
     reconcile_active_namespace(&mut ns, &mut pod_counter);
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Launching { .. }));
+    assert!(matches!(get_workload_state(&ns), WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }));
 
     // Update spec with no services — should stop the launching pod and cancel the launch timer.
     let empty_spec = NamespaceSpec {
@@ -290,7 +290,7 @@ fn test_activation_service_lifecycle() {
     );
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Launching { .. }
+        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
     ));
     assert!(out
         .worker_commands
@@ -308,10 +308,7 @@ fn test_activation_service_lifecycle() {
             pod_id: pod_id.clone(),
         },
     }, &mut pt);
-    assert!(matches!(
-        get_workload_state(&ns),
-        WorkloadState::Running { .. }
-    ));
+    assert!(get_workload_state(&ns).is_running());
     assert!(matches!(
         get_service_state(&ns),
         ServiceState::Active { .. }
@@ -357,7 +354,7 @@ fn test_always_on_service_lifecycle() {
     let _out = reconcile_active_namespace(&mut ns, &mut pod_counter);
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Launching { .. }
+        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
     ));
 
     let pod_id = get_launching_pod_id(&ns);
@@ -369,10 +366,7 @@ fn test_always_on_service_lifecycle() {
             pod_id: pod_id.clone(),
         },
     }, &mut pt);
-    assert!(matches!(
-        get_workload_state(&ns),
-        WorkloadState::Running { .. }
-    ));
+    assert!(get_workload_state(&ns).is_running());
     assert!(matches!(
         get_service_state(&ns),
         ServiceState::Active { .. }
@@ -392,7 +386,7 @@ fn test_always_on_service_lifecycle() {
     );
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Launching { .. }
+        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
     ));
 }
 
@@ -420,10 +414,7 @@ fn test_worker_loss_during_active_service() {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
     }, &mut pt);
-    assert!(matches!(
-        get_workload_state(&ns),
-        WorkloadState::Running { .. }
-    ));
+    assert!(get_workload_state(&ns).is_running());
 
     // Worker lost → workload enters WaitingForCapacity (demand preserved),
     // service stays NeedBackend (re-activated to wait for recovery).
@@ -458,9 +449,8 @@ fn test_launch_timeout() {
         &mut pod_counter,
     );
     let (pod_id, launch_timeout) = match get_workload_state(&ns) {
-        WorkloadState::Launching {
-            pod_id,
-            launch_timeout,
+        WorkloadState::Active {
+            pod: PodSlot { pod_id, pod_state: PodState::Launching { launch_timeout }, .. },
             ..
         } => (pod_id.clone(), launch_timeout.clone()),
         other => panic!("expected Launching, got {:?}", other),
@@ -473,7 +463,11 @@ fn test_launch_timeout() {
     }, &mut pt);
     assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
     assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
-    assert!(!ns.pod_map.contains(&pod_id));
+    // Pod stays in pod_map until PodExited/PodFailed confirms it's gone.
+    assert!(ns.pod_map.contains(&pod_id));
+    // Pod should be in the workload's retiring list.
+    let wl = ns.workloads.get(&wl_id()).expect("workload exists");
+    assert!(wl.is_retiring(&pod_id));
     assert!(out
         .worker_commands
         .iter()
@@ -711,7 +705,7 @@ fn test_stateful_destroy_with_running_pod() {
             pod_id: pod_id.clone(),
         },
     }, &mut pt);
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Running { .. }));
+    assert!(get_workload_state(&ns).is_running());
 
     // Delete namespace — stateful: not immediately destroyed.
     let out = ns.step(NamespaceInput::Delete {
@@ -818,10 +812,7 @@ fn test_namespace_failed_treats_like_worker_loss() {
         worker_id: worker_id(1),
         event: WorkerEvent::PodRunning { pod_id },
     }, &mut pt);
-    assert!(matches!(
-        get_workload_state(&ns),
-        WorkloadState::Running { .. }
-    ));
+    assert!(get_workload_state(&ns).is_running());
 
     // NamespaceFailed should act like worker loss: workload enters WaitingForCapacity
     // (demand preserved), service stays NeedBackend.
@@ -924,7 +915,7 @@ fn test_outer_layer_scheduling_picks_worker() {
     }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Launching { .. }
+        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
     ));
     assert!(out
         .worker_commands
@@ -968,7 +959,7 @@ fn test_waiting_for_capacity_no_workers() {
     }, &mut pt);
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Launching { .. }
+        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
     ));
     assert!(out.worker_commands.iter().any(|(wid, cmd)| {
         *wid == worker_id(1) && matches!(cmd, WorkerCommand::LaunchPod { .. })
@@ -1029,7 +1020,7 @@ fn test_full_activation_lifecycle_through_orchestrator() {
     let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
     assert!(matches!(
         ns.workloads[&wl_id()].state,
-        WorkloadState::Launching { .. }
+        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
     ));
     assert!(out
         .worker_commands
@@ -1038,7 +1029,7 @@ fn test_full_activation_lifecycle_through_orchestrator() {
 
     // Get pod_id from Launching state.
     let pod_id = match &ns.workloads[&wl_id()].state {
-        WorkloadState::Launching { pod_id, .. } => pod_id.clone(),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
         _ => panic!("expected Launching"),
     };
 
@@ -1053,10 +1044,7 @@ fn test_full_activation_lifecycle_through_orchestrator() {
         },
     });
     let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
-    assert!(matches!(
-        ns.workloads[&wl_id()].state,
-        WorkloadState::Running { .. }
-    ));
+    assert!(ns.workloads[&wl_id()].state.is_running());
     assert!(matches!(
         ns.services[&svc_id()].state,
         ServiceState::Active { .. }

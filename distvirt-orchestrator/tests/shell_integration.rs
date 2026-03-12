@@ -182,7 +182,7 @@ async fn test_always_on_service_full_lifecycle() {
         let orch = shell.orchestrator();
         if let Some(ns) = orch.namespaces.get(&NamespaceId::from("ns-test")) {
             let wl = ns.workloads.get(&WorkloadId("echo".to_string()));
-            if matches!(wl.map(|w| &w.state), Some(WorkloadState::Running { .. })) {
+            if wl.map(|w| w.state.is_running()).unwrap_or(false) {
                 break;
             }
         }
@@ -206,7 +206,7 @@ async fn test_always_on_service_full_lifecycle() {
         .get(&WorkloadId("echo".to_string()))
         .expect("workload should exist");
     assert!(
-        matches!(wl.state, WorkloadState::Running { .. }),
+        wl.state.is_running(),
         "workload should be Running, got {:?}",
         wl.state
     );

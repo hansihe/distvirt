@@ -638,38 +638,36 @@ pub enum NamespaceStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PodState {
+    Launching { launch_timeout: TimerKey },
+    Running,
+    Suspending { artifact_id: ArtifactId, suspend_timeout: TimerKey },
+    Resuming { artifact_id: ArtifactId, resume_timeout: TimerKey },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PodSlot {
+    pub pod_id: PodId,
+    pub worker_id: WorkerId,
+    pub pod_state: PodState,
+}
+
+/// A pod that has been told to stop but hasn't confirmed gone yet.
+/// Tracked in `WorkloadStateMachine.retiring` until PodGone confirms termination.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RetiredPod {
+    pub pod_id: PodId,
+    pub worker_id: WorkerId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkloadState {
     Dormant,
     WaitingForCapacity,
-    Launching {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        launch_timeout: TimerKey,
-        pending: PendingIntent,
-    },
-    Running {
-        pod_id: PodId,
-        worker_id: WorkerId,
-    },
-    /// Pod is being suspended. SuspendPod sent, waiting for PodSuspended.
-    Suspending {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        artifact_id: ArtifactId,
-        suspend_timeout: TimerKey,
-        pending: PendingIntent,
-    },
+    Active { pod: PodSlot, pending: PendingIntent },
     /// Pod is suspended. Artifact tracked in placement table.
     Suspended {
         artifact_id: ArtifactId,
-    },
-    /// Pod is being resumed from snapshot. ResumePod sent, waiting for PodRunning.
-    Resuming {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        artifact_id: ArtifactId,
-        resume_timeout: TimerKey,
-        pending: PendingIntent,
     },
     /// Waiting before retrying after a pod failure.
     RetryBackoff {
@@ -748,11 +746,13 @@ impl WorkloadState {
         match self {
             WorkloadState::Dormant => "dormant",
             WorkloadState::WaitingForCapacity => "waiting_for_capacity",
-            WorkloadState::Launching { .. } => "launching",
-            WorkloadState::Running { .. } => "running",
-            WorkloadState::Suspending { .. } => "suspending",
+            WorkloadState::Active { pod, .. } => match &pod.pod_state {
+                PodState::Launching { .. } => "launching",
+                PodState::Running => "running",
+                PodState::Suspending { .. } => "suspending",
+                PodState::Resuming { .. } => "resuming",
+            },
             WorkloadState::Suspended { .. } => "suspended",
-            WorkloadState::Resuming { .. } => "resuming",
             WorkloadState::RetryBackoff { .. } => "retry_backoff",
             WorkloadState::Failed => "failed",
             WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
@@ -761,10 +761,7 @@ impl WorkloadState {
 
     pub fn pod_id(&self) -> Option<&PodId> {
         match self {
-            WorkloadState::Launching { pod_id, .. }
-            | WorkloadState::Running { pod_id, .. }
-            | WorkloadState::Suspending { pod_id, .. }
-            | WorkloadState::Resuming { pod_id, .. } => Some(pod_id),
+            WorkloadState::Active { pod, .. } => Some(&pod.pod_id),
             WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
             _ => None,
         }
@@ -772,10 +769,7 @@ impl WorkloadState {
 
     pub fn worker_id(&self) -> Option<&WorkerId> {
         match self {
-            WorkloadState::Launching { worker_id, .. }
-            | WorkloadState::Running { worker_id, .. }
-            | WorkloadState::Suspending { worker_id, .. }
-            | WorkloadState::Resuming { worker_id, .. } => Some(worker_id),
+            WorkloadState::Active { pod, .. } => Some(&pod.worker_id),
             WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
             _ => None,
         }
@@ -783,10 +777,33 @@ impl WorkloadState {
 
     pub fn artifact_id(&self) -> Option<&ArtifactId> {
         match self {
-            WorkloadState::Suspending { artifact_id, .. }
-            | WorkloadState::Suspended { artifact_id, .. }
-            | WorkloadState::Resuming { artifact_id, .. } => Some(artifact_id),
+            WorkloadState::Active {
+                pod: PodSlot {
+                    pod_state: PodState::Suspending { artifact_id, .. }
+                        | PodState::Resuming { artifact_id, .. },
+                    ..
+                },
+                ..
+            }
+            | WorkloadState::Suspended { artifact_id, .. } => Some(artifact_id),
             WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
+            _ => None,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self,
+            WorkloadState::Active {
+                pod: PodSlot { pod_state: PodState::Running, .. },
+                ..
+            }
+        )
+    }
+
+    pub fn active_pod(&self) -> Option<&PodSlot> {
+        match self {
+            WorkloadState::Active { pod, .. } => Some(pod),
             _ => None,
         }
     }

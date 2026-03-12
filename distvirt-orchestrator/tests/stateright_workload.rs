@@ -38,6 +38,7 @@ struct WlModelState {
     step_count: usize,
     has_active_flows: bool,
     needs_successful_boot: bool,
+    retiring: Vec<RetiredPod>,
 }
 
 // --- Actions ---
@@ -74,9 +75,15 @@ fn ns_id() -> NamespaceId {
 /// Extract the pending intent from a workload state, if it's a transition state.
 fn get_pending(state: &WorkloadState) -> Option<PendingIntent> {
     match state {
-        WorkloadState::Launching { pending, .. }
-        | WorkloadState::Suspending { pending, .. }
-        | WorkloadState::Resuming { pending, .. } => Some(*pending),
+        WorkloadState::Active {
+            pod: PodSlot { pod_state, .. },
+            pending,
+        } => match pod_state {
+            PodState::Launching { .. } | PodState::Suspending { .. } | PodState::Resuming { .. } => {
+                Some(*pending)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -97,6 +104,7 @@ impl Model for WorkloadModel {
             step_count: 0,
             has_active_flows: false,
             needs_successful_boot: false,
+            retiring: Vec::new(),
         }]
     }
 
@@ -136,85 +144,84 @@ impl Model for WorkloadModel {
                     });
                 }
             }
-            WorkloadState::Launching {
-                pod_id, worker_id, ..
+            WorkloadState::Active {
+                pod: PodSlot { pod_id, worker_id, pod_state },
+                ..
             } => {
-                // Pod can start running.
-                actions.push(WlModelAction::PodRunning {
-                    pod_id: pod_id.clone(),
-                });
-                // Pod can fail during launch.
-                if self.enable_pod_failure {
-                    actions.push(WlModelAction::PodGone {
-                        pod_id: pod_id.clone(),
-                    });
-                }
-                // Worker can disconnect.
-                if self.enable_worker_loss {
-                    actions.push(WlModelAction::WorkerLost {
-                        worker_id: worker_id.clone(),
-                    });
-                }
-            }
-            WorkloadState::Running {
-                pod_id, worker_id, ..
-            } => {
-                // Pod can exit.
-                if self.enable_pod_failure {
-                    actions.push(WlModelAction::PodGone {
-                        pod_id: pod_id.clone(),
-                    });
-                }
-                // Worker can disconnect.
-                if self.enable_worker_loss {
-                    actions.push(WlModelAction::WorkerLost {
-                        worker_id: worker_id.clone(),
-                    });
+                match pod_state {
+                    PodState::Launching { .. } => {
+                        // Pod can start running.
+                        actions.push(WlModelAction::PodRunning {
+                            pod_id: pod_id.clone(),
+                        });
+                        // Pod can fail during launch.
+                        if self.enable_pod_failure {
+                            actions.push(WlModelAction::PodGone {
+                                pod_id: pod_id.clone(),
+                            });
+                        }
+                        // Worker can disconnect.
+                        if self.enable_worker_loss {
+                            actions.push(WlModelAction::WorkerLost {
+                                worker_id: worker_id.clone(),
+                            });
+                        }
+                    }
+                    PodState::Running => {
+                        // Pod can exit.
+                        if self.enable_pod_failure {
+                            actions.push(WlModelAction::PodGone {
+                                pod_id: pod_id.clone(),
+                            });
+                        }
+                        // Worker can disconnect.
+                        if self.enable_worker_loss {
+                            actions.push(WlModelAction::WorkerLost {
+                                worker_id: worker_id.clone(),
+                            });
+                        }
+                    }
+                    PodState::Suspending { artifact_id, .. } => {
+                        // Pod can finish suspending successfully.
+                        actions.push(WlModelAction::PodSuspended {
+                            pod_id: pod_id.clone(),
+                            artifact_id: artifact_id.clone(),
+                        });
+                        // Suspend can fail.
+                        actions.push(WlModelAction::PodSuspendFailed {
+                            pod_id: pod_id.clone(),
+                        });
+                        // Pod can die during suspend.
+                        actions.push(WlModelAction::PodGone {
+                            pod_id: pod_id.clone(),
+                        });
+                        if self.enable_worker_loss {
+                            actions.push(WlModelAction::WorkerLost {
+                                worker_id: worker_id.clone(),
+                            });
+                        }
+                    }
+                    PodState::Resuming { .. } => {
+                        actions.push(WlModelAction::PodRunning {
+                            pod_id: pod_id.clone(),
+                        });
+                        if self.enable_pod_failure {
+                            actions.push(WlModelAction::PodGone {
+                                pod_id: pod_id.clone(),
+                            });
+                        }
+                        if self.enable_worker_loss {
+                            actions.push(WlModelAction::WorkerLost {
+                                worker_id: worker_id.clone(),
+                            });
+                        }
+                    }
                 }
             }
             WorkloadState::Dormant => {}
-            WorkloadState::Suspending {
-                pod_id, worker_id, artifact_id, ..
-            } => {
-                // Pod can finish suspending successfully.
-                actions.push(WlModelAction::PodSuspended {
-                    pod_id: pod_id.clone(),
-                    artifact_id: artifact_id.clone(),
-                });
-                // Suspend can fail.
-                actions.push(WlModelAction::PodSuspendFailed {
-                    pod_id: pod_id.clone(),
-                });
-                // Pod can die during suspend.
-                actions.push(WlModelAction::PodGone {
-                    pod_id: pod_id.clone(),
-                });
-                if self.enable_worker_loss {
-                    actions.push(WlModelAction::WorkerLost {
-                        worker_id: worker_id.clone(),
-                    });
-                }
-            }
             WorkloadState::Suspended { .. } => {
                 // Worker loss for suspended state is now handled by the namespace layer
                 // via placement table. The workload SM no longer stores worker_id here.
-            }
-            WorkloadState::Resuming {
-                pod_id, worker_id, ..
-            } => {
-                actions.push(WlModelAction::PodRunning {
-                    pod_id: pod_id.clone(),
-                });
-                if self.enable_pod_failure {
-                    actions.push(WlModelAction::PodGone {
-                        pod_id: pod_id.clone(),
-                    });
-                }
-                if self.enable_worker_loss {
-                    actions.push(WlModelAction::WorkerLost {
-                        worker_id: worker_id.clone(),
-                    });
-                }
             }
             WorkloadState::RetryBackoff { .. } => {
                 // Timer fire is already covered by the pending_timers loop.
@@ -238,6 +245,7 @@ impl Model for WorkloadModel {
         sm.consecutive_failures = state.consecutive_failures;
         sm.has_active_flows = state.has_active_flows;
         sm.needs_successful_boot = state.needs_successful_boot;
+        sm.retiring = state.retiring.clone();
 
         let mut next_pod_id = state.next_pod_id;
         let ns = ns_id();
@@ -325,6 +333,7 @@ impl Model for WorkloadModel {
             step_count: state.step_count + 1,
             has_active_flows: sm.has_active_flows,
             needs_successful_boot: sm.needs_successful_boot,
+            retiring: sm.retiring,
         })
     }
 
@@ -370,7 +379,7 @@ impl Model for WorkloadModel {
             }),
             // Safety: Running implies consecutive_failures == 0.
             Property::<Self>::always("pod running resets failures", |_model, state| {
-                if matches!(state.state, WorkloadState::Running { .. }) {
+                if state.state.is_running() {
                     state.consecutive_failures == 0
                 } else {
                     true
@@ -383,8 +392,9 @@ impl Model for WorkloadModel {
             }),
             // Safety: Launching state always has a pending launch timeout timer.
             Property::<Self>::always("launching has timeout timer", |_model, state| {
-                if let WorkloadState::Launching {
-                    ref launch_timeout, ..
+                if let WorkloadState::Active {
+                    pod: PodSlot { pod_state: PodState::Launching { ref launch_timeout }, .. },
+                    ..
                 } = state.state
                 {
                     state.pending_timers.contains(launch_timeout)
@@ -394,7 +404,7 @@ impl Model for WorkloadModel {
             }),
             // Safety: Running state has no launch timeout timer.
             Property::<Self>::always("running has no launch timer", |_model, state| {
-                if let WorkloadState::Running { .. } = state.state {
+                if state.state.is_running() {
                     !state.pending_timers.iter().any(|tk| {
                         matches!(tk, TimerKey::LaunchTimeout { .. })
                     })
@@ -412,12 +422,13 @@ impl Model for WorkloadModel {
             }),
             // Reachability: Can reach Running state.
             Property::<Self>::sometimes("can reach running", |_model, state| {
-                matches!(state.state, WorkloadState::Running { .. })
+                state.state.is_running()
             }),
             // Safety: Suspending state always has a pending suspend timeout timer.
             Property::<Self>::always("suspending has timeout timer", |_model, state| {
-                if let WorkloadState::Suspending {
-                    ref suspend_timeout, ..
+                if let WorkloadState::Active {
+                    pod: PodSlot { pod_state: PodState::Suspending { ref suspend_timeout, .. }, .. },
+                    ..
                 } = state.state
                 {
                     state.pending_timers.contains(suspend_timeout)
@@ -427,8 +438,9 @@ impl Model for WorkloadModel {
             }),
             // Safety: Resuming state always has a pending resume timeout timer.
             Property::<Self>::always("resuming has timeout timer", |_model, state| {
-                if let WorkloadState::Resuming {
-                    ref resume_timeout, ..
+                if let WorkloadState::Active {
+                    pod: PodSlot { pod_state: PodState::Resuming { ref resume_timeout, .. }, .. },
+                    ..
                 } = state.state
                 {
                     state.pending_timers.contains(resume_timeout)
@@ -477,7 +489,7 @@ impl Model for WorkloadModel {
                     return true;
                 }
                 // Running after having been through multiple pod attempts.
-                matches!(state.state, WorkloadState::Running { .. })
+                state.state.is_running()
                     && state.next_pod_id > 5
             }),
         ]

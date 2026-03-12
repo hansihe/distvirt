@@ -239,7 +239,7 @@ pub(super) fn get_service_state(ns: &NamespaceStateMachine) -> &ServiceState {
 /// Helper to extract pod_id from a workload in Launching state.
 pub(super) fn get_launching_pod_id(ns: &NamespaceStateMachine) -> PodId {
     match get_workload_state(ns) {
-        WorkloadState::Launching { pod_id, .. } => pod_id.clone(),
+        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
         other => panic!("expected Launching, got {:?}", other),
     }
 }

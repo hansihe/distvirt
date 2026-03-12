@@ -104,6 +104,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
                     event: SmWorkloadEvent::PodRunning {
@@ -130,6 +131,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+
                 self.emit_endpoint_update_for_workload(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
@@ -157,6 +159,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+
                 self.emit_endpoint_update_for_workload(&wl_id, out);
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: wl_id.clone(),
@@ -290,6 +293,7 @@ impl NamespaceStateMachine {
                     None => return,
                 };
                 let wl_id = pod_info.workload_id.clone();
+
                 // Clean up any Writing placement entry for this artifact.
                 if let Some(wl) = self.workloads.get(&wl_id) {
                     if let Some(artifact_id) = wl.state.artifact_id() {
@@ -361,8 +365,20 @@ impl NamespaceStateMachine {
             .map(|(wl_id, _)| wl_id.clone())
             .collect();
 
-        // Forward WorkerLost to affected workloads.
-        for wl_id in affected_workloads.into_iter().chain(stale_suspended) {
+        // Workloads with retiring pods on the lost worker.
+        let retiring_affected: Vec<WorkloadId> = self
+            .workloads
+            .iter()
+            .filter(|(_, wl)| wl.retiring.iter().any(|r| r.worker_id == *worker_id))
+            .map(|(wl_id, _)| wl_id.clone())
+            .collect();
+
+        // Forward WorkerLost to affected workloads (dedup via BTreeSet).
+        let mut seen = std::collections::BTreeSet::new();
+        for wl_id in affected_workloads.into_iter().chain(stale_suspended).chain(retiring_affected) {
+            if !seen.insert(wl_id.clone()) {
+                continue;
+            }
             let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
                 wl.step(
                     WorkloadInput::WorkerLost {
@@ -441,19 +457,16 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                // Clean up pod from pods map.
-                if let TimerKey::LaunchTimeout { pod_id, .. } = timer_key {
-                    self.pod_map.remove(pod_id);
-                }
+                // Pod stays in pod_map until PodExited/PodFailed confirms it's gone.
+                // The workload SM has added it to its retiring list.
                 self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
             TimerKey::SuspendTimeout {
                 workload_id,
-                pod_id,
+                ..
             } => {
                 let workload_id = workload_id.clone();
-                let pod_id = pod_id.clone();
                 let wl_outputs = if let Some(wl) = self.workloads.get_mut(&workload_id) {
                     wl.step(
                         WorkloadInput::TimerFired {
@@ -464,17 +477,15 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                // Clean up pod from pods map on timeout.
-                self.pod_map.remove(&pod_id);
+                // Pod stays in pod_map until PodExited/PodFailed confirms it's gone.
                 self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
             TimerKey::ResumeTimeout {
                 workload_id,
-                pod_id,
+                ..
             } => {
                 let workload_id = workload_id.clone();
-                let pod_id = pod_id.clone();
                 let wl_outputs = if let Some(wl) = self.workloads.get_mut(&workload_id) {
                     wl.step(
                         WorkloadInput::TimerFired {
@@ -485,8 +496,7 @@ impl NamespaceStateMachine {
                 } else {
                     return;
                 };
-                // Clean up pod from pods map on timeout.
-                self.pod_map.remove(&pod_id);
+                // Pod stays in pod_map until PodExited/PodFailed confirms it's gone.
                 self.translate_workload_effects(&workload_id, wl_outputs, placement_table, out);
                 self.reconcile_demand(&workload_id, placement_table, out);
             }
