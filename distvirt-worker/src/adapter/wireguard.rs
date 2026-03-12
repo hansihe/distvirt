@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use crate::packet::{FABRIC_HDR_SZ, complete_checksum, ip_packet_dst, with_fabric_header};
 use crate::fabric::ChannelPort;
 
+use async_trait::async_trait;
 use super::{AdapterPortHandle, IngressAdapter};
 
 /// Maximum UDP datagram size (WireGuard max is ~65535 but typical MTU is much smaller).
@@ -563,12 +564,13 @@ impl WireGuardAdapter {
     }
 }
 
+#[async_trait]
 impl IngressAdapter for WireGuardAdapter {
     fn adapter_type(&self) -> &str {
         "wireguard"
     }
 
-    fn create_port(
+    async fn create_port(
         &self,
         namespace_id: &str,
     ) -> anyhow::Result<(ChannelPort, AdapterPortHandle)> {
@@ -583,28 +585,21 @@ impl IngressAdapter for WireGuardAdapter {
         ));
 
         // Store the namespace channel in state.
-        // We need to block_in_place since we're in a sync fn but need async.
-        let state = Arc::clone(&self.state);
-        let ns_id_clone = ns_id.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut s = state.write().await;
-                s.namespace_channels.insert(
-                    ns_id_clone,
-                    NamespaceChannel {
-                        adapter_tx,
-                        _egress_task: egress_task,
-                    },
-                );
-            });
-        });
+        {
+            let mut s = self.state.write().await;
+            s.namespace_channels.insert(
+                ns_id.clone(),
+                NamespaceChannel {
+                    adapter_tx,
+                    _egress_task: egress_task,
+                },
+            );
+        }
 
         // Create a drop guard that removes the namespace channel.
-        let drop_state = Arc::clone(&self.state);
-        let drop_ns_id = ns_id;
         let drop_guard = DropGuard {
-            state: drop_state,
-            namespace_id: drop_ns_id,
+            state: Arc::clone(&self.state),
+            namespace_id: ns_id,
         };
 
         let handle = AdapterPortHandle {
@@ -872,6 +867,7 @@ mod tests {
         let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
         let (_port, _handle) = adapter
             .create_port("ns1")
+            .await
             .expect("create_port failed");
 
         // Verify namespace channel was registered.
@@ -889,7 +885,7 @@ mod tests {
         let port = adapter_port(&adapter);
 
         // Create port + add peer.
-        let (_port, _handle) = adapter.create_port("ns1").expect("create_port failed");
+        let (_port, _handle) = adapter.create_port("ns1").await.expect("create_port failed");
         adapter
             .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
@@ -920,7 +916,7 @@ mod tests {
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 
-        let (fabric_port, _handle) = adapter.create_port("ns1").expect("create_port failed");
+        let (fabric_port, _handle) = adapter.create_port("ns1").await.expect("create_port failed");
         adapter
             .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
@@ -985,7 +981,7 @@ mod tests {
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 
-        let (fabric_port, _handle) = adapter.create_port("ns1").expect("create_port failed");
+        let (fabric_port, _handle) = adapter.create_port("ns1").await.expect("create_port failed");
         adapter
             .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await

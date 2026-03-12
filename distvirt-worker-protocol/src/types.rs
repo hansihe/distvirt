@@ -427,6 +427,7 @@ pub enum WorkerEvent {
     EndpointFlowStatus {
         namespace_id: NamespaceId,
         ip: Ipv4Addr,
+        service_id: Option<ServiceId>,
         has_active_flows: bool,
     },
 }

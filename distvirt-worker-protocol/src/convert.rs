@@ -1375,12 +1375,20 @@ pub fn write_worker_event(
         WorkerEvent::EndpointFlowStatus {
             namespace_id,
             ip,
+            service_id,
             has_active_flows,
         } => {
             let mut b = builder.init_endpoint_flow_status();
             b.set_namespace_id(namespace_id.as_ref());
             write_ipv4(&mut b.reborrow().init_ip(), ip);
             b.set_has_active_flows(*has_active_flows);
+            match service_id {
+                Some(sid) => {
+                    b.set_has_service_id(true);
+                    b.set_service_id(sid.as_ref());
+                }
+                None => b.set_has_service_id(false),
+            }
         }
     }
 }
@@ -1597,9 +1605,15 @@ pub fn read_worker_event(
         }
         EndpointFlowStatus(r) => {
             let r = r?;
+            let service_id = if r.get_has_service_id() {
+                Some(ServiceId::from(r.get_service_id()?.to_str()?))
+            } else {
+                None
+            };
             Ok(WorkerEvent::EndpointFlowStatus {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 ip: read_ipv4(r.get_ip()?),
+                service_id,
                 has_active_flows: r.get_has_active_flows(),
             })
         }

@@ -19,7 +19,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::AdapterManager;
+use crate::fs::Fs;
 use crate::image_provider::ImageProvider;
+use crate::fabric::gateway::GatewayProvider;
+use crate::resource_monitor::{ResourceMonitor, HostResourceMonitor};
 use namespace::{FatalError, NamespaceState};
 use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor, send_event, STOP_POD_TIMEOUT, FORCE_STOP_TIMEOUT};
 use tunnel_manager::TunnelManager;
@@ -31,12 +34,14 @@ use resources::*;
 ///
 /// Receives `WorkerCommand`s via a `WorkerConnection`, sends `WorkerEvent`s back,
 /// and opens yamux log streams for container output.
-pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
+pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static, F: Fs = crate::fs::TokioFs, R: ResourceMonitor = HostResourceMonitor> {
     kernel_path: PathBuf,
     rootfs_image_path: PathBuf,
     namespaces: HashMap<NamespaceId, NamespaceState>,
     vmm: Arc<V>,
     image_provider: Arc<P>,
+    _fs: std::marker::PhantomData<F>,
+    _resource_monitor: std::marker::PhantomData<R>,
     /// Channel for background tasks to send events back to the main loop.
     ///
     /// The 256-element buffer provides intentional backpressure: if the main
@@ -57,11 +62,11 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static> {
     tunnel_manager: Option<TunnelManager>,
     /// Assigned worker ID from handshake (set after WorkerAccepted).
     worker_id: Option<WorkerId>,
-    /// Use channel-based gateway instead of TUN (for sim tests, no root).
-    sim_gateway: bool,
+    /// Gateway provider for creating egress ports per namespace.
+    gateway_provider: G,
 }
 
-impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
+impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static, F: Fs, R: ResourceMonitor> Worker<V, P, G, F, R> {
     pub fn new(
         kernel_path: PathBuf,
         rootfs_image_path: PathBuf,
@@ -69,6 +74,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         image_provider: P,
         component_dir: Option<PathBuf>,
         public_endpoint: String,
+        gateway_provider: G,
     ) -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel(256);
         let activator_runtime = component_dir.and_then(|dir| {
@@ -80,7 +86,16 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                 }
             }
         });
-        let default_pool_path = std::env::temp_dir().join(format!("distvirt-snapshots-{}", std::process::id()));
+        // Include a per-instance counter so parallel tests in the same process
+        // don't share snapshot directories and stomp each other's artifacts.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let default_pool_path = std::env::temp_dir().join(format!(
+            "distvirt-snapshots-{}-{}",
+            std::process::id(),
+            instance_id,
+        ));
         let mut pools = HashMap::new();
         pools.insert(PoolId::from("local-default"), default_pool_path);
         Worker {
@@ -89,6 +104,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             namespaces: HashMap::new(),
             vmm: Arc::new(vmm),
             image_provider: Arc::new(image_provider),
+            _fs: std::marker::PhantomData,
+            _resource_monitor: std::marker::PhantomData,
             bg_event_tx,
             bg_event_rx,
             worker_token: CancellationToken::new(),
@@ -98,14 +115,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
             pools,
             tunnel_manager: None,
             worker_id: None,
-            sim_gateway: false,
+            gateway_provider,
         }
-    }
-
-    /// Enable channel-based gateway (no TUN device, no root required).
-    pub fn with_sim_gateway(mut self) -> Self {
-        self.sim_gateway = true;
-        self
     }
 
     /// Look up a pool's root directory by ID.
@@ -231,7 +242,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let mut last_pools: Vec<PoolInfo> = Vec::new();
 
         // PSI pressure reporting (10s interval, Linux only).
-        let psi_available = read_all_psi().is_some();
+        let psi_available = R::read_psi().await.is_some();
         if !psi_available {
             log::info!("worker: PSI not available, pressure will use static accounting only");
         }
@@ -359,7 +370,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
                     }
                 }
                 _ = psi_interval.tick(), if psi_available => {
-                    if let Some(psi) = read_all_psi() {
+                    if let Some(psi) = R::read_psi().await {
                         let should_send = match &last_psi {
                             Some(old) => psi_changed_significantly(old, &psi),
                             None => true,
@@ -582,22 +593,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
     ) -> Result<(), FatalError> {
         let segment_id = network.segment_id;
 
-        let (ns, event) = if self.sim_gateway {
-            NamespaceState::new_sim(
-                &self.worker_token,
-                &self.bg_event_tx,
-                &namespace_id,
-                network,
-            )?
-        } else {
-            NamespaceState::new(
-                &self.worker_token,
-                &self.bg_event_tx,
-                &self.adapter_manager,
-                &namespace_id,
-                network,
-            )?
-        };
+        let (ns, event) = NamespaceState::new(
+            &self.worker_token,
+            &self.bg_event_tx,
+            &self.adapter_manager,
+            &self.gateway_provider,
+            &namespace_id,
+            network,
+        ).await?;
 
         // Notify tunnel manager if this namespace has a segment_id.
         if let Some(seg) = segment_id {
@@ -654,7 +657,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let (suspend_tx, suspend_rx) = mpsc::channel(1);
 
         let supervisor = TaskHandle::spawn(async move {
-            pod_supervisor(
+            pod_supervisor::<V, P, F>(
                 vmm,
                 image_provider,
                 fabric,
@@ -872,7 +875,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         // Load snapshot metadata.
         let snapshot_dir = pool_base.join(artifact_id.as_ref());
         let metadata_path = snapshot_dir.join("metadata.json");
-        let metadata_bytes = match tokio::fs::read(&metadata_path).await {
+        let metadata_bytes = match F::read(&metadata_path).await {
             Ok(bytes) => bytes,
             Err(e) => {
                 send_event(
@@ -924,7 +927,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         let (suspend_tx, suspend_rx) = mpsc::channel(1);
 
         let supervisor = TaskHandle::spawn(async move {
-            pod_resume_supervisor(
+            pod_resume_supervisor::<V, F>(
                 vmm,
                 fabric,
                 cancel_clone,
@@ -1104,7 +1107,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static> Worker<V, P> {
         };
         let snapshot_dir = pool_base.join(artifact_id.as_ref());
         if snapshot_dir.exists() {
-            if let Err(e) = tokio::fs::remove_dir_all(&snapshot_dir).await {
+            if let Err(e) = F::remove_dir_all(&snapshot_dir).await {
                 log::error!(
                     "delete_artifact: failed to remove {}: {}",
                     snapshot_dir.display(),
@@ -1177,20 +1180,21 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn make_worker() -> Worker<StubVmm, StubImageProvider> {
-        Worker::new(
+    fn make_worker() -> Worker<StubVmm, StubImageProvider, crate::sim_traffic::SimGatewayProvider, crate::fs::SyncFs> {
+        Worker::<_, _, _, crate::fs::SyncFs>::new(
             PathBuf::from("/fake/kernel"),
             PathBuf::from("/fake/rootfs"),
             StubVmm,
             StubImageProvider,
             None, // no activator component dir
             String::new(),
+            crate::sim_traffic::SimGatewayProvider::new(),
         )
     }
 
     /// Inject a NamespaceState directly into the worker, bypassing
     /// handle_create_namespace (which requires root for TUN/gateway).
-    fn inject_namespace(worker: &mut Worker<StubVmm, StubImageProvider>, ns_id: &str) {
+    fn inject_namespace(worker: &mut Worker<StubVmm, StubImageProvider, crate::sim_traffic::SimGatewayProvider, crate::fs::SyncFs>, ns_id: &str) {
         let fabric = Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let tables = fabric.tables();
 
@@ -1429,7 +1433,7 @@ mod tests {
         };
         // Use FailingImageProvider so the supervisor fails quickly —
         // we just want to verify the PodState was registered.
-        let mut w = Worker::new(
+        let mut w = Worker::<_, _, _, crate::fs::SyncFs>::new(
             PathBuf::from("/fake/kernel"),
             PathBuf::from("/fake/rootfs"),
             vmm,
@@ -1438,6 +1442,7 @@ mod tests {
             },
             None,
             String::new(),
+            crate::sim_traffic::SimGatewayProvider::new(),
         );
 
         // Inject namespace manually.

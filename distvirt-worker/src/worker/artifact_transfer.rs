@@ -1,3 +1,5 @@
+// TODO: artifact_transfer uses tokio::fs and spawn_blocking directly.
+// Once sim tests exercise artifact transfers, these should go through the Fs trait too.
 //! Artifact transfer: stream artifacts between pools (local or cross-worker via TCP).
 //!
 //! Wire format for TCP transfers:

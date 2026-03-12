@@ -149,12 +149,12 @@ impl OrchestratorShell {
                     },
                 })
             }
-            ProtoEvent::EndpointFlowStatus { namespace_id, ip, has_active_flows } => {
+            ProtoEvent::EndpointFlowStatus { namespace_id, ip, service_id, has_active_flows } => {
                 Some(OrchestratorInput::NamespaceInput {
                     namespace_id,
                     input: NamespaceInput::WorkerEvent {
                         worker_id,
-                        event: WorkerEvent::EndpointFlowStatus { ip, has_active_flows },
+                        event: WorkerEvent::EndpointFlowStatus { ip, service_id, has_active_flows },
                     },
                 })
             }

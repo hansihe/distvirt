@@ -6,13 +6,14 @@
 
 use std::path::Path;
 use std::process::ExitStatus;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
-use super::guest_sim::{ContainerBehavior, GuestSimConfig, run_guest_sim};
+use super::guest_sim::{ContainerBehavior, GuestSimConfig, SuspendBehavior, run_guest_sim};
 use super::{NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
 use crate::fabric::FabricPort;
 use crate::task_handle::TaskHandle;
@@ -31,7 +32,9 @@ impl CrashHandle {
 /// Test VMM that launches in-process guest simulators.
 pub struct TestVmm {
     pub container_behavior: ContainerBehavior,
+    pub suspend_behavior: SuspendBehavior,
     crash_handle_tx: Option<mpsc::UnboundedSender<CrashHandle>>,
+    fail_counter: Option<(Arc<AtomicU32>, u32)>,
 }
 
 impl TestVmm {
@@ -39,7 +42,9 @@ impl TestVmm {
     pub fn new(container_behavior: ContainerBehavior) -> Self {
         TestVmm {
             container_behavior,
+            suspend_behavior: SuspendBehavior::Immediate,
             crash_handle_tx: None,
+            fail_counter: None,
         }
     }
 
@@ -52,10 +57,49 @@ impl TestVmm {
         (
             TestVmm {
                 container_behavior,
+                suspend_behavior: SuspendBehavior::Immediate,
                 crash_handle_tx: Some(tx),
+                fail_counter: None,
             },
             rx,
         )
+    }
+
+    /// Create a TestVmm where `PrepareSuspend` hangs (never responds).
+    pub fn with_suspend_hang(container_behavior: ContainerBehavior) -> Self {
+        TestVmm {
+            container_behavior,
+            suspend_behavior: SuspendBehavior::Hang,
+            crash_handle_tx: None,
+            fail_counter: None,
+        }
+    }
+
+    /// Create a TestVmm that fails the first `fail_times` launches, then succeeds.
+    pub fn with_fail_then_run(fail_times: u32) -> (Self, Arc<AtomicU32>) {
+        let counter = Arc::new(AtomicU32::new(0));
+        (
+            TestVmm {
+                container_behavior: ContainerBehavior::RunUntilSignaled,
+                suspend_behavior: SuspendBehavior::Immediate,
+                crash_handle_tx: None,
+                fail_counter: Some((counter.clone(), fail_times)),
+            },
+            counter,
+        )
+    }
+
+    fn make_config(&self) -> GuestSimConfig {
+        let fail_before_ready = if let Some((ref counter, fail_times)) = self.fail_counter {
+            counter.fetch_add(1, Ordering::SeqCst) < fail_times
+        } else {
+            false
+        };
+        GuestSimConfig {
+            container_behavior: self.container_behavior.clone(),
+            suspend_behavior: self.suspend_behavior.clone(),
+            fail_before_ready,
+        }
     }
 }
 
@@ -76,7 +120,7 @@ fn zero_exit_status() -> ExitStatus {
 
 /// Spawn a guest sim and return the instance fields.
 fn spawn_guest_sim(
-    behavior: ContainerBehavior,
+    config: GuestSimConfig,
 ) -> anyhow::Result<(
     UnixStream,
     TaskHandle<anyhow::Result<()>>,
@@ -87,16 +131,9 @@ fn spawn_guest_sim(
 
     let (exit_tx, _exit_rx) = watch::channel(None);
 
-    let cloned_behavior = behavior.clone();
     let exit_tx_clone = exit_tx.clone();
     let sim_task = TaskHandle::spawn(async move {
-        let result = run_guest_sim(
-            guest_socket,
-            GuestSimConfig {
-                container_behavior: cloned_behavior,
-            },
-        )
-        .await;
+        let result = run_guest_sim(guest_socket, config).await;
         let _ = exit_tx_clone.send(Some(zero_exit_status()));
         result
     });
@@ -108,7 +145,7 @@ impl Vmm for TestVmm {
     type Instance = TestVmInstance;
 
     async fn launch(&self, _config: &VmConfig) -> anyhow::Result<TestVmInstance> {
-        let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.container_behavior.clone())?;
+        let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.make_config())?;
 
         if let Some(ref tx) = self.crash_handle_tx {
             let _ = tx.send(CrashHandle(exit_tx.clone()));
@@ -128,12 +165,15 @@ impl Vmm for TestVmm {
         _net: Option<&NetConfig>,
     ) -> anyhow::Result<TestVmInstance> {
         // Validate snapshot exists by reading metadata.json.
+        // Uses std::fs instead of tokio::fs because tokio::fs dispatches to
+        // spawn_blocking, which causes flaky tests under `current_thread` +
+        // `start_paused` (the blocking pool is shared across test runtimes and
+        // doesn't advance with fake time).
         let metadata_path = snapshot.snapshot_dir.join("metadata.json");
-        let _bytes = tokio::fs::read(&metadata_path)
-            .await
+        let _bytes = std::fs::read(&metadata_path)
             .context("read metadata.json from snapshot dir")?;
 
-        let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.container_behavior.clone())?;
+        let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.make_config())?;
 
         if let Some(ref tx) = self.crash_handle_tx {
             let _ = tx.send(CrashHandle(exit_tx.clone()));
@@ -181,8 +221,11 @@ impl VmInstance for TestVmInstance {
     }
 
     async fn snapshot(&mut self, snapshot_dir: &Path) -> anyhow::Result<SnapshotArtifacts> {
-        tokio::fs::create_dir_all(snapshot_dir)
-            .await
+        // Uses std::fs instead of tokio::fs because tokio::fs dispatches to
+        // spawn_blocking, which causes flaky tests under `current_thread` +
+        // `start_paused` (the blocking pool is shared across test runtimes and
+        // doesn't advance with fake time).
+        std::fs::create_dir_all(snapshot_dir)
             .context("create snapshot dir")?;
 
         let metadata = SnapshotMetadata {
@@ -195,13 +238,11 @@ impl VmInstance for TestVmInstance {
         // Write metadata.json.
         let metadata_json =
             serde_json::to_vec_pretty(&metadata).context("serialize metadata")?;
-        tokio::fs::write(snapshot_dir.join("metadata.json"), &metadata_json)
-            .await
+        std::fs::write(snapshot_dir.join("metadata.json"), &metadata_json)
             .context("write metadata.json")?;
 
         // Write a small dummy snapshot.bin so dir_size() returns non-zero.
-        tokio::fs::write(snapshot_dir.join("snapshot.bin"), b"test-snapshot")
-            .await
+        std::fs::write(snapshot_dir.join("snapshot.bin"), b"test-snapshot")
             .context("write snapshot.bin")?;
 
         Ok(SnapshotArtifacts {

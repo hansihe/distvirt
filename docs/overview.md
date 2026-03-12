@@ -1,4 +1,8 @@
-# distvirt — System Overview
+---
+title: "distvirt — System Overview"
+sidebar:
+  order: 0
+---
 
 distvirt is a VM-based container runtime in Rust optimized for ultra-fast cold start. Containers run inside Firecracker microVMs with the container process as the only significant guest process — no nested container runtime inside the VM. The driving use case is **scale-to-zero staging environments**: a virtualized network fabric where VMs are spun up on demand when traffic arrives for a dormant service.
 
@@ -18,9 +22,12 @@ Workspace members (from `Cargo.toml`):
 | `distvirt-cli` | CLI binary (`dv` commands — compose-up, status, etc.) |
 | `distvirt-compose` | Docker Compose parsing, deployment planning |
 | `distvirt-activator` | Protocol activator runtime (WASM component support) |
+| `distvirt-tests` | Orchestrator scenario tests (harness + 12 scenario modules) |
 | `guest-image/guest-init` | Guest agent (PID 1 in the VM, static musl binary) |
 
 The `activators/` directory (excluded from the workspace) contains standalone activator components: `tcp`, `http2`, `postgres`, `spin`, `test-echo`, and `activator-types`.
+
+The `web/` directory contains the documentation site, built with [Astro Starlight](https://starlight.astro.build/).
 
 ---
 
@@ -153,7 +160,7 @@ The `dv` CLI has two layers:
 - **Layer 2 — Uniform resource**: `dv get <type>`, `dv describe <type> <name>`, `dv create`, `dv delete`. Resource types: service, workload, worker, pod, adapter. All support `-o json`.
 - **Auth commands**: `dv login` (save server + token), `dv context` (use/list/delete/show named contexts).
 
-Addressing: `<namespace>`, `<namespace>/<workload>`, `<namespace>/<resource-type>/<name>`. Namespaces are always explicit.
+Addressing: `<namespace>`, `<namespace>/<workload>`, `<namespace>/<resource-type>/<name>`. Namespaces are always explicit. The CLI has platform-specific TUN/routing support for `dv connect` on both Linux and macOS (`distvirt-cli/src/platform/`).
 
 Authentication: API key tokens as gRPC bearer tokens. Credentials in `~/.config/distvirt/credentials.toml` with named contexts (`dv login`, `dv context`). Resolution: CLI flags > env vars (`DV_SERVER`, `DV_TOKEN`) > active context.
 
@@ -194,6 +201,17 @@ Two-trait design separating factory (`Vmm`) from instance (`VmInstance`), fully 
 4. Guest init: vsock listen + yamux handshake
 5. Host: vsock connect → `AddContainer` → `ConfigureNetwork` → `StartContainer`
 6. Container process starts
+
+---
+
+## Testing
+
+- **Unit tests** — In-crate `#[test]` modules across the workspace.
+- **Integration tests** — `distvirt-tests/tests/integration.rs` exercises orchestrator integration logic.
+- **Stateright model tests** — Model-checked state machine tests for the orchestrator.
+- **Scenario tests** — `distvirt-tests/tests/scenarios/` contains 12 scenario modules (pod lifecycle, activation lifecycle, suspend/resume, drain, multi-worker, multi-service, fabric routing, spec reconciliation, retry/backoff, pressure, edge cases, known bugs) that run the full orchestrator with a test harness.
+- **E2E tests** — `distvirt-worker/tests/e2e/` spins up real Firecracker VMs (requires root). Covers pod lifecycle, suspend/resume, cross-worker resume, artifact transfer, services, and WireGuard tunnels.
+- **Simulation tests** — `distvirt-worker/tests/sim/` tests the worker with a simulated VMM backend (no real VMs). Covers pod lifecycle, suspend/resume, crash handling, and services.
 
 ---
 

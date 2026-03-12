@@ -162,6 +162,15 @@ async fn try_recv_event(rx: &mut tokio_mpsc::Receiver<FabricEvent>) -> Option<Fa
         .flatten()
 }
 
+/// Yield to the tokio runtime repeatedly, allowing background tasks
+/// (port_read_loop, flush tasks) to make progress.
+/// In the single-threaded test runtime, this is deterministic.
+async fn yield_until_idle() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+}
+
 // --- L3 routing tests ---
 
 #[tokio::test]
@@ -409,7 +418,7 @@ async fn buffered_frames_flushed_to_new_port() {
     }
 
     // Let the port read loop process the frames.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    yield_until_idle().await;
 
     // Update pod_ip from UnplacedPod to LocalPod so attach_port works.
     create_local_pod_endpoint(&fabric, pod_ip);
@@ -454,9 +463,6 @@ async fn route_miss_debounced_on_rapid_frames() {
         let frame = make_ipv4_frame(pod_ip);
         handle0.inject_tx.send(frame).await.unwrap();
     }
-
-    // Wait for processing.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Should get exactly one activation event (debounced).
     let event1 = try_recv_event(&mut event_rx).await;
@@ -603,9 +609,6 @@ async fn activator_tcp_syn_emits_backend_need() {
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
 
-    // Wait for processing.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
     // Should get a ServiceBackendNeed(Traffic) event.
     let mut got_backend_need = false;
     while let Some(event) = try_recv_event(&mut event_rx).await {
@@ -659,9 +662,6 @@ async fn activator_tcp_rst_dropped() {
         0x04, // RST
     );
     handle0.inject_tx.send(rst_frame).await.unwrap();
-
-    // Wait for processing.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // No ServiceBackendNeed event (RST is dropped by activator).
     let event = try_recv_event(&mut event_rx).await;
@@ -756,8 +756,8 @@ async fn service_forward_without_registered_backend_port() {
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
 
-    // Give the fabric a moment to process the injected frame.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Let the port read loop process the frame.
+    yield_until_idle().await;
 
     // Now add the backend port with IP+MAC — triggers flush_by_backend_ip.
     let (port1, handle1) = make_test_port();
@@ -1029,8 +1029,8 @@ async fn port_guard_drop_returns_endpoint_to_buffering() {
     // the PortGuard, which calls detach_port.
     drop(pod_task);
 
-    // Wait for async cleanup.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Let the runtime process the abort and run PortGuard::drop.
+    yield_until_idle().await;
 
     // Verify the endpoint went back to buffering: send another frame.
     // It shouldn't arrive at the (now closed) port, and should be buffered.
@@ -1126,12 +1126,11 @@ async fn flow_event_on_tcp_syn_to_local_pod() {
 
     // Drain the forwarded frame.
     let _ = try_recv(&handle1).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Should get EndpointFlowStatus { has_active_flows: true } for IP_B.
     let event = try_recv_event(&mut event_rx).await;
     assert!(
-        matches!(event, Some(FabricEvent::EndpointFlowStatus { ip, has_active_flows: true }) if ip == IP_B),
+        matches!(event, Some(FabricEvent::EndpointFlowStatus { ip, has_active_flows: true, .. }) if ip == IP_B),
         "expected EndpointFlowStatus(active=true) for IP_B, got {:?}",
         event
     );
@@ -1154,11 +1153,11 @@ async fn flow_event_inactive_after_rst() {
     let syn = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x02);
     handle0.inject_tx.send(syn).await.unwrap();
     let _ = try_recv(&handle1).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let event = try_recv_event(&mut event_rx).await;
     assert!(
         matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: true, .. })),
+
         "first event should be active=true"
     );
 
@@ -1166,11 +1165,11 @@ async fn flow_event_inactive_after_rst() {
     let rst = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x04);
     handle0.inject_tx.send(rst).await.unwrap();
     let _ = try_recv(&handle1).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let event = try_recv_event(&mut event_rx).await;
     assert!(
         matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: false, .. })),
+
         "second event should be active=false"
     );
 }
@@ -1197,10 +1196,10 @@ async fn no_flow_event_on_non_tcp() {
     assert!(received.is_some(), "UDP frame should be delivered");
 
     // No EndpointFlowStatus event (flow tracking is TCP-only).
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let event = try_recv_event(&mut event_rx).await;
     assert!(
         !matches!(event, Some(FabricEvent::EndpointFlowStatus { .. })),
+
         "UDP traffic should not produce flow status events"
     );
 }
@@ -1234,8 +1233,6 @@ async fn dnat_rewrite_does_not_double_count_flows() {
     // Frame should arrive at backend.
     let received = try_recv(&handle1).await;
     assert!(received.is_some(), "frame should reach backend");
-
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Collect all flow status events — should be at most one.
     let mut flow_events = Vec::new();
@@ -1277,7 +1274,8 @@ async fn service_ready_backend_unreachable_buffers() {
     let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
     handle0.inject_tx.send(syn).await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Let the port read loop buffer the frame.
+    yield_until_idle().await;
 
     // Client should not receive anything (frame was buffered, not bounced).
     assert_no_frame(&handle0).await;
@@ -1321,7 +1319,8 @@ async fn service_buffer_capacity_drops_excess() {
         handle0.inject_tx.send(frame).await.unwrap();
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Let the port read loop buffer the frames.
+    yield_until_idle().await;
 
     // Add backend port first, then mark ready so flush_service_frames can deliver.
     let (port1, handle1) = make_test_port();
@@ -1341,8 +1340,8 @@ async fn service_buffer_capacity_drops_excess() {
         fabric.flush_service_frames(frames, backend_ip, service_ip);
     }
 
-    // Wait for async flush to complete.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Let the spawned flush task complete.
+    yield_until_idle().await;
 
     // Count flushed frames.
     let mut count = 0;
@@ -1376,14 +1375,16 @@ async fn service_buffer_timeout_clears() {
     let frame1 = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 10000, 80, 0x02);
     handle0.inject_tx.send(frame1).await.unwrap();
 
-    // Wait for timeout to expire.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Wait for timeout to expire (uses std::time::Instant, needs real wall-clock time).
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    // Let the port read loop process the first frame.
+    yield_until_idle().await;
 
     // Send second frame — buffer has timed out, should be dropped.
     let frame2 = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 10001, 80, 0x02);
     handle0.inject_tx.send(frame2).await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    yield_until_idle().await;
 
     // Mark ready + add backend port → verify no frames delivered (all expired/dropped).
     {
@@ -1467,12 +1468,8 @@ async fn gateway_dns_local_resolve() {
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         async {
-            loop {
-                if let Some(frame) = try_recv(&handle0).await {
-                    return frame;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
+            let mut rx = handle0.capture_rx.lock().await;
+            rx.recv().await.unwrap()
         },
     )
     .await;
@@ -1570,7 +1567,8 @@ async fn flush_populates_nat_for_return_traffic() {
     let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
     handle0.inject_tx.send(syn).await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Let the port read loop buffer the frame.
+    yield_until_idle().await;
 
     // Now add backend port → triggers flush_by_backend_ip with DNAT.
     let (port1, handle1) = make_test_port();

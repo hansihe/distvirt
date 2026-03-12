@@ -180,6 +180,7 @@ async fn dispatch_frame<P: FramePort>(
             if let Some(tx) = ctx.inner.event_tx.get() {
                 let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
                     ip: change.ip,
+                    service_id: change.service_id,
                     has_active_flows: change.has_active_flows,
                 });
             }

@@ -31,6 +31,7 @@ boringtun = "0.7"
 sha2 = "0.10"
 hickory-resolver = "0.25"
 zerocopy = { version = "0.8", features = ["derive"] }
+async-trait = "0.1"
 snow = "0.10"
 tar = "0.4"
 

@@ -16,9 +16,21 @@ use distvirt_guest_protocol::{
     GuestEvent, GuestMessage, HostMessage, StreamHeader,
 };
 
+/// How the simulated guest responds to PrepareSuspend.
+#[derive(Clone, Default)]
+pub enum SuspendBehavior {
+    /// Send SuspendReady immediately (current behavior).
+    #[default]
+    Immediate,
+    /// Never respond to PrepareSuspend (triggers SUSPEND_TIMEOUT).
+    Hang,
+}
+
 /// Configuration for the guest simulator.
 pub struct GuestSimConfig {
     pub container_behavior: ContainerBehavior,
+    pub suspend_behavior: SuspendBehavior,
+    pub fail_before_ready: bool,
 }
 
 /// How the simulated container behaves after being started.
@@ -174,7 +186,16 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
     write_framed(&mut event_stream, &StreamHeader::Events).await
         .context("write event stream header")?;
 
-    // Phase 3: Send Ready.
+    // Phase 3: Optionally fail before sending Ready.
+    if config.fail_before_ready {
+        // Drop everything to simulate a VM crash before becoming ready.
+        drop(control);
+        drop(event_stream);
+        driver_task.abort();
+        anyhow::bail!("guest_sim: simulated failure before Ready");
+    }
+
+    // Send Ready.
     write_framed(&mut control, &GuestMessage::Ready {
         running_containers: vec![],
         pre_config_responses: vec![],
@@ -247,7 +268,15 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
                 }
             }
             HostMessage::PrepareSuspend => {
-                write_framed(&mut control, &GuestMessage::SuspendReady).await?;
+                match config.suspend_behavior {
+                    SuspendBehavior::Immediate => {
+                        write_framed(&mut control, &GuestMessage::SuspendReady).await?;
+                    }
+                    SuspendBehavior::Hang => {
+                        // Never respond — let the host-side timeout fire.
+                        futures_lite::future::pending::<()>().await;
+                    }
+                }
             }
             HostMessage::Shutdown => {
                 drop(control);

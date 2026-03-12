@@ -1,1 +1,12 @@
 mod pod_lifecycle;
+mod activation_lifecycle;
+mod suspend_resume;
+mod multi_worker;
+mod retry_backoff;
+mod known_bugs;
+mod drain;
+mod pressure;
+mod spec_reconciliation;
+mod multi_service;
+mod edge_cases;
+mod fabric_routing;

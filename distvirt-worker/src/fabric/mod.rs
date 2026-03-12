@@ -64,6 +64,7 @@ pub enum FabricEvent {
     /// Flow status changed for an endpoint (active flows started or stopped).
     EndpointFlowStatus {
         ip: Ipv4Addr,
+        service_id: Option<String>,
         has_active_flows: bool,
     },
     /// An activator signaled a backend need level change.
@@ -245,6 +246,7 @@ impl<P: FramePort> Fabric<P> {
                         for change in flow_changes {
                             let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
                                 ip: change.ip,
+                                service_id: change.service_id,
                                 has_active_flows: change.has_active_flows,
                             });
                         }

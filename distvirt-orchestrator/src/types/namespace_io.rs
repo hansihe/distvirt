@@ -80,5 +80,5 @@ pub enum WorkerEvent {
     ArtifactWriteCommitted { artifact_id: ArtifactId, pool_id: PoolId, size_bytes: u64 },
     ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
     EndpointActivation { ip: std::net::Ipv4Addr, service_id: Option<ServiceId> },
-    EndpointFlowStatus { ip: std::net::Ipv4Addr, has_active_flows: bool },
+    EndpointFlowStatus { ip: std::net::Ipv4Addr, service_id: Option<ServiceId>, has_active_flows: bool },
 }

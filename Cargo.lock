@@ -1276,6 +1276,7 @@ dependencies = [
  "distvirt-worker",
  "distvirt-worker-protocol",
  "env_logger",
+ "etherparse",
  "log",
  "tokio",
 ]
@@ -1285,6 +1286,7 @@ name = "distvirt-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "boringtun",
  "clap",
  "containerd-client",

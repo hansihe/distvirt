@@ -103,6 +103,7 @@ impl EndpointTable {
         if has_active != had_active {
             Some(FlowStatusChange {
                 ip: endpoint.ip,
+                service_id: endpoint.backend.service_id(),
                 has_active_flows: has_active,
             })
         } else {

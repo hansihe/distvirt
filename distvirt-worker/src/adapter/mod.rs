@@ -2,6 +2,7 @@ pub mod wireguard;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use distvirt_worker_protocol::AdapterConfig;
 
 use crate::fabric::ChannelPort;
@@ -19,12 +20,13 @@ pub struct AdapterPortHandle {
 ///
 /// Each adapter can create virtual ports that plug into the fabric via
 /// `ChannelPort`.
+#[async_trait]
 pub trait IngressAdapter: Send + Sync {
     /// Human-readable adapter type name (e.g. "wireguard").
     fn adapter_type(&self) -> &str;
 
     /// Create a virtual port for the given namespace.
-    fn create_port(
+    async fn create_port(
         &self,
         namespace_id: &str,
     ) -> anyhow::Result<(ChannelPort, AdapterPortHandle)>;
@@ -89,13 +91,13 @@ impl AdapterManager {
     }
 
     /// Create virtual ports for a namespace from all configured adapters.
-    pub fn create_namespace_ports(
+    pub async fn create_namespace_ports(
         &self,
         namespace_id: &str,
     ) -> Vec<(ChannelPort, AdapterPortHandle)> {
         let mut ports = Vec::new();
         for adapter in &self.adapters {
-            match adapter.create_port(namespace_id) {
+            match adapter.create_port(namespace_id).await {
                 Ok(pair) => ports.push(pair),
                 Err(e) => {
                     log::warn!(
@@ -128,15 +130,16 @@ impl AdapterManager {
 /// Wrapper to make `Arc<WireGuardAdapter>` implement `IngressAdapter`.
 struct ArcAdapter(Arc<WireGuardAdapter>);
 
+#[async_trait]
 impl IngressAdapter for ArcAdapter {
     fn adapter_type(&self) -> &str {
         self.0.adapter_type()
     }
 
-    fn create_port(
+    async fn create_port(
         &self,
         namespace_id: &str,
     ) -> anyhow::Result<(ChannelPort, AdapterPortHandle)> {
-        self.0.create_port(namespace_id)
+        self.0.create_port(namespace_id).await
     }
 }

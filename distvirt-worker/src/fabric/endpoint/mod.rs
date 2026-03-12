@@ -115,6 +115,15 @@ enum EndpointBackend {
     },
 }
 
+impl EndpointBackend {
+    fn service_id(&self) -> Option<String> {
+        match self {
+            EndpointBackend::Service { service_id, .. } => Some(service_id.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// A single endpoint entry in the table.
 struct Endpoint {
     ip: Ipv4Addr,
@@ -132,9 +141,10 @@ struct Endpoint {
 }
 
 /// Optional flow status transition returned alongside an `EndpointAction`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FlowStatusChange {
     pub ip: Ipv4Addr,
+    pub service_id: Option<String>,
     pub has_active_flows: bool,
 }
 
@@ -374,6 +384,7 @@ impl EndpointTable {
                 if has_active != had_active {
                     changes.push(FlowStatusChange {
                         ip: endpoint.ip,
+                        service_id: endpoint.backend.service_id(),
                         has_active_flows: has_active,
                     });
                 }

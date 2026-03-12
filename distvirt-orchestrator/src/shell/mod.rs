@@ -406,6 +406,32 @@ impl OrchestratorShell {
         self.process_output(output).await;
     }
 
+    /// Subscribe to namespace events synchronously (bypasses message queue).
+    /// Use this in tests where `client_command()` calls must see the subscription
+    /// immediately (before events are emitted).
+    pub fn subscribe_events(
+        &mut self,
+        namespace_id: NamespaceId,
+        workload_ids: HashSet<WorkloadId>,
+        service_ids: HashSet<ServiceId>,
+    ) -> mpsc::Receiver<EventData> {
+        let (tx, rx) = mpsc::channel(256);
+        self.subscriptions.subscribe_events(namespace_id, workload_ids, service_ids, tx);
+        rx
+    }
+
+    /// Like `subscribe_events`, but accepts a caller-provided sender
+    /// (allows the caller to control channel capacity).
+    pub fn subscribe_events_with_sender(
+        &mut self,
+        namespace_id: NamespaceId,
+        workload_ids: HashSet<WorkloadId>,
+        service_ids: HashSet<ServiceId>,
+        tx: mpsc::Sender<EventData>,
+    ) {
+        self.subscriptions.subscribe_events(namespace_id, workload_ids, service_ids, tx);
+    }
+
     /// Access the orchestrator state (for assertions in tests).
     pub fn orchestrator(&self) -> &Orchestrator {
         &self.orchestrator
@@ -414,6 +440,15 @@ impl OrchestratorShell {
     /// Mutable access to the orchestrator state (for test setup).
     pub fn orchestrator_mut(&mut self) -> &mut Orchestrator {
         &mut self.orchestrator
+    }
+
+    /// Inject a worker event directly into the shell message queue (for tests).
+    pub fn inject_worker_event(
+        &self,
+        worker_id: WorkerId,
+        event: distvirt_worker_protocol::WorkerEvent,
+    ) {
+        let _ = self.msg_tx.send(ShellMsg::WorkerEvent { worker_id, event });
     }
 
     /// Process one pending message. Returns false if no more messages.

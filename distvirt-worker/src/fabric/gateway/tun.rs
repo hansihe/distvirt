@@ -8,7 +8,7 @@ use crate::packet::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM, IP_PROTO_TCP, IP_PROTO_UDP};
 /// Abstraction over the internet egress/ingress path.
 ///
 /// Operates at the fabric-frame level: `[fabric_hdr(3)][IP]`.
-pub(crate) trait EgressPort: Send + 'static {
+pub trait EgressPort: Send + 'static {
     /// Write a fabric-format packet to the egress device.
     fn write_egress(&self, fabric_packet: &[u8]) -> impl Future<Output = ()> + Send;
     /// Read the next ingress frame in fabric format. Returns `None` on EOF/close.
@@ -22,7 +22,7 @@ use std::future::Future;
 /// TUN-based internet egress/ingress component.
 ///
 /// Manages a TUN device for routing pod traffic to the host network.
-pub(crate) struct TunEgress {
+pub struct TunEgress {
     tun: TunDevice,
 }
 
@@ -144,7 +144,7 @@ impl EgressPort for TunEgress {
 }
 
 /// Channel-based egress for testing. No TUN device, no root required.
-pub(crate) struct ChannelEgress {
+pub struct ChannelEgress {
     egress_tx: mpsc::Sender<Vec<u8>>,
     ingress_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
 }

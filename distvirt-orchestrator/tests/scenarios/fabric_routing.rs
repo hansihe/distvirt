@@ -291,6 +291,7 @@ async fn test_route_miss_demand_leak() {
     h.worker(&w1).send_event(WorkerEvent::EndpointFlowStatus {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
+        service_id: None,
         has_active_flows: false,
     });
     h.converge().await;

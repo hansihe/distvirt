@@ -29,15 +29,15 @@ pub async fn setup_with_behavior(behavior: ContainerBehavior) -> anyhow::Result<
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let worker = distvirt_worker::worker::Worker::new(
+        let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::SyncFs>::new(
             PathBuf::from("/dev/null"),
             PathBuf::from("/dev/null"),
             vmm,
             image_provider,
             None,
             String::new(),
-        )
-        .with_sim_gateway();
+            distvirt_worker::sim_traffic::SimGatewayProvider::new(),
+        );
         worker.run(conn).await
     });
 
@@ -217,15 +217,15 @@ pub async fn setup_with_crash_handles(
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let worker = distvirt_worker::worker::Worker::new(
+        let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::SyncFs>::new(
             PathBuf::from("/dev/null"),
             PathBuf::from("/dev/null"),
             vmm,
             image_provider,
             None,
             String::new(),
-        )
-        .with_sim_gateway();
+            distvirt_worker::sim_traffic::SimGatewayProvider::new(),
+        );
         worker.run(conn).await
     });
 

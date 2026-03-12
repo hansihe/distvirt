@@ -264,17 +264,22 @@ impl NamespaceStateMachine {
                     }
                 }
             }
-            WorkerEvent::EndpointFlowStatus { ip, has_active_flows } => {
-                let wl_match = self
-                    .spec
-                    .workloads
-                    .iter()
-                    .find(|(_, wl_spec)| wl_spec.network.ip == ip)
-                    .map(|(wl_id, _)| wl_id.clone());
+            WorkerEvent::EndpointFlowStatus { ip, service_id, has_active_flows } => {
+                let wl_match = match service_id {
+                    Some(svc_id) => {
+                        self.service_workload.get(&svc_id).cloned()
+                    }
+                    None => {
+                        self.spec
+                            .workloads
+                            .iter()
+                            .find(|(_, wl_spec)| wl_spec.network.ip == ip)
+                            .map(|(wl_id, _)| wl_id.clone())
+                    }
+                };
                 if let Some(wl_id) = wl_match {
                     if let Some(wl) = self.workloads.get_mut(&wl_id) {
                         wl.has_active_flows = has_active_flows;
-                        // Drop mutable borrow before calling reconcile_demand.
                     }
                     self.reconcile_demand(&wl_id, placement_table, out);
                 }

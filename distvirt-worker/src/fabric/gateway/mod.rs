@@ -16,7 +16,40 @@ pub use dns::DnsRegistry;
 
 use crate::packet::{FabricPacket, with_fabric_header};
 use dns::DnsForwarder;
-use tun::{EgressPort, TunEgress, ChannelEgress};
+pub use tun::{EgressPort, TunEgress, ChannelEgress};
+
+use distvirt_worker_protocol::NamespaceId;
+
+/// Trait for creating egress ports for namespaces.
+///
+/// The worker is generic over this trait: production uses `TunGatewayProvider`
+/// (real TUN devices), tests use `SimGatewayProvider` (channel-based).
+pub trait GatewayProvider: Send + Sync + 'static {
+    type Egress: EgressPort;
+
+    fn create_egress(
+        &self,
+        namespace_id: &NamespaceId,
+        gateway_ip: [u8; 4],
+        prefix_len: u8,
+    ) -> anyhow::Result<Self::Egress>;
+}
+
+/// Gateway provider that creates real TUN devices (requires root).
+pub struct TunGatewayProvider;
+
+impl GatewayProvider for TunGatewayProvider {
+    type Egress = TunEgress;
+
+    fn create_egress(
+        &self,
+        _namespace_id: &NamespaceId,
+        gateway_ip: [u8; 4],
+        prefix_len: u8,
+    ) -> anyhow::Result<TunEgress> {
+        TunEgress::new(gateway_ip, prefix_len_to_netmask(prefix_len))
+    }
+}
 
 /// Convert a prefix length (0–32) to a 4-byte netmask.
 fn prefix_len_to_netmask(prefix_len: u8) -> [u8; 4] {
@@ -130,21 +163,6 @@ pub struct FabricGateway<E: EgressPort = TunEgress> {
     pod_subnet_bits: u32,
 }
 
-impl FabricGateway<TunEgress> {
-    /// Create a new fabric gateway with a real TUN device (requires root).
-    pub fn new_tun(registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
-        let tun = TunEgress::new(pod_gateway_ip, prefix_len_to_netmask(pod_prefix_len))?;
-        let (gw, egress_tx, ingress_rx) = Self::new_inner(tun, registry, pod_gateway_ip, pod_prefix_len)?;
-        log::info!(
-            "gateway: created TUN device {} with smoltcp interface at {}.{}.{}.{}/{}",
-            gw.egress.name(),
-            pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3],
-            pod_prefix_len,
-        );
-        Ok((gw, egress_tx, ingress_rx))
-    }
-}
-
 impl FabricGateway<ChannelEgress> {
     /// Create a new fabric gateway backed by channels (no root, for testing).
     ///
@@ -155,7 +173,7 @@ impl FabricGateway<ChannelEgress> {
         pod_prefix_len: u8,
     ) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>, mpsc::Sender<Vec<u8>>)> {
         let (channel_egress, internet_rx, internet_tx) = ChannelEgress::new(CHANNEL_BUF);
-        let (gw, egress_tx, ingress_rx) = Self::new_inner(channel_egress, registry, pod_gateway_ip, pod_prefix_len)?;
+        let (gw, egress_tx, ingress_rx) = Self::new_with_egress(channel_egress, registry, pod_gateway_ip, pod_prefix_len)?;
         log::info!(
             "gateway: created channel egress with smoltcp interface at {}.{}.{}.{}/{}",
             pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3],
@@ -165,15 +183,8 @@ impl FabricGateway<ChannelEgress> {
     }
 }
 
-/// Backwards-compatible alias.
-impl FabricGateway<TunEgress> {
-    pub fn new(registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
-        Self::new_tun(registry, pod_gateway_ip, pod_prefix_len)
-    }
-}
-
 impl<E: EgressPort> FabricGateway<E> {
-    fn new_inner(egress: E, registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
+    pub fn new_with_egress(egress: E, registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create DNS forwarder sub-component.
         let dns = DnsForwarder::new(registry)?;
 

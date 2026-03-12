@@ -693,6 +693,8 @@ struct EndpointFlowStatusEvt {
   namespaceId @0 :Text;
   ip @1 :Ipv4Addr;
   hasActiveFlows @2 :Bool;
+  hasServiceId @3 :Bool;
+  serviceId @4 :Text;
 }
 
 # --- Control Stream: Commands (orchestrator -> worker) ---

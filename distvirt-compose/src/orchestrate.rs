@@ -299,8 +299,8 @@ pub async fn run_compose(
                     WorkerEvent::EndpointActivation { namespace_id: _, ip, service_id } => {
                         log::debug!("endpoint activation for {} (service: {:?})", ip, service_id);
                     }
-                    WorkerEvent::EndpointFlowStatus { namespace_id: _, ip, has_active_flows } => {
-                        log::debug!("endpoint flow status for {}: active={}", ip, has_active_flows);
+                    WorkerEvent::EndpointFlowStatus { namespace_id: _, ip, service_id, has_active_flows } => {
+                        log::debug!("endpoint flow status for {} (service: {:?}): active={}", ip, service_id, has_active_flows);
                     }
                     WorkerEvent::ServiceBackendNeed { namespace_id: _, service_id, need } => {
                         log::debug!("service backend need for '{}': {:?}", service_id, need);
