@@ -2,7 +2,7 @@ use crate::sm::service::ServiceOutput;
 use crate::types::*;
 use crate::sm::workload::{WorkloadInput, WorkloadOutput};
 
-use super::NamespaceStateMachine;
+use super::{prefix_len_to_netmask, NamespaceStateMachine};
 
 impl NamespaceStateMachine {
     /// Translate workload outputs into namespace-level actions.
@@ -62,16 +62,10 @@ impl NamespaceStateMachine {
                 });
             }
             WorkloadOutput::SuspendRequest {
+                pod_id,
                 worker_id,
                 artifact_id,
             } => {
-                // pod_id must exist: SuspendRequest is only emitted when
-                // the workload transitions to Suspending { pod_id, .. }.
-                let pod_id = self
-                    .workloads
-                    .get(workload_id)
-                    .and_then(|wl| wl.state.pod_id().cloned())
-                    .expect("invariant: workload must be in Suspending state when SuspendRequest is emitted");
 
                 // Resolve pool_id from the worker's primary pool.
                 // If the worker has no pool, we cannot suspend — feed failure
@@ -119,6 +113,114 @@ impl NamespaceStateMachine {
                     artifact_id,
                 });
             }
+            WorkloadOutput::LaunchRequest { worker_id, pod_id } => {
+                // Register pod in pod_map.
+                debug_assert!(
+                    !self.pod_map.contains(&pod_id),
+                    "Pod {:?} already exists in pods map — outer-layer bug",
+                    pod_id
+                );
+                self.pod_map.insert(
+                    pod_id.clone(),
+                    PodInfo {
+                        workload_id: workload_id.clone(),
+                        worker_id: worker_id.clone(),
+                    },
+                );
+
+                // Build and emit WorkerCommand::LaunchPod.
+                let wl_spec = match self.spec.workloads.get(workload_id) {
+                    Some(s) => s,
+                    None => return None,
+                };
+                let mut pod_network = wl_spec.network.clone();
+                pod_network.gateway = self.spec.network.gateway;
+                pod_network.netmask = prefix_len_to_netmask(self.spec.network.prefix_len);
+                let resources = wl_spec.resources.as_ref().map(|r| {
+                    distvirt_worker_protocol::ResourceRequirements {
+                        requests: r.requests.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
+                            memory_mib: v.memory_mb,
+                            vcpus: v.vcpus,
+                        }),
+                        limits: r.limits.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
+                            memory_mib: v.memory_mb,
+                            vcpus: v.vcpus,
+                        }),
+                    }
+                });
+                out.worker_commands.push((
+                    worker_id.clone(),
+                    WorkerCommand::LaunchPod {
+                        namespace_id: self.namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        network: pod_network,
+                        containers: wl_spec.containers.clone(),
+                        resources,
+                    },
+                ));
+
+                // Broadcast endpoint update.
+                self.emit_endpoint_update_for_workload(workload_id, out);
+
+                // Emit pod launching event.
+                out.events.push(SmNamespaceEvent::Workload {
+                    workload_id: workload_id.clone(),
+                    event: SmWorkloadEvent::PodLaunching {
+                        pod_id,
+                        worker_id,
+                    },
+                });
+            }
+            WorkloadOutput::ResumeFromArtifact { worker_id, pod_id, artifact_id } => {
+                // Register pod in pod_map.
+                debug_assert!(
+                    !self.pod_map.contains(&pod_id),
+                    "Pod {:?} already exists in pods map — outer-layer bug",
+                    pod_id
+                );
+                self.pod_map.insert(
+                    pod_id.clone(),
+                    PodInfo {
+                        workload_id: workload_id.clone(),
+                        worker_id: worker_id.clone(),
+                    },
+                );
+
+                // Build and emit WorkerCommand::ResumePod.
+                let wl_spec = match self.spec.workloads.get(workload_id) {
+                    Some(s) => s,
+                    None => return None,
+                };
+                let placement = match placement_table.get(&artifact_id) {
+                    Some(p) => p.clone(),
+                    None => return None,
+                };
+                let mut pod_network = wl_spec.network.clone();
+                pod_network.gateway = self.spec.network.gateway;
+                pod_network.netmask = prefix_len_to_netmask(self.spec.network.prefix_len);
+                out.worker_commands.push((
+                    worker_id.clone(),
+                    WorkerCommand::ResumePod {
+                        namespace_id: self.namespace_id.clone(),
+                        pod_id: pod_id.clone(),
+                        artifact_id,
+                        network: pod_network,
+                        pool_id: placement.pool_id,
+                    },
+                ));
+
+                // Broadcast endpoint update.
+                self.emit_endpoint_update_for_workload(workload_id, out);
+
+                // Emit resume event.
+                out.events.push(SmNamespaceEvent::Workload {
+                    workload_id: workload_id.clone(),
+                    event: SmWorkloadEvent::PodResuming {
+                        pod_id,
+                        worker_id,
+                    },
+                });
+            }
             WorkloadOutput::DeleteArtifact { artifact_id } => {
                 // Look up placement and emit DeleteArtifact to correct worker.
                 if let Some(placement) = placement_table.remove(&artifact_id) {
@@ -149,6 +251,15 @@ impl NamespaceStateMachine {
                 if let Some(wl) = self.workloads.get_mut(workload_id) {
                     wl.conditions.remove(&key);
                 }
+            }
+            WorkloadOutput::BecameReady { pod_id, worker_id } => {
+                self.workload_readiness.insert(
+                    workload_id.clone(),
+                    super::WorkloadReadyInfo { pod_id, worker_id },
+                );
+            }
+            WorkloadOutput::BecameUnready => {
+                self.workload_readiness.remove(workload_id);
             }
         }
         None
@@ -187,6 +298,60 @@ impl NamespaceStateMachine {
                         svc.conditions.remove(&key);
                     }
                 }
+                ServiceOutput::IdleTimerStarted { timeout } => {
+                    if let Some(svc) = self.services.get(service_id) {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: service_id.clone(),
+                            workload_id: svc.workload_id.clone(),
+                            event: SmServiceEvent::IdleTimerStarted { timeout },
+                        });
+                    }
+                }
+                ServiceOutput::IdleTimerCancelled { reason } => {
+                    if let Some(svc) = self.services.get(service_id) {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: service_id.clone(),
+                            workload_id: svc.workload_id.clone(),
+                            event: SmServiceEvent::IdleTimerCancelled { reason },
+                        });
+                    }
+                }
+                ServiceOutput::IdleTimeoutFired => {
+                    if let Some(svc) = self.services.get(service_id) {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: service_id.clone(),
+                            workload_id: svc.workload_id.clone(),
+                            event: SmServiceEvent::IdleTimeoutFired,
+                        });
+                    }
+                }
+                ServiceOutput::Deactivated { reason } => {
+                    if let Some(svc) = self.services.get(service_id) {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: service_id.clone(),
+                            workload_id: svc.workload_id.clone(),
+                            event: SmServiceEvent::Deactivated { reason },
+                        });
+                    }
+                }
+                ServiceOutput::Activated { trigger } => {
+                    if let Some(svc) = self.services.get(service_id) {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: service_id.clone(),
+                            workload_id: svc.workload_id.clone(),
+                            event: SmServiceEvent::Activated { trigger },
+                        });
+                    }
+                }
+                ServiceOutput::BackendReady => {
+                    if let Some(svc) = self.services.get(service_id) {
+                        out.events.push(SmNamespaceEvent::Service {
+                            service_id: service_id.clone(),
+                            workload_id: svc.workload_id.clone(),
+                            event: SmServiceEvent::BackendReady,
+                        });
+                    }
+                }
             }
         }
     }
@@ -200,13 +365,7 @@ impl NamespaceStateMachine {
         let band = self
             .services
             .get(service_id)
-            .and_then(|svc| {
-                if let ServiceState::Active { ref worker_id, .. } = svc.state {
-                    Some(worker_id)
-                } else {
-                    None
-                }
-            })
+            .and_then(|svc| svc.active_worker_id())
             .and_then(|wid| self.workers.get(wid))
             .map(|nws| nws.pressure_band)
             .unwrap_or(PressureBand::Normal);

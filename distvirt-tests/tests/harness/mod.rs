@@ -419,7 +419,7 @@ impl TestCluster {
     pub fn assert_workload_running(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_state(ns_id, wl_id);
         assert!(
-            matches!(state, WorkloadState::Running { .. }),
+            state.is_running(),
             "workload '{}/{}': expected Running, got {:?}",
             ns_id, wl_id, state
         );
@@ -454,7 +454,8 @@ impl TestCluster {
             assert!(
                 matches!(
                     state,
-                    WorkloadState::Suspending { .. } | WorkloadState::Suspended { .. }
+                    WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. }
+                    | WorkloadState::Suspended { .. }
                 ),
                 "workload '{}/{}': expected Suspending or Suspended, got {:?}",
                 ns_id, wl_id, state

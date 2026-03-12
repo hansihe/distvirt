@@ -24,7 +24,7 @@ pub enum PodOutput {
     TimerSet(TimerKey, Duration),
     TimerCancel(TimerKey),
     DeleteArtifact { artifact_id: ArtifactId },
-    SuspendRequest { worker_id: WorkerId, artifact_id: ArtifactId },
+    SuspendRequest { pod_id: PodId, worker_id: WorkerId, artifact_id: ArtifactId },
 }
 
 /// Result of a pod lifecycle step, consumed by the workload coordinator.
@@ -136,6 +136,7 @@ impl PodSlot {
                 Duration::from_secs(SUSPEND_TIMEOUT_SECS),
             ),
             PodOutput::SuspendRequest {
+                pod_id: self.pod_id.clone(),
                 worker_id: self.worker_id.clone(),
                 artifact_id,
             },
@@ -214,9 +215,10 @@ impl PodSlot {
             },
             PodInput::PodSuspendFailed => match &self.pod_state {
                 PodState::Suspending {
-                    suspend_timeout, ..
+                    artifact_id, suspend_timeout,
                 } => {
                     outputs.push(PodOutput::TimerCancel(suspend_timeout.clone()));
+                    outputs.push(PodOutput::DeleteArtifact { artifact_id: artifact_id.clone() });
                     PodOutcome::SuspendFailed
                 }
                 _ => PodOutcome::Noop,

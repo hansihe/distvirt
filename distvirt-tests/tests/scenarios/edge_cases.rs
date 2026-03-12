@@ -97,7 +97,11 @@ async fn test_worker_disconnect_during_suspend() {
     let state = cluster.workload_state("ns-disc", "web");
     let was_suspending = matches!(
         state,
-        distvirt_orchestrator::types::WorkloadState::Suspending { .. }
+        distvirt_orchestrator::types::WorkloadState::Active {
+            pod: distvirt_orchestrator::types::PodSlot {
+                pod_state: distvirt_orchestrator::types::PodState::Suspending { .. }, ..
+            }, ..
+        }
     );
 
     // Disconnect the hosting worker.
@@ -111,8 +115,7 @@ async fn test_worker_disconnect_during_suspend() {
         distvirt_orchestrator::types::WorkloadState::Dormant
             | distvirt_orchestrator::types::WorkloadState::WaitingForCapacity
             | distvirt_orchestrator::types::WorkloadState::Suspended { .. }
-            | distvirt_orchestrator::types::WorkloadState::Launching { .. }
-            | distvirt_orchestrator::types::WorkloadState::Running { .. }
+            | distvirt_orchestrator::types::WorkloadState::Active { .. }
     );
     assert!(
         acceptable,
@@ -128,8 +131,7 @@ async fn test_worker_disconnect_during_suspend() {
     let final_state = cluster.workload_state("ns-disc", "web");
     let ok = matches!(
         final_state,
-        distvirt_orchestrator::types::WorkloadState::Running { .. }
-            | distvirt_orchestrator::types::WorkloadState::Launching { .. }
+        distvirt_orchestrator::types::WorkloadState::Active { .. }
             | distvirt_orchestrator::types::WorkloadState::Dormant
             | distvirt_orchestrator::types::WorkloadState::WaitingForCapacity
     );

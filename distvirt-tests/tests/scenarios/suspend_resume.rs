@@ -104,7 +104,7 @@ async fn test_resume_pinned_to_artifact_worker_e2e() {
     // The resume path may need extra convergence for the snapshot restore I/O.
     // Check if already running (event may have fired during converge inside send_activation_traffic),
     // otherwise wait for the PodRunning event.
-    if !matches!(cluster.workload_state("ns", "web"), WorkloadState::Running { .. }) {
+    if !cluster.workload_state("ns", "web").is_running() {
         cluster.wait_for_event(&mut events, |e| matches!(e,
             SmNamespaceEvent::Workload { workload_id, event: SmWorkloadEvent::PodRunning { .. } }
             if workload_id.0 == "web"

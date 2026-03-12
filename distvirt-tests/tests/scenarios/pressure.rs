@@ -77,7 +77,8 @@ async fn test_pressure_shortens_idle_timeout() {
     // Should be suspended or suspending since pressure shortening fired.
     let state = cluster.workload_state("ns", "web");
     assert!(
-        matches!(state, WorkloadState::Suspended { .. } | WorkloadState::Suspending { .. }),
+        matches!(state, WorkloadState::Suspended { .. }
+            | WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. }),
         "expected Suspended/Suspending after pressure-shortened idle timeout, got {:?}",
         state
     );
@@ -142,7 +143,7 @@ async fn test_basic_preemption_e2e() {
     // wl-a should be preempted (no longer Running).
     let wl_a_state = cluster.workload_state("ns", "wl-a");
     assert!(
-        !matches!(wl_a_state, WorkloadState::Running { .. }),
+        !wl_a_state.is_running(),
         "wl-a should be preempted (not Running), got {:?}",
         wl_a_state
     );

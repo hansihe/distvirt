@@ -38,6 +38,14 @@ struct NamespaceSnapshot {
     service_workload: BTreeMap<ServiceId, WorkloadId>,
     pods: BTreeMap<PodId, PodInfo>,
     workers: BTreeMap<WorkerId, WorkerSnapshot>,
+    workload_readiness: BTreeMap<WorkloadId, WorkloadReadyInfoSnapshot>,
+    active_flows: BTreeSet<WorkloadId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkloadReadyInfoSnapshot {
+    pod_id: PodId,
+    worker_id: WorkerId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -90,7 +98,6 @@ struct WorkloadSnapshot {
     state: WorkloadState,
     current_demand: u32,
     consecutive_failures: u32,
-    has_active_flows: bool,
     needs_successful_boot: bool,
 }
 
@@ -143,7 +150,6 @@ impl NamespaceSnapshot {
                             state: v.state.clone(),
                             current_demand: v.current_demand,
                             consecutive_failures: v.consecutive_failures,
-                            has_active_flows: v.has_active_flows,
                             needs_successful_boot: v.needs_successful_boot,
                         },
                     )
@@ -185,6 +191,20 @@ impl NamespaceSnapshot {
                     )
                 })
                 .collect(),
+            workload_readiness: sm
+                .workload_readiness
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        WorkloadReadyInfoSnapshot {
+                            pod_id: v.pod_id.clone(),
+                            worker_id: v.worker_id.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            active_flows: sm.active_flows.clone(),
         }
     }
 
@@ -271,6 +291,20 @@ impl NamespaceSnapshot {
                 self.spec.network.subnet,
                 self.spec.network.prefix_len,
             ),
+            workload_readiness: self
+                .workload_readiness
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        distvirt_orchestrator::namespace::WorkloadReadyInfo {
+                            pod_id: v.pod_id.clone(),
+                            worker_id: v.worker_id.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            active_flows: self.active_flows.clone(),
         }
     }
 }
@@ -766,6 +800,23 @@ impl Model for NamespaceModel {
             }
         }
 
+        // Drain retiring pods: in the real system, PodGone eventually arrives for each
+        // retiring pod. The model never generates these events, so simulate immediate
+        // cleanup to avoid unbounded pod_map / retiring list growth.
+        let retiring_pods: Vec<(WorkloadId, Vec<RetiredPod>)> = sm
+            .workloads
+            .iter_mut()
+            .filter(|(_, wl)| !wl.retiring.is_empty())
+            .map(|(wl_id, wl)| (wl_id.clone(), std::mem::take(&mut wl.retiring)))
+            .collect();
+        for (_wl_id, retired) in retiring_pods {
+            for r in retired {
+                sm.pod_map.remove(&r.pod_id);
+            }
+            // No need to step the workload SM — retiring.clear() is sufficient
+            // since PodGone for a retiring pod just removes it and returns early.
+        }
+
         // Remove workers that were lost from service tracking.
         let active_workers: BTreeSet<WorkerId> = sm.workers.keys().cloned().collect();
         worker_service_created.retain(|wid, _| active_workers.contains(wid));
@@ -900,6 +951,24 @@ impl Model for NamespaceModel {
                 for (wl_id, wl_snap) in &state.namespace.workloads {
                     let effective = sm.effective_demand(wl_id);
                     if wl_snap.current_demand != effective {
+                        return false;
+                    }
+                }
+                true
+            },
+        ));
+
+        // Safety: readiness consistent with workload state.
+        // BecameReady/BecameUnready must keep workload_readiness in sync with
+        // the workload SM's Running state.
+        props.push(Property::<Self>::always(
+            "readiness consistent with workload state",
+            |_model, state| {
+                let ns = &state.namespace;
+                for (wl_id, wl) in &ns.workloads {
+                    let sm_running = wl.state.is_running();
+                    let has_readiness = ns.workload_readiness.contains_key(wl_id);
+                    if sm_running != has_readiness {
                         return false;
                     }
                 }

@@ -36,7 +36,6 @@ struct WlModelState {
     pending_timers: BTreeSet<TimerKey>,
     next_pod_id: u64,
     step_count: usize,
-    has_active_flows: bool,
     needs_successful_boot: bool,
     retiring: Vec<RetiredPod>,
 }
@@ -102,7 +101,6 @@ impl Model for WorkloadModel {
             pending_timers: BTreeSet::new(),
             next_pod_id: 0,
             step_count: 0,
-            has_active_flows: false,
             needs_successful_boot: false,
             retiring: Vec::new(),
         }]
@@ -243,7 +241,6 @@ impl Model for WorkloadModel {
         sm.state = state.state.clone();
         sm.current_demand = state.current_demand;
         sm.consecutive_failures = state.consecutive_failures;
-        sm.has_active_flows = state.has_active_flows;
         sm.needs_successful_boot = state.needs_successful_boot;
         sm.retiring = state.retiring.clone();
 
@@ -295,6 +292,27 @@ impl Model for WorkloadModel {
             }
         }
 
+        // Drain retiring pods: in the real system, PodGone eventually arrives for each
+        // retiring pod, removing it from the list. The model never generates PodGone for
+        // retiring pods, so we simulate immediate cleanup to avoid unbounded state growth.
+        while let Some(retired) = sm.retiring.pop() {
+            let drain_outputs = sm.step(
+                WorkloadInput::PodGone { pod_id: retired.pod_id, reason: None },
+                &ns,
+            );
+            for dout in &drain_outputs {
+                match dout {
+                    WorkloadOutput::TimerSet(key, _) => {
+                        pending_timers.insert(key.clone());
+                    }
+                    WorkloadOutput::TimerCancel(key) => {
+                        pending_timers.remove(key);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Process ResumeRequest outputs: simulate outer layer injecting ResumePod.
         // In the real system, the namespace layer resolves worker_id from the placement table.
         // Here we use a dummy worker_id since the workload SM doesn't validate it.
@@ -331,7 +349,6 @@ impl Model for WorkloadModel {
             pending_timers,
             next_pod_id,
             step_count: state.step_count + 1,
-            has_active_flows: sm.has_active_flows,
             needs_successful_boot: sm.needs_successful_boot,
             retiring: sm.retiring,
         })

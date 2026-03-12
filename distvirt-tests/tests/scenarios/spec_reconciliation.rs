@@ -41,10 +41,10 @@ async fn test_image_change_restarts_running_pod() {
         .expect("should have pod_id")
         .clone();
 
-    // BROKEN: If pod_id is the same, spec reconciliation didn't trigger restart.
-    if old_pod_id == new_pod_id {
-        eprintln!("BROKEN: image change did not restart pod (same pod_id)");
-    }
+    assert_ne!(
+        old_pod_id, new_pod_id,
+        "image change should restart pod with a new pod_id"
+    );
 }
 
 /// Add a new workload to a running namespace.
@@ -134,32 +134,10 @@ async fn test_image_change_on_suspended_workload() {
     cluster.converge().await;
     cluster.advance_time(Duration::from_secs(2)).await;
 
-    // Workload should go back to Dormant (artifact invalidated) or stay Suspended.
-    let state = cluster.workload_state("ns-img", "web");
-    let went_dormant = matches!(state, WorkloadState::Dormant);
-    let stayed_suspended = matches!(state, WorkloadState::Suspended { .. });
+    // Snapshot invalidated, no demand → should go back to Dormant.
+    cluster.assert_workload_dormant("ns-img", "web");
 
-    if !went_dormant && !stayed_suspended {
-        // Might be in WaitingForCapacity or other state after image change.
-        // BROKEN: spec reconciliation on suspended workload has unexpected behavior.
-        eprintln!(
-            "BROKEN: image change on suspended workload resulted in {:?} (expected Dormant or Suspended)",
-            state
-        );
-    }
-
-    // Re-activate and verify it runs (or at least gets scheduled).
+    // Re-activate and verify it reaches Running with the new image.
     cluster.send_activation_traffic("ns-img", "web-svc").await;
-
-    // Give extra time for the workload to launch (may need fabric setup after spec change).
-    cluster.advance_time(Duration::from_secs(5)).await;
-
-    let final_state = cluster.workload_state("ns-img", "web");
-    if !matches!(final_state, WorkloadState::Running { .. }) {
-        // BROKEN: workload didn't reach Running after re-activation post image change.
-        eprintln!(
-            "BROKEN: workload didn't reach Running after re-activation, got {:?}",
-            final_state
-        );
-    }
+    cluster.assert_workload_running("ns-img", "web");
 }

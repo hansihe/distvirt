@@ -369,7 +369,7 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
                 ns.services.get(svc_id).map(|s| s.wants_backend()).unwrap_or(false)
             })
             .count() as u32;
-        let active_flows: u32 = if wl.has_active_flows { 1 } else { 0 };
+        let active_flows: u32 = if ns.active_flows.contains(wl_id) { 1 } else { 0 };
         let expected_demand = service_demand + active_flows;
         assert_eq!(
             wl.current_demand, expected_demand,

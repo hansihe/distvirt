@@ -2,7 +2,7 @@ use crate::sm::service::{ServiceInput, ServiceStateMachine};
 use crate::types::*;
 use crate::sm::workload::{WorkloadInput, WorkloadStateMachine};
 
-use super::{prefix_len_to_netmask, NamespaceStateMachine};
+use super::NamespaceStateMachine;
 
 impl NamespaceStateMachine {
     pub(super) fn handle_update_spec(
@@ -215,6 +215,8 @@ impl NamespaceStateMachine {
             svc.state = ServiceState::Idle;
         }
         self.pod_map.clear();
+        self.workload_readiness.clear();
+        self.active_flows.clear();
 
         // Send DestroyNamespace to each worker, set fabric_status to Destroying.
         // DestroyNamespace handles stopping pods on the worker side.
@@ -258,11 +260,6 @@ impl NamespaceStateMachine {
         if self.status == NamespaceStatus::Destroying {
             return;
         }
-        // Only act if workload is waiting for capacity.
-        match self.workloads.get(workload_id) {
-            Some(wl) if matches!(wl.state, WorkloadState::WaitingForCapacity) => {}
-            _ => return,
-        }
 
         // Worker must be in our map and active.
         if !matches!(
@@ -272,71 +269,17 @@ impl NamespaceStateMachine {
             return;
         }
 
-        // Get workload spec for pod config.
-        let wl_spec = match self.spec.workloads.get(workload_id) {
-            Some(s) => s.clone(),
+        // Spec must exist.
+        if !self.spec.workloads.contains_key(workload_id) {
+            return;
+        }
+
+        // Step the workload SM — it is the sole authority on whether
+        // to accept a LaunchPod. Side effects are driven by SM outputs.
+        let wl = match self.workloads.get_mut(workload_id) {
+            Some(wl) => wl,
             None => return,
         };
-
-        // Register pod.
-        debug_assert!(
-            !self.pod_map.contains(pod_id),
-            "Pod {:?} already exists in pods map — outer-layer bug",
-            pod_id
-        );
-        self.pod_map.insert(
-            pod_id.clone(),
-            PodInfo {
-                workload_id: workload_id.clone(),
-                worker_id: worker_id.clone(),
-            },
-        );
-
-        // Send worker command to launch the pod.
-        let ns_id = self.namespace_id.clone();
-        // Override gateway and netmask from the namespace's network config,
-        // since the workload spec may not have them populated.
-        let mut pod_network = wl_spec.network.clone();
-        pod_network.gateway = self.spec.network.gateway;
-        pod_network.netmask = prefix_len_to_netmask(self.spec.network.prefix_len);
-        let resources = wl_spec.resources.as_ref().map(|r| {
-            distvirt_worker_protocol::ResourceRequirements {
-                requests: r.requests.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
-                    memory_mib: v.memory_mb,
-                    vcpus: v.vcpus,
-                }),
-                limits: r.limits.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
-                    memory_mib: v.memory_mb,
-                    vcpus: v.vcpus,
-                }),
-            }
-        });
-        out.worker_commands.push((
-            worker_id.clone(),
-            WorkerCommand::LaunchPod {
-                namespace_id: ns_id.clone(),
-                pod_id: pod_id.clone(),
-                network: pod_network,
-                containers: wl_spec.containers.clone(),
-                resources,
-            },
-        ));
-
-        // Broadcast endpoint update for the newly placed workload.
-        self.emit_endpoint_update_for_workload(workload_id, out);
-
-        // Emit pod launching event.
-        out.events.push(SmNamespaceEvent::Workload {
-            workload_id: workload_id.clone(),
-            event: SmWorkloadEvent::PodLaunching {
-                pod_id: pod_id.clone(),
-                worker_id: worker_id.clone(),
-            },
-        });
-
-        // Step the workload SM.
-        let wl = self.workloads.get_mut(workload_id)
-            .expect("invariant: workload confirmed to exist at top of handle_launch_pod");
         let wl_outputs = wl.step(
             WorkloadInput::LaunchPod {
                 worker_id: worker_id.clone(),
@@ -344,6 +287,7 @@ impl NamespaceStateMachine {
             },
             &self.namespace_id,
         );
+
         let wl_id = workload_id.clone();
         self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
         self.reconcile_demand(&wl_id, placement_table, out);
@@ -361,11 +305,6 @@ impl NamespaceStateMachine {
         if self.status == NamespaceStatus::Destroying {
             return;
         }
-        // Only act if workload is suspended.
-        match self.workloads.get(workload_id) {
-            Some(wl) if matches!(wl.state, WorkloadState::Suspended { .. }) => {}
-            _ => return,
-        }
 
         // Worker must be in our map and active.
         if !matches!(
@@ -376,61 +315,24 @@ impl NamespaceStateMachine {
         }
 
         // Look up placement table — only resume from Ready artifacts.
-        let placement = match placement_table.get(artifact_id) {
-            Some(p) if p.status == ArtifactStatus::Ready => p.clone(),
-            _ => return,
-        };
+        if !matches!(
+            placement_table.get(artifact_id),
+            Some(p) if p.status == ArtifactStatus::Ready
+        ) {
+            return;
+        }
 
-        // Get workload spec for pod network config.
-        let wl_spec = match self.spec.workloads.get(workload_id) {
-            Some(s) => s.clone(),
+        // Spec must exist.
+        if !self.spec.workloads.contains_key(workload_id) {
+            return;
+        }
+
+        // Step the workload SM — it is the sole authority on whether
+        // to accept a ResumePod. Side effects are driven by SM outputs.
+        let wl = match self.workloads.get_mut(workload_id) {
+            Some(wl) => wl,
             None => return,
         };
-
-        // Register pod.
-        debug_assert!(
-            !self.pod_map.contains(pod_id),
-            "Pod {:?} already exists in pods map — outer-layer bug",
-            pod_id
-        );
-        self.pod_map.insert(
-            pod_id.clone(),
-            PodInfo {
-                workload_id: workload_id.clone(),
-                worker_id: worker_id.clone(),
-            },
-        );
-
-        // Send ResumePod to worker.
-        let mut pod_network = wl_spec.network.clone();
-        pod_network.gateway = self.spec.network.gateway;
-        pod_network.netmask = prefix_len_to_netmask(self.spec.network.prefix_len);
-        out.worker_commands.push((
-            worker_id.clone(),
-            WorkerCommand::ResumePod {
-                namespace_id: self.namespace_id.clone(),
-                pod_id: pod_id.clone(),
-                artifact_id: artifact_id.clone(),
-                network: pod_network,
-                pool_id: placement.pool_id,
-            },
-        ));
-
-        // Broadcast endpoint update for the newly placed workload.
-        self.emit_endpoint_update_for_workload(workload_id, out);
-
-        // Emit resume event.
-        out.events.push(SmNamespaceEvent::Workload {
-            workload_id: workload_id.clone(),
-            event: SmWorkloadEvent::PodResuming {
-                pod_id: pod_id.clone(),
-                worker_id: worker_id.clone(),
-            },
-        });
-
-        // Step the workload SM.
-        let wl = self.workloads.get_mut(workload_id)
-            .expect("invariant: workload confirmed to exist at top of handle_resume_pod");
         let wl_outputs = wl.step(
             WorkloadInput::ResumePod {
                 worker_id: worker_id.clone(),
@@ -439,6 +341,7 @@ impl NamespaceStateMachine {
             },
             &self.namespace_id,
         );
+
         let wl_id = workload_id.clone();
         self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
         self.reconcile_demand(&wl_id, placement_table, out);
@@ -485,7 +388,7 @@ impl NamespaceStateMachine {
         // Check if any qualifying service has real demand (backend_need != None).
         for sid in &svc_ids {
             if let Some(svc) = self.services.get(sid) {
-                if let ServiceState::Active { ref backend_need, .. } = svc.state {
+                if let Some(backend_need) = svc.active_backend_need() {
                     if *backend_need != BackendNeed::None {
                         out.client_events.push((
                             client_id,
@@ -510,19 +413,10 @@ impl NamespaceStateMachine {
                 Some(svc) => svc,
                 None => continue,
             };
-            if !matches!(svc.state, ServiceState::Active { .. }) {
+            if !svc.is_active() {
                 continue;
             }
             let wl_id = svc.workload_id.clone();
-
-            // Emit deactivation events.
-            out.events.push(SmNamespaceEvent::Service {
-                service_id: sid.clone(),
-                workload_id: wl_id.clone(),
-                event: SmServiceEvent::Deactivated {
-                    reason: ServiceDeactivationReason::ForceDeactivate,
-                },
-            });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
             self.translate_service_effects(&sid, svc_outputs, out);
@@ -564,7 +458,7 @@ impl NamespaceStateMachine {
         };
 
         // Only preempt workloads that have a pod (Running, Launching, etc.)
-        if matches!(wl.state, WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed) {
+        if !wl.is_preemptable() {
             return;
         }
 
@@ -582,18 +476,10 @@ impl NamespaceStateMachine {
                 Some(svc) => svc,
                 None => continue,
             };
-            if !matches!(svc.state, ServiceState::Active { .. }) {
+            if !svc.is_active() {
                 continue;
             }
             let wl_id = svc.workload_id.clone();
-
-            out.events.push(SmNamespaceEvent::Service {
-                service_id: sid.clone(),
-                workload_id: wl_id.clone(),
-                event: SmServiceEvent::Deactivated {
-                    reason: ServiceDeactivationReason::ForceDeactivate,
-                },
-            });
 
             let svc_outputs = svc.step(ServiceInput::ForceDeactivate, &self.namespace_id);
             self.translate_service_effects(&sid, svc_outputs, out);

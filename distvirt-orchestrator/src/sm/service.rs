@@ -46,6 +46,7 @@ pub enum ServiceInput {
     ServiceBackendNeed { need: BackendNeed },
     TimerFired { timer_key: TimerKey },
     ForceDeactivate,
+    Initialize { workload_running: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +57,12 @@ pub enum ServiceOutput {
     TimerCancel(TimerKey),
     ConditionSet { key: String, message: String },
     ConditionClear { key: String },
+    IdleTimerStarted { timeout: std::time::Duration },
+    IdleTimerCancelled { reason: IdleTimerCancelReason },
+    IdleTimeoutFired,
+    Deactivated { reason: ServiceDeactivationReason },
+    Activated { trigger: ServiceActivationTrigger },
+    BackendReady,
 }
 
 impl ServiceStateMachine {
@@ -72,6 +79,24 @@ impl ServiceStateMachine {
             has_activation,
             idle_timeout,
             conditions: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self.state, ServiceState::Active { .. })
+    }
+
+    pub fn active_backend_need(&self) -> Option<&BackendNeed> {
+        match &self.state {
+            ServiceState::Active { backend_need, .. } => Some(backend_need),
+            _ => None,
+        }
+    }
+
+    pub fn active_worker_id(&self) -> Option<&WorkerId> {
+        match &self.state {
+            ServiceState::Active { worker_id, .. } => Some(worker_id),
+            _ => None,
         }
     }
 
@@ -98,6 +123,7 @@ impl ServiceStateMachine {
                             backend_need: BackendNeed::Active,
                             idle_timer: None,
                         };
+                        outputs.push(ServiceOutput::BackendReady);
                         outputs.push(ServiceOutput::ConditionClear {
                             key: "activation-pending".into(),
                         });
@@ -113,24 +139,14 @@ impl ServiceStateMachine {
                             outputs.push(ServiceOutput::TimerCancel(tk));
                         }
                         outputs.push(ServiceOutput::EndpointChanged);
-                        if self.has_activation {
-                            self.state = ServiceState::Idle;
-                        } else {
-                            // Always-on: stay NeedBackend, workload will retry.
-                            self.state = ServiceState::NeedBackend;
-                        }
+                        // Both activation and always-on services go to NeedBackend.
+                        // The workload SM handles restart/retry; the service keeps
+                        // its demand signal through the restart.
+                        self.state = ServiceState::NeedBackend;
                     }
                     ServiceState::NeedBackend => {
-                        if self.has_activation {
-                            // Activation service: go back to Idle, drop demand.
-                            self.state = ServiceState::Idle;
-                            outputs.push(ServiceOutput::ConditionClear {
-                                key: "activation-pending".into(),
-                            });
-                        } else {
-                            // Always-on: stay NeedBackend, workload will retry.
-                            self.state = ServiceState::NeedBackend;
-                        }
+                        // Already NeedBackend — no state change needed.
+                        self.state = ServiceState::NeedBackend;
                     }
                     other => {
                         // Restore state if not applicable.
@@ -141,6 +157,7 @@ impl ServiceStateMachine {
             ServiceInput::ServiceActivation => {
                 if matches!(self.state, ServiceState::Idle) {
                     self.state = ServiceState::NeedBackend;
+                    outputs.push(ServiceOutput::Activated { trigger: ServiceActivationTrigger::Traffic });
                     outputs.push(ServiceOutput::ConditionSet {
                         key: "activation-pending".into(),
                         message: "waiting for backend to become ready".into(),
@@ -166,11 +183,13 @@ impl ServiceStateMachine {
                                     self.idle_timeout,
                                 ));
                                 *idle_timer = Some(timer_key);
+                                outputs.push(ServiceOutput::IdleTimerStarted { timeout: self.idle_timeout });
                             }
                         }
                         BackendNeed::Traffic | BackendNeed::Active => {
                             if let Some(timer_key) = idle_timer.take() {
                                 outputs.push(ServiceOutput::TimerCancel(timer_key));
+                                outputs.push(ServiceOutput::IdleTimerCancelled { reason: IdleTimerCancelReason::NewTraffic });
                             }
                         }
                     }
@@ -187,29 +206,39 @@ impl ServiceStateMachine {
                         && *backend_need == BackendNeed::None
                         && self.has_activation
                     {
+                        outputs.push(ServiceOutput::IdleTimeoutFired);
+                        outputs.push(ServiceOutput::Deactivated { reason: ServiceDeactivationReason::IdleTimeout });
                         outputs.push(ServiceOutput::EndpointChanged);
                         self.state = ServiceState::Idle;
                     }
                 }
             }
+            ServiceInput::Initialize { workload_running } => {
+                if matches!(self.state, ServiceState::Pending) {
+                    if workload_running {
+                        self.state = ServiceState::NeedBackend;
+                    } else if self.has_activation {
+                        self.state = ServiceState::Idle;
+                    } else {
+                        self.state = ServiceState::NeedBackend;
+                    }
+                }
+            }
             ServiceInput::ForceDeactivate => {
                 if let ServiceState::Active {
-                    ref backend_need,
                     ref idle_timer,
                     ..
                 } = self.state
                 {
-                    if *backend_need == BackendNeed::None && self.has_activation {
-                        if let Some(tk) = idle_timer.clone() {
-                            outputs.push(ServiceOutput::TimerCancel(tk));
-                        }
-                        outputs.push(ServiceOutput::EndpointChanged);
+                    if let Some(tk) = idle_timer.clone() {
+                        outputs.push(ServiceOutput::TimerCancel(tk));
+                    }
+                    outputs.push(ServiceOutput::Deactivated { reason: ServiceDeactivationReason::ForceDeactivate });
+                    outputs.push(ServiceOutput::EndpointChanged);
+                    if self.has_activation {
                         self.state = ServiceState::Idle;
                     } else {
-                        log::debug!(
-                            "ForceDeactivate ignored for service {:?}: backend_need={:?}, has_activation={}",
-                            self.service_id, backend_need, self.has_activation,
-                        );
+                        self.state = ServiceState::NeedBackend;
                     }
                 }
             }

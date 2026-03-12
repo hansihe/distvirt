@@ -4,7 +4,7 @@ mod output;
 mod reconciliation;
 mod wireguard;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use crate::pod_map::PodMap;
@@ -12,6 +12,13 @@ use crate::sm::service::ServiceStateMachine;
 use crate::types::*;
 use crate::wg_peers::WireGuardPeerManager;
 use crate::sm::workload::WorkloadStateMachine;
+
+/// Cached readiness info per workload, updated from BecameReady/BecameUnready outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkloadReadyInfo {
+    pub pod_id: PodId,
+    pub worker_id: WorkerId,
+}
 
 /// Convert a CIDR prefix length (e.g. 24) to a dotted-decimal netmask string (e.g. "255.255.255.0").
 fn prefix_len_to_netmask(prefix_len: u8) -> String {
@@ -35,6 +42,10 @@ pub struct NamespaceStateMachine {
     pub workers: BTreeMap<WorkerId, NamespaceWorkerState>,
     /// WireGuard peer IP allocation and tracking.
     pub wg_peer_manager: WireGuardPeerManager,
+    /// Cached readiness info per workload, updated from BecameReady/BecameUnready outputs.
+    pub workload_readiness: BTreeMap<WorkloadId, WorkloadReadyInfo>,
+    /// Workloads with active network flows (demand signal from fabric).
+    pub active_flows: BTreeSet<WorkloadId>,
 }
 
 impl NamespaceStateMachine {
@@ -84,6 +95,8 @@ impl NamespaceStateMachine {
             pod_map: PodMap::new(),
             workers: BTreeMap::new(),
             wg_peer_manager,
+            workload_readiness: BTreeMap::new(),
+            active_flows: BTreeSet::new(),
         }
     }
 
