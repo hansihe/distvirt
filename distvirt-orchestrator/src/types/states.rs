@@ -617,16 +617,10 @@ impl LeaseTable {
     }
 }
 
-// --- Pending Intent ---
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub enum PendingIntent {
-    #[default]
-    None,
-    Demand,
-    Deactivate,
-    Restart, // Produced by WorkloadInput::SpecChanged when spec changes during a transition
-}
+// Re-export SM-owned types so `use crate::types::*` still works.
+pub use crate::sm::pod::{PodState, PodSlot};
+pub use crate::sm::workload::{PendingIntent, RetiredPod, WorkloadState};
+pub use crate::sm::service::ServiceState;
 
 // --- Domain Enums ---
 
@@ -635,63 +629,6 @@ pub enum NamespaceStatus {
     Creating,
     Active,
     Destroying,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PodState {
-    Launching { launch_timeout: TimerKey },
-    Running,
-    Suspending { artifact_id: ArtifactId, suspend_timeout: TimerKey },
-    Resuming { artifact_id: ArtifactId, resume_timeout: TimerKey },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PodSlot {
-    pub pod_id: PodId,
-    pub worker_id: WorkerId,
-    pub pod_state: PodState,
-}
-
-/// A pod that has been told to stop but hasn't confirmed gone yet.
-/// Tracked in `WorkloadStateMachine.retiring` until PodGone confirms termination.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RetiredPod {
-    pub pod_id: PodId,
-    pub worker_id: WorkerId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum WorkloadState {
-    Dormant,
-    WaitingForCapacity,
-    Active { pod: PodSlot, pending: PendingIntent },
-    /// Pod is suspended. Artifact tracked in placement table.
-    Suspended {
-        artifact_id: ArtifactId,
-    },
-    /// Waiting before retrying after a pod failure.
-    RetryBackoff {
-        backoff_timer: TimerKey,
-    },
-    /// Terminal failure state after max retries exhausted.
-    Failed,
-    /// Transient sentinel used during `mem::replace` destructuring.
-    /// Must never be observed outside of a single `step()` call.
-    /// If this variant survives, it means a code path forgot to set the final state.
-    Transitioning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ServiceState {
-    Pending,
-    Idle,
-    NeedBackend,
-    Active {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        backend_need: BackendNeed,
-        idle_timer: Option<TimerKey>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -739,85 +676,6 @@ pub struct WorkerState {
     pub pressure: WorkerPressure,
     pub pressure_bands: PressureBands,
     pub psi: Option<WorkerPsi>,
-}
-
-impl WorkloadState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WorkloadState::Dormant => "dormant",
-            WorkloadState::WaitingForCapacity => "waiting_for_capacity",
-            WorkloadState::Active { pod, .. } => match &pod.pod_state {
-                PodState::Launching { .. } => "launching",
-                PodState::Running => "running",
-                PodState::Suspending { .. } => "suspending",
-                PodState::Resuming { .. } => "resuming",
-            },
-            WorkloadState::Suspended { .. } => "suspended",
-            WorkloadState::RetryBackoff { .. } => "retry_backoff",
-            WorkloadState::Failed => "failed",
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
-        }
-    }
-
-    pub fn pod_id(&self) -> Option<&PodId> {
-        match self {
-            WorkloadState::Active { pod, .. } => Some(&pod.pod_id),
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
-            _ => None,
-        }
-    }
-
-    pub fn worker_id(&self) -> Option<&WorkerId> {
-        match self {
-            WorkloadState::Active { pod, .. } => Some(&pod.worker_id),
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
-            _ => None,
-        }
-    }
-
-    pub fn artifact_id(&self) -> Option<&ArtifactId> {
-        match self {
-            WorkloadState::Active {
-                pod: PodSlot {
-                    pod_state: PodState::Suspending { artifact_id, .. }
-                        | PodState::Resuming { artifact_id, .. },
-                    ..
-                },
-                ..
-            }
-            | WorkloadState::Suspended { artifact_id, .. } => Some(artifact_id),
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
-            _ => None,
-        }
-    }
-
-    pub fn is_running(&self) -> bool {
-        matches!(
-            self,
-            WorkloadState::Active {
-                pod: PodSlot { pod_state: PodState::Running, .. },
-                ..
-            }
-        )
-    }
-
-    pub fn active_pod(&self) -> Option<&PodSlot> {
-        match self {
-            WorkloadState::Active { pod, .. } => Some(pod),
-            _ => None,
-        }
-    }
-}
-
-impl ServiceState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ServiceState::Pending => "pending",
-            ServiceState::Idle => "idle",
-            ServiceState::NeedBackend => "need_backend",
-            ServiceState::Active { .. } => "active",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

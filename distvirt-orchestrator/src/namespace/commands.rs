@@ -1,6 +1,6 @@
-use crate::service::{ServiceInput, ServiceStateMachine};
+use crate::sm::service::{ServiceInput, ServiceStateMachine};
 use crate::types::*;
-use crate::workload::{WorkloadInput, WorkloadStateMachine};
+use crate::sm::workload::{WorkloadInput, WorkloadStateMachine};
 
 use super::{prefix_len_to_netmask, NamespaceStateMachine};
 

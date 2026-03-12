@@ -1,7 +1,6 @@
 pub mod config;
 pub mod types;
-pub mod workload;
-pub mod service;
+pub mod sm;
 pub mod wg_peers;
 pub mod pod_map;
 pub mod broadcast;

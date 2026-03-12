@@ -208,7 +208,7 @@ impl NamespaceSnapshot {
         let mut workloads = BTreeMap::new();
         for (wl_id, wl_snap) in &self.workloads {
             let suspend_on_idle = self.spec.workloads.get(wl_id).map_or(false, |w| w.suspend_on_idle);
-            let mut wl = distvirt_orchestrator::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle);
+            let mut wl = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle);
             wl.max_retries = max_retries;
             wl.state = wl_snap.state.clone();
             wl.current_demand = wl_snap.current_demand;
@@ -223,7 +223,7 @@ impl NamespaceSnapshot {
                 .and_then(|s| s.activation.as_ref())
                 .map(|a| a.idle_timeout)
                 .unwrap_or(Duration::from_secs(30));
-            let mut svc = distvirt_orchestrator::service::ServiceStateMachine::new(
+            let mut svc = distvirt_orchestrator::sm::service::ServiceStateMachine::new(
                 svc_id.clone(),
                 svc_snap.workload_id.clone(),
                 svc_snap.has_activation,

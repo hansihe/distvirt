@@ -8,10 +8,10 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use crate::pod_map::PodMap;
-use crate::service::ServiceStateMachine;
+use crate::sm::service::ServiceStateMachine;
 use crate::types::*;
 use crate::wg_peers::WireGuardPeerManager;
-use crate::workload::WorkloadStateMachine;
+use crate::sm::workload::WorkloadStateMachine;
 
 /// Convert a CIDR prefix length (e.g. 24) to a dotted-decimal netmask string (e.g. "255.255.255.0").
 fn prefix_len_to_netmask(prefix_len: u8) -> String {

@@ -1,6 +1,6 @@
-use crate::service::ServiceInput;
+use crate::sm::service::ServiceInput;
 use crate::types::*;
-use crate::workload::{PodGoneReason, WorkloadInput};
+use crate::sm::workload::{PodGoneReason, WorkloadInput};
 
 use super::NamespaceStateMachine;
 

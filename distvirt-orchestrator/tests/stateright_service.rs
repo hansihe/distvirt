@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use stateright::*;
 
-use distvirt_orchestrator::service::{ServiceInput, ServiceOutput, ServiceStateMachine};
+use distvirt_orchestrator::sm::service::{ServiceInput, ServiceOutput, ServiceStateMachine};
 use distvirt_orchestrator::types::*;
 
 // --- Model Configuration ---

@@ -25,7 +25,7 @@ The `PendingIntent` mechanism partially compensates — it records contradicting
 
 Mechanical refactor: moved pod lifecycle fields out of `WorkloadState` variants into `PodSlot` and `PodState` structs. No behavior change.
 
-**Types introduced** (in `src/types/states.rs`):
+**Types** (defined in `src/sm/pod.rs`, re-exported via `types::*`):
 
 ```rust
 pub enum PodState {
@@ -40,7 +40,11 @@ pub struct PodSlot {
     pub worker_id: WorkerId,
     pub pod_state: PodState,
 }
+```
 
+**Types** (defined in `src/sm/workload.rs`, re-exported via `types::*`):
+
+```rust
 pub enum WorkloadState {
     Dormant,
     WaitingForCapacity,
@@ -80,6 +84,30 @@ Timer handlers (LaunchTimeout, SuspendTimeout, ResumeTimeout) no longer eagerly 
 
 Low risk — additive change, no external behavior difference. All existing tests pass.
 
+### Phase 2.5: Extract pod SM + module reorganization — DONE
+
+Extracted pod lifecycle into its own state machine with `PodSlot::step()`, and reorganized all state machines under `src/sm/`:
+
+**Module structure:**
+- `src/sm/mod.rs` — re-exports `pod`, `workload`, `service` modules
+- `src/sm/pod.rs` — pod lifecycle SM (`PodSlot::step()`, `PodInput`, `PodOutput`, `PodOutcome`), owns `PodState` and `PodSlot` types
+- `src/sm/workload.rs` — workload coordinator SM, delegates pod lifecycle to `PodSlot::step()`, owns `WorkloadState`, `PendingIntent`, `RetiredPod` types
+- `src/sm/service.rs` — service SM, owns `ServiceState` type
+
+**Pod SM design:** Rather than a separate `PodStateMachine` struct, methods were added directly to `PodSlot` via `impl PodSlot` in `pod.rs`. This avoids touching all pattern matches that destructure `PodSlot` fields. The pod SM handles:
+- State transitions: Launching→Running, Resuming→Running, Running→Suspending, timeouts
+- Timer management: sets/cancels launch, suspend, resume timeouts
+- Artifact cleanup: deletes artifacts on successful resume or timeout
+
+The pod SM returns `(PodOutcome, Vec<PodOutput>)` from `step()`. The workload SM interprets the outcome for workload-level decisions (retry, demand check, intent handling) and converts `PodOutput`s to `WorkloadOutput`s via `collect_pod_outputs()`.
+
+**Key helper methods on PodSlot:**
+- `new_launching()` / `new_resuming()` — constructors that return `(PodSlot, Vec<PodOutput>)` with initial timer setup
+- `initiate_suspend()` — transitions Running→Suspending with timer and suspend request
+- `step()` — processes `PodInput` events, returns outcome + side effects
+
+**Type ownership:** SM-specific types (`PodState`, `PodSlot`, `WorkloadState`, `PendingIntent`, `RetiredPod`, `ServiceState`) are defined in their respective SM modules. `src/types/states.rs` re-exports them via `pub use crate::sm::*` so `use crate::types::*` continues to work everywhere — no import changes needed outside the SM modules.
+
 ### Phase 3: Replacement pod slot + concurrent spec change
 
 Add `replacement: Option<PodSlot>` to `WorkloadStateMachine`. On `SpecChanged` during `Active` with `PodState::Running`, launch a replacement concurrently instead of stop-then-launch.
@@ -112,17 +140,18 @@ Add `replacement: Option<PodSlot>` to `WorkloadStateMachine`. On `SpecChanged` d
 
 ### Pod State Machine
 
-Pod lifecycle as an independent state machine. A pod SM manages a single pod from launch to termination:
+Pod lifecycle as an independent state machine implemented on `PodSlot` in `src/sm/pod.rs`. A pod SM manages a single pod from launch to termination:
 
 ```
 Launching → Running → Stopping → Gone
                    → Suspending → Suspended
                                 → SuspendFailed
+Resuming  → Running
 ```
 
-The pod SM is simple, linear, and independently testable. It receives events from the worker (`PodRunning`, `PodGone`, `PodSuspended`) and emits commands (`StopPod`). It does not know about demand, activation, or spec versions.
+The pod SM is simple, linear, and independently testable. It receives events from the worker (`PodRunning`, `PodGone`, `PodSuspended`) and emits side effects (`TimerSet`, `TimerCancel`, `DeleteArtifact`, `SuspendRequest`). It does not know about demand, activation, or spec versions. Retirement (`StopPod`) is handled by the workload SM — the pod SM's `TimedOut` outcome signals the caller to retire the pod.
 
-After Phase 1, the `PodState` enum already captures this shape. The question is whether to extract a full `PodStateMachine` with its own `step()` or keep pod transitions inline in `WorkloadStateMachine.step()`. The current inline approach works well — the pod state transitions are simple enough that a separate SM may be over-abstraction. Revisit if `step()` grows unwieldy.
+**Design decision:** The pod SM is implemented as methods on `PodSlot` rather than a separate struct. This keeps pattern matching on `PodSlot` fields ergonomic throughout the workload SM and namespace layer. The `worker_lost` flag on `PodInput::PodGone` suppresses artifact deletion for Resuming pods when the worker is lost (namespace layer handles cleanup for lost workers).
 
 ### Workload State Machine
 
@@ -155,5 +184,6 @@ After Phase 3, `PendingIntent` can be simplified — the `Restart` variant is on
 
 - Phase 1: All existing tests pass unchanged (done)
 - Phase 2: All existing tests pass; stateright model updated with retiring tracking (done)
+- Phase 2.5: All existing tests pass; re-exports mean no import changes outside SM modules (done)
 - Phase 3: Existing tests pass (sequential fallback is default for existing specs); new scenarios for concurrent replacement, exclusive resources, rapid spec changes
 - Stateright models updated incrementally per phase

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use stateright::*;
 
 use distvirt_orchestrator::types::*;
-use distvirt_orchestrator::workload::{WorkloadInput, WorkloadOutput, WorkloadStateMachine};
+use distvirt_orchestrator::sm::workload::{WorkloadInput, WorkloadOutput, WorkloadStateMachine};
 
 /// Must match `WorkloadStateMachine::MAX_RETRIES`.
 const MAX_RETRIES: u32 = 5;

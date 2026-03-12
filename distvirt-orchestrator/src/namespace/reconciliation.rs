@@ -1,6 +1,6 @@
-use crate::service::ServiceInput;
+use crate::sm::service::ServiceInput;
 use crate::types::*;
-use crate::workload::WorkloadInput;
+use crate::sm::workload::WorkloadInput;
 
 use super::NamespaceStateMachine;
 

@@ -1,5 +1,29 @@
 use crate::types::*;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ServiceState {
+    Pending,
+    Idle,
+    NeedBackend,
+    Active {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        backend_need: BackendNeed,
+        idle_timer: Option<TimerKey>,
+    },
+}
+
+impl ServiceState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceState::Pending => "pending",
+            ServiceState::Idle => "idle",
+            ServiceState::NeedBackend => "need_backend",
+            ServiceState::Active { .. } => "active",
+        }
+    }
+}
+
 pub struct ServiceStateMachine {
     pub service_id: ServiceId,
     pub state: ServiceState,
