@@ -46,7 +46,6 @@ struct WlModelState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WlModelAction {
-    Initialize,
     SetDemand { count: u32 },
     ForceDeactivate,
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
@@ -97,24 +96,21 @@ impl Model for WorkloadModel {
     type Action = WlModelAction;
 
     fn init_states(&self) -> Vec<Self::State> {
+        let (sm, _init_outputs) = WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
+        // The init_outputs (e.g. PodRequest for always-on) are reflected in the initial state.
         vec![WlModelState {
-            state: WorkloadState::Dormant,
-            current_demand: 0,
-            consecutive_failures: 0,
+            state: sm.state,
+            current_demand: sm.current_demand,
+            consecutive_failures: sm.consecutive_failures,
             pending_timers: BTreeSet::new(),
             next_pod_id: 0,
             step_count: 0,
-            needs_successful_boot: false,
-            retiring: Vec::new(),
+            needs_successful_boot: sm.needs_successful_boot,
+            retiring: sm.retiring,
         }]
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
-        // Initialize: can fire once from Dormant state.
-        if matches!(state.state, WorkloadState::Dormant) {
-            actions.push(WlModelAction::Initialize);
-        }
-
         // SetDemand: can set to any value from 0 to num_services.
         for count in 0..=(self.num_services as u32) {
             if count != state.current_demand {
@@ -245,7 +241,7 @@ impl Model for WorkloadModel {
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        let mut sm = WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
+        let (mut sm, _) = WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
         sm.state = state.state.clone();
         sm.current_demand = state.current_demand;
         sm.consecutive_failures = state.consecutive_failures;
@@ -256,7 +252,6 @@ impl Model for WorkloadModel {
         let ns = ns_id();
 
         let (input, fired_timer) = match action {
-            WlModelAction::Initialize => (WorkloadInput::Initialize, None),
             WlModelAction::SetDemand { count } => (WorkloadInput::SetDemand { count }, None),
             WlModelAction::ForceDeactivate => (WorkloadInput::ForceDeactivate, None),
             WlModelAction::LaunchPod { worker_id, pod_id } => {

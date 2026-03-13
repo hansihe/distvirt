@@ -169,7 +169,7 @@ pub enum WorkloadInput {
     /// Initialize the workload. For always-on workloads (!has_activation),
     /// this transitions to WaitingForCapacity and emits PodRequest.
     /// For activation-based workloads, this is a no-op (stays Dormant).
-    Initialize,
+
     SetDemand { count: u32 },
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     /// Outer layer has generated a pod_id for resuming from snapshot.
@@ -226,8 +226,8 @@ fn backoff_delay(failures: u32) -> std::time::Duration {
 }
 
 impl WorkloadStateMachine {
-    pub fn new(workload_id: WorkloadId, suspend_on_idle: bool, has_activation: bool) -> Self {
-        WorkloadStateMachine {
+    pub fn new(workload_id: WorkloadId, suspend_on_idle: bool, has_activation: bool) -> (Self, Vec<WorkloadOutput>) {
+        let mut sm = WorkloadStateMachine {
             workload_id,
             state: WorkloadState::Dormant,
             current_demand: 0,
@@ -239,7 +239,14 @@ impl WorkloadStateMachine {
             needs_successful_boot: false,
             conditions: std::collections::BTreeMap::new(),
             retiring: Vec::new(),
+        };
+        let mut outputs = Vec::new();
+        if !has_activation {
+            // Always-on workload: self-activate immediately.
+            sm.needs_successful_boot = true;
+            sm.transition_on_demand(&mut outputs);
         }
+        (sm, outputs)
     }
 
     /// Helper: transition to dormant or waiting-for-capacity based on demand,
@@ -383,14 +390,6 @@ impl WorkloadStateMachine {
         let mut outputs = Vec::new();
 
         match input {
-            WorkloadInput::Initialize => {
-                if !self.has_activation && matches!(self.state, WorkloadState::Dormant) {
-                    // Always-on workload: self-activate on initialize.
-                    self.needs_successful_boot = true;
-                    self.transition_on_demand(&mut outputs);
-                }
-                // Activation-based workloads stay Dormant until demand arrives.
-            }
             WorkloadInput::SetDemand { count } => {
                 let old = self.current_demand;
                 self.current_demand = count;

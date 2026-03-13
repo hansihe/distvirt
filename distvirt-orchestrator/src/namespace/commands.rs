@@ -26,14 +26,13 @@ impl NamespaceStateMachine {
             if !self.workloads.contains_key(wl_id) {
                 let has_services = spec.services.values().any(|s| s.workload_id == *wl_id);
                 let has_activation = wl_spec.activation.is_some() || has_services;
-                self.workloads.insert(
+                let (wl_sm, init_outputs) = WorkloadStateMachine::new(
                     wl_id.clone(),
-                    WorkloadStateMachine::new(
-                        wl_id.clone(),
-                        wl_spec.suspend_on_idle,
-                        has_activation,
-                    ),
+                    wl_spec.suspend_on_idle,
+                    has_activation,
                 );
+                self.workloads.insert(wl_id.clone(), wl_sm);
+                self.translate_workload_effects(wl_id, init_outputs, placement_table, out);
             }
         }
 
@@ -52,6 +51,7 @@ impl NamespaceStateMachine {
         }
 
         // Add new services.
+        let mut added_services = Vec::new();
         for (svc_id, svc_spec) in &spec.services {
             if !self.services.contains_key(svc_id) {
                 let wl_id = svc_spec.workload_id.clone();
@@ -72,6 +72,7 @@ impl NamespaceStateMachine {
                     ),
                 );
                 self.service_workload.insert(svc_id.clone(), wl_id);
+                added_services.push(svc_id.clone());
             }
         }
 
@@ -142,8 +143,12 @@ impl NamespaceStateMachine {
         self.spec = spec;
 
         if self.status == NamespaceStatus::Active {
-            if !removed_services.is_empty() {
+            if !removed_services.is_empty() || !added_services.is_empty() {
                 self.emit_registry_sync(out);
+            }
+            // Broadcast endpoint updates for newly added services.
+            for svc_id in &added_services {
+                self.emit_endpoint_update_for_service(svc_id, out);
             }
             self.reconcile_all_services(placement_table, out);
         }

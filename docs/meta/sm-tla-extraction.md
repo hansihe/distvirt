@@ -21,22 +21,24 @@ The answer: **extract TLA+ modules directly from the Rust implementation.** Writ
 
 ### The SM Trait
 
-Every state machine conforms to a single interface:
+Rather than a single `step` function that matches on an `Inbox` enum, the build step generates a **handler trait** with one method per inbound message type. The SM implementor provides a handler for each message it needs to handle:
 
 ```rust
-trait StateMachine {
+// Generated from #[sm_message(to = WorkloadSm)] declarations
+trait WorkloadSmHandlers {
     type State;
-    type Inbox; // generated: enum of all messages routable to this SM
-
-    fn step(state: Self::State, msg: Self::Inbox, ctx: &mut SmContext) -> Self::State;
+    fn handle_set_demand(state: Self::State, msg: SetDemand, ctx: &mut SmContext) -> Self::State;
+    fn handle_force_deactivate(state: Self::State, msg: ForceDeactivate, ctx: &mut SmContext) -> Self::State;
 }
 ```
 
+Each handler is a self-contained extractable function — match on state internally, return new state. The extractor processes handlers independently, each producing one TLA+ operator.
+
 Key design choices:
 
-- **`State` by value, not `&mut self`.** `step` takes ownership of the old state and returns the new state. This eliminates `mem::replace`, the `Transitioning` sentinel, and mutable borrows into sub-state. It maps directly to TLA+'s `state' = ...`.
+- **`State` by value, not `&mut self`.** Handlers take ownership of the old state and return the new state. This eliminates `mem::replace`, the `Transitioning` sentinel, and mutable borrows into sub-state. It maps directly to TLA+'s `state' = ...`.
 - **Side effects through `ctx` only.** `ctx.send(target, msg)` is the sole mechanism for interacting with other SMs. No direct function calls between SMs.
-- **`Inbox` is generated**, not hand-written. See [Message Routing](#message-routing).
+- **One handler per message type.** No `Inbox` enum, no compound `(state, msg)` match. Each handler matches on state independently, using the full power of or-patterns and guards. The compiler enforces completeness — every message routed to this SM must have a handler. Irrelevant (state, message) combinations use a `_ => state` catch-all arm in the handler body.
 
 ### Hierarchical State
 
@@ -73,19 +75,28 @@ enum ActiveSub {
 }
 ```
 
-This lets match arms operate at the right level of specificity:
+This lets handler match arms operate at the right level of specificity:
 
 ```rust
-// Matches ANY active sub-state (one arm instead of four)
-(WorkloadPhase::Active { pod_id, worker_id, .. }, Inbox::WorkerLost(msg))
-    if worker_id == msg.worker_id => { ... }
+fn handle_worker_lost(state: WorkloadSmState, msg: WorkerLost, ctx: &mut SmContext) -> WorkloadSmState {
+    match state.phase {
+        // Matches ANY active sub-state (one arm instead of four)
+        WorkloadPhase::Active { pod_id, worker_id, .. }
+            if worker_id == msg.worker_id => { ... }
+        _ => state,
+    }
+}
 
-// Matches only transitioning sub-states via or-pattern
-(WorkloadPhase::Active { sub: ActiveSub::Launching { pending }
-                           | ActiveSub::Suspending { pending, .. }
-                           | ActiveSub::Resuming { pending, .. }, .. },
- Inbox::ForceDeactivate(_)) => {
-    // upgrade pending
+fn handle_force_deactivate(state: WorkloadSmState, msg: ForceDeactivate, ctx: &mut SmContext) -> WorkloadSmState {
+    match state.phase {
+        // Matches only transitioning sub-states via or-pattern
+        WorkloadPhase::Active { sub: ActiveSub::Launching { pending }
+                                   | ActiveSub::Suspending { pending, .. }
+                                   | ActiveSub::Resuming { pending, .. }, .. } => {
+            // upgrade pending
+        }
+        _ => state,
+    }
 }
 ```
 
@@ -151,13 +162,13 @@ The `#[sm_message]` attribute declares:
 
 A build step (not a proc macro — cross-module aggregation requires it) collects all `#[sm_message]` declarations and generates:
 
-- **`Inbox` enum per SM type.** For each SM, the enum contains a variant for every message type where `to = ThatSm`.
-- **Routing dispatch.** A function that takes an SM's output message, extracts the routing key, and delivers to the correct inbox.
+- **Handler trait per SM type.** For each SM, a trait with one method per message type where `to = ThatSm`.
+- **Routing dispatch.** A function that takes an SM's output message, extracts the routing key, and delivers to the correct handler on the target SM.
 - **TLA+ channel declarations.** For each `(from, to)` pair, a typed message channel in the TLA+ spec.
 
 This means:
 
-- Adding a new message = one struct + one attribute. The inbox enum, routing, and TLA+ channels update automatically.
+- Adding a new message = one struct + one attribute. The handler trait, routing, and TLA+ channels update automatically.
 - The routing topology is a static, inspectable graph — useful for both documentation and verification.
 - No manual conversion code between output and input types. The message struct is the same at both ends.
 
@@ -172,124 +183,38 @@ This means:
 
 Conditional routing (where the target depends on state or lookups) is handled by routing through an intermediary SM. The sender emits a request; the intermediary enriches and forwards. This is explicit in the message graph and visible in the TLA+ spec.
 
-### Default Message Dispositions
+### Dispatch Layer
 
-In a typical SM, most (state, message) combinations are "do nothing." Without a default, every unhandled combination needs an explicit catch-all arm — for the workload SM with ~6 states and ~12 message types, that's ~40 no-op arms burying the ~25 meaningful ones.
-
-Each `#[sm_message]` declares a default disposition for states that don't explicitly handle it:
-
-```rust
-#[sm_message(from = PodSm, to = WorkloadSm, route_by = workload_id, default = ignore)]
-struct PodBecameRunning { ... }
-
-#[sm_message(from = PodSm, to = WorkloadSm, route_by = workload_id, default = defer)]
-struct PodIsGone { ... }
-```
-
-- **`default = ignore`**: If no match arm handles this message in the current state, silently consume it. The step function returns the state unchanged. This is the common case for "message not relevant right now."
-- **`default = defer`**: If no match arm handles this message, leave it in the inbox and try the next message. The TLA+ action is simply not enabled. Useful for messages that must eventually be processed (e.g., `PodIsGone` should never be silently dropped).
-
-Per-state overrides are possible when a message's default doesn't apply everywhere:
-
-```rust
-#[derive(Extractable)]
-enum WorkloadPhase {
-    #[defer(PodBecameRunning)]  // override: shouldn't arrive while dormant
-    Dormant,
-    ...
-}
-```
-
-This is adopted from P's `defer`/`ignore` semantics but integrated into the message declaration rather than requiring per-state handler tables.
-
-### Dispatch Layer: `step` vs Runtime Wrapper
-
-The `step` function only contains arms for transitions the SM actually handles — no catch-all arms for ignore or defer. The user writes only meaningful logic:
-
-```rust
-fn step(state: WorkloadSmState, msg: Inbox, ctx: &mut SmContext) -> WorkloadSmState {
-    match (state.phase, msg) {
-        (WorkloadPhase::Dormant, Inbox::SetDemand(m)) if m.count > 0 => {
-            ctx.send(placement_sm, PodRequest { .. });
-            WorkloadSmState { phase: WorkloadPhase::WaitingForCapacity, ..state }
-        }
-        // ... only real transitions, no catch-all
-    }
-}
-```
-
-The build step — which already parses the `step` AST for TLA+ extraction — knows exactly which `(state_variant, message_variant)` pairs have explicit match arms. From this plus the `#[sm_message]` annotations and per-state overrides, it generates a dispatch wrapper that handles inbox scanning:
+The generated dispatch layer takes the next message from the inbox and calls the appropriate handler method. Every handler returns `State` — the message is always consumed.
 
 ```rust
 // Generated — user never writes or sees this
 fn dispatch(
+    sm: &impl WorkloadSmHandlers,
     state: WorkloadSmState,
-    inbox: &mut VecDeque<Inbox>,
+    inbox: &mut VecDeque<InboxMsg>,
     ctx: &mut SmContext,
 ) -> WorkloadSmState {
-    let mut i = 0;
-    while i < inbox.len() {
-        let disposition = match (&state.phase, &inbox[i]) {
-            // Derived from step's match patterns — arm exists, call step:
-            (WorkloadPhase::Dormant, Inbox::SetDemand(m)) if m.count > 0
-                => Disposition::Handle,
-            // SetDemand guard failed (count == 0, Dormant) — no arm matches,
-            // falls to message default (ignore):
-            (WorkloadPhase::Dormant, Inbox::SetDemand(_))
-                => Disposition::Ignore,
-
-            // No arm in step + default=defer on message:
-            (_, Inbox::PodIsGone(_))
-                => Disposition::Defer,
-            // Per-state override: #[defer(PodBecameRunning)] on Dormant:
-            (WorkloadPhase::Dormant, Inbox::PodBecameRunning(_))
-                => Disposition::Defer,
-
-            // No arm in step + default=ignore on message:
-            (_, Inbox::PodBecameRunning(_))
-                => Disposition::Ignore,
-
-            // Fallback for anything not covered:
-            _ => Disposition::Ignore,
-        };
-        match disposition {
-            Disposition::Handle => {
-                let msg = inbox.remove(i).unwrap();
-                return step(state, msg, ctx);
-            }
-            Disposition::Ignore => {
-                inbox.remove(i);
-                // don't increment i — next message shifted into position
-            }
-            Disposition::Defer => {
-                i += 1; // skip, try next message
-            }
-        }
+    let Some(msg) = inbox.pop_front() else {
+        return state; // empty inbox, no progress this tick
+    };
+    match msg {
+        InboxMsg::SetDemand(msg) => sm.handle_set_demand(state, msg, ctx),
+        InboxMsg::PodBecameRunning(msg) => sm.handle_pod_became_running(state, msg, ctx),
+        // ... one branch per message type
     }
-    state // all remaining messages deferred, no progress this tick
 }
 ```
 
-This separation has several benefits:
+This has several benefits:
 
-- **User writes zero boilerplate.** No catch-all arms, no defer signaling, no ignore arms. The `step` function is purely transition logic.
-- **Disposition is derived, not declared in `step`.** The build step already parses the match AST for TLA+ extraction; deriving disposition from "which arms exist" is a natural extension. Match guards are replicated in the disposition check — when a guard fails (e.g., `count > 0` fails), the message falls through to its default disposition rather than being handled.
-- **`defer` is invisible to `step`.** The `step` function is never called with a message it can't handle. The dispatch layer skips deferred messages before `step` sees them.
+- **User writes zero boilerplate.** No `Inbox` enum matching. Each handler is purely transition logic for one message type, with a `_ => state` catch-all for irrelevant states.
+- **Simple dispatch.** Messages are consumed in FIFO order. No inbox scanning or reordering.
+- **Trivial extraction.** Each handler method is independently extractable — one method becomes one TLA+ operator. No need to decompose a compound match.
 
-**TLA+ mapping:**
+**TLA+ mapping:** Each handler becomes a TLA+ operator. A handler that returns state unchanged (catch-all arm) maps to an enabled action with `UNCHANGED state` that consumes the message.
 
-- `Handle` → the CASE disjunct for this (state, msg) pair is enabled; state and inbox update per the match arm.
-- `Ignore` → an enabled action with `UNCHANGED state` that consumes the message (inbox shrinks by one).
-- `Defer` → the action is not enabled for this message. TLC naturally skips it and tries the next message in the sequence.
-
-**Compile-time validation:**
-
-The build step can verify:
-
-- **Completeness:** Every `(state_variant, message_variant)` pair resolves to exactly one disposition (handle, ignore, or defer). No gaps.
-- **Defer validity:** `Defer` is only possible for messages annotated with `default = defer` or covered by a per-state `#[defer]` override.
-- **Reachability:** A message with `default = defer` has at least one state that handles it. Otherwise it's permanently stuck in the inbox.
-- **Progress:** In every state, at least one message type is non-defer. Otherwise the SM can make no progress (livelock). This is a static check on the disposition matrix.
+**Compile-time validation:** Every message type routed to this SM must have a handler implementation. Guaranteed by the trait system — a missing handler is a compile error.
 
 ## Extractable Type System
 
@@ -336,7 +261,7 @@ Each method has a direct TLA+ translation. The `filter` predicate must itself be
 
 ### Extractable Rust Subset
 
-The `step` function and any helper functions it calls must use only constructs with known TLA+ translations. This is a "Rust-surface DSL" — valid Rust that happens to be mechanically extractable.
+Handler methods and any helper functions they call must use only constructs with known TLA+ translations. This is a "Rust-surface DSL" — valid Rust that happens to be mechanically extractable.
 
 **Control flow:**
 
@@ -362,7 +287,9 @@ The `step` function and any helper functions it calls must use only constructs w
 
 **Helper functions:**
 
-Extractable helper functions may be called from `step` and from each other. They can use `ctx.send()` and return values. The extractor compiles them to TLA+ operators, threading message sends through the call. This is essential — the workload SM has helpers like `transition_on_demand` called from ~8 different match arms.
+Extractable helper functions may be called from handler methods but not from each other (call depth is limited to 1). They can use `ctx.send()` and return values. This is essential — the workload SM has helpers like `transition_on_demand` called from ~8 different handlers.
+
+The extractor handles helpers by **inlining** them at each call site in the generated TLA+. At each call site, the helper body is substituted with arguments bound, and any `ctx.send()` calls within the helper merge with the calling handler's sends. This is straightforward because depth-1 means there's no recursive inlining — each helper body is a self-contained decision tree. The depth-1 limit is enforced by the `#[extractable_fn]` proc macro.
 
 ```rust
 // Extractable helper — compiles to TLA+ operator
@@ -389,6 +316,10 @@ fn transition_on_demand(
     }
 }
 ```
+
+**Compile-time validation of handler bodies:**
+
+Each handler method (and any helper it calls) is wrapped in a proc macro attribute (e.g., `#[extractable_fn]`) that validates the body at compile time against the extractable subset. Non-extractable constructs — loops, closures, unsupported method calls, early returns, etc. — produce compile errors with spans pointing at the offending expression. This catches violations immediately, not at a later extraction step.
 
 **Explicitly disallowed:**
 
@@ -482,7 +413,7 @@ struct TimerSmReceivers {
 }
 ```
 
-This is more natural for async excepted SMs — the timer impl can `select!` across its receivers, waiting on both incoming messages and its own clock events simultaneously. Extracted SMs don't need this; they receive a single `Inbox` enum and match on it in their `step` function.
+This is more natural for async excepted SMs — the timer impl can `select!` across its receivers, waiting on both incoming messages and its own clock events simultaneously. Extracted SMs don't need this; they implement a generated handler trait with one method per message type.
 
 The hand-written Rust implementation receives both the channel handle (for sending) and the receivers (for receiving). It can use async tasks, real clocks, whatever it needs — but it can only interact with the rest of the system through the declared message types. The routing topology remains statically known and complete.
 
@@ -522,44 +453,75 @@ The pattern is the same in each case: declare messages, get a typed channel hand
 For each SM, the build step generates:
 
 **Rust side:**
-- `Inbox` enum (from message declarations)
+- Handler trait (one method per inbound message type)
+- Dispatch function (scans inbox, calls appropriate handler)
 - Routing dispatch code
 - Stateright `Model` impl (optional — derives actions from message types, state from SM state)
 
 **TLA+ side:**
 - One `.tla` module per SM with:
   - State variable declaration
-  - `Step(self, msg)` operator: `CASE` disjuncts from `match` arms
+  - One operator per handler method (e.g., `WorkloadHandleSetDemand(self, msg)`)
+  - A top-level `WorkloadStep` that is the disjunction of all handler operators
   - Message send as `Append(inbox[target], msg)`
   - `state' = ...` from return value
 - One composition module that wires all SM processes together with their inboxes
 
-### Match Arms → CASE Disjuncts
+### Handlers → TLA+ Operators
 
-Each arm of the `match` in `step` becomes a TLA+ `CASE` guard:
+Each handler method becomes an independent TLA+ operator:
 
 ```rust
-// Rust
-(WorkloadState::Active { pod, pending }, Inbox::PodRunning { pod_id }) => {
-    ctx.send(demand_sm, DemandChanged { ... });
-    WorkloadState::Active { pod, pending: PendingIntent::None }
+// Rust handler
+fn handle_pod_became_running(state: WorkloadSmState, msg: PodBecameRunning, ctx: &mut SmContext) -> WorkloadSmState {
+    match state.phase {
+        WorkloadPhase::Active { sub: ActiveSub::Launching { pending }, pod_id, .. }
+            if pod_id == msg.pod_id =>
+        {
+            ctx.send(readiness_sm, BecameReady { workload_id: ctx.self_id(), pod_id });
+            WorkloadSmState {
+                phase: WorkloadPhase::Active { sub: ActiveSub::Running, pod_id, ..state.phase },
+                consecutive_failures: 0,
+                ..state
+            }
+        }
+        _ => state,
+    }
 }
 ```
 
 ```tla
-\* TLA+
-WorkloadStep(self, msg) ==
-    CASE state[self].type = "Active" /\ msg.type = "PodRunning" ->
-        /\ inbox' = [inbox EXCEPT ![demand_sm] =
-               Append(@, [type |-> "DemandChanged", ...])]
-        /\ state' = [state EXCEPT ![self] =
-               [type |-> "Active", pod |-> state[self].pod,
-                pending |-> "None"]]
+\* TLA+ — one operator per handler
+\* Takes inbox_after (inbox with head already consumed) so handlers
+\* only need to append outgoing messages.
+WorkloadHandlePodBecameRunning(self, msg, inbox_after) ==
+    /\ msg.type = "PodBecameRunning"
+    /\ state[self].phase.type = "Active"
+    /\ state[self].phase.sub.type = "Launching"
+    /\ state[self].phase.pod_id = msg.pod_id
+    /\ inbox' = [inbox_after EXCEPT ![readiness_sm] =
+           Append(@, [type |-> "BecameReady", workload_id |-> self,
+                      pod_id |-> state[self].phase.pod_id])]
+    /\ state' = [state EXCEPT ![self] =
+           [@ EXCEPT !.phase.sub = [type |-> "Running"],
+                     !.consecutive_failures = 0]]
+
+\* Top-level step: consume head of inbox, dispatch by type
+WorkloadStep(self) ==
+    /\ Len(inbox[self]) > 0
+    /\ LET msg == Head(inbox[self])
+           rest == [inbox EXCEPT ![self] = Tail(@)]
+       IN \/ WorkloadHandleSetDemand(self, msg, rest)
+          \/ WorkloadHandlePodBecameRunning(self, msg, rest)
+          \/ WorkloadHandlePodIsGone(self, msg, rest)
+          \/ ...
 ```
+
+Because each handler is an independent function with a single message type, extraction is straightforward — no need to decompose a compound `(state, msg)` match.
 
 ### Stateright Model Derivation
 
-The hand-written stateright models (`stateright_workload.rs`, `stateright_model.rs`) can be replaced by generated ones. The `actions()` method enumerates valid messages for the current state (derived from `#[sm_message]` metadata). The `next_state()` method calls `step` and snapshots. Timer tracking is handled by the generated harness, not manually.
+The hand-written stateright models (`stateright_workload.rs`, `stateright_model.rs`) can be replaced by generated ones. The `actions()` method enumerates valid messages for the current state (derived from `#[sm_message]` metadata). The `next_state()` method calls the appropriate handler and snapshots. Timer tracking is handled by the generated harness, not manually.
 
 ## Verification Strategy
 
@@ -587,25 +549,19 @@ Stateright remains valuable for fast CI feedback. The generated stateright model
 
 ## Migration Path
 
-### Phase 1: SM Trait and Context
+### Phase 1: Message Types and Handler Traits
 
-Define the `StateMachine` trait and `SmContext`. Refactor the existing pod, workload, and service SMs to conform. This is a mechanical refactor — the logic doesn't change, just the interface.
+Define `#[sm_message]` and the build step that generates handler traits, dispatch, and routing. Convert the current `PodOutput`/`WorkloadOutput`/`ServiceOutput` enums to shared message types. Refactor the existing pod, workload, and service SMs to implement the generated handler traits.
 
-Validate: existing stateright tests still pass (adapted to the new interface).
+Validate: existing stateright tests still pass (adapted to the new interface). Existing behavior preserved, routing is now declarative.
 
-### Phase 2: Message Types and Routing
+### Phase 2: Extract One SM to TLA+
 
-Define `#[sm_message]` and the build step that generates `Inbox` enums and routing. Convert the current `PodOutput`/`WorkloadOutput`/`ServiceOutput` enums to shared message types.
-
-Validate: existing behavior preserved, routing is now declarative.
-
-### Phase 3: Extract One SM to TLA+
-
-Pick the pod SM (smallest, most self-contained). Implement the extractor for the `step` body → TLA+ `CASE`. Verify the generated TLA+ module with TLC against the same properties as the stateright tests.
+Pick the pod SM (smallest, most self-contained). Implement the extractor: each handler method → one TLA+ operator. Verify the generated TLA+ module with TLC against the same properties as the stateright tests.
 
 Validate: TLC finds the same state space as stateright. If it finds more (unbounded), investigate.
 
-### Phase 4: Pod SM as Peer
+### Phase 3: Pod SM as Peer
 
 Move the pod SM from being inlined in the workload to a peer SM communicating via messages. External events (`PodRunning`, `PodGone`, etc.) go directly to the pod SM; the pod SM processes them and sends outcome messages (`PodBecameRunning`, `PodIsGone`, `PodSuspendComplete`) to the workload. This is cleaner than a `call` primitive — the pod SM handles its own timer management internally, and stale/irrelevant events (e.g., timer for wrong state → Noop) never reach the workload.
 
@@ -613,11 +569,11 @@ The workload SM's `Active` state uses hierarchical sub-states (`Launching`, `Run
 
 Validate: composed TLA+ spec of workload + pod checked with TLC.
 
-### Phase 5: Namespace Decomposition
+### Phase 4: Namespace Decomposition
 
 Incrementally pull concerns out of the namespace monolith into independent SMs (demand reconciliation first — clearest boundary, most critical logic). Extract each to TLA+. Verify composition.
 
-### Phase 6: Compositional Verification
+### Phase 5: Compositional Verification
 
 With multiple SMs extracted, write and verify cross-cutting temporal properties. This is where the investment pays off — proving things about the system that no bounded test can reach.
 
@@ -629,11 +585,11 @@ P is the closest analogue — a dedicated language for communicating state machi
 
 - **P is a standalone language; we embed in Rust.** P requires maintaining a separate model alongside the implementation. Our approach eliminates divergence by making the implementation the spec.
 - **P's communication is open; ours is closed.** Any P machine can send any event to any reference it holds. Our `#[sm_message]` routing is statically declared and compile-time enforced — more restrictive but provides guarantees P cannot.
-- **P is imperative within handlers** (loops, blocking receives, multi-step sequences). Our `step` is a pure decision tree — more restrictive but trivially extractable.
+- **P is imperative within handlers** (loops, blocking receives, multi-step sequences). Our handlers are pure decision trees — more restrictive but trivially extractable.
 
 **Concepts adopted from P:**
 
-- **`defer` / `ignore` semantics.** P lets you declare per-state that certain messages should be buffered (`defer`) or silently dropped (`ignore`). Adopted as a core design feature — see [Default Message Dispositions](#default-message-dispositions). Without this, the workload SM would need ~40 explicit no-op arms.
+- **`defer` / `ignore` semantics.** P lets you declare per-state that certain messages should be silently dropped (`ignore`) or buffered (`defer`). Our handlers achieve `ignore` naturally via `_ => state` catch-all arms — no special framework support needed. P's `defer` (buffering messages for later) is a potential future extension — see [Deferred Message Processing](#deferred-message-processing).
 
 - **Specification monitors.** P has `spec machine` that passively observes events via `announce`, separate from system SMs. These are verification-only actors that track ghost state and assert invariants or liveness. Our equivalent: specification SMs that observe message channels, existing only in the TLA+ extraction.
 
@@ -657,7 +613,7 @@ We already use stateright for bounded model checking. Our design preserves its s
 
 **What we preserve from stateright:**
 
-- **Tests the real `step()` function**, not a separate model. The generated stateright models still call the actual SM implementation.
+- **Tests the real handler functions**, not a separate model. The generated stateright models still call the actual SM implementation.
 - **`sometimes` properties** for reachability sanity checks ("can reach Running", "can reach Failed") — catches over-constrained models.
 - **Fast CI feedback** — stateright tests run in seconds within `cargo test`.
 - **Symmetry reduction** — generated models should implement `Representative` for SM instance pools to reduce state space.
@@ -703,9 +659,24 @@ A `ctx.peek(sm_id)` primitive could provide read-only access to another SM's sta
 
 This is a weaker coupling than `call` (no state modification of the target) and avoids the architectural complications of synchronous cross-SM mutation. Worth exploring when the SM count grows and redundant state tracking becomes painful.
 
+### Deferred Message Processing
+
+The current design always consumes messages from the head of the inbox — every handler returns `State`, and irrelevant messages are handled as no-ops (`ignore`). This is simple and keeps the dispatch layer and TLA+ extraction straightforward.
+
+An alternative, inspired by P's `defer` semantics, would allow handlers to signal "I can't handle this message in my current state — leave it in the inbox and try the next one." This would be expressed as handlers returning `Option<State>`, where `None` means defer. The dispatch layer would scan the inbox looking for a message some handler can process, skipping deferred ones.
+
+**Why this is deferred:**
+
+- **Inbox leak risk.** Deferred messages can accumulate if the condition for handling them never materializes (e.g., a `PodIsGone` deferred because the SM isn't `Active` with that pod, and it never will be). This requires garbage collection or TTLs — more complexity.
+- **State space explosion.** With defer, the inbox becomes a bag rather than a queue. TLC must explore `O(n)` message positions per step, significantly increasing the state space.
+- **Progress reasoning.** Proving that deferred messages eventually get handled requires showing the *right* state eventually occurs — a harder property than simple liveness.
+- **Explicit buffering is clearer.** When a message genuinely arrives before the SM is ready, an explicit "waiting for X" sub-state that buffers the specific data in SM state is visible, extractable, and bounded. It makes the buffering part of the state machine logic rather than hidden in the dispatch layer.
+
+**When to reconsider:** If multiple SMs end up needing "waiting" sub-states solely to buffer premature messages, that's the signal that `defer` would reduce boilerplate enough to justify its complexity. Until then, catch-all arms + explicit state covers the known use cases.
+
 ### Channel Delivery Semantics
 
-Message channels should specify delivery semantics — the `#[sm_message]` attribute could include an `ordering` parameter. Options: FIFO per channel (the natural default, maps to TLA+ `Seq`), unordered (maps to TLA+ set), or unordered with duplication (for modeling unreliable networks). The generated stateright model should use the matching network variant.
+Message channels are **FIFO per `(from_type, to_type)` pair** by default. This maps directly to TLA+ `Seq`, matches typical runtime behavior (tokio channels are ordered), and is the conservative starting point — the TLA+ model matches the Rust runtime from day one. The `#[sm_message]` attribute could later support an `ordering` parameter to weaken to unordered (TLA+ set) or unordered with duplication (for modeling unreliable networks), which would let you prove properties hold under weaker assumptions. The generated stateright model uses the matching network variant.
 
 ### Runtime Monitoring
 
@@ -715,7 +686,7 @@ P's PObserve feature checks production logs against specification monitors. A si
 
 - **Runtime overhead of message passing.** The current synchronous `pod.step()` call becomes async message delivery. For SMs that always run on the same thread, the runtime can optimize this to a direct function call while preserving the message-passing semantics for extraction.
 - **TLC state space.** More SM instances = larger state space. Bounded pools help, but the composition of many SMs may require aggressive abstraction or symmetry reduction.
-- **Message ordering.** The extraction must specify delivery semantics — FIFO per channel? Unordered? This affects what TLA+ can prove and must match the Rust runtime's actual behavior.
+- **Message ordering.** Channels default to FIFO per `(from_type, to_type)` pair (see [Channel Delivery Semantics](#channel-delivery-semantics)). Weakening to unordered for specific channels may be useful later for proving properties under weaker assumptions.
 - **Excepted SM faithfulness.** Excepted SMs have hand-written TLA+ models that could diverge from the Rust implementation. The typed channel handles limit the blast radius, but the TLA+ model itself requires manual review. Keeping these SMs small and few reduces the risk.
 - **Build step complexity.** The code generator that collects `#[sm_message]` across modules and produces Rust + TLA+ is a meaningful piece of infrastructure to build and maintain.
 
@@ -725,7 +696,7 @@ A concrete dry-run translation of the current workload SM into the proposed form
 
 - Helper functions with `ctx.send()` are load-bearing (~8 call sites for `transition_on_demand`)
 - Hierarchical state (`Active { sub: ActiveSub, .. }`) recovers the natural grouping lost by flattening
-- `default = ignore/defer` eliminates ~40 no-op match arms
+- `_ => state` catch-all arms handle irrelevant (state, message) combinations naturally
 - Pod-as-peer with outcome messages is cleaner than `call` for the workload↔pod interaction
 - Collection wrapper types (`SmSet`, `SmMap`) are needed for value-semantics APIs
 - Observability fields (`conditions`, `last_failure_reason`) should be excluded from extraction

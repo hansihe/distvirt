@@ -17,8 +17,9 @@ fn test_namespace_new_initializes_services() {
     assert_eq!(ns.status, NamespaceStatus::Creating);
     assert_eq!(ns.services.len(), 1);
     assert!(ns.services.contains_key(&svc_id()));
-    assert!(matches!(get_service_state(&ns), ServiceState::Pending));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
+    assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
+    // Workload transitions to WaitingForCapacity because the service starts in NeedBackend.
+    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
     assert!(ns.pod_map.is_empty());
     assert!(ns.workers.is_empty());
 }
@@ -162,8 +163,9 @@ fn test_update_spec_removes_service() {
     let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
-    // Reconcile to get the service launched.
-    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    // Service already starts in NeedBackend, workload already in WaitingForCapacity.
+    // Directly launch the workload.
+    launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
@@ -197,8 +199,9 @@ fn test_update_spec_removes_launching_service() {
     let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
-    // Reconcile to get the service launching.
-    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    // Service already starts in NeedBackend, workload already in WaitingForCapacity.
+    // Directly launch the workload.
+    launch_workload(&mut ns, &mut pod_counter);
     assert!(matches!(get_workload_state(&ns), WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }));
 
     // Update spec with no services — should stop the launching pod and cancel the launch timer.
@@ -252,15 +255,15 @@ fn test_namespace_created_activates_namespace() {
         FabricStatus::Active
     );
 
-    // Always-on service should have been launched (EndpointSync/EndpointUpdate + LaunchPod via scheduling).
+    // Namespace activation emits EndpointSync/EndpointUpdate.
+    // With the new lifecycle, the workload is already in WaitingForCapacity from construction,
+    // so no LaunchPod is emitted here — the outer layer scheduler handles that separately.
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
         WorkerCommand::EndpointSync { .. } | WorkerCommand::EndpointUpdate { .. }
     )));
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. })));
+    // Workload stays in WaitingForCapacity, awaiting outer-layer scheduling.
+    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
 }
 
 #[test]
@@ -268,13 +271,8 @@ fn test_activation_service_lifecycle() {
     let mut ns = active_namespace(test_spec_with_activation());
     let mut pod_counter = 0u64;
 
-    // Reconcile: activation service goes Pending → Idle with EndpointUpdate on workers.
-    let out = reconcile_active_namespace(&mut ns, &mut pod_counter);
+    // Service starts in Idle directly (no Pending state).
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::EndpointUpdate { .. }
-    )));
 
     // EndpointActivation (service) → should request pod scheduling then launch.
     let out = step_with_scheduling(
@@ -350,8 +348,9 @@ fn test_always_on_service_lifecycle() {
     let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
-    // Reconcile: always-on service goes Pending → NeedBackend, workload goes WaitingForCapacity → Launching.
-    let _out = reconcile_active_namespace(&mut ns, &mut pod_counter);
+    // Service already starts in NeedBackend, workload already in WaitingForCapacity.
+    // Directly launch the workload (simulating outer-layer scheduler).
+    let _out = launch_workload(&mut ns, &mut pod_counter);
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
@@ -481,7 +480,7 @@ fn test_delete_single_worker_stateful() {
     let mut pod_counter = 0u64;
 
     // Get to Active with a running pod.
-    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
@@ -556,7 +555,7 @@ fn test_delete_worker_lost_during_teardown() {
     let mut pt = PlacementTable::default();
     let mut pod_counter = 0u64;
 
-    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
@@ -697,7 +696,7 @@ fn test_stateful_destroy_with_running_pod() {
     let mut pod_counter = 0u64;
 
     // Get service to Active.
-    reconcile_active_namespace(&mut ns, &mut pod_counter);
+    launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
     ns.step(NamespaceInput::WorkerEvent {
         worker_id: worker_id(1),
@@ -894,17 +893,12 @@ fn test_outer_layer_scheduling_picks_worker() {
     let mut ns = active_namespace(test_spec());
     let mut pt = PlacementTable::default();
 
-    // Reconcile — workload should go to WaitingForCapacity with a PodRequest.
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(99),
-        spec: ns.spec.clone(),
-    }, &mut pt);
+    // With the new lifecycle, the workload is already in WaitingForCapacity from construction
+    // (non-activation service drives demand). No reconciliation needed.
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::WaitingForCapacity
     ));
-    assert_eq!(out.pod_requests.len(), 1);
-    assert_eq!(out.pod_requests[0].workload_id, wl_id());
 
     // Inject LaunchPod (simulating outer layer).
     let pod_id = PodId("pod-0".into());
@@ -931,16 +925,12 @@ fn test_waiting_for_capacity_no_workers() {
     // Make namespace Active with no workers.
     ns.status = NamespaceStatus::Active;
 
-    // Reconcile — workload should emit PodRequest but stay WaitingForCapacity.
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(99),
-        spec: ns.spec.clone(),
-    }, &mut pt);
+    // With the new lifecycle, the workload is already in WaitingForCapacity from construction
+    // (non-activation service drives demand). No reconciliation needed.
     assert!(matches!(
         get_workload_state(&ns),
         WorkloadState::WaitingForCapacity
     ));
-    assert_eq!(out.pod_requests.len(), 1);
 
     // Add a worker and inject LaunchPod.
     ns.workers.insert(

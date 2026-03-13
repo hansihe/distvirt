@@ -557,7 +557,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
-                ns.endpoint_sync(&namespace_id, endpoints, &worker_id, activator_runtime)
+                let pending_events = ns.endpoint_sync(&namespace_id, endpoints, &worker_id, activator_runtime)?;
+                for event in pending_events {
+                    let _ = self.bg_event_tx.try_send(event);
+                }
+                Ok(())
             }
             WorkerCommand::EndpointUpdate {
                 namespace_id,
@@ -570,7 +574,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
-                ns.endpoint_update(&namespace_id, upserted, removed_ips, &worker_id, activator_runtime)
+                let pending_events = ns.endpoint_update(&namespace_id, upserted, removed_ips, &worker_id, activator_runtime)?;
+                for event in pending_events {
+                    let _ = self.bg_event_tx.try_send(event);
+                }
+                Ok(())
             }
             WorkerCommand::Shutdown => {
                 // Handled in the main loop; should not reach here.

@@ -2,7 +2,6 @@ use crate::types::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServiceState {
-    Pending,
     Idle,
     NeedBackend,
     Active {
@@ -16,7 +15,6 @@ pub enum ServiceState {
 impl ServiceState {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ServiceState::Pending => "pending",
             ServiceState::Idle => "idle",
             ServiceState::NeedBackend => "need_backend",
             ServiceState::Active { .. } => "active",
@@ -46,7 +44,6 @@ pub enum ServiceInput {
     ServiceBackendNeed { need: BackendNeed },
     TimerFired { timer_key: TimerKey },
     ForceDeactivate,
-    Initialize { workload_running: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,9 +69,14 @@ impl ServiceStateMachine {
         has_activation: bool,
         idle_timeout: std::time::Duration,
     ) -> Self {
+        let initial_state = if has_activation {
+            ServiceState::Idle
+        } else {
+            ServiceState::NeedBackend
+        };
         ServiceStateMachine {
             service_id,
-            state: ServiceState::Pending,
+            state: initial_state,
             workload_id,
             has_activation,
             idle_timeout,
@@ -116,7 +118,7 @@ impl ServiceStateMachine {
                 backend: _,
             } => {
                 match &self.state {
-                    ServiceState::NeedBackend | ServiceState::Pending => {
+                    ServiceState::NeedBackend => {
                         self.state = ServiceState::Active {
                             pod_id: pod_id.clone(),
                             worker_id: worker_id.clone(),
@@ -133,7 +135,7 @@ impl ServiceStateMachine {
                 }
             }
             ServiceInput::WorkloadUnready => {
-                match std::mem::replace(&mut self.state, ServiceState::Pending) {
+                match std::mem::replace(&mut self.state, ServiceState::NeedBackend) {
                     ServiceState::Active { idle_timer, .. } => {
                         if let Some(tk) = idle_timer {
                             outputs.push(ServiceOutput::TimerCancel(tk));
@@ -210,17 +212,6 @@ impl ServiceStateMachine {
                         outputs.push(ServiceOutput::Deactivated { reason: ServiceDeactivationReason::IdleTimeout });
                         outputs.push(ServiceOutput::EndpointChanged);
                         self.state = ServiceState::Idle;
-                    }
-                }
-            }
-            ServiceInput::Initialize { workload_running } => {
-                if matches!(self.state, ServiceState::Pending) {
-                    if workload_running {
-                        self.state = ServiceState::NeedBackend;
-                    } else if self.has_activation {
-                        self.state = ServiceState::Idle;
-                    } else {
-                        self.state = ServiceState::NeedBackend;
                     }
                 }
             }

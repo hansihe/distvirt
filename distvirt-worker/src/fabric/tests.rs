@@ -1120,11 +1120,18 @@ async fn flow_event_on_tcp_syn_to_local_pod() {
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Send TCP SYN from IP_A to IP_B.
+    // Send TCP SYN from IP_A to IP_B (Opening — no flow event).
     let syn = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x02);
     handle0.inject_tx.send(syn).await.unwrap();
+    let _ = try_recv(&handle1).await;
 
-    // Drain the forwarded frame.
+    // Opening flows don't count as active, so no event.
+    let event = try_recv_event(&mut event_rx).await;
+    assert!(event.is_none(), "SYN-only (Opening) should not produce a flow event, got {:?}", event);
+
+    // Send ACK to transition to Established.
+    let ack = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x10);
+    handle0.inject_tx.send(ack).await.unwrap();
     let _ = try_recv(&handle1).await;
 
     // Should get EndpointFlowStatus { has_active_flows: true } for IP_B.
@@ -1149,15 +1156,19 @@ async fn flow_event_inactive_after_rst() {
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, IP_A);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, IP_B);
 
-    // Send TCP SYN → active.
+    // Send TCP SYN (Opening — no event yet).
     let syn = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x02);
     handle0.inject_tx.send(syn).await.unwrap();
+    let _ = try_recv(&handle1).await;
+
+    // Send ACK → Established → active.
+    let ack = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x10);
+    handle0.inject_tx.send(ack).await.unwrap();
     let _ = try_recv(&handle1).await;
 
     let event = try_recv_event(&mut event_rx).await;
     assert!(
         matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: true, .. })),
-
         "first event should be active=true"
     );
 

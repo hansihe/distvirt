@@ -56,18 +56,19 @@ impl NamespaceStateMachine {
 
         for (wl_id, wl_spec) in &spec.workloads {
             // has_activation: true if workload has activation, or if it has services
-            // (services drive demand — workload responds to SetDemand, not Initialize).
-            // Only serviceless workloads without activation auto-start via Initialize.
+            // (services drive demand — workload responds to SetDemand).
+            // Only serviceless workloads without activation auto-start from construction.
             let has_services = spec.services.values().any(|s| s.workload_id == *wl_id);
             let has_activation = wl_spec.activation.is_some() || has_services;
-            workloads.insert(
+            let (wl_sm, _init_outputs) = WorkloadStateMachine::new(
                 wl_id.clone(),
-                WorkloadStateMachine::new(
-                    wl_id.clone(),
-                    wl_spec.suspend_on_idle,
-                    has_activation,
-                ),
+                wl_spec.suspend_on_idle,
+                has_activation,
             );
+            // Note: init_outputs are discarded here because the namespace is in
+            // Creating state — no workers are connected yet to handle PodRequests.
+            // The reconciliation pass after first worker join will re-drive demand.
+            workloads.insert(wl_id.clone(), wl_sm);
         }
 
         for (svc_id, svc_spec) in &spec.services {
@@ -89,6 +90,23 @@ impl NamespaceStateMachine {
                 ),
             );
             service_workload.insert(svc_id.clone(), wl_id);
+        }
+
+        // Sync initial demand: services that start in NeedBackend contribute demand.
+        // Step the workload SMs with SetDemand so their state is consistent.
+        let ns_id_ref = &namespace_id;
+        for (wl_id, wl) in workloads.iter_mut() {
+            let service_demand: u32 = services
+                .values()
+                .filter(|svc| svc.workload_id == *wl_id && svc.wants_backend())
+                .count() as u32;
+            if service_demand > 0 {
+                // Outputs (PodRequest) are discarded — no workers connected yet.
+                let _ = wl.step(
+                    crate::sm::workload::WorkloadInput::SetDemand { count: service_demand },
+                    ns_id_ref,
+                );
+            }
         }
 
         let wg_peer_manager = WireGuardPeerManager::new(spec.network.subnet, spec.network.prefix_len);

@@ -22,6 +22,8 @@ pub enum EndpointSyncEffect {
     FlushPodBuffer { ip: Ipv4Addr },
     /// Adapter buffer should be flushed to the adapter port.
     FlushAdapterBuffer { ip: Ipv4Addr, port_id: PortId, frames: Vec<Vec<u8>> },
+    /// Flow status changed due to endpoint reconfiguration (e.g. flow tracker cleared).
+    FlowStatusChange { ip: Ipv4Addr, service_id: Option<String>, has_active_flows: bool },
 }
 
 /// What the fabric should do with a frame that matched an endpoint IP.

@@ -134,9 +134,6 @@ impl Model for ServiceModel {
                     actions.push(SvcModelAction::WorkloadUnready);
                 }
             }
-            ServiceState::Pending => {
-                // Should not reach here given our init_states, but be safe.
-            }
         }
     }
 

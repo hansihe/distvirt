@@ -84,11 +84,11 @@ impl TestHarness {
         );
     }
 
-    pub fn assert_service_pending(&self, ns_id: &str, svc_id: &str) {
+    pub fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
         let state = self.service_state(ns_id, svc_id);
         assert!(
-            matches!(state, ServiceState::Pending),
-            "service '{}/{}': expected Pending, got {:?}",
+            matches!(state, ServiceState::NeedBackend),
+            "service '{}/{}': expected NeedBackend, got {:?}",
             ns_id, svc_id, state
         );
     }
@@ -126,15 +126,6 @@ impl TestHarness {
             matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Resuming { .. }, .. }, .. }),
             "workload '{}/{}': expected Resuming, got {:?}",
             ns_id, wl_id, state
-        );
-    }
-
-    pub fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_state(ns_id, svc_id);
-        assert!(
-            matches!(state, ServiceState::NeedBackend),
-            "service '{}/{}': expected NeedBackend, got {:?}",
-            ns_id, svc_id, state
         );
     }
 

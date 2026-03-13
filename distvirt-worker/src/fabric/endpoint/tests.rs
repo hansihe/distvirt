@@ -714,7 +714,7 @@ fn gc_flow_trackers_reports_no_active_flows_after_closed_linger() {
     // Attach port so the endpoint gets a FlowTracker (Ready state).
     table.attach_port(LOCAL_POD_IP, 99).unwrap();
 
-    // Feed a TCP SYN to create an active flow.
+    // Feed a TCP SYN to create an Opening flow.
     let syn_frame = make_tcp_frame_for_service(
         [10, 0, 0, 1],
         LOCAL_POD_IP.octets(),
@@ -723,7 +723,21 @@ fn gc_flow_trackers_reports_no_active_flows_after_closed_linger() {
     );
     let (action, _, flow_change) = table.lookup_and_buffer(LOCAL_POD_IP, &syn_frame, false);
     assert!(matches!(action, EndpointAction::LocalPod { .. }));
-    // SYN creates an active flow: transition from false→true.
+    // Opening flows don't count as active, so no transition (false→false).
+    assert!(flow_change.is_none());
+
+    // Feed an ACK to transition to Established.
+    let ack_frame = {
+        use etherparse::PacketBuilder;
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], LOCAL_POD_IP.octets(), 64)
+            .tcp(12345, 80, 1000, 65535);
+        let mut ip_packet = Vec::new();
+        builder.write(&mut ip_packet, &[]).unwrap();
+        ip_packet[20 + 13] = 0x10; // ACK
+        with_fabric_header(0, 0, &ip_packet)
+    };
+    let (_, _, flow_change) = table.lookup_and_buffer(LOCAL_POD_IP, &ack_frame, false);
+    // Established counts as active: transition from false→true.
     assert!(flow_change.is_some());
     assert!(flow_change.unwrap().has_active_flows);
 
@@ -775,7 +789,7 @@ fn gc_flow_trackers_no_change_with_active_flows() {
     );
     table.attach_port(LOCAL_POD_IP, 99).unwrap();
 
-    // Feed a TCP SYN — flow is active (Opening).
+    // Feed a TCP SYN + ACK to create an Established flow.
     let syn_frame = make_tcp_frame_for_service(
         [10, 0, 0, 1],
         LOCAL_POD_IP.octets(),
@@ -783,8 +797,18 @@ fn gc_flow_trackers_no_change_with_active_flows() {
         80,
     );
     table.lookup_and_buffer(LOCAL_POD_IP, &syn_frame, false);
+    let ack_frame = {
+        use etherparse::PacketBuilder;
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], LOCAL_POD_IP.octets(), 64)
+            .tcp(12345, 80, 1000, 65535);
+        let mut ip_packet = Vec::new();
+        builder.write(&mut ip_packet, &[]).unwrap();
+        ip_packet[20 + 13] = 0x10; // ACK
+        with_fabric_header(0, 0, &ip_packet)
+    };
+    table.lookup_and_buffer(LOCAL_POD_IP, &ack_frame, false);
 
-    // GC with still-active flow — no changes.
+    // GC with still-active (Established) flow — no changes.
     let changes = table.gc_flow_trackers();
     assert!(changes.is_empty(), "GC with active flows should return empty vec");
 }

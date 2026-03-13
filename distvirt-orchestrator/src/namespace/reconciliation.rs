@@ -9,57 +9,9 @@ impl NamespaceStateMachine {
         if self.status == NamespaceStatus::Destroying {
             return;
         }
-        // Initialize workloads that are still in Dormant (pending) state.
-        self.reconcile_all_workloads(placement_table, out);
 
-        let svc_ids: Vec<ServiceId> = self.spec.services.keys().cloned().collect();
-        for svc_id in svc_ids {
-            self.reconcile_service(&svc_id, out);
-        }
         // After all services are reconciled, reconcile demand for all workloads.
         self.reconcile_all_demand(placement_table, out);
-    }
-
-    /// Send Initialize to all workloads. The SM is idempotent — it only
-    /// acts on Initialize when in Dormant state without activation.
-    fn reconcile_all_workloads(&mut self, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
-        let wl_ids: Vec<WorkloadId> = self.workloads.keys().cloned().collect();
-        for wl_id in wl_ids {
-            let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
-                wl.step(WorkloadInput::Initialize, &self.namespace_id)
-            } else {
-                continue;
-            };
-            self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
-        }
-    }
-
-    fn reconcile_service(&mut self, svc_id: &ServiceId, out: &mut NamespaceOutput) {
-        let svc = match self.services.get(svc_id) {
-            Some(s) => s,
-            None => return,
-        };
-        let wl_id = svc.workload_id.clone();
-        if !self.workloads.contains_key(&wl_id) {
-            return;
-        }
-
-        let svc_state = &svc.state;
-
-        match svc_state {
-            ServiceState::Pending => {
-                let is_running = self.workload_readiness.contains_key(&wl_id);
-                self.emit_endpoint_update_for_service(svc_id, out);
-                let svc = self.services.get_mut(svc_id)
-                    .expect("invariant: svc_id from reconcile_pair must exist in services");
-                let svc_outputs = svc.step(
-                    ServiceInput::Initialize { workload_running: is_running },
-                    &self.namespace_id,
-                );
-                self.translate_service_effects(svc_id, svc_outputs, out);
-            }
-            _ => {}
-        }
     }
 
     /// Compute effective demand for a workload: count of services with wants_backend() + active_flows.

@@ -334,13 +334,15 @@ impl NamespaceState {
     // -----------------------------------------------------------------------
 
     /// Shared helper to process endpoint sync effects (ServiceReady / FlushPodBuffer).
+    /// Returns any WorkerEvents that need to be sent (e.g. FlowStatusChange).
     fn handle_endpoint_effects(
         &self,
         namespace_id: &NamespaceId,
         effects: Vec<crate::fabric::endpoint::EndpointSyncEffect>,
-    ) -> Result<(), FatalError> {
+    ) -> Result<Vec<WorkerEvent>, FatalError> {
         use crate::fabric::endpoint::{EndpointSyncEffect, EndpointAction};
         use crate::fabric::MarkReadyResult;
+        let mut pending_events = Vec::new();
 
         for effect in effects {
             match effect {
@@ -409,6 +411,14 @@ impl NamespaceState {
                         }
                     }
                 }
+                EndpointSyncEffect::FlowStatusChange { ip, service_id, has_active_flows } => {
+                    pending_events.push(WorkerEvent::EndpointFlowStatus {
+                        namespace_id: namespace_id.clone(),
+                        ip,
+                        service_id: service_id.map(|s| distvirt_worker_protocol::ServiceId(s)),
+                        has_active_flows,
+                    });
+                }
                 EndpointSyncEffect::FlushAdapterBuffer { ip, port_id, frames } => {
                     if !frames.is_empty() {
                         log::info!(
@@ -437,7 +447,7 @@ impl NamespaceState {
             }
         }
 
-        Ok(())
+        Ok(pending_events)
     }
 
     pub(crate) fn endpoint_sync(
@@ -446,7 +456,7 @@ impl NamespaceState {
         endpoints: Vec<distvirt_worker_protocol::EndpointSpec>,
         my_worker_id: &distvirt_worker_protocol::WorkerId,
         activator_runtime: Option<&ActivatorRuntime>,
-    ) -> Result<(), FatalError> {
+    ) -> Result<Vec<WorkerEvent>, FatalError> {
         let effects = {
             let mut et = self.tables.endpoint_table.lock().map_err(|e| {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
@@ -459,13 +469,13 @@ impl NamespaceState {
             et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor, self.adapter_port_id)
         };
 
-        self.handle_endpoint_effects(namespace_id, effects)?;
+        let pending_events = self.handle_endpoint_effects(namespace_id, effects)?;
 
         log::info!(
             "worker: endpoint sync for namespace '{}'",
             namespace_id
         );
-        Ok(())
+        Ok(pending_events)
     }
 
     pub(crate) fn endpoint_update(
@@ -475,7 +485,7 @@ impl NamespaceState {
         removed_ips: Vec<std::net::Ipv4Addr>,
         my_worker_id: &distvirt_worker_protocol::WorkerId,
         activator_runtime: Option<&ActivatorRuntime>,
-    ) -> Result<(), FatalError> {
+    ) -> Result<Vec<WorkerEvent>, FatalError> {
         let effects = {
             let mut et = self.tables.endpoint_table.lock().map_err(|e| {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
@@ -488,13 +498,13 @@ impl NamespaceState {
             et.apply_endpoint_update(upserted, removed_ips, my_worker_id.as_ref(), &mut make_processor, self.adapter_port_id)
         };
 
-        self.handle_endpoint_effects(namespace_id, effects)?;
+        let pending_events = self.handle_endpoint_effects(namespace_id, effects)?;
 
         log::info!(
             "worker: endpoint update for namespace '{}'",
             namespace_id
         );
-        Ok(())
+        Ok(pending_events)
     }
 
     /// Build a ServiceProcessor from a ServicePolicy.

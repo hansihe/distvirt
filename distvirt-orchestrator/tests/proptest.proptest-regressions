@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 760ae64252148818c1f7568b5841a0b9135c3cb65b1bd9dcbc862cc996a6b5a5 # shrinks to inputs = [GetStatus { client_id: ClientId(1) }]
+cc 6d84701e999beaa7f81a6359b0492c7f592f639a945e07cbbc6b604af962992c # shrinks to inputs = [GetStatus { client_id: ClientId(1) }]

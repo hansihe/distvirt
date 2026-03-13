@@ -525,14 +525,6 @@ impl TestCluster {
         );
     }
 
-    pub fn assert_service_pending(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_state(ns_id, svc_id);
-        assert!(
-            matches!(state, ServiceState::Pending),
-            "service '{}/{}': expected Pending, got {:?}",
-            ns_id, svc_id, state
-        );
-    }
 
     pub fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
         let state = self.service_state(ns_id, svc_id);

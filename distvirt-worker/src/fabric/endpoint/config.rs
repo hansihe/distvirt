@@ -315,6 +315,17 @@ impl EndpointTable {
                     }
                     if new_backend_ip.is_none() {
                         endpoint.last_activation = None;
+                        // If the flow tracker had active flows, notify the
+                        // orchestrator so it can clear the demand contribution.
+                        if let Some(ref ft) = endpoint.flow_tracker {
+                            if ft.has_active_flows() {
+                                effects.push(EndpointSyncEffect::FlowStatusChange {
+                                    ip,
+                                    service_id: Some(svc_id_str.clone()),
+                                    has_active_flows: false,
+                                });
+                            }
+                        }
                         endpoint.flow_tracker = None;
                     }
 
@@ -330,6 +341,10 @@ impl EndpointTable {
                 } else {
                     // Create new service endpoint.
                     let processor = make_processor(&svc_id_str, &policy, ip);
+
+                    // Passthrough services get a FlowTracker immediately.
+                    // This is safe because has_active_flows() only counts
+                    // Established/HalfClosed flows, not Opening (SYN-only).
                     let flow_tracker = if matches!(processor, ServiceProcessor::Passthrough) {
                         Some(FlowTracker::new())
                     } else {

@@ -228,6 +228,22 @@ pub(super) fn reconcile_active_namespace(
     )
 }
 
+/// Launch the workload on an active namespace whose workload is already in WaitingForCapacity.
+/// This directly injects a LaunchPod, simulating the outer-layer scheduler.
+pub(super) fn launch_workload(
+    ns: &mut NamespaceStateMachine,
+    pod_counter: &mut u64,
+) -> NamespaceOutput {
+    let mut pt = PlacementTable::default();
+    let pod_id = PodId(format!("pod-{}", *pod_counter));
+    *pod_counter += 1;
+    ns.step(NamespaceInput::LaunchPod {
+        workload_id: wl_id(),
+        worker_id: worker_id(1),
+        pod_id,
+    }, &mut pt)
+}
+
 /// Helper to get the workload state for the default service.
 pub(super) fn get_workload_state(ns: &NamespaceStateMachine) -> &WorkloadState {
     &ns.workloads[&wl_id()].state

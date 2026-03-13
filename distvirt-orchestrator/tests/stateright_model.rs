@@ -229,7 +229,7 @@ impl NamespaceSnapshot {
         for (wl_id, wl_snap) in &self.workloads {
             let suspend_on_idle = self.spec.workloads.get(wl_id).map_or(false, |w| w.suspend_on_idle);
             let has_activation = self.spec.workloads.get(wl_id).and_then(|w| w.activation.as_ref()).is_some();
-            let mut wl = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle, has_activation);
+            let (mut wl, _) = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle, has_activation);
             wl.max_retries = max_retries;
             wl.state = wl_snap.state.clone();
             wl.current_demand = wl_snap.current_demand;
@@ -492,7 +492,7 @@ impl Model for NamespaceModel {
                             });
                         }
                     }
-                    ServiceState::Pending | ServiceState::NeedBackend => {}
+                    ServiceState::NeedBackend => {}
                 }
 
                 // Workload-level events.
@@ -987,12 +987,10 @@ impl Model for NamespaceModel {
                 if ns.status != NamespaceStatus::Active {
                     return true;
                 }
-                // Collect all service IDs that are not Pending.
-                let non_pending_services: BTreeSet<&ServiceId> = ns
+                // Collect all service IDs.
+                let all_services: BTreeSet<&ServiceId> = ns
                     .services
-                    .iter()
-                    .filter(|(_, svc)| !matches!(svc.state, ServiceState::Pending))
-                    .map(|(sid, _)| sid)
+                    .keys()
                     .collect();
 
                 for (wid, worker) in &ns.workers {
@@ -1004,7 +1002,7 @@ impl Model for NamespaceModel {
                         .get(wid)
                         .map(|m| tracked_service_ids(m))
                         .unwrap_or_default();
-                    for svc_id in &non_pending_services {
+                    for svc_id in &all_services {
                         if !created.contains(*svc_id) {
                             return false;
                         }
@@ -1017,22 +1015,8 @@ impl Model for NamespaceModel {
 
         if self.enable_service_addition {
             // Safety: no service should be Pending when its workload is Running.
-            props.push(Property::<Self>::always(
-                "no pending service for running workload",
-                |_model, state| {
-                    let ns = &state.namespace;
-                    for (_, svc) in &ns.services {
-                        if matches!(svc.state, ServiceState::Pending) {
-                            if let Some(wl) = ns.workloads.get(&svc.workload_id) {
-                                if wl.state.is_running() {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                    true
-                },
-            ));
+            // (Property "no pending service for running workload" removed:
+            //  Pending state no longer exists — services start in their operational state.)
             // Reachability: added service can reach Active.
             props.push(Property::<Self>::sometimes(
                 "added service can reach active",

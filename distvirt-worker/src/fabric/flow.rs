@@ -16,12 +16,21 @@ pub struct FlowKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpFlowState {
     /// SYN seen, connection establishing.
+    /// Does NOT count as active demand — connection attempts are handled
+    /// by the separate EndpointActivation (instantaneous demand) path.
+    /// Short timeout (OPENING_TIMEOUT).
     Opening,
     /// Established (SYN+ACK seen or data flowing).
+    /// Counts as active demand — keeps workload alive.
+    /// Uses IDLE_TIMEOUT.
     Established,
-    /// FIN seen from one side.
+    /// FIN seen from one side; connection winding down.
+    /// Counts as active demand — connection still in progress.
+    /// Uses HALF_CLOSED_TIMEOUT.
     HalfClosed,
     /// FIN seen from both sides or RST received.
+    /// Does not count as active demand. Brief linger (CLOSED_LINGER)
+    /// before removal to allow retransmits.
     Closed,
 }
 
@@ -33,8 +42,17 @@ pub struct FlowState {
     pub tcp_state: TcpFlowState,
 }
 
-/// Hard idle timeout — flows are removed after this even without FIN/RST.
+/// Timeout for Opening (SYN-only) flows.
+/// Short because these are connection attempts that haven't completed.
+/// If the backend isn't up yet, the SYN will be retransmitted.
+const OPENING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hard idle timeout for established connections.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Timeout for HalfClosed flows.
+/// Connection is winding down (FIN sent from one side).
+const HALF_CLOSED_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Brief linger after Closed state before removal (allow retransmits).
 const CLOSED_LINGER: Duration = Duration::from_secs(5);
@@ -88,20 +106,29 @@ impl FlowTracker {
         }
     }
 
-    /// Returns true if there are any non-closed flows.
+    /// Returns true if there are any established or half-closed flows.
+    ///
+    /// Opening (SYN-only) flows are NOT counted. They represent connection
+    /// attempts, not established connections. The activation signal for
+    /// connection attempts is handled separately by EndpointActivation
+    /// (instantaneous demand). This method tracks sustained demand — keeping
+    /// a workload alive while real connections are in progress.
     pub fn has_active_flows(&self) -> bool {
-        self.flows.values().any(|s| {
-            s.tcp_state != TcpFlowState::Closed
-        })
+        self.flows.values().any(|s| matches!(
+            s.tcp_state,
+            TcpFlowState::Established | TcpFlowState::HalfClosed
+        ))
     }
 
-    /// Remove expired and closed flows.
+    /// Remove expired and closed flows using per-state timeouts.
     pub fn gc(&mut self, now: Instant) {
         self.flows.retain(|_, state| {
-            if state.tcp_state == TcpFlowState::Closed {
-                now.duration_since(state.last_seen) < CLOSED_LINGER
-            } else {
-                now.duration_since(state.last_seen) < IDLE_TIMEOUT
+            let elapsed = now.duration_since(state.last_seen);
+            match state.tcp_state {
+                TcpFlowState::Opening => elapsed < OPENING_TIMEOUT,
+                TcpFlowState::Established => elapsed < IDLE_TIMEOUT,
+                TcpFlowState::HalfClosed => elapsed < HALF_CLOSED_TIMEOUT,
+                TcpFlowState::Closed => elapsed < CLOSED_LINGER,
             }
         });
     }
@@ -138,9 +165,29 @@ mod tests {
         assert!(!ft.has_active_flows());
 
         ft.track_packet(key(), SYN);
-        assert!(ft.has_active_flows());
+        // Opening flows do NOT count as active demand.
+        assert!(!ft.has_active_flows());
         assert_eq!(ft.flow_count(), 1);
         assert_eq!(ft.flows[&key()].tcp_state, TcpFlowState::Opening);
+    }
+
+    #[test]
+    fn established_flow_is_active() {
+        let mut ft = FlowTracker::new();
+        ft.track_packet(key(), SYN);
+        ft.track_packet(key(), ACK);
+        assert_eq!(ft.flows[&key()].tcp_state, TcpFlowState::Established);
+        assert!(ft.has_active_flows());
+    }
+
+    #[test]
+    fn half_closed_flow_is_active() {
+        let mut ft = FlowTracker::new();
+        ft.track_packet(key(), SYN);
+        ft.track_packet(key(), ACK);
+        ft.track_packet(key(), FIN_ACK);
+        assert_eq!(ft.flows[&key()].tcp_state, TcpFlowState::HalfClosed);
+        assert!(ft.has_active_flows());
     }
 
     #[test]
@@ -223,6 +270,40 @@ mod tests {
 
         // After idle timeout: removed.
         let later = Instant::now() + IDLE_TIMEOUT + Duration::from_secs(1);
+        ft.gc(later);
+        assert_eq!(ft.flow_count(), 0);
+    }
+
+    #[test]
+    fn gc_removes_opening_flows_quickly() {
+        let mut ft = FlowTracker::new();
+        ft.track_packet(key(), SYN);
+        assert_eq!(ft.flows[&key()].tcp_state, TcpFlowState::Opening);
+
+        // Before OPENING_TIMEOUT: retained.
+        ft.gc(Instant::now());
+        assert_eq!(ft.flow_count(), 1);
+
+        // After OPENING_TIMEOUT: removed.
+        let later = Instant::now() + OPENING_TIMEOUT + Duration::from_secs(1);
+        ft.gc(later);
+        assert_eq!(ft.flow_count(), 0);
+    }
+
+    #[test]
+    fn gc_removes_half_closed_flows() {
+        let mut ft = FlowTracker::new();
+        ft.track_packet(key(), SYN);
+        ft.track_packet(key(), ACK);
+        ft.track_packet(key(), FIN_ACK);
+        assert_eq!(ft.flows[&key()].tcp_state, TcpFlowState::HalfClosed);
+
+        // Before HALF_CLOSED_TIMEOUT: retained.
+        ft.gc(Instant::now());
+        assert_eq!(ft.flow_count(), 1);
+
+        // After HALF_CLOSED_TIMEOUT: removed.
+        let later = Instant::now() + HALF_CLOSED_TIMEOUT + Duration::from_secs(1);
         ft.gc(later);
         assert_eq!(ft.flow_count(), 0);
     }
