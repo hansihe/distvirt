@@ -266,6 +266,7 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
             containers: vec![container],
             suspend_on_idle: true,
             resources: None,
+            activation: None,
         };
 
         let expose: Vec<ExposeSpec> = svc
@@ -288,10 +289,10 @@ fn deployment_to_spec(deployment: &distvirt_compose::Deployment) -> anyhow::Resu
                 activator: Some(ActivatorConfig {
                     activator: Some(activator_config::Activator::Tcp(TcpActivator {
                         ports: tcp_ports,
+                        idle_timeout_ms: 30_000, // 30s default
                     })),
                 }),
                 buffer_policy: None,
-                idle_timeout_ms: 30_000, // 30s default (scale-to-zero)
             })
         } else {
             None

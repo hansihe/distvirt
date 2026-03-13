@@ -55,6 +55,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             network: pod_network(10),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
 
@@ -92,6 +93,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             network: pod_network(10),
             suspend_on_idle: true,
             resources: None,
+            activation: None,
         },
     );
 
@@ -129,6 +131,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             network: pod_network(10),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
 
@@ -166,6 +169,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             network: pod_network(10),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     workloads.insert(
@@ -175,6 +179,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             network: pod_network(11),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
 
@@ -225,6 +230,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             network: pod_network(10),
             suspend_on_idle: true,
             resources: None,
+            activation: None,
         },
     );
     workloads.insert(
@@ -234,6 +240,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             network: pod_network(11),
             suspend_on_idle: true,
             resources: None,
+            activation: None,
         },
     );
 
@@ -283,6 +290,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             network: pod_network(10),
             suspend_on_idle: true,
             resources: None,
+            activation: None,
         },
     );
 

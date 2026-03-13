@@ -1,4 +1,5 @@
 pub(crate) mod containerd;
+pub(crate) mod docker_config;
 pub(crate) mod image;
 pub mod containerd_overlayfs;
 pub mod rootfs_dir;

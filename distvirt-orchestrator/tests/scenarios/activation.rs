@@ -111,7 +111,7 @@ async fn test_activation_pending_in_status_report() {
     // Check status report before activation.
     let report = h.namespace("ns").status_report();
     let svc_report = report.services.get(&ServiceId::from("web-svc")).unwrap();
-    assert!(svc_report.service_conditions.is_empty());
+    assert!(svc_report.conditions.is_empty());
 
     // Send activation manually so we can observe mid-flow.
     let svc_ip = h.service_ip("ns", "web-svc");
@@ -126,7 +126,7 @@ async fn test_activation_pending_in_status_report() {
     let report = h.namespace("ns").status_report();
     let svc_report = report.services.get(&ServiceId::from("web-svc")).unwrap();
     assert!(
-        svc_report.service_conditions.contains_key("activation-pending"),
+        svc_report.conditions.contains_key("activation-pending"),
         "activation-pending should be present in status report while service is in NeedBackend"
     );
 
@@ -142,7 +142,7 @@ async fn test_activation_pending_in_status_report() {
     let report = h.namespace("ns").status_report();
     let svc_report = report.services.get(&ServiceId::from("web-svc")).unwrap();
     assert!(
-        !svc_report.service_conditions.contains_key("activation-pending"),
+        !svc_report.conditions.contains_key("activation-pending"),
         "activation-pending should be cleared after service becomes active"
     );
 }

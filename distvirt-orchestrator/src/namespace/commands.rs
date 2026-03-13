@@ -24,9 +24,15 @@ impl NamespaceStateMachine {
         // Add new workloads.
         for (wl_id, wl_spec) in &spec.workloads {
             if !self.workloads.contains_key(wl_id) {
+                let has_services = spec.services.values().any(|s| s.workload_id == *wl_id);
+                let has_activation = wl_spec.activation.is_some() || has_services;
                 self.workloads.insert(
                     wl_id.clone(),
-                    WorkloadStateMachine::new(wl_id.clone(), wl_spec.suspend_on_idle),
+                    WorkloadStateMachine::new(
+                        wl_id.clone(),
+                        wl_spec.suspend_on_idle,
+                        has_activation,
+                    ),
                 );
             }
         }

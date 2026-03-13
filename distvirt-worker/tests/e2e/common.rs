@@ -86,6 +86,7 @@ async fn setup_full(
     let image_provider = distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
         socket: containerd_socket,
         namespace: "default".into(),
+        docker_config: None,
     };
 
     let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);

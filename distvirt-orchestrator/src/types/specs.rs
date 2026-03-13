@@ -36,6 +36,16 @@ pub struct WorkloadSpec {
     /// Resource requests and limits for this workload.
     #[serde(default)]
     pub resources: Option<ResourceRequirements>,
+    /// Workload-level activation. If Some, workload is activation-based (starts dormant).
+    /// If None, workload is always-on (starts immediately).
+    #[serde(default)]
+    pub activation: Option<WorkloadActivationSpec>,
+}
+
+/// Workload-level activation configuration. Only passthrough is valid.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkloadActivationSpec {
+    pub idle_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

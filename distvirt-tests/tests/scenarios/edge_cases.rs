@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::harness::TestCluster;
-use crate::harness::spec_builders::{activation_spec, always_on_spec};
+use crate::harness::spec_builders::{activation_spec, always_on_spec, two_activation_workloads_spec};
 
 /// Create then immediately delete before pod fully starts.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -144,4 +144,132 @@ async fn test_worker_disconnect_during_suspend() {
     if was_suspending {
         eprintln!("Note: caught worker disconnect during Suspending state");
     }
+}
+
+/// Delete one namespace while another is active on the same worker.
+/// The surviving namespace should not be affected.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_namespace_deletion_doesnt_affect_siblings() {
+    let mut cluster = TestCluster::new();
+    let w1 = cluster.add_worker().await;
+
+    // Create two activation-based namespaces.
+    cluster
+        .create_namespace("ns-a", activation_spec(Duration::from_secs(30)))
+        .await;
+    cluster
+        .create_namespace("ns-b", activation_spec(Duration::from_secs(30)))
+        .await;
+    cluster.converge().await;
+
+    // Activate both.
+    cluster.send_activation_traffic("ns-a", "web-svc").await;
+    cluster.send_activation_traffic("ns-b", "web-svc").await;
+    cluster.assert_workload_running("ns-a", "web");
+    cluster.assert_workload_running("ns-b", "web");
+
+    // Delete ns-a while ns-b is running.
+    cluster.delete_namespace("ns-a").await;
+    cluster.converge().await;
+
+    cluster.assert_namespace_absent("ns-a");
+    cluster.assert_workload_running("ns-b", "web");
+
+    // ns-b should still respond to lifecycle events normally.
+    cluster.deactivate_service("ns-b", "web-svc", &w1).await;
+    cluster.advance_past_idle_timeout("ns-b", "web-svc").await;
+    cluster.wait_workload_suspended("ns-b", "web").await;
+    cluster.assert_workload_suspended("ns-b", "web");
+}
+
+/// Preemption under pressure should be scoped to the namespace that
+/// requested the new workload — it should not preempt workloads in
+/// other namespaces.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_preemption_is_namespace_scoped() {
+    let mut cluster = TestCluster::new();
+    let w1 = cluster.add_worker().await;
+
+    // ns-other: single always-on workload (no idle, can't be preempted by ns-main).
+    cluster
+        .create_namespace("ns-other", always_on_spec())
+        .await;
+    cluster.converge().await;
+    cluster.assert_workload_running("ns-other", "echo");
+
+    // ns-main: two activation workloads.
+    let spec = two_activation_workloads_spec(Duration::from_secs(30));
+    cluster.create_namespace("ns-main", spec).await;
+    cluster.converge().await;
+
+    // Activate wl-a.
+    cluster.send_activation_traffic("ns-main", "svc-a").await;
+    cluster.assert_workload_running("ns-main", "wl-a");
+
+    // Deactivate wl-a (becomes idle).
+    cluster.deactivate_service("ns-main", "svc-a", &w1).await;
+
+    // Inject high pressure.
+    cluster.inject_pressure(&w1, 85.0).await;
+
+    // Activate wl-b — should preempt idle wl-a within ns-main, NOT ns-other's echo.
+    cluster.send_activation_traffic("ns-main", "svc-b").await;
+
+    // ns-other's workload must still be running.
+    cluster.assert_workload_running("ns-other", "echo");
+
+    // wl-a should be preempted.
+    let wl_a_state = cluster.workload_state("ns-main", "wl-a");
+    assert!(
+        !wl_a_state.is_running(),
+        "wl-a should be preempted, got {:?}",
+        wl_a_state
+    );
+
+    // Release pressure so wl-b can schedule.
+    cluster.inject_pressure(&w1, 0.0).await;
+    cluster.converge().await;
+    cluster.assert_workload_running("ns-main", "wl-b");
+
+    // ns-other still running.
+    cluster.assert_workload_running("ns-other", "echo");
+}
+
+/// BROKEN: Three namespaces competing for a single worker under high pressure.
+/// After releasing pressure, not all waiting workloads get rescheduled.
+/// schedule_waiting_pods() may only reschedule a limited number per pressure
+/// update cycle, leaving some workloads stuck in WaitingForCapacity.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[should_panic(expected = "expected Running")]
+async fn test_many_namespaces_competing_for_capacity() {
+    eprintln!("BROKEN: not all WaitingForCapacity workloads rescheduled after pressure drop — schedule_waiting_pods() may need to iterate all waiting namespaces");
+    let mut cluster = TestCluster::new();
+    let w1 = cluster.add_worker().await;
+
+    // High pressure — blocks all scheduling.
+    cluster.inject_pressure(&w1, 85.0).await;
+
+    cluster
+        .create_namespace("ns-1", always_on_spec())
+        .await;
+    cluster
+        .create_namespace("ns-2", always_on_spec())
+        .await;
+    cluster
+        .create_namespace("ns-3", always_on_spec())
+        .await;
+    cluster.converge().await;
+
+    // All should be waiting.
+    cluster.assert_workload_waiting_for_capacity("ns-1", "echo");
+    cluster.assert_workload_waiting_for_capacity("ns-2", "echo");
+    cluster.assert_workload_waiting_for_capacity("ns-3", "echo");
+
+    // Release pressure — all should eventually schedule.
+    cluster.inject_pressure(&w1, 0.0).await;
+    cluster.converge().await;
+
+    cluster.assert_workload_running("ns-1", "echo");
+    cluster.assert_workload_running("ns-2", "echo");
+    cluster.assert_workload_running("ns-3", "echo");
 }

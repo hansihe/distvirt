@@ -427,11 +427,11 @@ async fn test_failed_condition_in_status_report() {
 
     // Check status report includes the failed condition.
     let report = h.namespace("ns").status_report();
-    let svc_report = report.services.get(&ServiceId::from("echo-svc")).unwrap();
+    let wl_report = report.workloads.get(&WorkloadId("echo".to_string())).unwrap();
     assert!(
-        svc_report.workload_conditions.contains_key("failed"),
+        wl_report.conditions.contains_key("failed"),
         "status report should include 'failed' workload condition, got: {:?}",
-        svc_report.workload_conditions
+        wl_report.conditions
     );
 }
 
@@ -447,10 +447,10 @@ async fn test_retry_backoff_condition_in_status_report() {
     h.assert_workload_retry_backoff("ns", "echo");
 
     let report = h.namespace("ns").status_report();
-    let svc_report = report.services.get(&ServiceId::from("echo-svc")).unwrap();
+    let wl_report = report.workloads.get(&WorkloadId("echo".to_string())).unwrap();
     assert!(
-        svc_report.workload_conditions.contains_key("retry-backoff"),
+        wl_report.conditions.contains_key("retry-backoff"),
         "status report should include 'retry-backoff' workload condition during backoff, got: {:?}",
-        svc_report.workload_conditions
+        wl_report.conditions
     );
 }

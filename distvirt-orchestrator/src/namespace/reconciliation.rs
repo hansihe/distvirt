@@ -9,12 +9,29 @@ impl NamespaceStateMachine {
         if self.status == NamespaceStatus::Destroying {
             return;
         }
+        // Initialize workloads that are still in Dormant (pending) state.
+        self.reconcile_all_workloads(placement_table, out);
+
         let svc_ids: Vec<ServiceId> = self.spec.services.keys().cloned().collect();
         for svc_id in svc_ids {
             self.reconcile_service(&svc_id, out);
         }
         // After all services are reconciled, reconcile demand for all workloads.
         self.reconcile_all_demand(placement_table, out);
+    }
+
+    /// Send Initialize to all workloads. The SM is idempotent — it only
+    /// acts on Initialize when in Dormant state without activation.
+    fn reconcile_all_workloads(&mut self, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
+        let wl_ids: Vec<WorkloadId> = self.workloads.keys().cloned().collect();
+        for wl_id in wl_ids {
+            let wl_outputs = if let Some(wl) = self.workloads.get_mut(&wl_id) {
+                wl.step(WorkloadInput::Initialize, &self.namespace_id)
+            } else {
+                continue;
+            };
+            self.translate_workload_effects(&wl_id, wl_outputs, placement_table, out);
+        }
     }
 
     fn reconcile_service(&mut self, svc_id: &ServiceId, out: &mut NamespaceOutput) {

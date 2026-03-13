@@ -159,6 +159,7 @@ async fn main() -> Result<()> {
     let image_provider = ContainerdOverlayfsProvider {
         socket: args.containerd_socket.clone(),
         namespace: args.containerd_namespace.clone(),
+        docker_config: None,
     };
     let artifact = image_provider
         .prepare(&args.container_image)

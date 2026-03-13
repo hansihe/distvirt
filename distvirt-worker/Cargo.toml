@@ -11,6 +11,10 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 anyhow = "1"
+base64 = "0.22"
+prost = "0.13"
+prost-types = "0.13"
+tokio-stream = "0.1"
 containerd-client = "0.8"
 distvirt-guest-protocol = { path = "../distvirt-guest-protocol" }
 distvirt-activator = { path = "../distvirt-activator" }

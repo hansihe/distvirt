@@ -1,4 +1,5 @@
 use std::env;
+use std::time::Duration;
 
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -80,7 +81,9 @@ pub async fn connect(params: &ConnectionParams) -> anyhow::Result<AuthChannel> {
         format!("http://{}", params.server)
     };
 
+    log::debug!("connecting to {}", endpoint);
     let channel = Channel::from_shared(endpoint)?
+        .connect_timeout(Duration::from_secs(5))
         .connect()
         .await?;
 

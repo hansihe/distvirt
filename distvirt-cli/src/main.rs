@@ -55,6 +55,14 @@ struct Cli {
     #[arg(long, global = true)]
     context: Option<String>,
 
+    /// Log level (off, error, warn, info, debug, trace)
+    #[arg(long, global = true)]
+    log_level: Option<log::LevelFilter>,
+
+    /// Enable verbose (debug) logging
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -251,12 +259,18 @@ enum ContextCommands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let default_level = if cli.verbose {
+        log::LevelFilter::Debug
+    } else {
+        cli.log_level.unwrap_or(log::LevelFilter::Info)
+    };
+
     env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(default_level)
         .parse_default_env()
         .init();
-
-    let cli = Cli::parse();
 
     match cli.command {
         // Auth commands — no gRPC needed
@@ -352,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
                     namespace_id,
                     config,
                 }) => {
-                    commands::connect::connect(client, &namespace_id, config).await?;
+                    commands::connect::connect(client, &params, &namespace_id, config).await?;
                 }
                 Commands::Task(TaskCommands::Disconnect { namespace_id }) => {
                     commands::connect::disconnect(client, &namespace_id).await?;

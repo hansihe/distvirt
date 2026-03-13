@@ -20,7 +20,7 @@ Throughout this document, features are marked with their implementation status:
 
 1. **Workloads and services are separate concepts.** A workload is a schedulable VM. A service is a virtual IP that routes traffic to a workload. Multiple services can point to the same workload.
 2. **Services can be declared inline on workloads.** The common case (1 workload = 1 service) should be concise.
-3. **Activation is first-class.** Scale-to-zero is the driving use case, not an afterthought.
+3. **Always-on by default, activation is opt-in.** Workloads run by default. Scale-to-zero is available as an opt-in per-workload or per-service, with increasing levels of protocol awareness (passthrough → TCP → HTTP/2).
 4. **Format: YAML.** Industry standard for container orchestration specs.
 
 ---
@@ -62,9 +62,9 @@ workloads:
     services:
       api:
         activation:
-          activator:
-            tcp: { ports: [8080] }
-          idle_timeout: 5m
+          tcp:
+            ports: [8080]
+            idle_timeout: 5m
 
   database:
     containers:
@@ -72,18 +72,16 @@ workloads:
         image: docker.io/library/postgres:16
         env:
           POSTGRES_PASSWORD: "dev"
-    services:
-      database:
-        activation:
-          idle_timeout: 10m
+    activation:                     # Workload-level passthrough activation
+      passthrough:
+        idle_timeout: 10m
 
   frontend:
     containers:
       - name: main
         image: docker.io/myorg/frontend:latest
     services:
-      frontend:
-        # No activation -> always-on
+      frontend: {}                # Always-on (no activation)
 ```
 
 ---
@@ -99,6 +97,9 @@ workloads:
   <workload-id>:
     ip: <ipv4>                  # Pod IP. Auto-assigned from subnet if omitted.
     suspend_on_idle: <bool>     # Default: true (from defaults). Snapshot instead of stop.
+    activation:                  # Workload-level activation. If omitted, always-on.
+      passthrough:               # Only passthrough is valid on workloads.
+        idle_timeout: <duration>
     containers:
       - name: <string>         # Container ID within pod. Default: "main".
         image: <oci-ref>       # Required. OCI image reference.
@@ -202,9 +203,9 @@ workloads:
     services:
       api:
         activation:
-          activator:
-            tcp: { ports: [8080] }
-          idle_timeout: 5m
+          tcp:
+            ports: [8080]
+            idle_timeout: 5m
 ```
 
 The service IP is auto-assigned from the subnet. The workload linkage is implicit.
@@ -231,8 +232,9 @@ services:
     ip: <ipv4>                  # Service virtual IP. Auto-assigned if omitted.
 
     activation:                 # If omitted, service is always-on.
-      activator: ...            # Protocol activator (see Protocol Activators).
-      idle_timeout: <duration>  # Time before deactivation. Default: 30s when activation is present.
+      passthrough: ...          # Activator type (exactly one). See Activators.
+      tcp: ...                  #
+      http2: ...                #
       buffer:                   # [Parsed, ignored] See note below.
         frames: <uint>
         timeout: <duration>
@@ -247,37 +249,108 @@ services:
 
 ### Always-on vs activated
 
-- **No `activation` block** -- always-on. Workload starts when namespace is created and stays running.
-- **With `activation` block** -- scale-to-zero. Workload starts only when traffic arrives, suspends/stops after idle timeout.
+The default behavior is **always-on**: a workload starts when the namespace is created and stays running. This applies to all workloads, including those with no services.
 
-### Activation without a protocol activator
+Activation is opt-in. It can be configured at two levels:
+
+- **Workload-level activation:** Add an `activation` block on the workload itself. The workload starts only when traffic arrives at its pod IP, and suspends or stops after idle. Only the `passthrough` activator is valid at this level.
+- **Service-level activation:** Add an `activation` block on a service. The service (and its linked workload) becomes scale-to-zero. Any activator can be used (`passthrough`, `tcp`, `http2`).
+
+There are three activator types, each with increasing protocol awareness:
+
+#### 1. No activation (default) -- always-on
+
+```yaml
+workloads:
+  api:
+    containers:
+      - image: docker.io/myorg/api:latest
+    services:
+      api: {}
+```
+
+Workload starts immediately and stays running. This is also the behavior for workloads with no services at all.
+
+#### 2. Passthrough activation -- packet-level
+
+```yaml
+# On a workload (activates on traffic to pod IP):
+workloads:
+  database:
+    activation:
+      passthrough:
+        idle_timeout: 10m
+    containers:
+      - image: docker.io/library/postgres:16
+
+# On a service (activates on traffic to service VIP):
+services:
+  api:
+    activation:
+      passthrough:
+        idle_timeout: 5m
+```
+
+Buffers all packets and activates on the first one. No protocol awareness. Suspends/stops after the idle timeout. `idle_timeout` is required for passthrough since it cannot detect when traffic has stopped.
+
+#### 3. TCP activation -- connection-aware
 
 ```yaml
 services:
-  simple:
+  api:
     activation:
-      idle_timeout: 5m
+      tcp:
+        ports: [8080]
+        idle_timeout: 5m    # Optional safety net for stuck flows.
 ```
 
-Buffers all packets and activates on the first one (passthrough mode). No protocol awareness.
+Activates on new TCP connections (SYN). Filters RSTs and stale traffic. More precise than passthrough -- avoids spurious wakeups from non-connection traffic. Tracks active TCP flows and can deactivate when all connections close. `idle_timeout` is optional (safety net for half-open or stuck connections).
+
+#### 4. HTTP/2 activation -- stream-aware
+
+```yaml
+services:
+  api:
+    activation:
+      http2: {}
+```
+
+Full H2 proxy with per-stream activation. The backend is held active while streams are open -- precise scale-to-zero without timeout guessing. No `idle_timeout` needed.
 
 ---
 
-## Protocol Activators
+## Activators
 
-Protocol activators inspect traffic to make intelligent activation decisions (e.g., activate on TCP SYN, not RST or stale keepalives).
+Activators determine how activation detects traffic and decides when to deactivate. They are specified directly inside the `activation` block as a tagged union (exactly one key).
+
+### Passthrough
+
+**[Planned]**
+
+Packet-level. Buffers all packets and activates on the first one. No protocol awareness. Valid on both workloads and services.
+
+```yaml
+activation:
+  passthrough:
+    idle_timeout: 5m          # Required. Time after last packet before deactivation.
+```
+
+`idle_timeout` is required because passthrough has no way to detect when traffic has stopped.
 
 ### TCP
 
 **[Implemented]**
 
-L3 packet-level. Activates on new TCP connections (SYN). Filters RSTs and stale traffic.
+Connection-aware. Activates on new TCP connections (SYN). Filters RSTs and stale traffic. Tracks active TCP flows and can deactivate when all connections close.
 
 ```yaml
-activator:
+activation:
   tcp:
-    ports: [8080, 8443]    # Ports to watch. Omit for all ports.
+    ports: [8080, 8443]      # Ports to watch. Omit for all ports.
+    idle_timeout: 10m         # Optional. Safety net for stuck/half-open connections.
 ```
+
+`idle_timeout` is optional -- the activator tracks active flows and deactivates when all connections close. The timeout is a safety net for half-open or stuck connections.
 
 > **Note:** The fields `tcp_only` and `max_flows` that may appear in older documentation are not supported in the client protocol. They are not parsed and will cause a YAML deserialization error if present.
 
@@ -285,19 +358,21 @@ activator:
 
 **[Implemented]**
 
-L4 stream-level. Full H2 proxy with per-stream activation. Backend need is held active while streams are open -- precise scale-to-zero without timeout guessing.
+Stream-aware. Full H2 proxy with per-stream activation. Backend need is held active while streams are open -- precise scale-to-zero without timeout guessing.
 
 ```yaml
-activator:
+activation:
   http2: {}
 ```
 
+No `idle_timeout` needed -- the activator tracks active streams precisely.
+
 ### PostgreSQL
 
-**[Parsed, ignored]** -- The `postgres: {}` activator is accepted in the YAML but is not supported in the client protocol (`ActivatorConfig` only has `tcp` and `http2` variants). When present, a log warning is emitted and the activator is dropped -- the service will behave as if no activator was specified (passthrough activation).
+**[Parsed, ignored]** -- The `postgres: {}` activator is accepted in the YAML but is not supported in the client protocol (`ActivatorConfig` only has `tcp` and `http2` variants). When present, a log warning is emitted and the activator is dropped.
 
 ```yaml
-activator:
+activation:
   postgres: {}    # Parsed but ignored -- activator is dropped
 ```
 
@@ -354,12 +429,14 @@ defaults:
       memory_mb: 512
       vcpus: 2
   activation:                         # Default activation for all services
-    activator:
-      tcp: { ports: [80] }
-    idle_timeout: 5m
+    tcp:
+      ports: [80]
+      idle_timeout: 5m
 ```
 
 A workload or service can override any default by specifying the field explicitly. An inline service with an empty body (`service_name: {}`) inherits the default activation if one is set.
+
+Note that setting `defaults.activation` changes services from always-on to scale-to-zero by default. Without it, all services (and their workloads) are always-on unless they individually declare an `activation` block.
 
 Note: when no `defaults.suspend_on_idle` is specified, the parser defaults to `true`.
 
@@ -376,6 +453,8 @@ network.gateway                   -> (dropped)                     Parsed, ignor
 workloads.<id>                    -> WorkloadSpec                  Implemented
 workloads.<id>.ip                 -> PodNetworkConfig.ip           Implemented
 workloads.<id>.suspend_on_idle    -> WorkloadSpec.suspend_on_idle  Implemented
+workloads.<id>.activation         -> (workload activation)         Planned
+  .passthrough                    -> (flow activation)             Planned
 workloads.<id>.resources.requests -> ResourceRequirements.requests Implemented
 workloads.<id>.resources.limits   -> ResourceRequirements.limits   Implemented
 workloads.<id>.healthcheck        -> (dropped)                     Parsed, ignored
@@ -383,9 +462,10 @@ workloads.<id>.containers[]       -> ContainerSpec                 Implemented
 services.<id>                     -> ServiceSpec                   Implemented
 services.<id>.ip                  -> ServiceNetworkConfig.ip       Implemented
 services.<id>.activation          -> ActivationSpec                Implemented
-  .activator.tcp                  -> ActivatorConfig::Tcp          Implemented
-  .activator.http2                -> ActivatorConfig::Http2        Implemented
-  .activator.postgres             -> (dropped)                     Parsed, ignored
+  .passthrough                    -> ActivatorConfig (none)        Planned
+  .tcp                            -> ActivatorConfig::Tcp          Implemented
+  .http2                          -> ActivatorConfig::Http2        Implemented
+  .postgres                       -> (dropped)                     Parsed, ignored
   .buffer.frames / .timeout       -> (dropped)                     Parsed, ignored
 services.<id>.expose              -> ExposeSpec                    Implemented
 ```
@@ -397,9 +477,9 @@ services.<id>.expose              -> ExposeSpec                    Implemented
 | Aspect | Docker Compose | distvirt spec |
 |--------|---------------|---------------|
 | Workload + service | Conflated as "service" | Separate concepts, inline shorthand |
-| Activation | N/A | First-class per-service config |
+| Activation | N/A | Opt-in per-workload or per-service (passthrough → TCP → HTTP/2) |
 | Suspend/resume | N/A | Per-workload `suspend_on_idle` |
-| Protocol activators | N/A | TCP, HTTP/2 (PostgreSQL planned) |
+| Activators | N/A | Passthrough, TCP, HTTP/2 (PostgreSQL planned) |
 | Resources | Limits only (deploy.resources) | Requests (scheduling) + limits (VM size) |
 | Health checks | Basic (no readiness gating) | Planned (parsed but not yet functional) |
 | Network | Implicit/multi-network | Explicit single subnet |
@@ -458,9 +538,9 @@ workloads:
     services:
       api:
         activation:
-          activator:
-            tcp: { ports: [8080] }
-          idle_timeout: 5m
+          tcp:
+            ports: [8080]
+            idle_timeout: 5m
 ```
 
 A fragment is a partial namespace spec. It declares one or more workloads with their inline services but has no `network` or `metadata` -- those belong to the namespace definition.

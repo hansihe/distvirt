@@ -108,6 +108,7 @@ fn test_spec() -> NamespaceSpec {
             },
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
 

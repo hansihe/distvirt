@@ -177,6 +177,7 @@ fn single_service_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -206,6 +207,7 @@ fn multi_service_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     workloads.insert(
@@ -220,6 +222,7 @@ fn multi_service_spec() -> NamespaceSpec {
                 netmask: "255.255.255.0".into(),
             },
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -259,6 +262,7 @@ fn activation_only_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();

@@ -141,6 +141,9 @@ pub struct WorkloadStateMachine {
     pub current_demand: u32,
     /// Whether to suspend the pod instead of stopping it when demand drops to zero.
     pub suspend_on_idle: bool,
+    /// Whether this workload has activation configured. If false, the workload is
+    /// always-on and will self-activate on Initialize, ignoring SetDemand(0).
+    pub has_activation: bool,
     /// Reason for the most recent pod failure, for observability.
     pub last_failure_reason: Option<PodGoneReason>,
     /// Number of consecutive pod failures without a successful PodRunning in between.
@@ -163,6 +166,10 @@ pub struct WorkloadStateMachine {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkloadInput {
+    /// Initialize the workload. For always-on workloads (!has_activation),
+    /// this transitions to WaitingForCapacity and emits PodRequest.
+    /// For activation-based workloads, this is a no-op (stays Dormant).
+    Initialize,
     SetDemand { count: u32 },
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
     /// Outer layer has generated a pod_id for resuming from snapshot.
@@ -219,12 +226,13 @@ fn backoff_delay(failures: u32) -> std::time::Duration {
 }
 
 impl WorkloadStateMachine {
-    pub fn new(workload_id: WorkloadId, suspend_on_idle: bool) -> Self {
+    pub fn new(workload_id: WorkloadId, suspend_on_idle: bool, has_activation: bool) -> Self {
         WorkloadStateMachine {
             workload_id,
             state: WorkloadState::Dormant,
             current_demand: 0,
             suspend_on_idle,
+            has_activation,
             last_failure_reason: None,
             consecutive_failures: 0,
             max_retries: MAX_RETRIES,
@@ -375,6 +383,14 @@ impl WorkloadStateMachine {
         let mut outputs = Vec::new();
 
         match input {
+            WorkloadInput::Initialize => {
+                if !self.has_activation && matches!(self.state, WorkloadState::Dormant) {
+                    // Always-on workload: self-activate on initialize.
+                    self.needs_successful_boot = true;
+                    self.transition_on_demand(&mut outputs);
+                }
+                // Activation-based workloads stay Dormant until demand arrives.
+            }
             WorkloadInput::SetDemand { count } => {
                 let old = self.current_demand;
                 self.current_demand = count;
@@ -407,6 +423,17 @@ impl WorkloadStateMachine {
                         _ => {}
                     }
                 } else if count == 0 && old > 0 {
+                    if !self.has_activation {
+                        // Always-on workload: update counter for observability but
+                        // don't transition state. ForceDeactivate is the only way to shut down.
+                        // Clear any Demand pending since we won't act on it.
+                        if let WorkloadState::Active { ref mut pending, .. } = self.state {
+                            if *pending == PendingIntent::Demand {
+                                *pending = PendingIntent::None;
+                            }
+                        }
+                        return outputs;
+                    }
                     // Demand dropped to zero: shut down (unless committed to booting).
                     match std::mem::replace(&mut self.state, WorkloadState::Transitioning) {
                         WorkloadState::WaitingForCapacity if self.needs_successful_boot => {
@@ -853,6 +880,7 @@ impl WorkloadStateMachine {
             }
             WorkloadInput::ForceDeactivate => {
                 self.needs_successful_boot = false;
+                self.consecutive_failures = 0;
                 match &self.state {
                     WorkloadState::Dormant | WorkloadState::WaitingForCapacity => {
                         // Already inactive, no-op.
@@ -910,13 +938,11 @@ impl WorkloadStateMachine {
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
                             outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
-                            self.consecutive_failures = 0;
                             self.state = WorkloadState::Dormant;
                         }
                     }
                     WorkloadState::Failed => {
                         outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
-                        self.consecutive_failures = 0;
                         self.state = WorkloadState::Dormant;
                     }
                     WorkloadState::Transitioning => unreachable!("Transitioning in ForceDeactivate"),

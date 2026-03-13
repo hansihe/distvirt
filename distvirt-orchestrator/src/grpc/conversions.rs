@@ -98,11 +98,29 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         }),
     });
 
+    // Workload-level activation: extract passthrough idle_timeout
+    let activation = wl.activation.and_then(|act| {
+        act.activator.and_then(|cfg| {
+            cfg.activator.and_then(|a| match a {
+                proto::activator_config::Activator::Passthrough(p) => {
+                    Some(WorkloadActivationSpec {
+                        idle_timeout: Duration::from_millis(p.idle_timeout_ms),
+                    })
+                }
+                _ => {
+                    log::warn!("only passthrough activator is valid on workloads; ignored");
+                    None
+                }
+            })
+        })
+    });
+
     Ok(WorkloadSpec {
         containers,
         network: pod_network,
         suspend_on_idle: wl.suspend_on_idle,
         resources,
+        activation,
     })
 }
 
@@ -188,6 +206,15 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
                 proto::activator_config::Activator::Http2(_) => {
                     ActivatorConfig::Http2 {}
                 }
+                proto::activator_config::Activator::Passthrough(_) => {
+                    // Passthrough on a service: no protocol-specific activator config.
+                    // The service will activate on any traffic.
+                    ActivatorConfig::Tcp {
+                        ports: None,
+                        tcp_only: false,
+                        max_flows: 1024,
+                    }
+                }
             })
         });
         ServicePolicy {
@@ -203,8 +230,23 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
         }
     };
 
-    let activation = svc.activation.map(|a| ActivationSpec {
-        idle_timeout: Duration::from_millis(a.idle_timeout_ms),
+    let activation = svc.activation.and_then(|a| {
+        // Extract idle_timeout from inside the activator variant
+        let idle_timeout = a.activator.as_ref().and_then(|cfg| {
+            cfg.activator.as_ref().and_then(|act| match act {
+                proto::activator_config::Activator::Passthrough(p) => {
+                    Some(Duration::from_millis(p.idle_timeout_ms))
+                }
+                proto::activator_config::Activator::Tcp(tcp) if tcp.idle_timeout_ms > 0 => {
+                    Some(Duration::from_millis(tcp.idle_timeout_ms))
+                }
+                _ => None,
+            })
+        });
+        // Default to 30s if no idle_timeout was specified but activation is present
+        Some(ActivationSpec {
+            idle_timeout: idle_timeout.unwrap_or(Duration::from_secs(30)),
+        })
     });
 
     Ok(ServiceSpec {
@@ -229,35 +271,65 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
     let mut workloads: HashMap<String, proto::WorkloadStatusReport> = HashMap::new();
     let mut services: HashMap<String, proto::ServiceStatusReport> = HashMap::new();
 
-    for (svc_id, svc) in report.services {
-        let wl_key = svc.workload_id.0.clone();
+    for (wl_id, wl) in &report.workloads {
+        // Look up pod/worker info from the pods collection if this workload has a pod.
+        let (pod_id_ref, worker_id_ref) = wl.pod_id.as_ref()
+            .and_then(|pid| report.pods.get(pid).map(|p| (Some(&p.pod_id), Some(&p.worker_id))))
+            .unwrap_or((wl.pod_id.as_ref(), None));
 
-        // Build workload entry from service data (first service for each workload wins).
-        workloads.entry(wl_key).or_insert_with(|| {
+        workloads.insert(
+            wl_id.0.clone(),
             proto::WorkloadStatusReport {
                 state: Some(convert_workload_state_from_strings(
-                    &svc.workload_state,
-                    &svc.pod_id,
-                    &svc.worker_id,
+                    &wl.state,
+                    &pod_id_ref.cloned(),
+                    &worker_id_ref.cloned(),
                 )),
                 spliced: false,
-            }
-        });
+            },
+        );
+    }
+
+    for (svc_id, svc) in &report.services {
+        // Look up pod/worker from the linked workload's pod.
+        let (pod_id, worker_id) = report.workloads.get(&svc.workload_id)
+            .and_then(|wl| wl.pod_id.as_ref())
+            .and_then(|pid| report.pods.get(pid).map(|p| (Some(p.pod_id.clone()), Some(p.worker_id.clone()))))
+            .unwrap_or((None, None));
 
         services.insert(
-            svc_id.0,
+            svc_id.0.clone(),
             proto::ServiceStatusReport {
-                workload_id: svc.workload_id.0,
+                workload_id: svc.workload_id.0.clone(),
                 state: Some(convert_service_state_from_strings(
                     &svc.service_state,
-                    &svc.pod_id,
-                    &svc.worker_id,
+                    &pod_id,
+                    &worker_id,
                     &svc.backend_need,
                 )),
                 activation_enabled: svc.activation_enabled,
                 spliced: false,
-                ip: svc.ip,
+                ip: svc.ip.clone(),
                 mac: String::new(),
+            },
+        );
+    }
+
+    let mut pods: HashMap<String, proto::PodStatusReportEntry> = HashMap::new();
+    for (pod_id, pod) in &report.pods {
+        pods.insert(
+            pod_id.0.clone(),
+            proto::PodStatusReportEntry {
+                workload_id: pod.workload_id.0.clone(),
+                worker_id: pod.worker_id.0.clone(),
+                ip: pod.ip.clone(),
+                state: match pod.state {
+                    PodStatus::Launching => proto::PodState::Launching as i32,
+                    PodStatus::Running => proto::PodState::Running as i32,
+                    PodStatus::Suspending => proto::PodState::Suspending as i32,
+                    PodStatus::Suspended => proto::PodState::Suspended as i32,
+                    PodStatus::Resuming => proto::PodState::Resuming as i32,
+                },
             },
         );
     }
@@ -267,6 +339,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
         state: convert_namespace_state(&report.status),
         workloads,
         services,
+        pods,
     }
 }
 

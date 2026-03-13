@@ -37,6 +37,10 @@ struct Cli {
     /// Shared secret for authenticating with the orchestrator
     #[arg(long)]
     worker_secret: String,
+
+    /// Path to Docker config.json for registry auth
+    #[arg(long, default_value = "/root/.docker/config.json")]
+    docker_config: PathBuf,
 }
 
 #[tokio::main]
@@ -50,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
             socket: cli.containerd_socket,
             namespace: cli.containerd_namespace,
+            docker_config: Some(cli.docker_config),
         };
 
     log::info!("connecting to orchestrator at {}", cli.orchestrator);

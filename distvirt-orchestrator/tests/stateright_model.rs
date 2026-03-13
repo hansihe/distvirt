@@ -228,7 +228,8 @@ impl NamespaceSnapshot {
         let mut workloads = BTreeMap::new();
         for (wl_id, wl_snap) in &self.workloads {
             let suspend_on_idle = self.spec.workloads.get(wl_id).map_or(false, |w| w.suspend_on_idle);
-            let mut wl = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle);
+            let has_activation = self.spec.workloads.get(wl_id).and_then(|w| w.activation.as_ref()).is_some();
+            let mut wl = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle, has_activation);
             wl.max_retries = max_retries;
             wl.state = wl_snap.state.clone();
             wl.current_demand = wl_snap.current_demand;
@@ -1174,6 +1175,7 @@ fn single_service_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -1205,6 +1207,7 @@ fn two_service_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     workloads.insert(
@@ -1219,6 +1222,7 @@ fn two_service_spec() -> NamespaceSpec {
                 netmask: "255.255.255.0".into(),
             },
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -1261,6 +1265,7 @@ fn shared_workload_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();

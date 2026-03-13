@@ -76,19 +76,24 @@ pub enum PodStatus {
 pub struct NamespaceStatusReport {
     pub namespace_id: NamespaceId,
     pub status: NamespaceStatus,
+    pub workloads: BTreeMap<WorkloadId, WorkloadStatusReport>,
     pub services: BTreeMap<ServiceId, ServiceStatusReport>,
+    pub pods: BTreeMap<PodId, PodStatusReport>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkloadStatusReport {
+    pub state: String,
+    pub pod_id: Option<PodId>,
+    pub conditions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceStatusReport {
-    pub service_state: String,
     pub workload_id: WorkloadId,
-    pub workload_state: String,
-    pub pod_id: Option<PodId>,
-    pub worker_id: Option<WorkerId>,
+    pub service_state: String,
     pub backend_need: Option<BackendNeed>,
     pub activation_enabled: bool,
     pub ip: String,
-    pub workload_conditions: BTreeMap<String, String>,
-    pub service_conditions: BTreeMap<String, String>,
+    pub conditions: BTreeMap<String, String>,
 }

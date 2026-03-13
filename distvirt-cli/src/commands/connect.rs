@@ -14,9 +14,70 @@ use tokio::sync::Mutex;
 use rand::rngs::OsRng;
 
 use crate::client::{self, Client};
+use crate::connection::ConnectionParams;
 use crate::platform::{TunDevice, configure_interface, add_route, remove_route};
 
 const MAX_PACKET_SIZE: usize = 65536;
+
+/// Check whether an anyhow error chain contains a permission-denied I/O error.
+fn is_permission_denied(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Re-execute the current process with `sudo`, passing connection params explicitly
+/// so that the root shell doesn't lose the user's context/config.
+fn reexec_with_sudo(params: &ConnectionParams) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("cannot determine own executable path")?;
+    let args: Vec<String> = std::env::args().collect();
+
+    eprintln!("creating a network tunnel requires root privileges, re-running with sudo...");
+
+    let mut cmd = std::process::Command::new("sudo");
+    cmd.arg("--").arg(&exe);
+
+    // Pass connection params explicitly so sudo's env doesn't matter.
+    cmd.arg("--server").arg(&params.server);
+    if let Some(ref token) = params.token {
+        cmd.arg("--token").arg(token);
+    }
+
+    // Re-add the subcommand and its arguments from the original invocation.
+    // Skip argv[0] and any global flags we already handled above.
+    let mut skip_next = false;
+    for arg in &args[1..] {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--server" | "--token" | "--context" => {
+                skip_next = true;
+                continue;
+            }
+            s if s.starts_with("--server=")
+                || s.starts_with("--token=")
+                || s.starts_with("--context=") =>
+            {
+                continue;
+            }
+            _ => {}
+        }
+        cmd.arg(arg);
+    }
+
+    let status = cmd
+        .status()
+        .context("failed to exec sudo (is it installed?)")?;
+
+    std::process::exit(status.code().unwrap_or(1));
+}
 
 /// State file for tracking active connections.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -39,6 +100,7 @@ fn state_file_path(namespace_id: &str) -> anyhow::Result<PathBuf> {
 /// `dv connect` — establish a WireGuard tunnel into a namespace.
 pub async fn connect(
     mut client: Client,
+    params: &ConnectionParams,
     namespace_id: &str,
     config_only: bool,
 ) -> anyhow::Result<()> {
@@ -89,8 +151,14 @@ pub async fn connect(
         return Ok(());
     }
 
-    // 4. Create TUN device.
-    let tun = TunDevice::create().context("failed to create TUN device")?;
+    // 4. Create TUN device, escalating to sudo on permission denied.
+    let tun = match TunDevice::create() {
+        Ok(tun) => tun,
+        Err(e) if is_permission_denied(&e) => {
+            return reexec_with_sudo(&params);
+        }
+        Err(e) => return Err(e.context("failed to create TUN device")),
+    };
     let tun_name = tun.name.clone();
 
     // 5. Configure IP + routes.

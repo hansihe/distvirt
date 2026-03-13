@@ -23,6 +23,8 @@ struct WorkloadModel {
     enable_suspend: bool,
     /// Whether to enable ForceDeactivate actions.
     enable_force_deactivate: bool,
+    /// Whether the workload has activation (true = demand-driven, false = always-on).
+    has_activation: bool,
     max_steps: usize,
 }
 
@@ -44,6 +46,7 @@ struct WlModelState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WlModelAction {
+    Initialize,
     SetDemand { count: u32 },
     ForceDeactivate,
     LaunchPod { worker_id: WorkerId, pod_id: PodId },
@@ -107,6 +110,11 @@ impl Model for WorkloadModel {
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+        // Initialize: can fire once from Dormant state.
+        if matches!(state.state, WorkloadState::Dormant) {
+            actions.push(WlModelAction::Initialize);
+        }
+
         // SetDemand: can set to any value from 0 to num_services.
         for count in 0..=(self.num_services as u32) {
             if count != state.current_demand {
@@ -237,7 +245,7 @@ impl Model for WorkloadModel {
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        let mut sm = WorkloadStateMachine::new(wl_id(), self.enable_suspend);
+        let mut sm = WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
         sm.state = state.state.clone();
         sm.current_demand = state.current_demand;
         sm.consecutive_failures = state.consecutive_failures;
@@ -248,6 +256,7 @@ impl Model for WorkloadModel {
         let ns = ns_id();
 
         let (input, fired_timer) = match action {
+            WlModelAction::Initialize => (WorkloadInput::Initialize, None),
             WlModelAction::SetDemand { count } => (WorkloadInput::SetDemand { count }, None),
             WlModelAction::ForceDeactivate => (WorkloadInput::ForceDeactivate, None),
             WlModelAction::LaunchPod { worker_id, pod_id } => {
@@ -365,6 +374,7 @@ impl Model for WorkloadModel {
                 !matches!(state.state, WorkloadState::Transitioning)
             }),
             // Safety: consecutive failures never exceed MAX_RETRIES.
+            // ForceDeactivate resets the counter, so this holds in all modes.
             Property::<Self>::always("consecutive failures bounded", |_model, state| {
                 state.consecutive_failures <= MAX_RETRIES
             }),
@@ -474,7 +484,12 @@ impl Model for WorkloadModel {
                 }
             }),
             // Reachability: Can reach Dormant after Running (demand drops to 0).
-            Property::<Self>::sometimes("can reach dormant after running", |_model, state| {
+            // Always-on workloads can only go dormant via ForceDeactivate.
+            Property::<Self>::sometimes("can reach dormant after running", |model, state| {
+                if !model.has_activation && !model.enable_force_deactivate {
+                    // Always-on without force deactivate: can never reach Dormant after running.
+                    return true;
+                }
                 state.next_pod_id > 0 && matches!(state.state, WorkloadState::Dormant)
             }),
             // Safety: pending == Demand implies current_demand > 0.
@@ -524,6 +539,7 @@ fn workload_single_service_single_worker() {
         enable_worker_loss: false,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 15,
     }
     .checker()
@@ -546,6 +562,7 @@ fn workload_two_services_single_worker() {
         enable_worker_loss: false,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 15,
     }
     .checker()
@@ -568,6 +585,7 @@ fn workload_with_pod_failure() {
         enable_worker_loss: false,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 20,
     }
     .checker()
@@ -590,6 +608,7 @@ fn workload_with_worker_loss() {
         enable_worker_loss: true,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 20,
     }
     .checker()
@@ -612,6 +631,7 @@ fn workload_full_chaos() {
         enable_worker_loss: true,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 12,
     }
     .checker()
@@ -634,6 +654,7 @@ fn workload_suspend_basic() {
         enable_worker_loss: false,
         enable_suspend: true,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 20,
     }
     .checker()
@@ -656,6 +677,7 @@ fn workload_suspend_with_failures() {
         enable_worker_loss: true,
         enable_suspend: true,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 15,
     }
     .checker()
@@ -678,6 +700,7 @@ fn workload_suspend_two_services() {
         enable_worker_loss: false,
         enable_suspend: true,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 15,
     }
     .checker()
@@ -700,6 +723,7 @@ fn workload_force_deactivate() {
         enable_worker_loss: false,
         enable_suspend: true,
         enable_force_deactivate: true,
+        has_activation: true,
         max_steps: 20,
     }
     .checker()
@@ -722,6 +746,7 @@ fn workload_force_deactivate_no_suspend() {
         enable_worker_loss: false,
         enable_suspend: false,
         enable_force_deactivate: true,
+        has_activation: true,
         max_steps: 20,
     }
     .checker()
@@ -744,6 +769,7 @@ fn workload_force_deactivate_full_chaos() {
         enable_worker_loss: true,
         enable_suspend: true,
         enable_force_deactivate: true,
+        has_activation: true,
         max_steps: 12,
     }
     .checker()
@@ -768,6 +794,7 @@ fn workload_retry_backoff() {
         enable_worker_loss: false,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 30,
     }
     .checker()
@@ -792,6 +819,7 @@ fn workload_retry_recovery() {
         enable_worker_loss: false,
         enable_suspend: false,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 35,
     }
     .checker()
@@ -814,6 +842,7 @@ fn workload_retry_with_suspend() {
         enable_worker_loss: false,
         enable_suspend: true,
         enable_force_deactivate: false,
+        has_activation: true,
         max_steps: 30,
     }
     .checker()
@@ -823,6 +852,55 @@ fn workload_retry_with_suspend() {
     result.assert_properties();
     println!(
         "Workload (retry with suspend): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+/// Always-on workload (has_activation=false): Initialize self-activates,
+/// SetDemand(0) is ignored (workload stays running).
+#[test]
+fn workload_always_on_basic() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: false,
+        enable_worker_loss: false,
+        enable_suspend: false,
+        enable_force_deactivate: false,
+        has_activation: false,
+        max_steps: 15,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (always-on): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+/// Always-on workload with force deactivate and pod failure.
+#[test]
+fn workload_always_on_with_force_deactivate() {
+    let result = WorkloadModel {
+        num_services: 1,
+        num_workers: 1,
+        enable_pod_failure: true,
+        enable_worker_loss: false,
+        enable_suspend: false,
+        enable_force_deactivate: true,
+        has_activation: false,
+        max_steps: 20,
+    }
+    .checker()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    println!(
+        "Workload (always-on, force deactivate): {} unique states",
         result.unique_state_count()
     );
 }

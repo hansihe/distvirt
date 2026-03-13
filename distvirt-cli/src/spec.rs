@@ -118,10 +118,17 @@ pub struct SpecNetwork {
 pub struct SpecWorkload {
     pub ip: Option<String>,
     pub suspend_on_idle: Option<bool>,
+    pub activation: Option<SpecWorkloadActivation>,
     pub containers: Vec<SpecContainer>,
     pub resources: Option<SpecResources>,
     pub healthcheck: Option<serde_yaml::Value>,
     pub services: Option<HashMap<String, SpecInlineService>>,
+}
+
+/// Workload-level activation. Only `passthrough` is valid here.
+#[derive(Debug, Deserialize)]
+pub struct SpecWorkloadActivation {
+    pub passthrough: Option<SpecPassthroughActivator>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,21 +174,22 @@ pub struct SpecService {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpecActivation {
-    pub activator: Option<SpecActivator>,
-    pub idle_timeout: Option<String>,
+    pub passthrough: Option<SpecPassthroughActivator>,
+    pub tcp: Option<SpecTcpActivator>,
+    pub http2: Option<serde_yaml::Value>,
+    pub postgres: Option<serde_yaml::Value>,
     pub buffer: Option<SpecBuffer>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SpecActivator {
-    pub tcp: Option<SpecTcpActivator>,
-    pub http2: Option<serde_yaml::Value>,
-    pub postgres: Option<serde_yaml::Value>,
+pub struct SpecPassthroughActivator {
+    pub idle_timeout: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpecTcpActivator {
     pub ports: Option<Vec<u32>>,
+    pub idle_timeout: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -352,6 +360,28 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                 );
             }
 
+            // Workload-level activation (only passthrough allowed)
+            let wl_activation = wl.activation.as_ref().and_then(|a| {
+                if let Some(ref passthrough) = a.passthrough {
+                    let idle_timeout_ms = parse_duration_ms(&passthrough.idle_timeout)
+                        .unwrap_or_else(|e| {
+                            log::warn!("workload '{}': failed to parse passthrough idle_timeout: {}", wid, e);
+                            30_000
+                        });
+                    Some(ActivationSpec {
+                        activator: Some(ActivatorConfig {
+                            activator: Some(activator_config::Activator::Passthrough(
+                                PassthroughActivator { idle_timeout_ms },
+                            )),
+                        }),
+                        buffer_policy: None,
+                    })
+                } else {
+                    log::warn!("workload '{}': only passthrough activator is valid on workloads; ignored", wid);
+                    None
+                }
+            });
+
             workloads.insert(
                 wid.clone(),
                 WorkloadSpec {
@@ -362,6 +392,7 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                     containers,
                     suspend_on_idle,
                     resources,
+                    activation: wl_activation,
                 },
             );
 
@@ -477,39 +508,47 @@ fn resolve_activation(
         None => return None,
     };
 
-    let activator = activation.activator.as_ref().and_then(|a| {
-        if a.postgres.is_some() {
-            log::warn!("postgres activator is not yet supported in client protocol; ignored");
-            None
-        } else if a.http2.is_some() {
-            Some(ActivatorConfig {
-                activator: Some(activator_config::Activator::Http2(Http2Activator {})),
-            })
-        } else if let Some(ref tcp) = a.tcp {
-            Some(ActivatorConfig {
-                activator: Some(activator_config::Activator::Tcp(TcpActivator {
-                    ports: tcp.ports.clone().unwrap_or_default(),
-                })),
-            })
-        } else {
-            None
-        }
-    });
+    if activation.postgres.is_some() {
+        log::warn!("postgres activator is not yet supported in client protocol; ignored");
+    }
 
-    let idle_timeout_ms = activation
-        .idle_timeout
-        .as_ref()
-        .map(|s| parse_duration_ms(s))
-        .transpose()
-        .unwrap_or_else(|e| {
-            log::warn!("failed to parse idle_timeout: {}", e);
-            None
+    let activator = if let Some(ref passthrough) = activation.passthrough {
+        let idle_timeout_ms = parse_duration_ms(&passthrough.idle_timeout)
+            .unwrap_or_else(|e| {
+                log::warn!("failed to parse passthrough idle_timeout: {}", e);
+                30_000
+            });
+        Some(ActivatorConfig {
+            activator: Some(activator_config::Activator::Passthrough(PassthroughActivator {
+                idle_timeout_ms,
+            })),
         })
-        .unwrap_or(30_000); // default 30s (scale-to-zero)
+    } else if activation.http2.is_some() {
+        Some(ActivatorConfig {
+            activator: Some(activator_config::Activator::Http2(Http2Activator {})),
+        })
+    } else if let Some(ref tcp) = activation.tcp {
+        let idle_timeout_ms = tcp.idle_timeout
+            .as_ref()
+            .map(|s| parse_duration_ms(s))
+            .transpose()
+            .unwrap_or_else(|e| {
+                log::warn!("failed to parse tcp idle_timeout: {}", e);
+                None
+            })
+            .unwrap_or(0); // 0 = not set
+        Some(ActivatorConfig {
+            activator: Some(activator_config::Activator::Tcp(TcpActivator {
+                ports: tcp.ports.clone().unwrap_or_default(),
+                idle_timeout_ms,
+            })),
+        })
+    } else {
+        None
+    };
 
     if let Some(ref buf) = activation.buffer {
         if buf.frames.is_some() || buf.timeout.is_some() {
-            // TODO: ServicePolicy message is empty in proto
             log::warn!("activation.buffer fields are not yet in client protocol; ignored");
         }
     }
@@ -517,7 +556,6 @@ fn resolve_activation(
     Some(ActivationSpec {
         activator,
         buffer_policy: None,
-        idle_timeout_ms,
     })
 }
 
@@ -640,9 +678,9 @@ workloads:
     services:
       api:
         activation:
-          activator:
-            tcp: { ports: [8080] }
-          idle_timeout: 5m
+          tcp:
+            ports: [8080]
+            idle_timeout: 5m
   database:
     containers:
       - name: main
@@ -652,9 +690,7 @@ workloads:
     services:
       database:
         activation:
-          activator:
-            postgres: {}
-          idle_timeout: 10m
+          postgres: {}
   frontend:
     containers:
       - name: main
@@ -685,11 +721,18 @@ workloads:
         assert_eq!(limits.memory_mb, 512);
         assert_eq!(limits.vcpus, 2);
 
-        // Check activation on api service
+        // Check activation on api service — idle_timeout is now inside the tcp activator
         let api_svc = &proto.services["api"];
         assert_eq!(api_svc.workload_id, "api");
         let act = api_svc.activation.as_ref().unwrap();
-        assert_eq!(act.idle_timeout_ms, 300_000);
+        let activator = act.activator.as_ref().unwrap().activator.as_ref().unwrap();
+        match activator {
+            activator_config::Activator::Tcp(tcp) => {
+                assert_eq!(tcp.idle_timeout_ms, 300_000);
+                assert_eq!(tcp.ports, vec![8080]);
+            }
+            _ => panic!("expected TCP activator"),
+        }
     }
 
     // --- (b) IP stability on addition ---
@@ -850,9 +893,9 @@ network:
   subnet: 172.16.0.0/24
 defaults:
   activation:
-    activator:
-      tcp: { ports: [80] }
-    idle_timeout: 5m
+    tcp:
+      ports: [80]
+      idle_timeout: 5m
 workloads:
   app:
     containers:
@@ -861,19 +904,27 @@ workloads:
       inherits: {}
       overrides:
         activation:
-          activator:
-            tcp: { ports: [9090] }
-          idle_timeout: 30s
+          tcp:
+            ports: [9090]
+            idle_timeout: 30s
 "#;
         let (_, proto) = convert(yaml);
 
-        // Service that inherits default activation
+        // Service that inherits default activation — idle_timeout inside tcp activator
         let inherits_act = proto.services["inherits"].activation.as_ref().unwrap();
-        assert_eq!(inherits_act.idle_timeout_ms, 300_000);
+        let inherits_tcp = match inherits_act.activator.as_ref().unwrap().activator.as_ref().unwrap() {
+            activator_config::Activator::Tcp(tcp) => tcp,
+            _ => panic!("expected TCP activator"),
+        };
+        assert_eq!(inherits_tcp.idle_timeout_ms, 300_000);
 
         // Service that overrides activation
         let overrides_act = proto.services["overrides"].activation.as_ref().unwrap();
-        assert_eq!(overrides_act.idle_timeout_ms, 30_000);
+        let overrides_tcp = match overrides_act.activator.as_ref().unwrap().activator.as_ref().unwrap() {
+            activator_config::Activator::Tcp(tcp) => tcp,
+            _ => panic!("expected TCP activator"),
+        };
+        assert_eq!(overrides_tcp.idle_timeout_ms, 30_000);
     }
 
     // --- (g) Duration parsing ---

@@ -59,6 +59,7 @@ pub(super) fn test_spec() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();
@@ -87,6 +88,7 @@ pub(super) fn test_spec_with_activation() -> NamespaceSpec {
             network: test_pod_network_config(),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     let mut services = BTreeMap::new();

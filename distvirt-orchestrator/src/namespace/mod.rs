@@ -55,9 +55,18 @@ impl NamespaceStateMachine {
         let mut service_workload = BTreeMap::new();
 
         for (wl_id, wl_spec) in &spec.workloads {
+            // has_activation: true if workload has activation, or if it has services
+            // (services drive demand — workload responds to SetDemand, not Initialize).
+            // Only serviceless workloads without activation auto-start via Initialize.
+            let has_services = spec.services.values().any(|s| s.workload_id == *wl_id);
+            let has_activation = wl_spec.activation.is_some() || has_services;
             workloads.insert(
                 wl_id.clone(),
-                WorkloadStateMachine::new(wl_id.clone(), wl_spec.suspend_on_idle),
+                WorkloadStateMachine::new(
+                    wl_id.clone(),
+                    wl_spec.suspend_on_idle,
+                    has_activation,
+                ),
             );
         }
 
@@ -121,16 +130,22 @@ impl NamespaceStateMachine {
     }
 
     pub fn status_report(&self) -> NamespaceStatusReport {
+        // Workloads
+        let mut workloads = BTreeMap::new();
+        for (wl_id, wl) in &self.workloads {
+            workloads.insert(
+                wl_id.clone(),
+                WorkloadStatusReport {
+                    state: wl.state.as_str().to_string(),
+                    pod_id: wl.state.pod_id().cloned(),
+                    conditions: wl.conditions.clone(),
+                },
+            );
+        }
+
+        // Services
         let mut services = BTreeMap::new();
         for (svc_id, svc) in &self.services {
-            let wl_id = &svc.workload_id;
-            let wl = self.workloads.get(wl_id);
-
-            let wl_state = wl.map(|w| &w.state);
-            let wl_state_str = wl_state.map_or("dormant", |s| s.as_str()).to_string();
-            let pod_id = wl_state.and_then(|s| s.pod_id()).cloned();
-            let worker_id = wl_state.and_then(|s| s.worker_id()).cloned();
-
             let backend_need = match &svc.state {
                 ServiceState::Active { backend_need, .. } => Some(backend_need.clone()),
                 _ => None,
@@ -140,22 +155,47 @@ impl NamespaceStateMachine {
                 .map(|spec| spec.ip.to_string())
                 .unwrap_or_default();
 
-            let workload_conditions = wl.map(|w| w.conditions.clone()).unwrap_or_default();
-            let service_conditions = svc.conditions.clone();
-
             services.insert(
                 svc_id.clone(),
                 ServiceStatusReport {
+                    workload_id: svc.workload_id.clone(),
                     service_state: svc.state.as_str().to_string(),
-                    workload_id: wl_id.clone(),
-                    workload_state: wl_state_str,
-                    pod_id,
-                    worker_id,
                     backend_need,
                     activation_enabled: svc.has_activation,
                     ip,
-                    workload_conditions,
-                    service_conditions,
+                    conditions: svc.conditions.clone(),
+                },
+            );
+        }
+
+        // Pods
+        let mut pods = BTreeMap::new();
+        for (pod_id, info) in self.pod_map.iter() {
+            let is_running = self.workloads
+                .get(&info.workload_id)
+                .map_or(false, |wl| match &wl.state {
+                    WorkloadState::Active {
+                        pod: crate::sm::pod::PodSlot { pod_id: running_pod, pod_state: crate::sm::pod::PodState::Running, .. },
+                        ..
+                    } => running_pod == pod_id,
+                    _ => false,
+                });
+            let state = if is_running {
+                PodStatus::Running
+            } else {
+                PodStatus::Launching
+            };
+            let ip = self.spec.workloads.get(&info.workload_id)
+                .map(|wl| wl.network.ip.to_string())
+                .unwrap_or_default();
+            pods.insert(
+                pod_id.clone(),
+                PodStatusReport {
+                    pod_id: pod_id.clone(),
+                    workload_id: info.workload_id.clone(),
+                    worker_id: info.worker_id.clone(),
+                    ip,
+                    state,
                 },
             );
         }
@@ -163,7 +203,9 @@ impl NamespaceStateMachine {
         NamespaceStatusReport {
             namespace_id: self.namespace_id.clone(),
             status: self.status.clone(),
+            workloads,
             services,
+            pods,
         }
     }
 

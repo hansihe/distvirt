@@ -49,6 +49,7 @@ message WorkloadSpec {
     repeated ContainerSpec containers = 2;
     bool suspend_on_idle = 3;
     ResourceRequirements resources = 4;
+    ActivationSpec activation = 5;
 }
 
 message ResourceValues {
@@ -82,18 +83,23 @@ message ServiceSpec {
 message ActivationSpec {
     ActivatorConfig activator = 1;
     ServicePolicy buffer_policy = 2;
-    uint64 idle_timeout_ms = 3;
 }
 
 message ActivatorConfig {
     oneof activator {
         TcpActivator tcp = 1;
         Http2Activator http2 = 2;
+        PassthroughActivator passthrough = 3;
     }
+}
+
+message PassthroughActivator {
+    uint64 idle_timeout_ms = 1;
 }
 
 message TcpActivator {
     repeated uint32 ports = 1;
+    uint64 idle_timeout_ms = 2;
 }
 
 message Http2Activator {}
@@ -172,6 +178,14 @@ message NamespaceStatusReport {
     NamespaceState state = 2;
     map<string, WorkloadStatusReport> workloads = 3;
     map<string, ServiceStatusReport> services = 4;
+    map<string, PodStatusReportEntry> pods = 5;
+}
+
+message PodStatusReportEntry {
+    string workload_id = 1;
+    string worker_id = 2;
+    string ip = 3;
+    PodState state = 4;
 }
 
 enum NamespaceState {

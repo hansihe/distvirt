@@ -157,3 +157,29 @@ async fn test_basic_preemption_e2e() {
     cluster.converge().await;
     cluster.assert_workload_running("ns", "wl-b");
 }
+
+/// Pressure recovery: multiple workloads stuck in WaitingForCapacity should
+/// all be rescheduled when pressure drops back to Normal.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_pressure_recovery_reschedules_all_waiting() {
+    let mut cluster = TestCluster::new();
+    let w1 = cluster.add_worker().await;
+
+    // High pressure blocks all scheduling.
+    cluster.inject_pressure(&w1, 85.0).await;
+
+    // Create two always-on namespaces — both should get stuck.
+    cluster.create_namespace("ns-a", always_on_spec()).await;
+    cluster.create_namespace("ns-b", always_on_spec()).await;
+    cluster.converge().await;
+    cluster.assert_workload_waiting_for_capacity("ns-a", "echo");
+    cluster.assert_workload_waiting_for_capacity("ns-b", "echo");
+
+    // Release pressure.
+    cluster.inject_pressure(&w1, 0.0).await;
+    cluster.converge().await;
+
+    // Both should now be scheduled and running.
+    cluster.assert_workload_running("ns-a", "echo");
+    cluster.assert_workload_running("ns-b", "echo");
+}

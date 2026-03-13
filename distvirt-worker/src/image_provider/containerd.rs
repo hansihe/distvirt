@@ -1,23 +1,29 @@
 use std::env::consts;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 use containerd_client as client;
 use containerd_client::services::v1::{
     content_client::ContentClient, images_client::ImagesClient,
-    transfer_client::TransferClient, GetImageRequest, InfoRequest, ReadContentRequest,
-    TransferOptions, TransferRequest,
+    streaming_client::StreamingClient, transfer_client::TransferClient, GetImageRequest,
+    InfoRequest, ReadContentRequest, StreamInit, TransferOptions, TransferRequest,
 };
 use containerd_client::services::v1::snapshots::{
     snapshots_client::SnapshotsClient, RemoveSnapshotRequest, ViewSnapshotRequest,
 };
 use containerd_client::to_any;
-use containerd_client::types::transfer::{ImageStore, OciRegistry, UnpackConfiguration};
+use containerd_client::types::transfer::{
+    AuthResponse, AuthType, ImageStore, OciRegistry, RegistryResolver, UnpackConfiguration,
+};
 use containerd_client::types::Platform;
 use containerd_client::with_namespace;
 use oci_spec::image::ImageConfiguration;
+use prost::Name;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::Request;
+
+use super::docker_config;
 
 pub use crate::oci::ImageConfig;
 
@@ -60,13 +66,14 @@ pub async fn prepare_image(
     socket: &str,
     namespace: &str,
     image_ref: &str,
+    docker_config: Option<&Path>,
 ) -> anyhow::Result<PreparedImage> {
     let channel = client::connect(socket)
         .await
         .with_context(|| format!("connecting to containerd at {}", socket))?;
 
     // Step 1: Pull image via TransferClient.
-    pull_image(&channel, namespace, image_ref).await?;
+    pull_image(&channel, namespace, image_ref, docker_config).await?;
 
     // Step 2: Read image config.
     let config = read_image_config(&channel, namespace, image_ref).await?;
@@ -85,7 +92,12 @@ pub async fn prepare_image(
     })
 }
 
-async fn pull_image(channel: &Channel, namespace: &str, image_ref: &str) -> anyhow::Result<()> {
+async fn pull_image(
+    channel: &Channel,
+    namespace: &str,
+    image_ref: &str,
+    docker_config: Option<&Path>,
+) -> anyhow::Result<()> {
     // Check if the image already exists locally (e.g. imported via `ctr image import`).
     let mut images = ImagesClient::new(channel.clone());
     let req = GetImageRequest {
@@ -102,11 +114,26 @@ async fn pull_image(channel: &Channel, namespace: &str, image_ref: &str) -> anyh
         _ => consts::ARCH,
     };
 
+    // Look up registry credentials from docker config, if provided.
+    let credential = docker_config.and_then(|path| docker_config::lookup_credentials(path, image_ref));
+
+    // Set up auth stream if we have credentials.
+    let resolver = if let Some(cred) = credential {
+        let stream_id = format!("distvirt-auth-{}", uuid_simple());
+        setup_auth_stream(channel, namespace, &stream_id, cred).await?;
+        Some(RegistryResolver {
+            auth_stream: stream_id,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
     let mut transfer = TransferClient::new(channel.clone());
 
     let source = OciRegistry {
         reference: image_ref.to_string(),
-        resolver: Default::default(),
+        resolver,
     };
 
     let platform = Platform {
@@ -138,6 +165,65 @@ async fn pull_image(channel: &Channel, namespace: &str, image_ref: &str) -> anyh
         .await
         .with_context(|| format!("pulling image {}", image_ref))?;
     log::info!("image {} pulled successfully", image_ref);
+
+    Ok(())
+}
+
+/// Open a bidirectional streaming connection with containerd and spawn a task
+/// that responds to auth callbacks with the provided credentials.
+async fn setup_auth_stream(
+    channel: &Channel,
+    namespace: &str,
+    stream_id: &str,
+    cred: docker_config::RegistryCredential,
+) -> anyhow::Result<()> {
+    let mut streaming = StreamingClient::new(channel.clone());
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<prost_types::Any>(4);
+
+    // Send the StreamInit as the first message to register the stream ID.
+    let init = StreamInit {
+        id: stream_id.to_string(),
+    };
+    tx.send(to_any(&init))
+        .await
+        .context("sending StreamInit")?;
+
+    let stream = ReceiverStream::new(rx);
+    let mut req = Request::new(stream);
+    let md = req.metadata_mut();
+    md.insert("containerd-namespace", namespace.parse().unwrap());
+    let resp = streaming
+        .stream(req)
+        .await
+        .context("opening auth stream")?;
+
+    let mut inbound = resp.into_inner();
+
+    // Spawn a task to handle auth callbacks.
+    tokio::spawn(async move {
+        use containerd_client::types::transfer::AuthRequest;
+
+        while let Ok(Some(any)) = inbound.message().await {
+            // Check if this is an AuthRequest.
+            if any.type_url == AuthRequest::full_name()
+                || any.type_url == format!("/{}", AuthRequest::full_name())
+                || any.type_url.ends_with("AuthRequest")
+            {
+                log::debug!("received auth callback, responding with credentials");
+                let response = AuthResponse {
+                    auth_type: AuthType::Credentials as i32,
+                    username: cred.username.clone(),
+                    secret: cred.password.clone(),
+                    expire_at: None,
+                };
+                if tx.send(to_any(&response)).await.is_err() {
+                    log::warn!("auth stream sender closed");
+                    break;
+                }
+            }
+        }
+    });
 
     Ok(())
 }

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Context;
 use tempfile::NamedTempFile;
 
@@ -10,11 +12,17 @@ use super::{ImageProvider, PreparedArtifact};
 pub struct ContainerdOverlayfsProvider {
     pub socket: String,
     pub namespace: String,
+    pub docker_config: Option<PathBuf>,
 }
 
 impl ImageProvider for ContainerdOverlayfsProvider {
     async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact> {
-        let prepared = containerd::prepare_image(&self.socket, &self.namespace, image_ref)
+        let prepared = containerd::prepare_image(
+            &self.socket,
+            &self.namespace,
+            image_ref,
+            self.docker_config.as_deref(),
+        )
             .await
             .context("preparing containerd image")?;
 

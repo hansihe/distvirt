@@ -44,7 +44,7 @@ impl TunDevice {
         let ret =
             unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, &mut ifr as *mut Ifreq) };
         if ret < 0 {
-            bail!("TUNSETIFF ioctl: {}", io::Error::last_os_error());
+            return Err(io::Error::last_os_error()).context("TUNSETIFF ioctl");
         }
 
         let name = CStr::from_bytes_until_nul(&ifr.ifr_name)

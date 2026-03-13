@@ -84,6 +84,7 @@ async fn test_add_workload_to_existing_namespace() {
             network: pod_network(11),
             suspend_on_idle: false,
             resources: None,
+            activation: None,
         },
     );
     new_spec.services.insert(
