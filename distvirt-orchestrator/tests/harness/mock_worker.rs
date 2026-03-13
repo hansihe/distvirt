@@ -14,6 +14,7 @@ pub type CommandHandler =
 pub struct MockWorkerConfig {
     pub handler: Option<CommandHandler>,
     pub capabilities: WorkerCapabilities,
+    pub auth_token: String,
 }
 
 impl Default for MockWorkerConfig {
@@ -29,6 +30,7 @@ impl Default for MockWorkerConfig {
                 public_endpoint: String::new(),
                 pools: vec![],
             },
+            auth_token: super::test_harness::TestHarness::TEST_SECRET.to_string(),
         }
     }
 }
@@ -103,7 +105,6 @@ impl MockWorkerConfig {
     /// Config with a local storage pool (needed for suspend/resume).
     pub fn with_pool() -> Self {
         MockWorkerConfig {
-            handler: None,
             capabilities: WorkerCapabilities {
                 has_kvm: true,
                 has_containerd: true,
@@ -118,6 +119,7 @@ impl MockWorkerConfig {
                     available_bytes: 1024 * 1024 * 1024,
                 }],
             },
+            ..Default::default()
         }
     }
 
@@ -156,7 +158,6 @@ impl MockWorkerConfig {
     /// one pod on a 256MB worker → 0.5 pressure → Elevated.
     pub fn with_pool_and_memory(available_memory_mb: u64) -> Self {
         MockWorkerConfig {
-            handler: None,
             capabilities: WorkerCapabilities {
                 has_kvm: true,
                 has_containerd: true,
@@ -171,13 +172,13 @@ impl MockWorkerConfig {
                     available_bytes: 1024 * 1024 * 1024,
                 }],
             },
+            ..Default::default()
         }
     }
 
     /// Config with tunnel capabilities (public_endpoint, pool, etc.).
     pub fn with_tunnel(endpoint: &str, _public_key: [u8; 32]) -> Self {
         MockWorkerConfig {
-            handler: None,
             capabilities: WorkerCapabilities {
                 has_kvm: true,
                 has_containerd: true,
@@ -192,6 +193,7 @@ impl MockWorkerConfig {
                     available_bytes: 1024 * 1024 * 1024,
                 }],
             },
+            ..Default::default()
         }
     }
 }
@@ -304,6 +306,7 @@ pub fn spawn_mock_worker(
     let (inject_tx, mut inject_rx) = mpsc::unbounded_channel::<WorkerEvent>();
     let handler = config.handler;
     let capabilities = config.capabilities;
+    let auth_token = config.auth_token;
 
     // Determine tunnel info from capabilities: if we have a public_endpoint,
     // send tunnel info in WorkerReady (simulates a tunnel-capable worker).
@@ -331,7 +334,7 @@ pub fn spawn_mock_worker(
 
         if conn
             .send_hello(&WorkerHello {
-                auth_token: "test".to_string(),
+                auth_token,
                 capabilities,
             })
             .await

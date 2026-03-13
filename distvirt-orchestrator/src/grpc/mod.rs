@@ -14,6 +14,20 @@ use crate::types::*;
 
 use conversions::{convert_proto_spec, convert_sm_event_to_proto, convert_status_report};
 
+/// Validate the `Authorization: Bearer <token>` header against the configured secret.
+pub fn check_client_auth(req: Request<()>, secret: &str) -> Result<Request<()>, Status> {
+    let token = req
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match token {
+        Some(t) if crate::shell::constant_time_eq(t.as_bytes(), secret.as_bytes()) => Ok(req),
+        Some(_) => Err(Status::unauthenticated("invalid token")),
+        None => Err(Status::unauthenticated("missing authorization header")),
+    }
+}
+
 pub struct DistvirtClientService {
     handle: ShellHandle,
 }

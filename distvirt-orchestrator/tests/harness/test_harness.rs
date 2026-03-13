@@ -14,9 +14,11 @@ pub struct TestHarness {
 }
 
 impl TestHarness {
+    pub const TEST_SECRET: &str = "test-secret";
+
     pub fn new() -> Self {
         TestHarness {
-            shell: OrchestratorShell::new(51820, false, vec![]),
+            shell: OrchestratorShell::new(51820, false, vec![], Self::TEST_SECRET.to_string()),
             workers: HashMap::new(),
             next_client_id: 1,
         }

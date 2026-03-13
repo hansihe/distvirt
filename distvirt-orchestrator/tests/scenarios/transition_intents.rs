@@ -113,6 +113,7 @@ async fn test_demand_up_during_resume() {
             _ => None,
         })),
         capabilities: MockWorkerConfig::with_pool().capabilities,
+        ..Default::default()
     };
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(config).await;

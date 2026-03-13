@@ -65,7 +65,7 @@ impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
         TestCluster {
-            shell: OrchestratorShell::new(0, false, vec![]),
+            shell: OrchestratorShell::new(0, false, vec![], "test-secret".to_string()),
             worker_handles: Vec::new(),
             next_client_id: 1,
             gateway_provider: SimGatewayProvider::new(),
@@ -97,7 +97,7 @@ impl TestCluster {
                 String::new(),
                 gateway_provider,
             );
-            worker.run(conn).await
+            worker.run(conn, "test-secret".to_string()).await
         });
 
         let orch_conn = OrchestratorConnection::connect(orch_half)

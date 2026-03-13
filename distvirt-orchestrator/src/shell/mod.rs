@@ -17,6 +17,15 @@ use crate::types::*;
 
 use subscriptions::Subscriptions;
 
+/// Constant-time byte comparison to prevent timing attacks on auth tokens.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
 pub struct OrchestratorShell {
     orchestrator: Orchestrator,
     workers: HashMap<WorkerId, WorkerHandle>,
@@ -29,6 +38,7 @@ pub struct OrchestratorShell {
     wg_listen_port: u16,
     tunnel_encrypted: bool,
     worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>,
+    worker_secret: String,
     subscriptions: Subscriptions,
 }
 
@@ -172,7 +182,7 @@ impl ShellHandle {
 }
 
 impl OrchestratorShell {
-    pub fn new(wg_listen_port: u16, tunnel_encrypted: bool, worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>) -> Self {
+    pub fn new(wg_listen_port: u16, tunnel_encrypted: bool, worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>, worker_secret: String) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         OrchestratorShell {
             orchestrator: Orchestrator::new(),
@@ -186,6 +196,7 @@ impl OrchestratorShell {
             wg_listen_port,
             tunnel_encrypted,
             worker_pool_configs,
+            worker_secret,
             subscriptions: Subscriptions::new(),
         }
     }
@@ -233,7 +244,11 @@ impl OrchestratorShell {
             });
         }
 
-        // Auth validation placeholder — always accept.
+        // Validate auth token using constant-time comparison.
+        if !constant_time_eq(hello.auth_token.as_bytes(), self.worker_secret.as_bytes()) {
+            anyhow::bail!("worker authentication failed: invalid auth token");
+        }
+
         conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
             worker_id: worker_id.clone(),
             adapters,

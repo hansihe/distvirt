@@ -43,6 +43,7 @@ async fn test_activation_pending_condition_lifecycle() {
             _ => None,
         })),
         capabilities: MockWorkerConfig::with_pool().capabilities,
+        ..Default::default()
     };
     let w1 = h.add_worker_with(config).await;
     let timeout = Duration::from_secs(30);

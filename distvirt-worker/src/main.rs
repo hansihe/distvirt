@@ -33,6 +33,10 @@ struct Cli {
     /// Public IP/hostname where this worker is reachable by other workers
     #[arg(long, default_value = "")]
     public_endpoint: String,
+
+    /// Shared secret for authenticating with the orchestrator
+    #[arg(long)]
+    worker_secret: String,
 }
 
 #[tokio::main]
@@ -62,5 +66,5 @@ async fn main() -> anyhow::Result<()> {
         distvirt_worker::TunGatewayProvider,
     );
 
-    worker.run(conn).await
+    worker.run(conn, cli.worker_secret).await
 }

@@ -38,7 +38,7 @@ pub async fn setup_with_behavior(behavior: ContainerBehavior) -> anyhow::Result<
             String::new(),
             distvirt_worker::sim_traffic::SimGatewayProvider::new(),
         );
-        worker.run(conn).await
+        worker.run(conn, "test-secret".to_string()).await
     });
 
     let mut conn = OrchestratorConnection::connect(orch_half).await?;
@@ -226,7 +226,7 @@ pub async fn setup_with_crash_handles(
             String::new(),
             distvirt_worker::sim_traffic::SimGatewayProvider::new(),
         );
-        worker.run(conn).await
+        worker.run(conn, "test-secret".to_string()).await
     });
 
     let mut conn = OrchestratorConnection::connect(orch_half).await?;

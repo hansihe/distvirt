@@ -21,11 +21,15 @@ pub struct PoolConfig {
 #[derive(Debug, Deserialize)]
 pub struct GrpcConfig {
     pub listen: String,
+    /// Shared secret for client authentication. Can also be set via --client-secret CLI flag.
+    pub secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WorkersConfig {
     pub listen: String,
+    /// Shared secret for worker authentication. Can also be set via --worker-secret CLI flag.
+    pub secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

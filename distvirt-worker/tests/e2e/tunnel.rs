@@ -36,7 +36,7 @@ async fn setup_worker(
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
         let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs>::new(kernel, rootfs, vmm, image_provider, None, String::new(), distvirt_worker::TunGatewayProvider);
-        worker.run(conn).await
+        worker.run(conn, "test-secret".to_string()).await
     });
 
     let mut conn = OrchestratorConnection::connect(orch_half).await?;

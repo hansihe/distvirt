@@ -56,7 +56,7 @@ async fn mock_worker_loop(mut conn: WorkerConnection) {
 /// Perform the worker-side handshake on an accepted connection.
 async fn mock_worker_handshake(conn: &mut WorkerConnection) {
     conn.send_hello(&WorkerHello {
-        auth_token: "test".to_string(),
+        auth_token: "test-secret".to_string(),
         capabilities: WorkerCapabilities {
             has_kvm: true,
             has_containerd: true,
@@ -154,7 +154,7 @@ async fn test_always_on_service_full_lifecycle() {
     // Connect orchestrator side and perform handshake.
     let orch_conn = OrchestratorConnection::connect(orch_half).await.unwrap();
 
-    let mut shell = OrchestratorShell::new(51820, true, vec![]);
+    let mut shell = OrchestratorShell::new(51820, true, vec![], "test-secret".to_string());
     let worker_id = shell.add_worker(orch_conn).await.unwrap();
     assert_eq!(worker_id, WorkerId::from("w-1"));
 

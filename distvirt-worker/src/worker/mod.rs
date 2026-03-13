@@ -158,13 +158,13 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
 
     /// Run the worker main loop: receive commands, dispatch them,
     /// and forward background events to the orchestrator.
-    pub async fn run(mut self, mut conn: WorkerConnection) -> anyhow::Result<()> {
+    pub async fn run(mut self, mut conn: WorkerConnection, worker_secret: String) -> anyhow::Result<()> {
         // --- Handshake ---
         let capabilities = self.detect_capabilities();
         log::info!("worker: capabilities: {:?}", capabilities);
 
         conn.send_hello(&WorkerHello {
-            auth_token: String::new(),
+            auth_token: worker_secret,
             capabilities,
         })
         .await

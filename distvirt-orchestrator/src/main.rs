@@ -11,6 +11,14 @@ struct Cli {
     /// Path to the TOML configuration file
     #[arg(short, long)]
     config: String,
+
+    /// Shared secret for worker authentication (overrides config file)
+    #[arg(long)]
+    worker_secret: Option<String>,
+
+    /// Shared secret for client API authentication (overrides config file)
+    #[arg(long)]
+    client_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -31,7 +39,12 @@ async fn main() -> anyhow::Result<()> {
             available_bytes: 0,
         })
         .collect();
-    let mut shell = OrchestratorShell::new(config.wireguard.listen_port, config.tunnels.encrypted, pool_configs);
+    let worker_secret = cli
+        .worker_secret
+        .or(config.workers.secret)
+        .expect("worker secret must be set via --worker-secret or workers.secret in config");
+    let client_secret = cli.client_secret.or(config.grpc.secret);
+    let mut shell = OrchestratorShell::new(config.wireguard.listen_port, config.tunnels.encrypted, pool_configs, worker_secret);
     let handle = shell.handle();
 
     // Start gRPC server.
@@ -40,11 +53,21 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         let svc = DistvirtClientService::new(grpc_handle);
         log::info!("gRPC server listening on {}", grpc_addr);
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(DistvirtClientServer::new(svc))
-            .serve(grpc_addr)
-            .await
-        {
+        let mut server = tonic::transport::Server::builder();
+        let result = if let Some(secret) = client_secret {
+            server
+                .add_service(DistvirtClientServer::with_interceptor(svc, move |req| {
+                    distvirt_orchestrator::grpc::check_client_auth(req, &secret)
+                }))
+                .serve(grpc_addr)
+                .await
+        } else {
+            server
+                .add_service(DistvirtClientServer::new(svc))
+                .serve(grpc_addr)
+                .await
+        };
+        if let Err(e) = result {
             log::error!("gRPC server error: {}", e);
         }
     });
