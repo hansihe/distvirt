@@ -69,6 +69,10 @@ crate::router! {
             sources: [(AlphaToBeta, Alpha::Demand), (GammaToBeta, Gamma::Value)],
             aggregator: MultiSourceAggregator,
         },
+        Gamma::BetaStatusInput {
+            sources: [(BetaToGamma, Beta::Status)],
+            aggregator: ListAggregator<BetaId, u32>,
+        },
     }
 }
 
@@ -1148,6 +1152,109 @@ fn sm_handler_sets_edges_and_signals_atomically() {
         .contains(&A1));
 }
 
+// ---- Port input tests ----
+
+#[test]
+fn port_input_basic_flow() {
+    // Beta sets Status signal → propagate → drain_gamma_inputs returns BetaStatusInput
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_beta_to_gamma_edges(B1, vec![G1]);
+    router.set_beta_status(B1, 42);
+    router.propagate();
+
+    let inputs = router.drain_gamma_inputs();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].0, G1);
+    assert_eq!(inputs[0].1, GammaPortInput::BetaStatusInput(vec![42]));
+}
+
+#[test]
+fn port_input_drain_empties_queue() {
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_beta_to_gamma_edges(B1, vec![G1]);
+    router.set_beta_status(B1, 42);
+    router.propagate();
+
+    let inputs = router.drain_gamma_inputs();
+    assert_eq!(inputs.len(), 1);
+
+    // Second drain should be empty.
+    let inputs2 = router.drain_gamma_inputs();
+    assert!(inputs2.is_empty());
+}
+
+#[test]
+fn port_input_dedup_same_value() {
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_beta_to_gamma_edges(B1, vec![G1]);
+    router.set_beta_status(B1, 42);
+    router.propagate();
+
+    let inputs = router.drain_gamma_inputs();
+    assert_eq!(inputs.len(), 1);
+
+    // Propagate again with no changes — no new output (dedup).
+    router.propagate();
+    let inputs2 = router.drain_gamma_inputs();
+    assert!(inputs2.is_empty());
+}
+
+#[test]
+fn port_input_changed_value_produces_output() {
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_beta_to_gamma_edges(B1, vec![G1]);
+    router.set_beta_status(B1, 42);
+    router.propagate();
+    router.drain_gamma_inputs();
+
+    // Change the value.
+    router.set_beta_status(B1, 99);
+    router.propagate();
+
+    let inputs = router.drain_gamma_inputs();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].1, GammaPortInput::BetaStatusInput(vec![99]));
+}
+
+#[test]
+fn port_input_port_destroy_cleans_up() {
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    let g1 = G1;
+    router.create_gamma(g1);
+
+    router.set_beta_to_gamma_edges(B1, vec![g1]);
+    router.set_beta_status(B1, 42);
+    router.propagate();
+
+    // Destroy the port before draining — pending inputs for this port should be removed.
+    router.destroy_gamma(g1);
+    let inputs = router.drain_gamma_inputs();
+    assert!(inputs.is_empty());
+
+    // Also verify last_* was cleaned up: re-create port with same edges,
+    // should get a delivery even though the value is the same as before.
+    router.create_gamma(g1);
+    router.set_beta_to_gamma_edges(B1, vec![g1]);
+    router.propagate();
+
+    let inputs = router.drain_gamma_inputs();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].1, GammaPortInput::BetaStatusInput(vec![42]));
+}
+
 // ---- Auto-ID tests ----
 // Separate module so the router! macro generates a fresh set of types.
 
@@ -1155,47 +1262,49 @@ fn sm_handler_sets_edges_and_signals_atomically() {
 
 #[test]
 fn tracer_captures_basic_propagation() {
-    use crate::trace::{RecordingTracer, TraceEntry};
+    use crate::trace::{RecordingTracer, TraceEvent};
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, RecordingTracer::new());
     router.create_alpha(A1, AlphaSm::new());
     router.create_beta(B1, BetaSm::new());
 
     router.set_alpha_to_beta_edges(A1, vec![B1]);
-    router.set_alpha_demand(A1, true);
 
-    router.set_tracer(RecordingTracer::new());
+    router.tracer_mut().clear();
+    router.set_alpha_demand(A1, true);
     router.propagate();
 
-    let tracer = router.take_tracer().unwrap();
-    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
-    let entries = tracer.entries();
+    let entries = router.tracer().entries();
 
-    // Should have propagate start/end
-    assert!(matches!(entries.first(), Some(TraceEntry::PropagateStart)));
-    assert!(matches!(entries.last(), Some(TraceEntry::PropagateEnd { .. })));
-
-    // Should have at least one round
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e, TraceEntry::RoundStart { depth: 1 })));
-
-    // Should have delivered DemandInput to Beta
+    // Should have signal change for Alpha::Demand (set before propagate)
     assert!(entries.iter().any(|e| matches!(
         e,
-        TraceEntry::InputDelivered {
-            node: "Beta",
-            input: "DemandInput",
+        TraceEvent::SignalChanged {
+            node: "Alpha",
+            signal: "Demand",
             ..
         }
     )));
 
-    // Should have signal change for Alpha::Demand
+    // Should have propagate start/end
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, TraceEvent::PropagateStart)));
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, TraceEvent::PropagateEnd { .. })));
+
+    // Should have at least one round
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, TraceEvent::RoundStart { depth: 1 })));
+
+    // Should have delivered DemandInput to Beta
     assert!(entries.iter().any(|e| matches!(
         e,
-        TraceEntry::SignalChanged {
-            node: "Alpha",
-            signal: "Demand",
+        TraceEvent::InputDelivered {
+            node: "Beta",
+            input: "DemandInput",
             ..
         }
     )));
@@ -1203,9 +1312,9 @@ fn tracer_captures_basic_propagation() {
 
 #[test]
 fn tracer_captures_effects_bracketing() {
-    use crate::trace::{RecordingTracer, TraceEntry};
+    use crate::trace::{RecordingTracer, TraceEvent};
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, RecordingTracer::new());
     router.create_alpha(A1, AlphaSm::new());
 
     let mut b1 = BetaSm::new();
@@ -1222,58 +1331,54 @@ fn tracer_captures_effects_bracketing() {
     router.set_alpha_to_beta_edges(A1, vec![B1]);
     router.set_alpha_demand(A1, true);
 
-    router.set_tracer(RecordingTracer::new());
+    router.tracer_mut().clear();
     router.propagate();
 
-    let tracer = router.take_tracer().unwrap();
-    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
-    let entries = tracer.entries();
+    let entries = router.tracer().entries();
 
     // Find the EffectsStart/End for Beta(B1)
     let effects_start_idx = entries
         .iter()
-        .position(|e| matches!(e, TraceEntry::EffectsStart { node: "Beta", .. }))
+        .position(|e| matches!(e, TraceEvent::EffectsStart { node: "Beta", .. }))
         .expect("should have EffectsStart for Beta");
     let effects_end_idx = entries
         .iter()
-        .position(|e| matches!(e, TraceEntry::EffectsEnd { node: "Beta", .. }))
+        .position(|e| matches!(e, TraceEvent::EffectsEnd { node: "Beta", .. }))
         .expect("should have EffectsEnd for Beta");
 
     // Signal change and edge change should be between effects_start and effects_end
     let has_signal_in_effects = entries[effects_start_idx..effects_end_idx]
         .iter()
-        .any(|e| matches!(e, TraceEntry::SignalChanged { signal: "Status", .. }));
+        .any(|e| matches!(e, TraceEvent::SignalChanged { signal: "Status", .. }));
     assert!(has_signal_in_effects, "signal change should be within effects bracket");
 
     let has_edge_in_effects = entries[effects_start_idx..effects_end_idx]
         .iter()
-        .any(|e| matches!(e, TraceEntry::EdgeChanged { edge: "BetaToAlpha", .. }));
+        .any(|e| matches!(e, TraceEvent::EdgeChanged { edge: "BetaToAlpha", .. }));
     assert!(has_edge_in_effects, "edge change should be within effects bracket");
 }
 
 #[test]
 fn tracer_captures_event_delivery() {
-    use crate::trace::{RecordingTracer, TraceEntry};
+    use crate::trace::{RecordingTracer, TraceEvent};
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, RecordingTracer::new());
     router.create_beta(B1, BetaSm::new());
     router.create_gamma(G1);
 
     router.set_gamma_to_beta_edges(G1, vec![B1]);
     router.propagate();
 
-    router.set_tracer(RecordingTracer::new());
+    router.tracer_mut().clear();
     router.send_command(G1, B1, "hello".to_string());
     router.propagate();
 
-    let tracer = router.take_tracer().unwrap();
-    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
-    let entries = tracer.entries();
+    let entries = router.tracer().entries();
 
     // Should have event queued
     assert!(entries.iter().any(|e| matches!(
         e,
-        TraceEntry::EventQueued {
+        TraceEvent::EventQueued {
             event: "Command",
             ..
         }
@@ -1282,7 +1387,7 @@ fn tracer_captures_event_delivery() {
     // Should have event delivered
     assert!(entries.iter().any(|e| matches!(
         e,
-        TraceEntry::EventDelivered {
+        TraceEvent::EventDelivered {
             event: "Command",
             ..
         }
@@ -1291,9 +1396,9 @@ fn tracer_captures_event_delivery() {
 
 #[test]
 fn tracer_captures_suppression() {
-    use crate::trace::{RecordingTracer, TraceEntry};
+    use crate::trace::{RecordingTracer, TraceEvent};
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, RecordingTracer::new());
     router.create_alpha(A1, AlphaSm::new());
     router.create_alpha(A2, AlphaSm::new());
     router.create_beta(B1, BetaSm::new());
@@ -1306,26 +1411,22 @@ fn tracer_captures_suppression() {
     router.set_alpha_demand(A2, true);
     router.propagate();
 
-    // A1=false, A2=true simultaneously → count still 1... wait, initially 2, now 1.
-    // Let me set up for actual suppression:
     // Set A1=false → count=1
     router.set_alpha_demand(A1, false);
     router.propagate();
 
     // Now A1=true, A2=false → count stays at 1 (suppressed)
-    router.set_tracer(RecordingTracer::new());
+    router.tracer_mut().clear();
     router.set_alpha_demand(A1, true);
     router.set_alpha_demand(A2, false);
     router.propagate();
 
-    let tracer = router.take_tracer().unwrap();
-    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
-    let entries = tracer.entries();
+    let entries = router.tracer().entries();
 
     // Should have InputSuppressed for DemandInput (aggregated value didn't change)
     assert!(entries.iter().any(|e| matches!(
         e,
-        TraceEntry::InputSuppressed {
+        TraceEvent::InputSuppressed {
             node: "Beta",
             input: "DemandInput",
             ..
@@ -1337,20 +1438,17 @@ fn tracer_captures_suppression() {
 fn tracer_display_output() {
     use crate::trace::RecordingTracer;
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, RecordingTracer::new());
     router.create_alpha(A1, AlphaSm::new());
     router.create_beta(B1, BetaSm::new());
 
     router.set_alpha_to_beta_edges(A1, vec![B1]);
     router.set_alpha_demand(A1, true);
 
-    router.set_tracer(RecordingTracer::new());
+    router.tracer_mut().clear();
     router.propagate();
 
-    let tracer = router.take_tracer().unwrap();
-    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
-
-    let output = format!("{}", tracer);
+    let output = format!("{}", router.tracer());
     assert!(output.contains("propagate"));
     assert!(output.contains("Round 1"));
     assert!(output.contains("deliver"));
@@ -1806,5 +1904,255 @@ mod auto_id {
             })
             .collect();
         assert_eq!(*configs.last().unwrap(), vec![20]);
+    }
+}
+
+mod invariant_tests {
+    use crate::{Aggregator, SmHandler};
+
+    #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+    struct NodeId(u64);
+
+    #[derive(Default)]
+    struct SumAggregator;
+
+    impl Aggregator for SumAggregator {
+        type Input = (NodeId, bool);
+        type Output = u32;
+
+        fn aggregate(&self, inputs: &[(NodeId, bool)]) -> u32 {
+            inputs.iter().filter(|(_, v)| *v).count() as u32
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Default)]
+    struct Status {
+        ready: bool,
+    }
+
+    impl Status {
+        fn is_ready(&self) -> bool {
+            self.ready
+        }
+    }
+
+    crate::router! {
+        expose_internals_for_testing
+
+        state_machines {
+            Src(NodeId, SrcSm),
+            Dst(NodeId, DstSm),
+        }
+        ports {}
+        signals {
+            Src::Healthy(bool),
+            Src::Retries(u32),
+            Src::Info(Status),
+            Dst::Output(u32),
+        }
+        edges {
+            SrcToDst: Src -> Dst,
+            DstToSrc: Dst -> Src,
+        }
+        events {}
+        inputs {
+            Dst::DemandInput {
+                sources: [(SrcToDst, Src::Healthy)],
+                aggregator: SumAggregator,
+            },
+        }
+        invariants {
+            Src::Healthy(*value),
+            Src::Retries(*value < 5),
+            Src::Info(value.is_ready()),
+        }
+    }
+
+    struct SrcSm {
+        on_handle: Option<Box<dyn FnMut(&SrcInput, &mut SrcCtx)>>,
+    }
+
+    impl SrcSm {
+        fn new() -> Self {
+            SrcSm { on_handle: None }
+        }
+    }
+
+    impl SmHandler for SrcSm {
+        type Input = SrcInput;
+        type Ctx = SrcCtx;
+
+        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+            if let Some(ref mut cb) = self.on_handle {
+                cb(&input, ctx);
+            }
+        }
+    }
+
+    struct DstSm {
+        on_handle: Option<Box<dyn FnMut(&DstInput, &mut DstCtx)>>,
+    }
+
+    impl DstSm {
+        fn new() -> Self {
+            DstSm { on_handle: None }
+        }
+    }
+
+    impl SmHandler for DstSm {
+        type Input = DstInput;
+        type Ctx = DstCtx;
+
+        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+            if let Some(ref mut cb) = self.on_handle {
+                cb(&input, ctx);
+            }
+        }
+    }
+
+    const S1: NodeId = NodeId(1);
+    const D1: NodeId = NodeId(2);
+
+    #[test]
+    fn invariant_passes_at_quiescence() {
+        use crate::trace::{RecordingTracer, TraceEvent};
+
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+        router.create_src(S1, SrcSm::new());
+
+        // Set signals that satisfy all invariants
+        router.set_src_healthy(S1, true);
+        router.set_src_retries(S1, 3);
+        router.set_src_info(S1, Status { ready: true });
+
+        router.tracer_mut().clear();
+        router.propagate();
+
+        let violations: Vec<_> = router
+            .tracer()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
+            .collect();
+        assert!(violations.is_empty(), "expected no violations, got: {:?}", violations);
+    }
+
+    #[test]
+    fn invariant_violated_at_quiescence() {
+        use crate::trace::{RecordingTracer, TraceEvent};
+
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+        router.create_src(S1, SrcSm::new());
+
+        // Healthy=false violates the *value invariant
+        router.set_src_healthy(S1, false);
+        router.set_src_retries(S1, 10); // violates *value < 5
+        router.set_src_info(S1, Status { ready: false }); // violates value.is_ready()
+
+        router.tracer_mut().clear();
+        router.propagate();
+
+        let violations: Vec<_> = router
+            .tracer()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
+            .collect();
+        assert_eq!(violations.len(), 3, "expected 3 violations, got: {:?}", violations);
+
+        // Check specific fields
+        assert!(violations.iter().any(|e| matches!(
+            e,
+            TraceEvent::InvariantViolation {
+                node: "Src",
+                signal: "Healthy",
+                ..
+            }
+        )));
+        assert!(violations.iter().any(|e| matches!(
+            e,
+            TraceEvent::InvariantViolation {
+                node: "Src",
+                signal: "Retries",
+                ..
+            }
+        )));
+        assert!(violations.iter().any(|e| matches!(
+            e,
+            TraceEvent::InvariantViolation {
+                node: "Src",
+                signal: "Info",
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn invariant_transient_violation_resolves() {
+        use crate::trace::{RecordingTracer, TraceEvent};
+
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+        router.create_src(S1, SrcSm::new());
+        router.create_dst(D1, DstSm::new());
+        router.set_src_to_dst_edges(S1, vec![D1]);
+
+        // Start with Healthy=false (invariant violated)
+        router.set_src_healthy(S1, false);
+        router.propagate();
+
+        // Now a handler on Dst fixes it by setting Healthy back to true
+        // via cascading propagation. We simulate this by having the Dst
+        // handler trigger a fix on Src via edge.
+        // For simplicity, just set it to true externally before next propagate.
+        router.set_src_healthy(S1, true);
+        router.set_src_retries(S1, 2);
+        router.set_src_info(S1, Status { ready: true });
+
+        router.tracer_mut().clear();
+        router.propagate();
+
+        let violations: Vec<_> = router
+            .tracer()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
+            .collect();
+        assert!(violations.is_empty(), "expected resolved state, got: {:?}", violations);
+    }
+
+    #[test]
+    fn invariant_expression_with_method_call() {
+        use crate::trace::{RecordingTracer, TraceEvent};
+
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+        router.create_src(S1, SrcSm::new());
+
+        // Info::is_ready() returns false → violation
+        router.set_src_healthy(S1, true);
+        router.set_src_retries(S1, 0);
+        router.set_src_info(S1, Status { ready: false });
+
+        router.tracer_mut().clear();
+        router.propagate();
+
+        let violations: Vec<_> = router
+            .tracer()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
+            .collect();
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(
+            violations[0],
+            TraceEvent::InvariantViolation {
+                node: "Src",
+                signal: "Info",
+                ..
+            }
+        ));
+
+        // Verify the summary counts it
+        let summary = router.tracer().summary();
+        assert_eq!(summary.invariant_violations, 1);
     }
 }

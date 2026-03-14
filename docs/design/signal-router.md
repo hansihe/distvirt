@@ -149,6 +149,51 @@ The lattice property is highly testable. Tools like stateright can explore all d
 
 Use `round_complete` for optimization (avoid unnecessary intermediate work), not for correctness.
 
+## Signal Invariants
+
+### Concept
+
+Signals can declare **invariants** — boolean expressions over the signal value that are expected to hold when propagation is complete. Transient violations during propagation are normal (intermediate states are inconsistent), but violations at quiescence indicate a problem in domain logic.
+
+### Syntax
+
+```rust
+router! {
+    signals {
+        Pod::Healthy(bool),
+        Pod::Retries(u32),
+        Pod::Status(PodStatus),
+    }
+    invariants {
+        Pod::Healthy(*value),          // bool — check truthiness
+        Pod::Retries(*value < 5),      // comparison
+        Pod::Status(value.is_ready()), // method call
+    }
+}
+```
+
+Each entry is `Node::Signal(expr)` where `expr` is any Rust expression. In generated code, `value: &SignalType` is bound, and the expression must evaluate to `bool`.
+
+### Semantics
+
+Invariants are checked once per `propagate()` call, after all rounds complete, before `PropagateEnd`. The router iterates all instances of signals with invariants and evaluates the expression. Multiple invariants on the same signal are allowed — each generates an independent check.
+
+### Integration with tracing
+
+Violations emit `TraceEvent::InvariantViolation` with the node type, instance ID, signal name, current value, and the stringified invariant expression. Different tracers handle this differently:
+
+- **Test tracers** (`PanicTracer` + `RecordingTracer`): dump full causality traces so you can see what sequence of events led to the violated state.
+- **Production tracers** (`RingTracer`): provide rolling history context — when a violation surfaces, the recent trace buffer shows the events leading up to it.
+- **Custom tracers**: can log, alert, or integrate with monitoring systems.
+
+### Design rationale
+
+Invariants are modeled as a signal property rather than a separate mechanism because they reuse all existing signal machinery — per-instance storage, `PartialEq`/`Debug` bounds, and the BTreeMap iteration pattern. The invariant expression is simply a post-propagation check on existing state.
+
+### Example
+
+A workload's `Healthy` signal — during pod replacement it may temporarily be `false`, but by the time propagation completes, cascading effects should have restored it (new pod created, became running, readiness propagated back). If not, the invariant violation surfaces the problem with full trace context, showing exactly which handler failed to restore the expected state.
+
 ## Modeling Examples
 
 ### 1. Service demand aggregation

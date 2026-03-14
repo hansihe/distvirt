@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 
 mod generate;
 mod parse;
+mod validate;
 
 /// Declares a signal router topology and generates all dispatch code.
 ///
@@ -155,5 +156,8 @@ mod parse;
 #[proc_macro]
 pub fn router(input: TokenStream) -> TokenStream {
     let def = syn::parse_macro_input!(input as parse::TopologyDef);
+    if let Err(err) = validate::validate(&def) {
+        return err.to_compile_error().into();
+    }
     generate::generate(&def).into()
 }

@@ -31,6 +31,10 @@
 //! - **Event:** A one-shot discrete message between instances that have an edge
 //!   relationship (checked in either direction). Not aggregated.
 //!
+//! Signals can have **invariants** — expressions that must hold at quiescence.
+//! Violations are reported via the [tracing infrastructure](trace). See [`trace`]
+//! module docs.
+//!
 //! ## Quick example
 //!
 //! ```rust,ignore
@@ -75,6 +79,9 @@
 //!             sources: [(ServiceToWorkload, Service::Demand)],
 //!             aggregator: DemandAggregator,
 //!         },
+//!     }
+//!     invariants {
+//!         Service::Demand(*value),  // services should have demand at quiescence
 //!     }
 //! }
 //!

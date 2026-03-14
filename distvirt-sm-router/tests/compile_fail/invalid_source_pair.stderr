@@ -1,15 +1,8 @@
-error: proc macro panicked
-  --> tests/compile_fail/invalid_source_pair.rs:25:1
+error: edge `AlphaToBeta` source is `Alpha`, but signal is on `Beta`
+  --> tests/compile_fail/invalid_source_pair.rs:41:37
    |
-25 | / distvirt_sm_router::router! {
-26 | |     state_machines {
-27 | |         Alpha(AlphaId, AlphaSm),
-28 | |         Beta(BetaId, BetaSm),
-...  |
-45 | | }
-   | |_^
-   |
-   = help: message: input Beta::StatusInput: edge AlphaToBeta source is Alpha, but signal is on Beta
+41 |             sources: [(AlphaToBeta, Beta::Status)],
+   |                                     ^^^^
 
 error[E0412]: cannot find type `AlphaInput` in this scope
   --> tests/compile_fail/invalid_source_pair.rs:13:18

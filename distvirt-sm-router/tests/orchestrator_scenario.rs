@@ -47,8 +47,33 @@ enum PodStatus {
     #[default]
     Pending,
     Running,
+    Suspending,
+    /// Terminal: pod successfully suspended, artifact available for resume.
+    Suspended { artifact_id: ArtifactId },
+    /// Terminal: pod failed, was stopped, or was abandoned.
     Failed,
 }
+
+impl PodStatus {
+    fn is_terminal(&self) -> bool {
+        matches!(self, PodStatus::Suspended { .. } | PodStatus::Failed)
+    }
+}
+
+/// Intent signal from workload to pod via ownership edge.
+#[derive(Clone, Debug, PartialEq, Default)]
+enum PodIntent {
+    #[default]
+    None,
+    /// Workload wants this pod running.
+    Want,
+    /// Workload wants this pod to suspend (preserve state).
+    Suspend,
+}
+
+/// Identifier for a suspend/resume artifact (snapshot).
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+struct ArtifactId(u64);
 
 /// Workload spec delivered by management port.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -83,14 +108,61 @@ enum AdminCmd {
 }
 
 /// Timer key enum for workload-specific timers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 enum WorkloadTimerKey {
+    #[default]
     RetryBackoff,
+}
+
+/// Backend need level reported by workers to services.
+/// Priority: Active > Traffic > None.
+#[derive(Clone, Debug, PartialEq, Default)]
+enum BackendNeed {
+    #[default]
+    None,
+    Traffic,
+    Active,
+}
+
+/// Timer key enum for service-specific timers.
+#[derive(Clone, Debug, PartialEq, Default)]
+enum ServiceTimerKey {
+    #[default]
+    IdleTimeout,
+}
+
+/// Timer request: service declares which timers it wants active.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct ServiceTimerRequest {
+    key: ServiceTimerKey,
+    generation: u64,
+}
+
+/// Timer key enum for pod-specific timers.
+#[derive(Clone, Debug, PartialEq, Default)]
+enum PodTimerKey {
+    #[default]
+    LaunchTimeout,
+    SuspendTimeout,
+}
+
+/// Timer request: pod declares which timers it wants active.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct PodTimerRequest {
+    key: PodTimerKey,
+    generation: u64,
 }
 
 // ============================================================================
 // Aggregators
 // ============================================================================
+
+/// Timer request: workload declares which timers it wants active.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct TimerRequest {
+    key: WorkloadTimerKey,
+    generation: u64,
+}
 
 /// Counts services with demand=true, also collects all service IDs.
 #[derive(Default)]
@@ -122,17 +194,70 @@ impl Aggregator for DemandAggregator {
     }
 }
 
-/// Aggregates incoming WorkloadToPod edges to extract the owner workload ID.
-/// Expects at most one owner.
+/// Aggregates the workload spec, preserving the management port ID.
+/// Expects at most one spec source.
+#[derive(Default)]
+struct SpecAggregator;
+
+impl Aggregator for SpecAggregator {
+    type Input = (ManagementId, WorkloadSpec);
+    type Output = Option<(ManagementId, WorkloadSpec)>;
+
+    fn aggregate(&self, inputs: &[(ManagementId, WorkloadSpec)]) -> Option<(ManagementId, WorkloadSpec)> {
+        inputs.first().cloned()
+    }
+}
+
+/// Aggregates incoming WorkloadToPod edges to extract the owner workload ID
+/// and intent (Want/Suspend/None). Expects at most one owner.
 #[derive(Default)]
 struct OwnerAggregator;
 
 impl Aggregator for OwnerAggregator {
-    type Input = (WorkloadId, bool);
-    type Output = Option<WorkloadId>;
+    type Input = (WorkloadId, PodIntent);
+    type Output = Option<(WorkloadId, PodIntent)>;
 
-    fn aggregate(&self, inputs: &[(WorkloadId, bool)]) -> Option<WorkloadId> {
-        inputs.first().map(|(id, _)| *id)
+    fn aggregate(&self, inputs: &[(WorkloadId, PodIntent)]) -> Option<(WorkloadId, PodIntent)> {
+        inputs.first().cloned()
+    }
+}
+
+/// Aggregates BackendNeed from multiple workers. Returns the "hottest" need.
+/// Priority: Active > Traffic > None.
+#[derive(Default)]
+struct BackendNeedAggregator;
+
+impl Aggregator for BackendNeedAggregator {
+    type Input = (WorkerId, BackendNeed);
+    type Output = BackendNeed;
+
+    fn aggregate(&self, inputs: &[(WorkerId, BackendNeed)]) -> BackendNeed {
+        let mut result = BackendNeed::None;
+        for (_, need) in inputs {
+            match need {
+                BackendNeed::Active => return BackendNeed::Active,
+                BackendNeed::Traffic => result = BackendNeed::Traffic,
+                BackendNeed::None => {}
+            }
+        }
+        result
+    }
+}
+
+/// Aggregates the service spec, preserving the management port ID.
+/// Expects at most one spec source.
+#[derive(Default)]
+struct SvcSpecAggregator;
+
+impl Aggregator for SvcSpecAggregator {
+    type Input = (ManagementId, ServiceSpec);
+    type Output = Option<(ManagementId, ServiceSpec)>;
+
+    fn aggregate(
+        &self,
+        inputs: &[(ManagementId, ServiceSpec)],
+    ) -> Option<(ManagementId, ServiceSpec)> {
+        inputs.first().cloned()
     }
 }
 
@@ -149,13 +274,18 @@ distvirt_sm_router::router! {
     ports {
         Worker(auto),
         Management(auto),
+        Timer(auto),
     }
     signals {
         Service::Demand(bool),
+        Service::SvcWantedTimers(Vec<ServiceTimerRequest>),
         Workload::Readiness(Option<ReadyInfo>),
-        Workload::NeedsPod(bool),
+        Workload::PodIntent(PodIntent),
+        Workload::WantedTimers(Vec<TimerRequest>),
         Pod::Status(PodStatus),
+        Pod::WantedPodTimers(Vec<PodTimerRequest>),
         Worker::Info(WorkerInfo),
+        Worker::BackendNeed(BackendNeed),
         Management::WlSpec(WorkloadSpec),
         Management::SvcSpec(ServiceSpec),
     }
@@ -165,14 +295,25 @@ distvirt_sm_router::router! {
         WorkloadToPod: Workload -> Pod,
         PodToWorkload: Pod -> Workload,
         WorkerToPod: Worker -> Pod,
+        WorkerToService: Worker -> Service,
         ManagementToWorkload: Management -> Workload,
         ManagementToService: Management -> Service,
+        WorkloadToTimer: Workload -> Timer,
+        ServiceToTimer: Service -> Timer,
+        PodToTimer: Pod -> Timer,
     }
     events {
         AdminCommand(AdminCmd): Management -> Workload,
         ActivateService(bool): Management -> Service,
         NotifyPodStatus(PodStatus): Worker -> Pod,
-        WorkloadTimerFired(WorkloadTimerKey): Management -> Workload,
+        NotifyPodSuspended(ArtifactId): Worker -> Pod,
+        WorkloadTimerFired(WorkloadTimerKey): Timer -> Workload,
+        ServiceTimerFired(ServiceTimerKey): Timer -> Service,
+        PodTimerFired(PodTimerKey): Timer -> Pod,
+    }
+    invariants {
+        // Worker info should always have positive capacity
+        Worker::Info(value.capacity > 0),
     }
     inputs {
         Workload::DemandInput {
@@ -181,7 +322,7 @@ distvirt_sm_router::router! {
         },
         Workload::SpecInput {
             sources: [(ManagementToWorkload, Management::WlSpec)],
-            aggregator: ListAggregator<ManagementId, WorkloadSpec>,
+            aggregator: SpecAggregator,
         },
         Workload::PodStatusInput {
             sources: [(PodToWorkload, Pod::Status)],
@@ -193,15 +334,31 @@ distvirt_sm_router::router! {
         },
         Service::SvcSpecInput {
             sources: [(ManagementToService, Management::SvcSpec)],
-            aggregator: ListAggregator<ManagementId, ServiceSpec>,
+            aggregator: SvcSpecAggregator,
+        },
+        Service::BackendNeedInput {
+            sources: [(WorkerToService, Worker::BackendNeed)],
+            aggregator: BackendNeedAggregator,
         },
         Pod::WorkerInput {
             sources: [(WorkerToPod, Worker::Info)],
             aggregator: ListAggregator<WorkerId, WorkerInfo>,
         },
         Pod::OwnerInput {
-            sources: [(WorkloadToPod, Workload::NeedsPod)],
+            sources: [(WorkloadToPod, Workload::PodIntent)],
             aggregator: OwnerAggregator,
+        },
+        Timer::WorkloadTimersInput {
+            sources: [(WorkloadToTimer, Workload::WantedTimers)],
+            aggregator: ListAggregator<WorkloadId, Vec<TimerRequest>>,
+        },
+        Timer::ServiceTimersInput {
+            sources: [(ServiceToTimer, Service::SvcWantedTimers)],
+            aggregator: ListAggregator<ServiceId, Vec<ServiceTimerRequest>>,
+        },
+        Timer::PodTimersInput {
+            sources: [(PodToTimer, Pod::WantedPodTimers)],
+            aggregator: ListAggregator<PodId, Vec<PodTimerRequest>>,
         },
     }
 }
@@ -225,6 +382,8 @@ enum ServiceState {
 struct ServiceSm {
     state: ServiceState,
     has_activation: bool,
+    idle_generation: u64,
+    idle_timer_active: bool,
 }
 
 impl ServiceSm {
@@ -236,6 +395,19 @@ impl ServiceSm {
                 ServiceState::NeedBackend
             },
             has_activation,
+            idle_generation: 0,
+            idle_timer_active: false,
+        }
+    }
+
+    fn update_timer_signal(&self, ctx: &mut ServiceCtx) {
+        if self.idle_timer_active {
+            ctx.set_svc_wanted_timers(vec![ServiceTimerRequest {
+                key: ServiceTimerKey::IdleTimeout,
+                generation: self.idle_generation,
+            }]);
+        } else {
+            ctx.set_svc_wanted_timers(vec![]);
         }
     }
 }
@@ -254,6 +426,10 @@ impl SmHandler for ServiceSm {
                     }
                     (ServiceState::Active { .. }, None) => {
                         self.state = ServiceState::NeedBackend;
+                        if self.idle_timer_active {
+                            self.idle_timer_active = false;
+                            self.update_timer_signal(ctx);
+                        }
                     }
                     (ServiceState::Active { .. }, Some(info)) => {
                         self.state = ServiceState::Active { ready: info };
@@ -261,8 +437,8 @@ impl SmHandler for ServiceSm {
                     _ => {}
                 }
             }
-            ServiceInput::SvcSpecInput(specs) => {
-                if let Some(spec) = specs.into_iter().next() {
+            ServiceInput::SvcSpecInput(spec_opt) => {
+                if let Some((_, spec)) = spec_opt {
                     self.has_activation = spec.has_activation;
                     if !self.has_activation {
                         // Always-on: set demand immediately.
@@ -282,9 +458,48 @@ impl SmHandler for ServiceSm {
                     } else if !active {
                         self.state = ServiceState::Idle;
                         ctx.set_demand(false);
+                        if self.idle_timer_active {
+                            self.idle_timer_active = false;
+                            self.update_timer_signal(ctx);
+                        }
                     }
                 }
             }
+            ServiceInput::BackendNeedInput(need) => {
+                match (&self.state, &need) {
+                    (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
+                        if !self.idle_timer_active {
+                            self.idle_timer_active = true;
+                            self.idle_generation += 1;
+                            self.update_timer_signal(ctx);
+                        }
+                    }
+                    (ServiceState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
+                        if self.idle_timer_active {
+                            self.idle_timer_active = false;
+                            self.update_timer_signal(ctx);
+                        }
+                    }
+                    (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
+                        ctx.set_demand(true);
+                        self.state = ServiceState::NeedBackend;
+                    }
+                    _ => {}
+                }
+            }
+            ServiceInput::ServiceTimerFired(key) => match key {
+                ServiceTimerKey::IdleTimeout => {
+                    if matches!(self.state, ServiceState::Active { .. })
+                        && self.idle_timer_active
+                        && self.has_activation
+                    {
+                        self.state = ServiceState::Idle;
+                        ctx.set_demand(false);
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
+                    }
+                }
+            },
         }
     }
 }
@@ -320,15 +535,31 @@ struct WorkloadSm {
     max_retries: u32,
     /// True while waiting for a retry backoff timer to fire.
     in_backoff: bool,
+    /// Incremented each time we enter backoff, used for timer identity.
+    backoff_generation: u64,
+
+    /// Timer port ID, passed to pods created by this workload.
+    timer_id: TimerId,
+
+    /// Whether to suspend the pod instead of destroying it when demand drops.
+    suspend_on_idle: bool,
+    /// Artifact from a successfully suspended pod. Used to resume on next
+    /// demand cycle instead of cold-booting.
+    suspended_artifact: Option<ArtifactId>,
+    /// True while the pod is in the process of suspending. Prevents reconcile
+    /// from touching the pod until it reaches a terminal state.
+    awaiting_suspend: bool,
+    /// Counter for generating unique artifact IDs.
+    artifact_counter: u64,
 }
 
 impl WorkloadSm {
-    fn new() -> Self {
-        Self::with_max_retries(MAX_RETRIES)
+    fn new(timer_id: TimerId) -> Self {
+        Self::with_max_retries(timer_id, MAX_RETRIES)
     }
 
     #[allow(dead_code)]
-    fn with_max_retries(max_retries: u32) -> Self {
+    fn with_max_retries(timer_id: TimerId, max_retries: u32) -> Self {
         WorkloadSm {
             has_spec: false,
             has_demand: false,
@@ -341,7 +572,35 @@ impl WorkloadSm {
             consecutive_failures: 0,
             max_retries,
             in_backoff: false,
+            backoff_generation: 0,
+            timer_id,
+            suspend_on_idle: false,
+            suspended_artifact: None,
+            awaiting_suspend: false,
+            artifact_counter: 0,
         }
+    }
+
+    #[allow(dead_code)]
+    fn new_suspendable(timer_id: TimerId) -> Self {
+        WorkloadSm {
+            suspend_on_idle: true,
+            ..Self::new(timer_id)
+        }
+    }
+
+    #[allow(dead_code)]
+    fn new_suspendable_with_max_retries(timer_id: TimerId, max_retries: u32) -> Self {
+        WorkloadSm {
+            suspend_on_idle: true,
+            ..Self::with_max_retries(timer_id, max_retries)
+        }
+    }
+
+    #[allow(dead_code)]
+    fn next_artifact_id(&mut self) -> ArtifactId {
+        self.artifact_counter += 1;
+        ArtifactId(self.artifact_counter)
     }
 }
 
@@ -368,9 +627,10 @@ impl SmHandler for WorkloadSm {
 
                 ctx.set_workload_to_service_edges(demand.service_ids);
                 self.reconcile(ctx);
+                self.update_timer_signal(ctx);
             }
-            WorkloadInput::SpecInput(specs) => {
-                let new_has_spec = specs.into_iter().next().is_some();
+            WorkloadInput::SpecInput(spec_opt) => {
+                let new_has_spec = spec_opt.is_some();
 
                 if self.has_spec && new_has_spec {
                     // Spec value changed (Some→Some). Increment version so we
@@ -387,20 +647,40 @@ impl SmHandler for WorkloadSm {
 
                 self.has_spec = new_has_spec;
                 self.reconcile(ctx);
+                self.update_timer_signal(ctx);
             }
             WorkloadInput::PodStatusInput(statuses) => {
                 let was_running = self.pod_running;
                 self.pod_running = statuses.iter().any(|s| *s == PodStatus::Running);
                 let has_failed = statuses.iter().any(|s| *s == PodStatus::Failed);
 
+                // Pod reached Suspended terminal state — save artifact and reap.
+                let suspended_artifact = statuses.iter().find_map(|s| match s {
+                    PodStatus::Suspended { artifact_id } => Some(*artifact_id),
+                    _ => None,
+                });
+
                 // All pods gone — clear tracking.
                 if statuses.is_empty() && self.pod_id.is_some() {
                     self.pod_id = None;
                     self.committed_to_boot = false;
                     ctx.set_workload_to_pod_edges(vec![]);
+                    ctx.set_pod_intent(PodIntent::None);
                 }
 
-                if self.pod_running && !was_running {
+                if let Some(artifact_id) = suspended_artifact {
+                    // Pod successfully suspended. Save artifact, reap pod.
+                    self.suspended_artifact = Some(artifact_id);
+                    self.pod_running = false;
+                    self.awaiting_suspend = false;
+                    ctx.set_readiness(None);
+                    // Remove edge → pod will self-destruct (terminal + no owner).
+                    ctx.set_workload_to_pod_edges(vec![]);
+                    ctx.set_pod_intent(PodIntent::None);
+                    self.pod_id = None;
+                    // Reconcile may create a new pod if demand returned during suspend.
+                    self.reconcile(ctx);
+                } else if self.pod_running && !was_running {
                     // Pod just became Running — check current signal state
                     // to decide what to do. This replaces PendingIntent.
                     self.on_pod_running(ctx);
@@ -413,6 +693,7 @@ impl SmHandler for WorkloadSm {
                 } else {
                     self.reconcile(ctx);
                 }
+                self.update_timer_signal(ctx);
             }
             WorkloadInput::AdminCommand(cmd) => {
                 match cmd {
@@ -422,9 +703,11 @@ impl SmHandler for WorkloadSm {
                             return;
                         }
                         // Not demanded — reclaim: destroy pod, clear commitment and retry state.
+                        // Also discard any suspended artifact.
                         self.committed_to_boot = false;
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
+                        self.suspended_artifact = None;
                         self.destroy_current_pod(ctx);
                         self.reconcile(ctx);
                     }
@@ -439,12 +722,14 @@ impl SmHandler for WorkloadSm {
                         self.reconcile(ctx);
                     }
                 }
+                self.update_timer_signal(ctx);
             }
             WorkloadInput::WorkloadTimerFired(key) => match key {
                 WorkloadTimerKey::RetryBackoff => {
                     if self.in_backoff {
                         self.in_backoff = false;
                         self.reconcile(ctx);
+                        self.update_timer_signal(ctx);
                     }
                 }
             },
@@ -471,9 +756,8 @@ impl WorkloadSm {
             return;
         }
 
-        // 2. No demand → deactivate.
+        // 2. No demand → let reconcile decide (suspend if enabled, else destroy).
         if !self.has_demand {
-            self.destroy_current_pod(ctx);
             self.reconcile(ctx);
             return;
         }
@@ -490,10 +774,13 @@ impl WorkloadSm {
     fn on_pod_failed(&mut self, ctx: &mut WorkloadCtx) {
         // Clear readiness — pod is no longer usable.
         self.pod_running = false;
+        self.awaiting_suspend = false;
         ctx.set_readiness(None);
 
-        // Remove ownership edge so pod can self-destruct.
+        // Remove ownership edge — pod is already terminal (Failed),
+        // so removing the edge triggers self-destruct (terminal + no owner).
         ctx.set_workload_to_pod_edges(vec![]);
+        ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
 
         self.consecutive_failures += 1;
@@ -511,58 +798,174 @@ impl WorkloadSm {
             && self.consecutive_failures < self.max_retries;
         if want_retry {
             self.in_backoff = true;
+            self.backoff_generation += 1;
         } else if !self.has_demand {
             // Going dormant — clear failure tracking.
             self.consecutive_failures = 0;
         }
 
         self.reconcile(ctx);
+        self.update_timer_signal(ctx);
     }
 
-    /// Signal the current pod to self-destruct by removing the ownership edge.
-    /// The pod sees OwnerInput(None) and self-destructs.
-    /// We'll learn it's gone via PodStatusInput([]).
+    /// Abandon the current pod by removing the ownership edge.
+    /// The pod will drive itself to a terminal state and self-destruct.
+    /// Any suspended artifact is discarded (this is a hard kill).
     fn destroy_current_pod(&mut self, ctx: &mut WorkloadCtx) {
         if self.pod_id.is_some() {
             ctx.set_workload_to_pod_edges(vec![]);
+            ctx.set_pod_intent(PodIntent::None);
         }
         self.pod_running = false;
+        self.awaiting_suspend = false;
+        self.suspended_artifact = None;
         ctx.set_readiness(None);
     }
 
+    fn update_timer_signal(&self, ctx: &mut WorkloadCtx) {
+        if self.in_backoff {
+            ctx.set_wanted_timers(vec![TimerRequest {
+                key: WorkloadTimerKey::RetryBackoff,
+                generation: self.backoff_generation,
+            }]);
+        } else {
+            ctx.set_wanted_timers(vec![]);
+        }
+    }
+
     fn reconcile(&mut self, ctx: &mut WorkloadCtx) {
+        // If we're waiting for a suspend to complete, don't touch the pod.
+        if self.awaiting_suspend {
+            return;
+        }
+
         let is_failed = self.consecutive_failures >= self.max_retries;
         let want_pod = self.has_spec
             && (self.has_demand || self.committed_to_boot)
             && !self.in_backoff
             && !is_failed;
         self.wants_pod = want_pod;
-        ctx.set_needs_pod(want_pod);
 
         if want_pod && self.pod_id.is_none() {
-            let pod_id = ctx.create_pod(PodSm::new());
+            // Create new pod — resume from artifact if available.
+            let pod = if let Some(artifact_id) = self.suspended_artifact.take() {
+                PodSm::new_from_artifact(self.timer_id, artifact_id)
+            } else {
+                PodSm::new(self.timer_id)
+            };
+            let pod_id = ctx.create_pod(pod);
             self.pod_id = Some(pod_id);
             self.launched_with_spec_version = self.spec_version;
             ctx.set_workload_to_pod_edges(vec![pod_id]);
+            ctx.set_pod_intent(PodIntent::Want);
+        } else if want_pod && self.pod_id.is_some() {
+            ctx.set_pod_intent(PodIntent::Want);
         } else if !want_pod && self.pod_id.is_some() {
-            ctx.set_workload_to_pod_edges(vec![]);
-            ctx.set_readiness(None);
+            if self.pod_running && self.suspend_on_idle {
+                // Signal pod to suspend — keep edge, pod drives itself to
+                // Suspended terminal state.
+                ctx.set_pod_intent(PodIntent::Suspend);
+                self.awaiting_suspend = true;
+            } else {
+                // Abandon pod (remove edge). Pod will drive itself to
+                // terminal and self-destruct.
+                ctx.set_workload_to_pod_edges(vec![]);
+                ctx.set_pod_intent(PodIntent::None);
+                ctx.set_readiness(None);
+            }
+        } else {
+            ctx.set_pod_intent(PodIntent::None);
         }
     }
 }
 
 // ---- Pod SM ----
+//
+// A pod manages the lifecycle of a single "running thing" from creation to
+// terminal state. The lifecycle is linear and non-circular:
+//
+//   Pending → Running → Suspending → Suspended(artifact)  [terminal]
+//                     → Failed                             [terminal]
+//            → Failed                                      [terminal]
+//
+// Terminal states wait for reaping: the pod self-destructs only when it is
+// in a terminal state AND has no owner. This gives the workload time to
+// read the terminal status (e.g. extract artifact_id from Suspended).
+//
+// Two paths to pod death:
+//   Natural:  pod reaches terminal → workload reads status → workload
+//             removes edge (reap) → pod self-destructs.
+//   Abandon:  workload removes edge → pod drives itself to terminal
+//             (owner loss while live = failure) → pod self-destructs.
 
 struct PodSm {
     status: PodStatus,
     workload_id: Option<WorkloadId>,
+    intent: PodIntent,
+    /// Artifact to resume from (set at creation for resumed pods).
+    /// The worker port can read this to know whether to cold-boot or resume.
+    resume_artifact: Option<ArtifactId>,
+    /// Timer port ID for requesting timeouts.
+    timer_id: TimerId,
+    /// Generation counter for timer requests.
+    timer_generation: u64,
+    /// Whether the timer edge has been set yet.
+    timer_edge_set: bool,
 }
 
 impl PodSm {
-    fn new() -> Self {
+    fn new(timer_id: TimerId) -> Self {
         PodSm {
             status: PodStatus::Pending,
             workload_id: None,
+            intent: PodIntent::None,
+            resume_artifact: None,
+            timer_id,
+            timer_generation: 0,
+            timer_edge_set: false,
+        }
+    }
+
+    fn new_from_artifact(timer_id: TimerId, artifact_id: ArtifactId) -> Self {
+        PodSm {
+            status: PodStatus::Pending,
+            workload_id: None,
+            intent: PodIntent::None,
+            resume_artifact: Some(artifact_id),
+            timer_id,
+            timer_generation: 0,
+            timer_edge_set: false,
+        }
+    }
+
+    /// Self-destruct if terminal and no owner (the reaping rule).
+    fn maybe_reap(&self, ctx: &mut PodCtx) {
+        if self.status.is_terminal() && self.workload_id.is_none() {
+            ctx.self_destruct();
+        }
+    }
+
+    /// Update the timer signal based on current pod status.
+    fn update_timer_signal(&self, ctx: &mut PodCtx) {
+        if !self.timer_edge_set {
+            return;
+        }
+        match &self.status {
+            PodStatus::Pending => {
+                ctx.set_wanted_pod_timers(vec![PodTimerRequest {
+                    key: PodTimerKey::LaunchTimeout,
+                    generation: self.timer_generation,
+                }]);
+            }
+            PodStatus::Suspending => {
+                ctx.set_wanted_pod_timers(vec![PodTimerRequest {
+                    key: PodTimerKey::SuspendTimeout,
+                    generation: self.timer_generation,
+                }]);
+            }
+            _ => {
+                ctx.set_wanted_pod_timers(vec![]);
+            }
         }
     }
 }
@@ -572,30 +975,94 @@ impl SmHandler for PodSm {
     type Ctx = PodCtx;
 
     fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+        // Set timer edge on first input so timer signals can flow.
+        if !self.timer_edge_set {
+            self.timer_edge_set = true;
+            ctx.set_pod_to_timer_edges(vec![self.timer_id]);
+            self.update_timer_signal(ctx);
+        }
+
         match input {
             PodInput::WorkerInput(workers) => {
-                if workers.is_empty() {
+                if workers.is_empty() && !self.status.is_terminal() {
                     // Worker lost — pod is dead.
-                    if self.status != PodStatus::Failed {
-                        self.status = PodStatus::Failed;
-                        ctx.set_status(PodStatus::Failed);
-                    }
+                    self.status = PodStatus::Failed;
+                    ctx.set_status(PodStatus::Failed);
+                    self.update_timer_signal(ctx);
+                    self.maybe_reap(ctx);
                 }
             }
             PodInput::OwnerInput(owner) => {
                 let had_owner = self.workload_id.is_some();
-                self.workload_id = owner;
-                let edges: Vec<WorkloadId> = owner.into_iter().collect();
+                let (new_wl, new_intent) = match owner {
+                    Some((wl, intent)) => (Some(wl), intent),
+                    None => (None, PodIntent::None),
+                };
+                self.workload_id = new_wl;
+                self.intent = new_intent;
+
+                let edges: Vec<WorkloadId> = self.workload_id.into_iter().collect();
                 ctx.set_pod_to_workload_edges(edges);
 
-                // Lost owner → self-destruct.
-                if had_owner && owner.is_none() {
-                    ctx.self_destruct();
+                // React to intent: Running + Suspend → begin suspending.
+                if matches!(
+                    (&self.status, &self.intent),
+                    (PodStatus::Running, PodIntent::Suspend)
+                ) {
+                    self.timer_generation += 1;
+                    self.status = PodStatus::Suspending;
+                    ctx.set_status(PodStatus::Suspending);
+                    self.update_timer_signal(ctx);
                 }
+
+                // Lost owner while in a live state → drive to terminal.
+                // (In a real system this would go through a shutdown sequence
+                // with worker interaction; simplified to immediate here.)
+                if had_owner && self.workload_id.is_none() && !self.status.is_terminal() {
+                    self.status = PodStatus::Failed;
+                    ctx.set_status(PodStatus::Failed);
+                    self.update_timer_signal(ctx);
+                }
+
+                self.maybe_reap(ctx);
             }
             PodInput::NotifyPodStatus(new_status) => {
-                self.status = new_status.clone();
-                ctx.set_status(new_status);
+                if !self.status.is_terminal() {
+                    self.status = new_status.clone();
+                    ctx.set_status(new_status);
+                    self.update_timer_signal(ctx);
+                    self.maybe_reap(ctx);
+                }
+            }
+            PodInput::NotifyPodSuspended(artifact_id) => {
+                if matches!(self.status, PodStatus::Suspending) {
+                    self.status = PodStatus::Suspended {
+                        artifact_id: artifact_id.clone(),
+                    };
+                    ctx.set_status(PodStatus::Suspended { artifact_id });
+                    self.update_timer_signal(ctx);
+                    self.maybe_reap(ctx);
+                }
+            }
+            PodInput::PodTimerFired(key) => {
+                match key {
+                    PodTimerKey::LaunchTimeout => {
+                        if matches!(self.status, PodStatus::Pending) {
+                            self.status = PodStatus::Failed;
+                            ctx.set_status(PodStatus::Failed);
+                            self.update_timer_signal(ctx);
+                            self.maybe_reap(ctx);
+                        }
+                    }
+                    PodTimerKey::SuspendTimeout => {
+                        if matches!(self.status, PodStatus::Suspending) {
+                            self.status = PodStatus::Failed;
+                            ctx.set_status(PodStatus::Failed);
+                            self.update_timer_signal(ctx);
+                            self.maybe_reap(ctx);
+                        }
+                    }
+                }
             }
         }
     }
@@ -611,6 +1078,64 @@ const S3: ServiceId = ServiceId(3);
 const W1: WorkloadId = WorkloadId(1);
 
 // ============================================================================
+// Test helpers
+// ============================================================================
+
+/// Extract workload timer requests from timer port inputs.
+/// Each delivery is a `Vec<Vec<TimerRequest>>` — one inner Vec per workload connected
+/// to the timer port.
+fn drain_timer_requests(router: &mut Router, timer: TimerId) -> Vec<Vec<Vec<TimerRequest>>> {
+    router
+        .drain_timer_inputs()
+        .into_iter()
+        .filter(|(id, _)| *id == timer)
+        .filter_map(|(_, input)| match input {
+            TimerPortInput::WorkloadTimersInput(timers) => Some(timers),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Assert that the timer port received a timer delivery where the workload
+/// declared exactly the expected timer requests.
+fn assert_timer_requested(router: &mut Router, timer: TimerId, expected: &[TimerRequest]) {
+    let deliveries = drain_timer_requests(router, timer);
+    assert!(
+        !deliveries.is_empty(),
+        "expected timer delivery {:?}, got nothing",
+        expected
+    );
+    // Last delivery should have one workload's timer list matching expected.
+    let last = deliveries.last().unwrap();
+    assert_eq!(last.len(), 1, "expected 1 workload's timers, got {:?}", last);
+    assert_eq!(last[0].as_slice(), expected, "timer requests mismatch");
+}
+
+/// Assert that timer output is either absent or empty (no active timers).
+fn assert_no_timers_wanted(router: &mut Router, timer: TimerId) {
+    let deliveries = drain_timer_requests(router, timer);
+    for delivery in &deliveries {
+        for workload_timers in delivery {
+            assert!(
+                workload_timers.is_empty(),
+                "expected no timers wanted, got {:?}",
+                workload_timers
+            );
+        }
+    }
+}
+
+/// Assert no timer-related port inputs were delivered at all (dedup suppressed).
+fn assert_no_timer_output(router: &mut Router, timer: TimerId) {
+    let deliveries = drain_timer_requests(router, timer);
+    assert!(
+        deliveries.is_empty(),
+        "expected no timer output, got {:?}",
+        deliveries
+    );
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -618,10 +1143,15 @@ const W1: WorkloadId = WorkloadId(1);
 #[test]
 fn demand_aggregation() {
     let mut router = Router::new(16);
-    router.create_workload(W1, WorkloadSm::new());
+    let timer = router.create_timer();
+    router.create_workload(W1, WorkloadSm::new(timer));
+    router.set_workload_to_timer_edges(W1, vec![timer]);
     router.create_service(S1, ServiceSm::new(true));
+    router.set_service_to_timer_edges(S1, vec![timer]);
     router.create_service(S2, ServiceSm::new(true));
+    router.set_service_to_timer_edges(S2, vec![timer]);
     router.create_service(S3, ServiceSm::new(true));
+    router.set_service_to_timer_edges(S3, vec![timer]);
 
     // Deliver specs through management port — services get edges to W1.
     let mgmt = router.create_management();
@@ -667,13 +1197,17 @@ fn demand_aggregation() {
 #[test]
 fn reactive_readiness_edges() {
     let mut router = Router::new(16);
+    let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W1, WorkloadSm::new(timer));
+    router.set_workload_to_timer_edges(W1, vec![timer]);
     router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.set_service_to_timer_edges(S1, vec![timer]);
     router.create_service(S2, ServiceSm::new(false));
+    router.set_service_to_timer_edges(S2, vec![timer]);
 
     // Deliver workload spec.
     router.set_management_to_workload_edges(mgmt, vec![W1]);
@@ -712,6 +1246,7 @@ fn reactive_readiness_edges() {
 
     // Add a third service — it should immediately get readiness.
     router.create_service(S3, ServiceSm::new(false));
+    router.set_service_to_timer_edges(S3, vec![timer]);
     // Use same mgmt port, update edges to include S3.
     router.set_management_to_service_edges(mgmt, vec![S1, S2, S3]);
     router.propagate();
@@ -727,11 +1262,13 @@ fn reactive_readiness_edges() {
 #[test]
 fn pod_lifecycle() {
     let mut router = Router::new(16);
+    let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W1, WorkloadSm::new(timer));
+    router.set_workload_to_timer_edges(W1, vec![timer]);
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into() });
     router.propagate();
@@ -742,6 +1279,7 @@ fn pod_lifecycle() {
 
     // Add an always-on service with demand.
     router.create_service(S1, ServiceSm::new(false));
+    router.set_service_to_timer_edges(S1, vec![timer]);
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -809,6 +1347,9 @@ fn worker_loss_via_port_removal() {
     let s1 = router.get_service(&S1).unwrap();
     assert!(matches!(s1.state, ServiceState::Active { .. }));
 
+    // No timers wanted while running.
+    assert_no_timers_wanted(&mut router, mgmt);
+
     // Worker dies — remove the port.
     router.destroy_worker(worker);
     router.propagate();
@@ -818,6 +1359,12 @@ fn worker_loss_via_port_removal() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.pod_running);
     assert!(wl.in_backoff);
+
+    // Timer signal should show a retry backoff request.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
 
     // Service should be back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
@@ -1004,6 +1551,9 @@ fn full_end_to_end() {
             || matches!(s2.state, ServiceState::NeedBackend)
     );
 
+    // No timers requested while running normally.
+    assert_no_timers_wanted(&mut router, mgmt_wl);
+
     // Worker dies.
     router.destroy_worker(worker);
     router.propagate();
@@ -1012,6 +1562,12 @@ fn full_end_to_end() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.pod_running);
     assert!(wl.in_backoff);
+
+    // Timer signal: workload wants a retry backoff timer.
+    assert_timer_requested(&mut router, mgmt_wl, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
 
     // S1 goes back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
@@ -1117,19 +1673,22 @@ fn handler_and_router_share_id_counter() {
 // ============================================================================
 
 /// Helper: set up a workload with an activation-based service that has been
-/// activated, return (mgmt, worker, pod_id).
+/// activated, return (mgmt, worker, pod_id, timer).
 /// After this, workload has spec + demand, a pod exists in Pending state.
 /// Use send_activate_service(mgmt, S1, false) to drop demand.
-fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, WorkerId, PodId) {
+fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, WorkerId, PodId, TimerId) {
+    let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W1, WorkloadSm::new(timer));
+    router.set_workload_to_timer_edges(W1, vec![timer]);
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.set_service_to_timer_edges(S1, vec![timer]);
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -1147,7 +1706,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_eq!(router.get_pod(&pod_id).unwrap().status, PodStatus::Pending);
 
-    (mgmt, worker, pod_id)
+    (mgmt, worker, pod_id, timer)
 }
 
 /// Helper: make a pending pod Running.
@@ -1165,17 +1724,20 @@ fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) {
 }
 
 /// Helper: set up a workload (with configurable max_retries) with an always-on
-/// service, a running pod, and return (mgmt, worker).
-fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementId, WorkerId) {
+/// service, a running pod, and return (mgmt, worker, timer).
+fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementId, WorkerId, TimerId) {
+    let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::with_max_retries(max_retries));
+    router.create_workload(W1, WorkloadSm::with_max_retries(timer, max_retries));
+    router.set_workload_to_timer_edges(W1, vec![timer]);
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.set_service_to_timer_edges(S1, vec![timer]);
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -1191,7 +1753,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     make_pod_running(router, worker, pod_id);
 
     assert!(router.get_workload(&W1).unwrap().pod_running);
-    (mgmt, worker)
+    (mgmt, worker, timer)
 }
 
 /// 11. Demand drops during pod launch — committed_to_boot keeps the pod alive.
@@ -1531,6 +2093,12 @@ fn pod_failure_backoff_and_retry() {
     assert_eq!(wl.consecutive_failures, 1);
     assert!(wl.pod_id.is_none()); // pod released
 
+    // Workload should have signaled a retry backoff timer.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
+
     // Timer fires — backoff cleared, reconcile creates new pod.
     router.send_workload_timer_fired(mgmt, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
@@ -1540,6 +2108,9 @@ fn pod_failure_backoff_and_retry() {
     assert!(wl.pod_id.is_some());
     let new_pod = wl.pod_id.unwrap();
 
+    // Timer signal should now be empty (backoff cleared).
+    assert_no_timers_wanted(&mut router, mgmt);
+
     // New worker + make pod running.
     let worker2 = router.create_worker();
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
@@ -1548,6 +2119,9 @@ fn pod_failure_backoff_and_retry() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
     assert_eq!(wl.consecutive_failures, 0); // reset on success
+
+    // No timers while running.
+    assert_no_timer_output(&mut router, mgmt);
 }
 
 /// 21. Multiple failures increment the counter.
@@ -1564,6 +2138,12 @@ fn consecutive_failures_increment() {
     assert_eq!(wl.consecutive_failures, 1);
     assert!(wl.in_backoff);
 
+    // Generation 1 timer requested.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
+
     // Timer fires → retry.
     router.send_workload_timer_fired(mgmt, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
@@ -1578,6 +2158,12 @@ fn consecutive_failures_increment() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 2);
     assert!(wl.in_backoff);
+
+    // Generation 2 timer requested (new backoff cycle).
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 2,
+    }]);
 }
 
 /// 22. After max_retries failures, workload stops retrying (terminal Failed).
@@ -1593,6 +2179,12 @@ fn max_retries_enters_failed() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
     assert!(wl.in_backoff); // still under limit
+
+    // Timer requested for first backoff.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
 
     // Timer fires → retry.
     router.send_workload_timer_fired(mgmt, W1, WorkloadTimerKey::RetryBackoff);
@@ -1610,6 +2202,9 @@ fn max_retries_enters_failed() {
     assert!(!wl.in_backoff); // not in backoff — terminal
     assert!(wl.pod_id.is_none()); // no new pod
     assert!(!wl.wants_pod); // reconcile says no
+
+    // Terminal failure: no timer requested (timers cleared).
+    assert_no_timers_wanted(&mut router, mgmt);
 }
 
 /// 23. Failed state + spec change → resets failures and retries.
@@ -1786,6 +2381,12 @@ fn backoff_cleared_on_demand_drop() {
     assert!(wl.in_backoff);
     assert_eq!(wl.consecutive_failures, 1);
 
+    // Timer requested during backoff.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
+
     // Drop demand → clears everything.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
@@ -1794,6 +2395,9 @@ fn backoff_cleared_on_demand_drop() {
     assert!(!wl.in_backoff);
     assert_eq!(wl.consecutive_failures, 0);
     assert!(wl.pod_id.is_none());
+
+    // Timer cleared after demand drop.
+    assert_no_timers_wanted(&mut router, mgmt);
 }
 
 /// 28. In backoff + spec change → clears backoff, immediate retry.
@@ -1809,6 +2413,12 @@ fn backoff_cleared_on_spec_change() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
 
+    // Timer requested during backoff.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
+
     // Spec change clears backoff + failures → immediate retry.
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
     router.propagate();
@@ -1817,6 +2427,9 @@ fn backoff_cleared_on_spec_change() {
     assert!(!wl.in_backoff);
     assert_eq!(wl.consecutive_failures, 0);
     assert!(wl.pod_id.is_some()); // new pod created immediately
+
+    // Timer cleared after spec change.
+    assert_no_timers_wanted(&mut router, mgmt);
 }
 
 /// 29. Scavenge during backoff clears everything, goes dormant.
@@ -1832,14 +2445,21 @@ fn scavenge_during_backoff() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
 
+    // Timer requested during backoff.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
+
     // Scavenge is noop when demand is present (always-on service).
     // So scavenge won't do anything here — demand is still active.
     router.send_admin_command(mgmt, W1, AdminCmd::Scavenge);
     router.propagate();
 
-    // Still in backoff because demand is active.
+    // Still in backoff because demand is active — timer unchanged (dedup suppresses).
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
+    assert_no_timer_output(&mut router, mgmt);
 }
 
 /// 30. Scavenge during Failed clears failures (when no demand).
@@ -1906,6 +2526,12 @@ fn success_resets_failure_counter() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
 
+    // First backoff: generation 1.
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 1,
+    }]);
+
     // Timer fires → retry.
     router.send_workload_timer_fired(mgmt, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
@@ -1928,4 +2554,742 @@ fn success_resets_failure_counter() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
     assert!(wl.in_backoff);
+
+    // Second backoff: generation 2 (incremented again after success reset).
+    assert_timer_requested(&mut router, mgmt, &[TimerRequest {
+        key: WorkloadTimerKey::RetryBackoff,
+        generation: 2,
+    }]);
+}
+
+// ============================================================================
+// Suspend/Resume tests
+// ============================================================================
+
+/// Helper: set up a suspendable workload (suspend_on_idle=true) with an
+/// activation-based service, a running pod, and return (mgmt, worker, timer).
+fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, WorkerId, TimerId) {
+    let timer = router.create_timer();
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new_suspendable(timer));
+    router.set_workload_to_timer_edges(W1, vec![timer]);
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.set_service_to_timer_edges(S1, vec![timer]);
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Activate → demand → pod created.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    make_pod_running(router, worker, pod_id);
+
+    assert!(router.get_workload(&W1).unwrap().pod_running);
+    (mgmt, worker, timer)
+}
+
+/// 32. Basic suspend: demand drops on suspend_on_idle workload → pod suspends →
+///     artifact saved → pod self-destructs.
+#[test]
+fn suspend_on_demand_drop() {
+    let mut router = Router::new(16);
+    let (mgmt, _worker) = setup_running_suspendable_workload(&mut router);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_running);
+    let pod_id = wl.pod_id.unwrap();
+
+    // Deactivate service → demand drops to 0.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+
+    // Workload should have signaled Suspend (not destroyed the pod).
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.awaiting_suspend);
+    assert!(wl.pod_id.is_some()); // pod still alive
+    assert!(!wl.pod_running); // no longer considered running by workload
+
+    // Pod should be in Suspending state.
+    let pod = router.get_pod(&pod_id).unwrap();
+    assert_eq!(pod.status, PodStatus::Suspending);
+
+    // Worker completes the suspend.
+    let artifact = ArtifactId(42);
+    router.send_notify_pod_suspended(_worker, pod_id, artifact);
+    router.propagate();
+
+    // Workload should have saved the artifact and reaped the pod.
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.awaiting_suspend);
+    assert!(wl.pod_id.is_none()); // pod reaped
+    assert_eq!(wl.suspended_artifact, Some(artifact));
+
+    // Pod should be gone (self-destructed: terminal + no owner).
+    assert!(router.get_pod(&pod_id).is_none());
+}
+
+/// 33. Resume from artifact: workload with suspended artifact + demand →
+///     creates pod from artifact instead of cold boot.
+#[test]
+fn resume_from_artifact() {
+    let mut router = Router::new(16);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+
+    // Suspend: deactivate → suspend → complete.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+
+    let artifact = ArtifactId(100);
+    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert!(wl.pod_id.is_none());
+
+    // Re-activate → demand returns → workload should create pod from artifact.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_id.is_some());
+    let new_pod_id = wl.pod_id.unwrap();
+    assert_ne!(new_pod_id, pod_id); // new pod, different ID
+
+    // The new pod should have been created with the artifact.
+    let new_pod = router.get_pod(&new_pod_id).unwrap();
+    assert_eq!(new_pod.resume_artifact, Some(artifact));
+
+    // Artifact consumed from workload state.
+    assert_eq!(wl.suspended_artifact, None);
+
+    // Make resumed pod running — should become active normally.
+    make_pod_running(&mut router, worker, new_pod_id);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_running);
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+}
+
+/// 34. Demand returns during suspend: pod is suspending, demand comes back,
+///     pod completes suspend, workload immediately resumes from artifact.
+#[test]
+fn demand_returns_during_suspend() {
+    let mut router = Router::new(16);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+
+    // Start suspend.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.awaiting_suspend);
+
+    // Demand returns while suspending.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+
+    // Pod is still suspending — can't go back (lifecycle is non-circular).
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.awaiting_suspend); // still waiting
+    assert!(wl.has_demand); // demand is back
+
+    let pod = router.get_pod(&pod_id).unwrap();
+    assert_eq!(pod.status, PodStatus::Suspending); // still suspending
+
+    // Worker completes the suspend.
+    let artifact = ArtifactId(200);
+    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    router.propagate();
+
+    // Workload saved artifact, reaped pod, and immediately created new pod
+    // from artifact (because demand is present).
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.awaiting_suspend);
+    assert!(wl.pod_id.is_some());
+    assert_ne!(wl.pod_id.unwrap(), pod_id); // new pod
+    assert_eq!(wl.suspended_artifact, None); // consumed
+
+    // Old pod is gone.
+    assert!(router.get_pod(&pod_id).is_none());
+
+    // New pod should have the artifact for resume.
+    let new_pod = router.get_pod(&wl.pod_id.unwrap()).unwrap();
+    assert_eq!(new_pod.resume_artifact, Some(artifact));
+}
+
+/// 35. Spec change during suspend: workload abandons the suspending pod
+///     (artifact is stale), cold boots with new spec.
+#[test]
+fn spec_change_during_suspend() {
+    let mut router = Router::new(16);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+
+    // Start suspend.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.awaiting_suspend);
+
+    // Spec changes while pod is suspending.
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.propagate();
+
+    // Spec change while pod_running=false doesn't trigger immediate restart
+    // (that branch checks pod_running). But spec_version is incremented.
+    // The pod is still suspending.
+
+    // Re-activate demand so the workload wants a pod again.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+
+    // Worker completes the suspend.
+    let artifact = ArtifactId(300);
+    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    router.propagate();
+
+    // Workload should have created a new pod. Since spec changed,
+    // the spec_version != launched_with_spec_version check will catch it
+    // when the pod reaches Running (if it used the old artifact).
+    // But actually, the workload still uses the artifact for resume
+    // since the artifact was saved. The spec mismatch is detected at Running.
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_id.is_some());
+    assert_ne!(wl.pod_id.unwrap(), pod_id);
+}
+
+/// 36. Worker loss while pod is running on a suspendable workload — pod fails
+///     (not suspended), enters backoff normally. No artifact saved.
+#[test]
+fn worker_loss_on_suspendable_workload() {
+    let mut router = Router::new(16);
+    let (_mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    // Worker dies — this is NOT a suspend, it's a failure.
+    router.destroy_worker(worker);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.pod_running);
+    assert!(wl.in_backoff); // failure, not suspend
+    assert_eq!(wl.consecutive_failures, 1);
+    assert_eq!(wl.suspended_artifact, None); // no artifact from a crash
+
+    // Service should be back to NeedBackend.
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::NeedBackend);
+}
+
+/// 37. Destroy (hard kill) discards any previously saved artifact.
+#[test]
+fn destroy_discards_artifact() {
+    let mut router = Router::new(16);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+
+    // Suspend successfully.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+    let artifact = ArtifactId(400);
+    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.suspended_artifact, Some(artifact));
+
+    // Re-activate → resumes from artifact.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+
+    let new_pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    make_pod_running(&mut router, worker, new_pod_id);
+
+    // Now do a hard restart (admin command) — destroys pod AND discards artifact.
+    router.send_admin_command(mgmt, W1, AdminCmd::Restart);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.suspended_artifact, None); // artifact discarded
+    assert!(wl.pod_id.is_some()); // new pod created (cold boot)
+
+    // New pod should NOT have an artifact.
+    let restart_pod = router.get_pod(&wl.pod_id.unwrap()).unwrap();
+    assert_eq!(restart_pod.resume_artifact, None);
+}
+
+/// 38. Suspend → resume → suspend cycle: verify the full round-trip works
+///     and artifact IDs are tracked correctly.
+#[test]
+fn suspend_resume_suspend_cycle() {
+    let mut router = Router::new(16);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    // First suspend.
+    let pod1 = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+    let artifact1 = ArtifactId(500);
+    router.send_notify_pod_suspended(worker, pod1, artifact1);
+    router.propagate();
+
+    assert_eq!(router.get_workload(&W1).unwrap().suspended_artifact, Some(artifact1));
+
+    // First resume.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+    let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    assert_ne!(pod1, pod2);
+    assert_eq!(router.get_pod(&pod2).unwrap().resume_artifact, Some(artifact1));
+    make_pod_running(&mut router, worker, pod2);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_running);
+
+    // Second suspend.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+    let artifact2 = ArtifactId(501);
+    router.send_notify_pod_suspended(worker, pod2, artifact2);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.suspended_artifact, Some(artifact2));
+    assert!(wl.pod_id.is_none());
+
+    // Second resume.
+    router.send_activate_service(mgmt, S1, true);
+    router.propagate();
+    let pod3 = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    assert_ne!(pod2, pod3);
+    assert_eq!(router.get_pod(&pod3).unwrap().resume_artifact, Some(artifact2));
+}
+
+/// 39. Scavenge on suspendable workload with no demand — should behave like
+///     normal scavenge (no suspend, just cleanup since pod is already gone).
+#[test]
+fn scavenge_clears_suspended_artifact() {
+    let mut router = Router::new(16);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+
+    // Suspend successfully.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+    let artifact = ArtifactId(600);
+    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.suspended_artifact, Some(artifact));
+
+    // Scavenge with no demand — should clear the artifact.
+    router.send_admin_command(mgmt, W1, AdminCmd::Scavenge);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.suspended_artifact, None);
+    assert!(wl.pod_id.is_none());
+}
+
+// ============================================================================
+// Service idle timeout + BackendNeed tests
+// ============================================================================
+
+/// 40. Traffic-triggered activation: idle service receives BackendNeed(Traffic)
+///     from worker → activates → demand → pod boots.
+#[test]
+fn traffic_triggered_activation() {
+    let mut router = Router::new(16);
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new());
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Service is idle, no demand.
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::Idle);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+
+    // Worker reports traffic → service activates.
+    router.set_worker_to_service_edges(worker, vec![S1]);
+    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.propagate();
+
+    // Service: Idle → NeedBackend, demand=true.
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::NeedBackend);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.has_demand);
+    assert!(wl.pod_id.is_some());
+
+    // Make pod running.
+    let pod_id = wl.pod_id.unwrap();
+    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
+    router.propagate();
+
+    // Service should be Active.
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+}
+
+/// 41. Idle timeout deactivation: running service, traffic stops → idle timer
+///     fires → service deactivates → demand drops → workload destroys pod.
+#[test]
+fn idle_timeout_deactivation() {
+    let mut router = Router::new(16);
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new());
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true));
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Traffic activates the service.
+    router.set_worker_to_service_edges(worker, vec![S1]);
+    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.propagate();
+
+    // Make pod running.
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(!s1.idle_timer_active);
+
+    // Traffic stops → idle timer starts.
+    router.set_worker_backend_need(worker, BackendNeed::None);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. })); // still active
+    assert!(s1.idle_timer_active);
+    assert_eq!(s1.idle_generation, 1);
+
+    // Fire the idle timer → service deactivates.
+    router.send_service_timer_fired(mgmt, S1, ServiceTimerKey::IdleTimeout);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::Idle);
+    assert!(!s1.idle_timer_active);
+
+    // Demand should be gone → workload destroyed the pod.
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+    assert!(wl.pod_id.is_none());
+}
+
+/// 42. Traffic cancels idle timer: idle timer running, new traffic arrives →
+///     timer cancelled, service stays active.
+#[test]
+fn traffic_cancels_idle_timer() {
+    let mut router = Router::new(16);
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new());
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true));
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Traffic → activate → pod running.
+    router.set_worker_to_service_edges(worker, vec![S1]);
+    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.propagate();
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
+    router.propagate();
+
+    // Traffic stops → idle timer starts.
+    router.set_worker_backend_need(worker, BackendNeed::None);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(s1.idle_timer_active);
+
+    // Traffic returns → idle timer cancelled.
+    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(!s1.idle_timer_active);
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+
+    // Demand still present.
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.has_demand);
+    assert!(wl.pod_running);
+}
+
+/// 43. Idle timeout + suspend integration: full chain from traffic loss → idle
+///     timer → service deactivates → demand drops → workload suspends pod →
+///     artifact saved.
+#[test]
+fn idle_timeout_suspend_integration() {
+    let mut router = Router::new(16);
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new_suspendable());
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true));
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Traffic → activate → pod running.
+    router.set_worker_to_service_edges(worker, vec![S1]);
+    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.propagate();
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
+    router.propagate();
+
+    assert!(matches!(
+        router.get_service(&S1).unwrap().state,
+        ServiceState::Active { .. }
+    ));
+    assert!(router.get_workload(&W1).unwrap().pod_running);
+
+    // Traffic stops → idle timer starts.
+    router.set_worker_backend_need(worker, BackendNeed::None);
+    router.propagate();
+
+    assert!(router.get_service(&S1).unwrap().idle_timer_active);
+
+    // Idle timer fires → service deactivates → demand drops →
+    // workload signals pod to suspend (suspend_on_idle=true).
+    router.send_service_timer_fired(mgmt, S1, ServiceTimerKey::IdleTimeout);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::Idle);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+    assert!(wl.awaiting_suspend);
+
+    // Pod should be suspending.
+    let pod = router.get_pod(&pod_id).unwrap();
+    assert_eq!(pod.status, PodStatus::Suspending);
+
+    // Worker completes suspend.
+    let artifact = ArtifactId(42);
+    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    router.propagate();
+
+    // Workload saved artifact, pod reaped.
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.awaiting_suspend);
+    assert!(wl.pod_id.is_none());
+    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert!(router.get_pod(&pod_id).is_none());
+}
+
+/// 44. Worker loss removes backend need: worker providing traffic dies →
+///     BackendNeed aggregates to None → idle timer starts.
+#[test]
+fn worker_loss_removes_backend_need() {
+    let mut router = Router::new(16);
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new());
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true));
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Traffic → activate → pod running.
+    router.set_worker_to_service_edges(worker, vec![S1]);
+    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.propagate();
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
+    router.propagate();
+
+    assert!(matches!(
+        router.get_service(&S1).unwrap().state,
+        ServiceState::Active { .. }
+    ));
+    assert!(!router.get_service(&S1).unwrap().idle_timer_active);
+
+    // Worker dies → BackendNeed aggregates to None → idle timer starts.
+    // (Pod also fails, but service idle timer is the focus here.)
+    router.destroy_worker(worker);
+    router.propagate();
+
+    // Service lost readiness (pod failed) → back to NeedBackend.
+    // Idle timer should have been cleared when readiness was lost
+    // (Active→NeedBackend transition clears idle timer).
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::NeedBackend);
+    assert!(!s1.idle_timer_active);
+}
+
+/// 45. Multiple workers, one loses traffic: two workers with traffic, one drops
+///     to None → aggregate still Traffic → no idle timer.
+#[test]
+fn multiple_workers_one_loses_traffic() {
+    let mut router = Router::new(16);
+    let worker1 = router.create_worker();
+    let worker2 = router.create_worker();
+    router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+
+    let mgmt = router.create_management();
+    router.create_workload(W1, WorkloadSm::new());
+    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+
+    router.create_service(S1, ServiceSm::new(true));
+    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+        },
+    );
+    router.propagate();
+
+    // Both workers report traffic.
+    router.set_worker_to_service_edges(worker1, vec![S1]);
+    router.set_worker_to_service_edges(worker2, vec![S1]);
+    router.set_worker_backend_need(worker1, BackendNeed::Traffic);
+    router.set_worker_backend_need(worker2, BackendNeed::Traffic);
+    router.propagate();
+
+    // Service activated via traffic.
+    let s1 = router.get_service(&S1).unwrap();
+    assert_eq!(s1.state, ServiceState::NeedBackend);
+
+    // Make pod running.
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.set_worker_to_pod_edges(worker1, vec![pod_id]);
+    router.send_notify_pod_status(worker1, pod_id, PodStatus::Running);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(!s1.idle_timer_active);
+
+    // Worker1 drops to None → aggregate still Traffic (worker2 has Traffic).
+    router.set_worker_backend_need(worker1, BackendNeed::None);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(!s1.idle_timer_active); // no idle timer — still has traffic
+
+    // Worker1 reports Active (highest priority) → still no idle timer.
+    router.set_worker_backend_need(worker1, BackendNeed::Active);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(!s1.idle_timer_active);
+
+    // Worker1 back to None.
+    router.set_worker_backend_need(worker1, BackendNeed::None);
+    router.propagate();
+
+    // Worker2 also drops → aggregate None → idle timer starts.
+    router.set_worker_backend_need(worker2, BackendNeed::None);
+    router.propagate();
+
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(s1.idle_timer_active); // now idle timer starts
 }

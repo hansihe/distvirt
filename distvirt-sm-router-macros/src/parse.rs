@@ -12,6 +12,7 @@ mod kw {
     syn::custom_keyword!(aggregator);
     syn::custom_keyword!(events);
     syn::custom_keyword!(expose_internals_for_testing);
+    syn::custom_keyword!(invariants);
     syn::custom_keyword!(auto);
 }
 
@@ -23,6 +24,7 @@ pub struct TopologyDef {
     pub edges: Vec<EdgeDef>,
     pub events: Vec<EventDef>,
     pub inputs: Vec<InputDef>,
+    pub invariants: Vec<InvariantDef>,
 }
 
 pub struct SmDef {
@@ -71,6 +73,12 @@ pub struct SourcePair {
     pub signal: Ident,
 }
 
+pub struct InvariantDef {
+    pub node: Ident,
+    pub signal: Ident,
+    pub expr: syn::Expr,
+}
+
 impl Parse for TopologyDef {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut expose_internals = false;
@@ -80,6 +88,7 @@ impl Parse for TopologyDef {
         let mut edges = Vec::new();
         let mut events = Vec::new();
         let mut inputs = Vec::new();
+        let mut invariants = Vec::new();
 
         // Optional leading flag
         if input.peek(kw::expose_internals_for_testing) {
@@ -93,48 +102,58 @@ impl Parse for TopologyDef {
                 input.parse::<kw::state_machines>()?;
                 let content;
                 braced!(content in input);
-                state_machines =
+                state_machines.extend(
                     Punctuated::<SmDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter()
-                        .collect();
+                        .into_iter(),
+                );
             } else if lookahead.peek(kw::ports) {
                 input.parse::<kw::ports>()?;
                 let content;
                 braced!(content in input);
-                ports = Punctuated::<PortDef, Token![,]>::parse_terminated(&content)?
-                    .into_iter()
-                    .collect();
+                ports.extend(
+                    Punctuated::<PortDef, Token![,]>::parse_terminated(&content)?
+                        .into_iter(),
+                );
             } else if lookahead.peek(kw::signals) {
                 input.parse::<kw::signals>()?;
                 let content;
                 braced!(content in input);
-                signals =
+                signals.extend(
                     Punctuated::<SignalDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter()
-                        .collect();
+                        .into_iter(),
+                );
             } else if lookahead.peek(kw::edges) {
                 input.parse::<kw::edges>()?;
                 let content;
                 braced!(content in input);
-                edges = Punctuated::<EdgeDef, Token![,]>::parse_terminated(&content)?
-                    .into_iter()
-                    .collect();
+                edges.extend(
+                    Punctuated::<EdgeDef, Token![,]>::parse_terminated(&content)?
+                        .into_iter(),
+                );
             } else if lookahead.peek(kw::events) {
                 input.parse::<kw::events>()?;
                 let content;
                 braced!(content in input);
-                events =
+                events.extend(
                     Punctuated::<EventDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter()
-                        .collect();
+                        .into_iter(),
+                );
             } else if lookahead.peek(kw::inputs) {
                 input.parse::<kw::inputs>()?;
                 let content;
                 braced!(content in input);
-                inputs =
+                inputs.extend(
                     Punctuated::<InputDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter()
-                        .collect();
+                        .into_iter(),
+                );
+            } else if lookahead.peek(kw::invariants) {
+                input.parse::<kw::invariants>()?;
+                let content;
+                braced!(content in input);
+                invariants.extend(
+                    Punctuated::<InvariantDef, Token![,]>::parse_terminated(&content)?
+                        .into_iter(),
+                );
             } else {
                 return Err(lookahead.error());
             }
@@ -148,6 +167,7 @@ impl Parse for TopologyDef {
             edges,
             events,
             inputs,
+            invariants,
         })
     }
 }
@@ -277,6 +297,23 @@ impl Parse for EventDef {
             payload_type,
             sender,
             receiver,
+        })
+    }
+}
+
+// Alpha::Demand(*value)
+impl Parse for InvariantDef {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let node: Ident = input.parse()?;
+        input.parse::<Token![::]>()?;
+        let signal: Ident = input.parse()?;
+        let content;
+        parenthesized!(content in input);
+        let expr: syn::Expr = content.parse()?;
+        Ok(InvariantDef {
+            node,
+            signal,
+            expr,
         })
     }
 }

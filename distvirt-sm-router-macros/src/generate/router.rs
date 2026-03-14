@@ -1,701 +1,10 @@
 use crate::parse::*;
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
-use syn::Ident;
+use quote::{format_ident, quote, ToTokens};
 
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.extend(c.to_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
+use super::helpers::*;
 
-fn snake_ident(s: &str) -> Ident {
-    format_ident!("{}", to_snake_case(s))
-}
-
-/// Returns the ID type tokens for a node. For auto-ID nodes, generates `{Name}Id`.
-fn node_id_type(def: &TopologyDef, node: &Ident) -> TokenStream {
-    if let Some(sm) = def.state_machines.iter().find(|s| s.name == *node) {
-        sm_id_type(sm)
-    } else if let Some(port) = def.ports.iter().find(|p| p.name == *node) {
-        port_id_type(port)
-    } else {
-        panic!("unknown node: {}", node)
-    }
-}
-
-fn sm_id_type(sm: &SmDef) -> TokenStream {
-    match &sm.id_type {
-        Some(ty) => quote! { #ty },
-        None => {
-            let id = format_ident!("{}Id", sm.name);
-            quote! { #id }
-        }
-    }
-}
-
-fn port_id_type(port: &PortDef) -> TokenStream {
-    match &port.id_type {
-        Some(ty) => quote! { #ty },
-        None => {
-            let id = format_ident!("{}Id", port.name);
-            quote! { #id }
-        }
-    }
-}
-
-fn is_sm_node(def: &TopologyDef, node: &Ident) -> bool {
-    def.state_machines.iter().any(|s| s.name == *node)
-}
-
-fn signal_field(sig: &SignalDef) -> Ident {
-    format_ident!(
-        "{}_{}",
-        to_snake_case(&sig.node.to_string()),
-        to_snake_case(&sig.signal.to_string())
-    )
-}
-
-fn edge_snake(edge: &EdgeDef) -> String {
-    to_snake_case(&edge.name.to_string())
-}
-
-fn last_field(inp: &InputDef) -> Ident {
-    format_ident!(
-        "last_{}_{}",
-        to_snake_case(&inp.node.to_string()),
-        to_snake_case(&inp.input_name.to_string())
-    )
-}
-
-fn dirty_variant(inp: &InputDef) -> Ident {
-    format_ident!("{}{}", inp.node, inp.input_name)
-}
-
-fn validate(def: &TopologyDef) {
-    let is_node = |name: &Ident| -> bool {
-        def.state_machines.iter().any(|s| s.name == *name)
-            || def.ports.iter().any(|p| p.name == *name)
-    };
-
-    for sig in &def.signals {
-        assert!(
-            is_node(&sig.node),
-            "unknown node in signal: {}",
-            sig.node
-        );
-    }
-    for ev in &def.events {
-        assert!(
-            is_node(&ev.sender),
-            "unknown sender in event {}: {}",
-            ev.name,
-            ev.sender
-        );
-        assert!(
-            def.state_machines.iter().any(|s| s.name == ev.receiver),
-            "event {} receiver {} must be a state machine",
-            ev.name,
-            ev.receiver
-        );
-        // Verify at least one edge type connects sender and receiver (either direction)
-        let has_connecting_edge = def.edges.iter().any(|e| {
-            (e.source == ev.sender && e.target == ev.receiver)
-                || (e.source == ev.receiver && e.target == ev.sender)
-        });
-        assert!(
-            has_connecting_edge,
-            "event {}: no edge type connects {} and {}",
-            ev.name,
-            ev.sender,
-            ev.receiver
-        );
-    }
-    for edge in &def.edges {
-        assert!(
-            is_node(&edge.source),
-            "unknown source in edge {}: {}",
-            edge.name,
-            edge.source
-        );
-        assert!(
-            is_node(&edge.target),
-            "unknown target in edge {}: {}",
-            edge.name,
-            edge.target
-        );
-    }
-    for inp in &def.inputs {
-        assert!(
-            def.state_machines.iter().any(|s| s.name == inp.node),
-            "input {} targets non-SM node {}",
-            inp.input_name,
-            inp.node
-        );
-        for sp in &inp.sources {
-            assert!(
-                def.edges.iter().any(|e| e.name == sp.edge),
-                "input {}::{} references unknown edge {}",
-                inp.node,
-                inp.input_name,
-                sp.edge
-            );
-            assert!(
-                def.signals
-                    .iter()
-                    .any(|s| s.node == sp.node && s.signal == sp.signal),
-                "input {}::{} references unknown signal {}::{}",
-                inp.node,
-                inp.input_name,
-                sp.node,
-                sp.signal
-            );
-            let edge_def = def.edges.iter().find(|e| e.name == sp.edge).unwrap();
-            assert!(
-                edge_def.source == sp.node,
-                "input {}::{}: edge {} source is {}, but signal is on {}",
-                inp.node,
-                inp.input_name,
-                sp.edge,
-                edge_def.source,
-                sp.node
-            );
-            assert!(
-                edge_def.target == inp.node,
-                "input {}::{}: edge {} target is {}, but input is on {}",
-                inp.node,
-                inp.input_name,
-                sp.edge,
-                edge_def.target,
-                inp.node
-            );
-        }
-    }
-}
-
-pub fn generate(def: &TopologyDef) -> TokenStream {
-    validate(def);
-
-    let auto_id_types = gen_auto_id_types(def);
-    let signal_bounds = gen_signal_bound_checks(def);
-    let source_enums = gen_source_enums(def);
-    let input_enums = gen_input_enums(def);
-    let ctx_structs = gen_ctx_structs(def);
-    let dirty_enum = gen_dirty_enum(def);
-    let pending_event_enum = gen_pending_event_enum(def);
-    let router_module = gen_router_module(def);
-
-    quote! {
-        #auto_id_types
-        #signal_bounds
-        #source_enums
-        #input_enums
-        #ctx_structs
-        #dirty_enum
-        #pending_event_enum
-        #router_module
-    }
-}
-
-/// Generate compile-time checks that signal value types implement PartialEq and Debug.
-/// Produces clear error messages pointing at the user's type rather than generated code.
-fn gen_signal_bound_checks(def: &TopologyDef) -> TokenStream {
-    let checks: Vec<_> = def
-        .signals
-        .iter()
-        .map(|sig| {
-            let vt = &sig.value_type;
-            let eq_fn = format_ident!(
-                "__assert_signal_partial_eq_{}_{}",
-                to_snake_case(&sig.node.to_string()),
-                to_snake_case(&sig.signal.to_string())
-            );
-            let dbg_fn = format_ident!(
-                "__assert_signal_debug_{}_{}",
-                to_snake_case(&sig.node.to_string()),
-                to_snake_case(&sig.signal.to_string())
-            );
-            quote! {
-                #[doc(hidden)]
-                const fn #eq_fn<T: PartialEq>() {}
-                const _: () = #eq_fn::<#vt>();
-                #[doc(hidden)]
-                const fn #dbg_fn<T: std::fmt::Debug>() {}
-                const _: () = #dbg_fn::<#vt>();
-            }
-        })
-        .collect();
-
-    quote! { #(#checks)* }
-}
-
-/// Generate newtype ID structs for auto-ID nodes.
-fn gen_auto_id_types(def: &TopologyDef) -> TokenStream {
-    let mut types = Vec::new();
-
-    for sm in &def.state_machines {
-        if sm.id_type.is_none() {
-            let id_name = format_ident!("{}Id", sm.name);
-            types.push(quote! {
-                #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-                #[allow(dead_code)]
-                struct #id_name(u64);
-            });
-        }
-    }
-
-    for port in &def.ports {
-        if port.id_type.is_none() {
-            let id_name = format_ident!("{}Id", port.name);
-            types.push(quote! {
-                #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-                #[allow(dead_code)]
-                struct #id_name(u64);
-            });
-        }
-    }
-
-    quote! { #(#types)* }
-}
-
-fn gen_source_enums(def: &TopologyDef) -> TokenStream {
-    let enums: Vec<_> = def
-        .inputs
-        .iter()
-        .filter(|inp| inp.sources.len() >= 2)
-        .map(|inp| {
-            let enum_name = format_ident!("{}Source", inp.input_name);
-            let variants: Vec<_> = inp
-                .sources
-                .iter()
-                .map(|sp| {
-                    let variant_name = format_ident!("{}{}", sp.node, sp.signal);
-                    let src_id = node_id_type(def, &sp.node);
-                    let sig = def
-                        .signals
-                        .iter()
-                        .find(|s| s.node == sp.node && s.signal == sp.signal)
-                        .unwrap();
-                    let vt = &sig.value_type;
-                    quote! { #variant_name(#src_id, #vt) }
-                })
-                .collect();
-
-            quote! {
-                #[derive(Debug, Clone, PartialEq)]
-                #[allow(dead_code)]
-                enum #enum_name {
-                    #(#variants,)*
-                }
-            }
-        })
-        .collect();
-
-    quote! { #(#enums)* }
-}
-
-fn gen_input_enums(def: &TopologyDef) -> TokenStream {
-    let enums: Vec<_> = def
-        .state_machines
-        .iter()
-        .map(|sm| {
-            let enum_name = format_ident!("{}Input", sm.name);
-
-            let input_variants: Vec<_> = def
-                .inputs
-                .iter()
-                .filter(|inp| inp.node == sm.name)
-                .map(|inp| {
-                    let variant = &inp.input_name;
-                    let agg = &inp.aggregator;
-                    quote! {
-                        #variant(<#agg as crate::Aggregator>::Output)
-                    }
-                })
-                .collect();
-
-            let event_variants: Vec<_> = def
-                .events
-                .iter()
-                .filter(|ev| ev.receiver == sm.name)
-                .map(|ev| {
-                    let variant = &ev.name;
-                    let payload = &ev.payload_type;
-                    quote! {
-                        #variant(#payload)
-                    }
-                })
-                .collect();
-
-            quote! {
-                #[derive(Debug, PartialEq)]
-                #[allow(dead_code)]
-                enum #enum_name {
-                    #(#input_variants,)*
-                    #(#event_variants,)*
-                }
-            }
-        })
-        .collect();
-
-    quote! { #(#enums)* }
-}
-
-fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
-    let structs: Vec<_> = def
-        .state_machines
-        .iter()
-        .map(|sm| {
-            let ctx_name = format_ident!("{}Ctx", sm.name);
-            let id_type = sm_id_type(sm);
-
-            // Signals this SM produces
-            let signals: Vec<_> = def
-                .signals
-                .iter()
-                .filter(|s| s.node == sm.name)
-                .collect();
-
-            // Outgoing edges from this SM
-            let out_edges: Vec<_> =
-                def.edges.iter().filter(|e| e.source == sm.name).collect();
-
-            // Events this SM can send
-            let out_events: Vec<_> = def
-                .events
-                .iter()
-                .filter(|ev| ev.sender == sm.name)
-                .collect();
-
-            // Struct fields
-            let signal_fields: Vec<_> = signals
-                .iter()
-                .map(|sig| {
-                    let f = format_ident!("{}", to_snake_case(&sig.signal.to_string()));
-                    let vt = &sig.value_type;
-                    quote! { #f: Option<#vt> }
-                })
-                .collect();
-
-            let edge_fields: Vec<_> = out_edges
-                .iter()
-                .map(|edge| {
-                    let f = format_ident!("{}", edge_snake(edge));
-                    let tgt_id = node_id_type(def, &edge.target);
-                    quote! { #f: Option<Vec<#tgt_id>> }
-                })
-                .collect();
-
-            let event_fields: Vec<_> = out_events
-                .iter()
-                .map(|ev| {
-                    let f = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
-                    let receiver_id = node_id_type(def, &ev.receiver);
-                    let payload = &ev.payload_type;
-                    quote! { #f: Vec<(#receiver_id, #payload)> }
-                })
-                .collect();
-
-            // SM lifecycle fields: create/destroy for each SM type
-            let create_fields: Vec<_> = def
-                .state_machines
-                .iter()
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "pending_create_{}",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    let tid = sm_id_type(target_sm);
-                    let handler = &target_sm.handler_type;
-                    quote! { #f: Vec<(#tid, #handler)> }
-                })
-                .collect();
-
-            let destroy_fields: Vec<TokenStream> = vec![
-                quote! { pending_self_destruct: bool },
-            ];
-
-            let counter_fields: Vec<_> = def
-                .state_machines
-                .iter()
-                .filter(|s| s.id_type.is_none())
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "next_{}_id",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f: u64 }
-                })
-                .collect();
-
-            // Constructor init
-            let signal_inits: Vec<_> = signals
-                .iter()
-                .map(|sig| {
-                    let f = format_ident!("{}", to_snake_case(&sig.signal.to_string()));
-                    quote! { #f: None }
-                })
-                .collect();
-
-            let event_inits: Vec<_> = out_events
-                .iter()
-                .map(|ev| {
-                    let f = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
-                    quote! { #f: Vec::new() }
-                })
-                .collect();
-
-            let edge_inits: Vec<_> = out_edges
-                .iter()
-                .map(|edge| {
-                    let f = format_ident!("{}", edge_snake(edge));
-                    quote! { #f: None }
-                })
-                .collect();
-
-            let create_inits: Vec<_> = def
-                .state_machines
-                .iter()
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "pending_create_{}",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f: Vec::new() }
-                })
-                .collect();
-
-            let destroy_inits: Vec<TokenStream> = vec![
-                quote! { pending_self_destruct: false },
-            ];
-
-            // Counter constructor params and pass-through inits
-            let counter_params: Vec<_> = def
-                .state_machines
-                .iter()
-                .filter(|s| s.id_type.is_none())
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "next_{}_id",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f: u64 }
-                })
-                .collect();
-
-            let counter_inits: Vec<_> = def
-                .state_machines
-                .iter()
-                .filter(|s| s.id_type.is_none())
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "next_{}_id",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f }
-                })
-                .collect();
-
-            // Signal setters
-            let signal_setters: Vec<_> = signals
-                .iter()
-                .map(|sig| {
-                    let field =
-                        format_ident!("{}", to_snake_case(&sig.signal.to_string()));
-                    let method =
-                        format_ident!("set_{}", to_snake_case(&sig.signal.to_string()));
-                    let vt = &sig.value_type;
-                    quote! {
-                        #[allow(dead_code)]
-                        pub fn #method(&mut self, value: #vt) {
-                            self.#field = Some(value);
-                        }
-                    }
-                })
-                .collect();
-
-            // Event send methods
-            let event_senders: Vec<_> = out_events
-                .iter()
-                .map(|ev| {
-                    let method = format_ident!("send_{}", to_snake_case(&ev.name.to_string()));
-                    let field = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
-                    let receiver_id = node_id_type(def, &ev.receiver);
-                    let payload = &ev.payload_type;
-                    quote! {
-                        #[allow(dead_code)]
-                        pub fn #method(&mut self, target: #receiver_id, payload: #payload) {
-                            self.#field.push((target, payload));
-                        }
-                    }
-                })
-                .collect();
-
-            // Edge setters
-            let edge_setters: Vec<_> = out_edges
-                .iter()
-                .map(|edge| {
-                    let method = format_ident!("set_{}_edges", edge_snake(edge));
-                    let field = format_ident!("{}", edge_snake(edge));
-                    let tgt_id = node_id_type(def, &edge.target);
-                    quote! {
-                        #[allow(dead_code)]
-                        pub fn #method(&mut self, targets: impl IntoIterator<Item = #tgt_id>) {
-                            self.#field = Some(targets.into_iter().collect());
-                        }
-                    }
-                })
-                .collect();
-
-            // SM create methods
-            let create_methods: Vec<_> = def
-                .state_machines
-                .iter()
-                .map(|target_sm| {
-                    let target_snake = to_snake_case(&target_sm.name.to_string());
-                    let method = format_ident!("create_{}", target_snake);
-                    let field = format_ident!("pending_create_{}", target_snake);
-                    let tid = sm_id_type(target_sm);
-                    let handler = &target_sm.handler_type;
-
-                    if target_sm.id_type.is_none() {
-                        let id_name = format_ident!("{}Id", target_sm.name);
-                        let counter = format_ident!("next_{}_id", target_snake);
-                        quote! {
-                            #[allow(dead_code)]
-                            pub fn #method(&mut self, sm: #handler) -> #tid {
-                                let id = #id_name(self.#counter);
-                                self.#counter += 1;
-                                self.#field.push((id, sm));
-                                id
-                            }
-                        }
-                    } else {
-                        quote! {
-                            #[allow(dead_code)]
-                            pub fn #method(&mut self, id: #tid, sm: #handler) {
-                                self.#field.push((id, sm));
-                            }
-                        }
-                    }
-                })
-                .collect();
-
-            // Self-destruct method
-            let destroy_methods: Vec<TokenStream> = vec![
-                quote! {
-                    #[allow(dead_code)]
-                    pub fn self_destruct(&mut self) {
-                        self.pending_self_destruct = true;
-                    }
-                },
-            ];
-
-            quote! {
-                #[allow(dead_code)]
-                struct #ctx_name {
-                    #[allow(dead_code)]
-                    id: #id_type,
-                    #(#signal_fields,)*
-                    #(#edge_fields,)*
-                    #(#event_fields,)*
-                    #(#create_fields,)*
-                    #(#destroy_fields,)*
-                    #(#counter_fields,)*
-                }
-
-                #[allow(dead_code)]
-                impl #ctx_name {
-                    fn new(id: #id_type #(, #counter_params)*) -> Self {
-                        #ctx_name {
-                            id,
-                            #(#signal_inits,)*
-                            #(#edge_inits,)*
-                            #(#event_inits,)*
-                            #(#create_inits,)*
-                            #(#destroy_inits,)*
-                            #(#counter_inits,)*
-                        }
-                    }
-
-                    #[allow(dead_code)]
-                    pub fn id(&self) -> #id_type {
-                        self.id
-                    }
-
-                    #(#signal_setters)*
-                    #(#edge_setters)*
-                    #(#event_senders)*
-                    #(#create_methods)*
-                    #(#destroy_methods)*
-                }
-            }
-        })
-        .collect();
-
-    quote! { #(#structs)* }
-}
-
-fn gen_dirty_enum(def: &TopologyDef) -> TokenStream {
-    let variants: Vec<_> = def
-        .inputs
-        .iter()
-        .map(|inp| {
-            let variant = dirty_variant(inp);
-            let id_type = node_id_type(def, &inp.node);
-            quote! { #variant(#id_type) }
-        })
-        .collect();
-
-    quote! {
-        #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-        #[allow(dead_code)]
-        enum DirtyInput {
-            #(#variants,)*
-        }
-    }
-}
-
-fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
-    if def.events.is_empty() {
-        return quote! {
-            #[derive(Debug)]
-            #[allow(dead_code)]
-            enum PendingEvent {}
-        };
-    }
-
-    let variants: Vec<_> = def
-        .events
-        .iter()
-        .map(|ev| {
-            let variant = &ev.name;
-            let sender_id = node_id_type(def, &ev.sender);
-            let receiver_id = node_id_type(def, &ev.receiver);
-            let payload = &ev.payload_type;
-            quote! { #variant(#sender_id, #receiver_id, #payload) }
-        })
-        .collect();
-
-    quote! {
-        #[derive(Debug)]
-        #[allow(dead_code)]
-        enum PendingEvent {
-            #(#variants,)*
-        }
-    }
-}
-
-fn gen_router_module(def: &TopologyDef) -> TokenStream {
+pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     let expose = def.expose_internals;
 
     // Determine field visibility
@@ -780,6 +89,19 @@ fn gen_router_module(def: &TopologyDef) -> TokenStream {
         }
     }
 
+    // Port input output queues
+    for port in &def.ports {
+        let has_inputs = def.inputs.iter().any(|inp| inp.node == port.name);
+        if has_inputs {
+            let f = format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
+            let id = port_id_type(port);
+            let port_input_enum = format_ident!("{}PortInput", port.name);
+            let vis = &field_vis;
+            fields.push(quote! { #vis #f: Vec<(#id, #port_input_enum)> });
+            inits.push(quote! { #f: Vec::new() });
+        }
+    }
+
     // Dirty queue, pending events, depth limit, tracer
     fields.push(quote! { dirty: std::collections::VecDeque<DirtyInput> });
     fields.push(quote! { pending_events: std::collections::VecDeque<PendingEvent> });
@@ -812,6 +134,9 @@ fn gen_router_module(def: &TopologyDef) -> TokenStream {
     gen_remove_methods(def, &mut public_methods);
     gen_sm_accessors(def, &mut public_methods);
     gen_propagate(def, &mut public_methods);
+
+    // Always public: port input drain methods
+    gen_drain_port_inputs(def, &mut public_methods);
 
     // Always public: port signal/edge setters, port event senders
     // Internal: SM signal/edge setters
@@ -895,9 +220,10 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self, sm: #handler) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
-                    if let Some(__tracer) = &mut self.tracer {
-                        __tracer.sm_created(#node_str, &id as &dyn std::fmt::Debug);
-                    }
+                    self.tracer.trace(crate::trace::TraceEvent::SmCreated {
+                        node: #node_str,
+                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    });
                     self.#instances.insert(id, sm);
                     #(#sig_inits)*
                     id
@@ -907,9 +233,10 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type, sm: #handler) {
-                    if let Some(__tracer) = &mut self.tracer {
-                        __tracer.sm_created(#node_str, &id as &dyn std::fmt::Debug);
-                    }
+                    self.tracer.trace(crate::trace::TraceEvent::SmCreated {
+                        node: #node_str,
+                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    });
                     self.#instances.insert(id, sm);
                     #(#sig_inits)*
                 }
@@ -942,9 +269,10 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
-                    if let Some(__tracer) = &mut self.tracer {
-                        __tracer.port_created(#node_str, &id as &dyn std::fmt::Debug);
-                    }
+                    self.tracer.trace(crate::trace::TraceEvent::PortCreated {
+                        node: #node_str,
+                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    });
                     self.#instances.insert(id);
                     #(#sig_inits)*
                     id
@@ -954,9 +282,10 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type) {
-                    if let Some(__tracer) = &mut self.tracer {
-                        __tracer.port_created(#node_str, &id as &dyn std::fmt::Debug);
-                    }
+                    self.tracer.trace(crate::trace::TraceEvent::PortCreated {
+                        node: #node_str,
+                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    });
                     self.#instances.insert(id);
                     #(#sig_inits)*
                 }
@@ -1067,15 +396,54 @@ fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             })
             .collect();
 
+        let last_removes: Vec<_> = def
+            .inputs
+            .iter()
+            .filter(|inp| inp.node == port.name)
+            .map(|inp| {
+                let f = last_field(inp);
+                quote! { self.#f.remove(&id); }
+            })
+            .collect();
+
+        let queue_retains: Vec<_> = if def.inputs.iter().any(|inp| inp.node == port.name) {
+            let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
+            vec![quote! { self.#pending_field.retain(|(pid, _)| *pid != id); }]
+        } else {
+            vec![]
+        };
+
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) {
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.port_destroyed(#node_str, &id as &dyn std::fmt::Debug);
-                }
+                self.tracer.trace(crate::trace::TraceEvent::PortDestroyed {
+                    node: #node_str,
+                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                });
                 self.#instances.remove(&id);
                 #(#sig_removes)*
+                #(#last_removes)*
                 #(#edge_clears)*
                 #(#incoming_edge_clears)*
+                #(#queue_retains)*
+            }
+        });
+    }
+}
+
+fn gen_drain_port_inputs(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
+    for port in &def.ports {
+        let has_inputs = def.inputs.iter().any(|inp| inp.node == port.name);
+        if !has_inputs {
+            continue;
+        }
+        let method = format_ident!("drain_{}_inputs", to_snake_case(&port.name.to_string()));
+        let field = format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
+        let id_type = port_id_type(port);
+        let port_input_enum = format_ident!("{}PortInput", port.name);
+
+        methods.push(quote! {
+            fn #method(&mut self) -> Vec<(#id_type, #port_input_enum)> {
+                std::mem::take(&mut self.#field)
             }
         });
     }
@@ -1141,11 +509,13 @@ fn gen_signal_setters(
                 if self.#field.get(&id) == Some(&value) {
                     return;
                 }
-                self.tracer.signal_changed(
-                    #node_str, &id, #signal_str,
-                    &self.#field.get(&id) as &dyn std::fmt::Debug,
-                    &value as &dyn std::fmt::Debug,
-                );
+                self.tracer.trace(crate::trace::TraceEvent::SignalChanged {
+                    node: #node_str,
+                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    signal: #signal_str,
+                    old: crate::trace::DebugValue::Borrowed(&self.#field.get(&id) as &dyn std::fmt::Debug),
+                    new: crate::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
+                });
                 self.#field.insert(id, value);
                 #(#enqueue_code)*
             }
@@ -1201,14 +571,12 @@ fn gen_edge_setters(
                     return;
                 }
 
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.edge_changed(
-                        #edge_str,
-                        &source as &dyn std::fmt::Debug,
-                        &added as &dyn std::fmt::Debug,
-                        &removed as &dyn std::fmt::Debug,
-                    );
-                }
+                self.tracer.trace(crate::trace::TraceEvent::EdgeChanged {
+                    edge: #edge_str,
+                    source: crate::trace::DebugValue::Borrowed(&source as &dyn std::fmt::Debug),
+                    added: crate::trace::DebugValue::Borrowed(&added as &dyn std::fmt::Debug),
+                    removed: crate::trace::DebugValue::Borrowed(&removed as &dyn std::fmt::Debug),
+                });
 
                 if new_targets.is_empty() {
                     self.#fwd.remove(&source);
@@ -1246,7 +614,7 @@ fn gen_edge_setters(
 /// Generate connectivity check code for an event: returns a TokenStream that
 /// evaluates to `bool` — true if any edge connects `sender_id` and `receiver_id`
 /// in either direction.
-fn gen_connectivity_check(def: &TopologyDef, ev: &crate::parse::EventDef) -> TokenStream {
+fn gen_connectivity_check(def: &TopologyDef, ev: &EventDef) -> TokenStream {
     let checks: Vec<_> = def
         .edges
         .iter()
@@ -1302,14 +670,12 @@ fn gen_event_send_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, sender_id: #sender_id, receiver_id: #receiver_id, payload: #payload) {
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.event_queued(
-                        #event_str,
-                        &sender_id as &dyn std::fmt::Debug,
-                        &receiver_id as &dyn std::fmt::Debug,
-                        &payload as &dyn std::fmt::Debug,
-                    );
-                }
+                self.tracer.trace(crate::trace::TraceEvent::EventQueued {
+                    event: #event_str,
+                    sender: crate::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
+                    receiver: crate::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
+                    payload: crate::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                });
                 self.pending_events.push_back(PendingEvent::#variant(sender_id, receiver_id, payload));
             }
         });
@@ -1409,9 +775,10 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
                 quote! {
                     for (new_id, new_sm) in ctx.#ctx_field {
-                        if let Some(__tracer) = &mut self.tracer {
-                            __tracer.sm_created(#target_str, &new_id as &dyn std::fmt::Debug);
-                        }
+                        self.tracer.trace(crate::trace::TraceEvent::SmCreated {
+                            node: #target_str,
+                            id: crate::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
+                        });
                         self.#instances.insert(new_id, new_sm);
                         #(#sig_inits)*
                     }
@@ -1479,14 +846,12 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 let event_str = ev.name.to_string();
                 quote! {
                     for (receiver_id, payload) in ctx.#ctx_field {
-                        if let Some(__tracer) = &mut self.tracer {
-                            __tracer.event_queued(
-                                #event_str,
-                                &id as &dyn std::fmt::Debug,
-                                &receiver_id as &dyn std::fmt::Debug,
-                                &payload as &dyn std::fmt::Debug,
-                            );
-                        }
+                        self.tracer.trace(crate::trace::TraceEvent::EventQueued {
+                            event: #event_str,
+                            sender: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                            receiver: crate::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
+                            payload: crate::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                        });
                         self.pending_events.push_back(PendingEvent::#variant(id, receiver_id, payload));
                     }
                 }
@@ -1503,23 +868,26 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, id: #id_type, ctx: #ctx_name) -> bool {
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.effects_start(#node_str, &id as &dyn std::fmt::Debug);
-                }
+                self.tracer.trace(crate::trace::TraceEvent::EffectsStart {
+                    node: #node_str,
+                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                });
                 #(#create_applies)*
                 #(#counter_updates)*
                 #(#signal_applies)*
                 #(#edge_applies)*
                 #(#event_applies)*
                 if ctx.pending_self_destruct {
-                    if let Some(__tracer) = &mut self.tracer {
-                        __tracer.sm_destroyed(#node_str, &id as &dyn std::fmt::Debug);
-                    }
+                    self.tracer.trace(crate::trace::TraceEvent::SmDestroyed {
+                        node: #node_str,
+                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    });
                 }
                 #self_destruct_apply
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.effects_end(#node_str, &id as &dyn std::fmt::Debug);
-                }
+                self.tracer.trace(crate::trace::TraceEvent::EffectsEnd {
+                    node: #node_str,
+                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                });
                 ctx.pending_self_destruct
             }
         });
@@ -1551,57 +919,88 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 to_snake_case(&inp.input_name.to_string())
             );
             let last = last_field(inp);
-
-            let sm = def
-                .state_machines
-                .iter()
-                .find(|s| s.name == inp.node)
-                .unwrap();
-            let input_enum = format_ident!("{}Input", sm.name);
-            let ctx_name = format_ident!("{}Ctx", sm.name);
-            let input_variant = &inp.input_name;
-            let apply = format_ident!(
-                "apply_{}_effects",
-                to_snake_case(&inp.node.to_string())
-            );
-            let counter_passes = &counter_passes;
             let node_str = inp.node.to_string();
             let input_str = inp.input_name.to_string();
 
-            quote! {
-                DirtyInput::#variant(target_id) => {
-                    if !self.#instances.contains_key(&target_id) {
-                        continue;
-                    }
-                    let result = self.#aggregate(target_id);
-                    if self.#last.get(&target_id) == Some(&result) {
-                        if let Some(__tracer) = &mut self.tracer {
-                            __tracer.input_suppressed(
-                                #node_str,
-                                &target_id as &dyn std::fmt::Debug,
-                                #input_str,
-                            );
+            if is_sm_node(def, &inp.node) {
+                // SM path: remove instance → create ctx → call handler → apply effects → reinsert
+                let sm = def
+                    .state_machines
+                    .iter()
+                    .find(|s| s.name == inp.node)
+                    .unwrap();
+                let input_enum = format_ident!("{}Input", sm.name);
+                let ctx_name = format_ident!("{}Ctx", sm.name);
+                let input_variant = &inp.input_name;
+                let apply = format_ident!(
+                    "apply_{}_effects",
+                    to_snake_case(&inp.node.to_string())
+                );
+                let counter_passes = &counter_passes;
+
+                quote! {
+                    DirtyInput::#variant(target_id) => {
+                        if !self.#instances.contains_key(&target_id) {
+                            continue;
                         }
-                        continue;
+                        let result = self.#aggregate(target_id);
+                        if self.#last.get(&target_id) == Some(&result) {
+                            self.tracer.trace(crate::trace::TraceEvent::InputSuppressed {
+                                node: #node_str,
+                                id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                                input: #input_str,
+                            });
+                            continue;
+                        }
+                        self.#last.insert(target_id, result.clone());
+
+                        self.tracer.trace(crate::trace::TraceEvent::InputDelivered {
+                            node: #node_str,
+                            id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                            input: #input_str,
+                            value: crate::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
+                        });
+
+                        let mut sm = self.#instances.remove(&target_id).unwrap();
+                        let mut ctx = #ctx_name::new(target_id #(#counter_passes)*);
+                        sm.handle(#input_enum::#input_variant(result), &mut ctx);
+
+                        let self_destructed = self.#apply(target_id, ctx);
+                        if !self_destructed {
+                            self.#instances.insert(target_id, sm);
+                        }
                     }
-                    self.#last.insert(target_id, result.clone());
+                }
+            } else {
+                // Port path: check existence → aggregate → dedup → push to output queue
+                let port_input_enum = format_ident!("{}PortInput", inp.node);
+                let input_variant = &inp.input_name;
+                let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&inp.node.to_string()));
 
-                    if let Some(__tracer) = &mut self.tracer {
-                        __tracer.input_delivered(
-                            #node_str,
-                            &target_id as &dyn std::fmt::Debug,
-                            #input_str,
-                            &result as &dyn std::fmt::Debug,
-                        );
-                    }
+                quote! {
+                    DirtyInput::#variant(target_id) => {
+                        if !self.#instances.contains(&target_id) {
+                            continue;
+                        }
+                        let result = self.#aggregate(target_id);
+                        if self.#last.get(&target_id) == Some(&result) {
+                            self.tracer.trace(crate::trace::TraceEvent::InputSuppressed {
+                                node: #node_str,
+                                id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                                input: #input_str,
+                            });
+                            continue;
+                        }
+                        self.#last.insert(target_id, result.clone());
 
-                    let mut sm = self.#instances.remove(&target_id).unwrap();
-                    let mut ctx = #ctx_name::new(target_id #(#counter_passes)*);
-                    sm.handle(#input_enum::#input_variant(result), &mut ctx);
+                        self.tracer.trace(crate::trace::TraceEvent::InputDelivered {
+                            node: #node_str,
+                            id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                            input: #input_str,
+                            value: crate::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
+                        });
 
-                    let self_destructed = self.#apply(target_id, ctx);
-                    if !self_destructed {
-                        self.#instances.insert(target_id, sm);
+                        self.#pending_field.push((target_id, #port_input_enum::#input_variant(result)));
                     }
                 }
             }
@@ -1638,14 +1037,12 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     }
 
                     if let Some(mut sm) = self.#instances.remove(&receiver_id) {
-                        if let Some(__tracer) = &mut self.tracer {
-                            __tracer.event_delivered(
-                                #event_str,
-                                &sender_id as &dyn std::fmt::Debug,
-                                &receiver_id as &dyn std::fmt::Debug,
-                                &payload as &dyn std::fmt::Debug,
-                            );
-                        }
+                        self.tracer.trace(crate::trace::TraceEvent::EventDelivered {
+                            event: #event_str,
+                            sender: crate::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
+                            receiver: crate::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
+                            payload: crate::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                        });
                         let mut ctx = #ctx_name::new(receiver_id #(#counter_passes)*);
                         sm.handle(#input_enum::#variant(payload), &mut ctx);
 
@@ -1659,11 +1056,39 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         })
         .collect();
 
+    let invariant_checks: Vec<TokenStream> = def
+        .invariants
+        .iter()
+        .map(|inv| {
+            let sig = def
+                .signals
+                .iter()
+                .find(|s| s.node == inv.node && s.signal == inv.signal)
+                .expect("invariant references valid signal (validated)");
+            let field = signal_field(sig);
+            let expr = &inv.expr;
+            let node_str = inv.node.to_string();
+            let signal_str = inv.signal.to_string();
+            let expr_str = expr.to_token_stream().to_string();
+            quote! {
+                for (id, value) in &self.#field {
+                    if !(#expr) {
+                        self.tracer.trace(crate::trace::TraceEvent::InvariantViolation {
+                            node: #node_str,
+                            id: crate::trace::DebugValue::Borrowed(id as &dyn std::fmt::Debug),
+                            signal: #signal_str,
+                            value: crate::trace::DebugValue::Borrowed(value as &dyn std::fmt::Debug),
+                            invariant_expr: #expr_str,
+                        });
+                    }
+                }
+            }
+        })
+        .collect();
+
     methods.push(quote! {
         fn propagate(&mut self) {
-            if let Some(__tracer) = &mut self.tracer {
-                __tracer.propagate_start();
-            }
+            self.tracer.trace(crate::trace::TraceEvent::PropagateStart);
             let mut depth = 0;
 
             while !self.dirty.is_empty() || !self.pending_events.is_empty() {
@@ -1681,9 +1106,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     );
                 }
 
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.round_start(depth);
-                }
+                self.tracer.trace(crate::trace::TraceEvent::RoundStart { depth });
 
                 // Process dirty signal queue
                 let wave: Vec<DirtyInput> = self.dirty.drain(..).collect();
@@ -1707,14 +1130,12 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     }
                 }
 
-                if let Some(__tracer) = &mut self.tracer {
-                    __tracer.round_end(depth);
-                }
+                self.tracer.trace(crate::trace::TraceEvent::RoundEnd { depth });
             }
 
-            if let Some(__tracer) = &mut self.tracer {
-                __tracer.propagate_end(depth);
-            }
+            #(#invariant_checks)*
+
+            self.tracer.trace(crate::trace::TraceEvent::PropagateEnd { rounds: depth });
         }
     });
 }
