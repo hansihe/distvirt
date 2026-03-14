@@ -144,9 +144,10 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     gen_edge_setters(def, &mut public_methods, &mut internal_methods);
     gen_event_send_methods(def, &mut public_methods);
 
-    // Always internal: aggregate, apply_effects
+    // Always internal: aggregate, apply_effects, initialize
     gen_aggregate_methods(def, &mut internal_methods);
     gen_apply_effects(def, &mut internal_methods);
+    gen_initialize_methods(def, &mut internal_methods);
 
     // If expose_internals, internal methods become pub too
     let internal_vis: TokenStream = if expose {
@@ -212,6 +213,8 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             })
             .collect();
 
+        let initialize = format_ident!("initialize_{}_sm", to_snake_case(&sm.name.to_string()));
+
         if sm.id_type.is_none() {
             // Auto-ID: generate ID internally, return it
             let id_name = format_ident!("{}Id", sm.name);
@@ -226,6 +229,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     });
                     self.#instances.insert(id, sm);
                     #(#sig_inits)*
+                    self.#initialize(id);
                     id
                 }
             });
@@ -239,6 +243,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     });
                     self.#instances.insert(id, sm);
                     #(#sig_inits)*
+                    self.#initialize(id);
                 }
             });
         }
@@ -773,6 +778,8 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     })
                     .collect();
 
+                let initialize = format_ident!("initialize_{}_sm", target_snake);
+
                 quote! {
                     for (new_id, new_sm) in ctx.#ctx_field {
                         self.tracer.trace(crate::trace::TraceEvent::SmCreated {
@@ -781,6 +788,7 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                         });
                         self.#instances.insert(new_id, new_sm);
                         #(#sig_inits)*
+                        self.#initialize(new_id);
                     }
                 }
             })
@@ -872,8 +880,8 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     node: #node_str,
                     id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
-                #(#create_applies)*
                 #(#counter_updates)*
+                #(#create_applies)*
                 #(#signal_applies)*
                 #(#edge_applies)*
                 #(#event_applies)*
@@ -889,6 +897,45 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 ctx.pending_self_destruct
+            }
+        });
+    }
+}
+
+fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
+    // Generate counter passing code for Ctx::new calls
+    let counter_passes: Vec<_> = def
+        .state_machines
+        .iter()
+        .filter(|s| s.id_type.is_none())
+        .map(|sm| {
+            let f = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
+            quote! { , self.#f }
+        })
+        .collect();
+
+    for sm in &def.state_machines {
+        let method = format_ident!("initialize_{}_sm", to_snake_case(&sm.name.to_string()));
+        let instances = format_ident!("{}_instances", to_snake_case(&sm.name.to_string()));
+        let id_type = sm_id_type(sm);
+        let ctx_name = format_ident!("{}Ctx", sm.name);
+        let apply = format_ident!("apply_{}_effects", to_snake_case(&sm.name.to_string()));
+        let node_str = sm.name.to_string();
+        let counter_passes = &counter_passes;
+
+        methods.push(quote! {
+            fn #method(&mut self, id: #id_type) {
+                self.tracer.trace(crate::trace::TraceEvent::SmInitialized {
+                    node: #node_str,
+                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                });
+                let mut sm = self.#instances.remove(&id).unwrap();
+                let mut ctx = #ctx_name::new(id #(#counter_passes)*);
+                sm.initialize(&mut ctx);
+                let self_destructed = self.#apply(id, ctx);
+                if !self_destructed {
+                    self.#instances.insert(id, sm);
+                }
             }
         });
     }

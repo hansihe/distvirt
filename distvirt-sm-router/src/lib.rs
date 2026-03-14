@@ -199,10 +199,20 @@ pub trait Aggregator {
 /// applied first (so edges can reference new SMs), then signals, edges, events,
 /// and finally destroys. The router then cascades any resulting changes within
 /// the same round.
+///
+/// ## Lifecycle
+///
+/// - **`initialize`** is called once, immediately after the SM is created (both
+///   for external `router.create_*()` calls and internal `ctx.create_*()` calls).
+///   Use it to set initial signals, edges, or spawn child SMs. Has a default
+///   no-op implementation.
+///
+/// - **`handle`** is called each time an aggregated input or event is delivered.
 pub trait SmHandler {
     type Input;
     type Ctx;
     fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx);
+    fn initialize(&mut self, _ctx: &mut Self::Ctx) {}
 }
 
 /// Built-in aggregator that collects all signal values into a `Vec`.

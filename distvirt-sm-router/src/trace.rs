@@ -259,6 +259,10 @@ pub enum TraceEvent<'a> {
         node: &'static str,
         id: DebugValue<'a>,
     },
+    SmInitialized {
+        node: &'static str,
+        id: DebugValue<'a>,
+    },
     SmDestroyed {
         node: &'static str,
         id: DebugValue<'a>,
@@ -363,6 +367,10 @@ impl<'a> TraceEvent<'a> {
                 node,
                 id: id.into_owned(),
             },
+            TraceEvent::SmInitialized { node, id } => TraceEvent::SmInitialized {
+                node,
+                id: id.into_owned(),
+            },
             TraceEvent::SmDestroyed { node, id } => TraceEvent::SmDestroyed {
                 node,
                 id: id.into_owned(),
@@ -404,6 +412,7 @@ impl<'a> TraceEvent<'a> {
             | TraceEvent::EffectsEnd { node, .. }
             | TraceEvent::SignalChanged { node, .. }
             | TraceEvent::SmCreated { node, .. }
+            | TraceEvent::SmInitialized { node, .. }
             | TraceEvent::SmDestroyed { node, .. }
             | TraceEvent::PortCreated { node, .. }
             | TraceEvent::PortDestroyed { node, .. }
@@ -493,6 +502,10 @@ impl Clone for TraceEvent<'static> {
                 payload: payload.clone(),
             },
             TraceEvent::SmCreated { node, id } => TraceEvent::SmCreated {
+                node,
+                id: id.clone(),
+            },
+            TraceEvent::SmInitialized { node, id } => TraceEvent::SmInitialized {
                 node,
                 id: id.clone(),
             },
@@ -598,6 +611,9 @@ impl Debug for TraceEvent<'_> {
             ),
             TraceEvent::SmCreated { node, id } => {
                 write!(f, "SmCreated {{ node: {:?}, id: {} }}", node, id)
+            }
+            TraceEvent::SmInitialized { node, id } => {
+                write!(f, "SmInitialized {{ node: {:?}, id: {} }}", node, id)
             }
             TraceEvent::SmDestroyed { node, id } => {
                 write!(f, "SmDestroyed {{ node: {:?}, id: {} }}", node, id)
@@ -919,6 +935,10 @@ fn clone_as_event<'a>(event: &'a TraceEvent<'static>) -> TraceEvent<'a> {
             node,
             id: borrow_debug_value(id),
         },
+        TraceEvent::SmInitialized { node, id } => TraceEvent::SmInitialized {
+            node,
+            id: borrow_debug_value(id),
+        },
         TraceEvent::SmDestroyed { node, id } => TraceEvent::SmDestroyed {
             node,
             id: borrow_debug_value(id),
@@ -1005,6 +1025,8 @@ impl TraceSummary {
                 TraceEvent::EventQueued { .. } => s.events_queued += 1,
                 TraceEvent::EventDelivered { .. } => s.events_delivered += 1,
                 TraceEvent::SmCreated { .. } => s.sms_created += 1,
+                TraceEvent::SmInitialized { .. } => {}
+
                 TraceEvent::SmDestroyed { .. } => s.sms_destroyed += 1,
                 TraceEvent::PortCreated { .. } => s.ports_created += 1,
                 TraceEvent::PortDestroyed { .. } => s.ports_destroyed += 1,
@@ -1201,6 +1223,9 @@ pub fn write_trace_tree(
             }
             TraceEvent::SmCreated { node, id } => {
                 writeln!(w, "{}{}create {}({})", prefix, indent, node, id)?;
+            }
+            TraceEvent::SmInitialized { node, id } => {
+                writeln!(w, "{}{}initialize {}({})", prefix, indent, node, id)?;
             }
             TraceEvent::SmDestroyed { node, id } => {
                 writeln!(w, "{}{}destroy {}({})", prefix, indent, node, id)?;

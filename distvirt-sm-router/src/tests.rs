@@ -2156,3 +2156,226 @@ mod invariant_tests {
         assert_eq!(summary.invariant_violations, 1);
     }
 }
+
+// ============================================================================
+// Initialize tests
+// ============================================================================
+
+mod initialize_tests {
+    use crate::{Aggregator, SmHandler};
+    use crate::trace::{RecordingTracer, TraceEvent};
+
+    #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+    struct ParentId(u64);
+
+    #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+    struct ChildId(u64);
+
+    #[derive(Default)]
+    struct CountTrueAgg;
+
+    impl Aggregator for CountTrueAgg {
+        type Input = (ParentId, bool);
+        type Output = u32;
+
+        fn aggregate(&self, inputs: &[(ParentId, bool)]) -> u32 {
+            inputs.iter().filter(|(_, v)| *v).count() as u32
+        }
+    }
+
+    crate::router! {
+        expose_internals_for_testing
+
+        state_machines {
+            Parent(ParentId, ParentSm),
+            Child(ChildId, ChildSm),
+        }
+        ports {}
+        signals {
+            Parent::Flag(bool),
+            Child::Status(u32),
+        }
+        edges {
+            ParentToChild: Parent -> Child,
+        }
+        events {}
+        inputs {
+            Child::FlagInput {
+                sources: [(ParentToChild, Parent::Flag)],
+                aggregator: CountTrueAgg,
+            },
+        }
+    }
+
+    const P1: ParentId = ParentId(1);
+    const C1: ChildId = ChildId(1);
+
+    // --- ParentSm: configurable initialize via closure ---
+
+    struct ParentSm {
+        on_init: Option<Box<dyn FnMut(&mut ParentCtx)>>,
+        on_handle: Option<Box<dyn FnMut(&ParentInput, &mut ParentCtx)>>,
+    }
+
+    impl ParentSm {
+        fn new() -> Self {
+            ParentSm {
+                on_init: None,
+                on_handle: None,
+            }
+        }
+
+        fn with_init(mut self, f: impl FnMut(&mut ParentCtx) + 'static) -> Self {
+            self.on_init = Some(Box::new(f));
+            self
+        }
+
+        #[allow(dead_code)]
+        fn with_handle(mut self, f: impl FnMut(&ParentInput, &mut ParentCtx) + 'static) -> Self {
+            self.on_handle = Some(Box::new(f));
+            self
+        }
+    }
+
+    impl SmHandler for ParentSm {
+        type Input = ParentInput;
+        type Ctx = ParentCtx;
+
+        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+            if let Some(ref mut cb) = self.on_handle {
+                cb(&input, ctx);
+            }
+        }
+
+        fn initialize(&mut self, ctx: &mut Self::Ctx) {
+            if let Some(ref mut cb) = self.on_init {
+                cb(ctx);
+            }
+        }
+    }
+
+    // --- ChildSm: configurable initialize via closure ---
+
+    struct ChildSm {
+        on_init: Option<Box<dyn FnMut(&mut ChildCtx)>>,
+        deliveries: Vec<ChildInput>,
+    }
+
+    impl ChildSm {
+        fn new() -> Self {
+            ChildSm {
+                on_init: None,
+                deliveries: Vec::new(),
+            }
+        }
+
+        fn with_init(mut self, f: impl FnMut(&mut ChildCtx) + 'static) -> Self {
+            self.on_init = Some(Box::new(f));
+            self
+        }
+    }
+
+    impl SmHandler for ChildSm {
+        type Input = ChildInput;
+        type Ctx = ChildCtx;
+
+        fn handle(&mut self, input: Self::Input, _ctx: &mut Self::Ctx) {
+            self.deliveries.push(input);
+        }
+
+        fn initialize(&mut self, ctx: &mut Self::Ctx) {
+            if let Some(ref mut cb) = self.on_init {
+                cb(ctx);
+            }
+        }
+    }
+
+    #[test]
+    fn initialize_sets_signal() {
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+        let sm = ParentSm::new().with_init(|ctx| {
+            ctx.set_flag(true);
+        });
+        router.create_parent(P1, sm);
+
+        // Signal should be set immediately after create (before propagate)
+        assert_eq!(router.parent_flag.get(&P1), Some(&true));
+    }
+
+    #[test]
+    fn initialize_sets_edges_and_propagates() {
+        let mut router = Router::new(16);
+        router.create_child(C1, ChildSm::new());
+        let sm = ParentSm::new().with_init(|ctx| {
+            ctx.set_parent_to_child_edges(vec![C1]);
+        });
+        router.create_parent(P1, sm);
+
+        // Edge should exist after create
+        assert!(router.parent_to_child_fwd.get(&P1).unwrap().contains(&C1));
+
+        // Propagate should deliver through the edge
+        router.set_parent_flag(P1, true);
+        router.propagate();
+
+        let c1 = router.get_child(&C1).unwrap();
+        assert!(c1
+            .deliveries
+            .iter()
+            .any(|inp| matches!(inp, ChildInput::FlagInput(1))));
+    }
+
+    #[test]
+    fn initialize_creates_child_sm() {
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+        let sm = ParentSm::new().with_init(|ctx| {
+            ctx.create_child(C1, ChildSm::new());
+        });
+        router.create_parent(P1, sm);
+
+        // Child should have been created
+        assert_eq!(router.child_instances.len(), 1);
+        assert!(router.child_instances.contains_key(&C1));
+
+        // Verify trace contains SmInitialized events
+        let events = router.tracer().entries();
+        let init_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::SmInitialized { .. }))
+            .collect();
+        // Should have at least 2: one for Parent, one for Child
+        assert!(
+            init_events.len() >= 2,
+            "should have SmInitialized trace events for both parent and child, got {}",
+            init_events.len()
+        );
+    }
+
+    #[test]
+    fn internal_create_during_initialize_cascades() {
+        // Parent's initialize creates a child, and the child's initialize sets a signal.
+        let mut router = Router::new_traced(16, RecordingTracer::new());
+
+        let c2 = ChildId(2);
+
+        let sm = ParentSm::new().with_init(move |ctx| {
+            let child = ChildSm::new().with_init(|ctx| {
+                ctx.set_status(42);
+            });
+            ctx.create_child(c2, child);
+        });
+        router.create_parent(P1, sm);
+
+        // The child created during Parent's initialize should exist
+        assert!(
+            router.child_instances.contains_key(&c2),
+            "child C2 should have been created during parent's initialize"
+        );
+        // Its own initialize should have run and set the signal
+        assert_eq!(
+            router.child_status.get(&c2),
+            Some(&42),
+            "child's initialize should have set its status signal"
+        );
+    }
+}
