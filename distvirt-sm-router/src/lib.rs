@@ -144,6 +144,23 @@
 //!
 //! A configurable depth limit (passed to `Router::new()`) prevents infinite loops.
 //! The router warns at `limit - 1` and panics at `limit`.
+//!
+//! ## Self-destruct ordering guarantees
+//!
+//! When a handler calls `ctx.self_destruct()`, the following guarantees hold:
+//!
+//! - **Events before destruction:** Events queued by the handler (via
+//!   `ctx.send_*()`) are delivered *before* the reactive effects of the
+//!   destruction (edge removal, re-aggregation) take effect. Events are moved
+//!   to the pending queue before `destroy_*()` runs, and the propagation loop
+//!   processes pending events in the current round while new dirty inputs from
+//!   edge clearing are deferred to the next round.
+//!
+//! - **No handler calls after self-destruct:** Once `self_destruct()` is called
+//!   and effects are applied, the SM instance is removed from the instances map.
+//!   All delivery paths (dirty input processing and event delivery) guard on
+//!   instance existence and silently skip destroyed SMs. No further `handle()`
+//!   calls will be made to the instance.
 
 /// Reduces N signal values (from N incoming edges) into one aggregated input value.
 ///

@@ -759,20 +759,26 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     _ => None,
                 });
 
-                // All pods gone — clear tracking.
+                // All pods gone — single cleanup path for signal-derived state.
+                // Normally pod_id is already cleared by the initiator
+                // (destroy_current_pod, on_pod_failed, etc.), but this acts
+                // as a safety net for unexpected pod disappearance.
                 if statuses.is_empty() && self.pod_id.is_some() {
                     self.pod_id = None;
                     self.pod_worker_id = None;
+                    self.awaiting_suspend = false;
                     self.committed_to_boot = false;
                     ctx.set_workload_to_pod_edges(vec![]);
                     ctx.set_pod_intent(PodIntent::None);
+                    ctx.set_readiness(None);
                 }
 
                 if let Some(artifact_id) = suspended_artifact {
                     // Pod successfully suspended. Save artifact, reap pod.
                     self.suspended_artifact = Some(artifact_id);
-                    self.pod_running = false;
-                    self.pod_worker_id = None;
+                    // pod_running already set to false at top of handler
+                    // (Suspended is not Running).
+                    // pod_worker_id will be cleared by PodWorkerInput signal propagation.
                     self.awaiting_suspend = false;
                     ctx.set_readiness(None);
                     // Remove edge → pod will self-destruct (terminal + no owner).
@@ -892,7 +898,8 @@ impl WorkloadSm {
     /// Called when a pod reports Finished status (graceful exit, exit code 0).
     /// Not counted as a failure. Cleans up and reconciles.
     fn on_pod_finished(&mut self, ctx: &mut impl WorkloadCtx) {
-        self.pod_running = false;
+        // pod_running is already false — set by PodStatusInput handler at
+        // the top (Finished is not Running).
         self.awaiting_suspend = false;
         ctx.set_readiness(None);
 
@@ -901,7 +908,7 @@ impl WorkloadSm {
         ctx.set_workload_to_pod_edges(vec![]);
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
-        self.pod_worker_id = None;
+        // pod_worker_id will be cleared by PodWorkerInput signal propagation.
 
         // No failure increment — graceful exit is not a failure.
         // Re-evaluate commitment.
@@ -916,8 +923,8 @@ impl WorkloadSm {
     /// Called when a pod reports Failed status. Cleans up tracking and enters
     /// backoff for retry, or gives up if max retries exceeded.
     fn on_pod_failed(&mut self, ctx: &mut impl WorkloadCtx) {
-        // Clear readiness — pod is no longer usable.
-        self.pod_running = false;
+        // pod_running is already false — set by PodStatusInput handler at
+        // the top (Failed is not Running).
         self.awaiting_suspend = false;
         ctx.set_readiness(None);
 
@@ -926,7 +933,7 @@ impl WorkloadSm {
         ctx.set_workload_to_pod_edges(vec![]);
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
-        self.pod_worker_id = None;
+        // pod_worker_id will be cleared by PodWorkerInput signal propagation.
 
         self.consecutive_failures += 1;
 
@@ -960,9 +967,11 @@ impl WorkloadSm {
         if self.pod_id.is_some() {
             ctx.set_workload_to_pod_edges(vec![]);
             ctx.set_pod_intent(PodIntent::None);
+            self.pod_id = None;
         }
-        self.pod_running = false;
-        self.pod_worker_id = None;
+        // pod_running and pod_worker_id are signal-derived — they will be
+        // cleared by PodStatusInput([]) and PodWorkerInput([]) when the
+        // abandoned pod removes its reverse edges and self-destructs.
         self.awaiting_suspend = false;
         self.suspended_artifact = None;
         ctx.set_readiness(None);
@@ -1044,6 +1053,7 @@ impl WorkloadSm {
                 // terminal and self-destruct.
                 ctx.set_workload_to_pod_edges(vec![]);
                 ctx.set_pod_intent(PodIntent::None);
+                self.pod_id = None;
                 ctx.set_readiness(None);
             }
         } else {
