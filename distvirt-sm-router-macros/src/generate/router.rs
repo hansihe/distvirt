@@ -734,7 +734,7 @@ fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
     for sm in &def.state_machines {
         let method = format_ident!("apply_{}_effects", to_snake_case(&sm.name.to_string()));
-        let ctx_name = format_ident!("{}Ctx", sm.name);
+        let ctx_name = format_ident!("{}CtxConcrete", sm.name);
         let id_type = sm_id_type(sm);
         let node_str = sm.name.to_string();
 
@@ -884,7 +884,7 @@ fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let method = format_ident!("initialize_{}_sm", to_snake_case(&sm.name.to_string()));
         let instances = format_ident!("{}_instances", to_snake_case(&sm.name.to_string()));
         let id_type = sm_id_type(sm);
-        let ctx_name = format_ident!("{}Ctx", sm.name);
+        let ctx_name = format_ident!("{}CtxConcrete", sm.name);
         let apply = format_ident!("apply_{}_effects", to_snake_case(&sm.name.to_string()));
         let node_str = sm.name.to_string();
         let counter_passes = &counter_passes;
@@ -943,7 +943,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     .find(|s| s.name == inp.node)
                     .unwrap();
                 let input_enum = format_ident!("{}Input", sm.name);
-                let ctx_name = format_ident!("{}Ctx", sm.name);
+                let ctx_name = format_ident!("{}CtxConcrete", sm.name);
                 let input_variant = &inp.input_name;
                 let apply = format_ident!(
                     "apply_{}_effects",
@@ -1029,7 +1029,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             let instances =
                 format_ident!("{}_instances", to_snake_case(&ev.receiver.to_string()));
             let input_enum = format_ident!("{}Input", ev.receiver);
-            let ctx_name = format_ident!("{}Ctx", ev.receiver);
+            let ctx_name = format_ident!("{}CtxConcrete", ev.receiver);
             let apply = format_ident!(
                 "apply_{}_effects",
                 to_snake_case(&ev.receiver.to_string())

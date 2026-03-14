@@ -94,7 +94,7 @@ impl Aggregator for MultiSourceAggregator {
 
 struct AlphaSm {
     deliveries: Vec<AlphaInput>,
-    on_handle: Option<Box<dyn FnMut(&AlphaInput, &mut AlphaCtx)>>,
+    on_handle: Option<Box<dyn FnMut(&AlphaInput, &mut dyn AlphaCtx)>>,
 }
 
 impl AlphaSm {
@@ -106,11 +106,10 @@ impl AlphaSm {
     }
 }
 
-impl SmHandler for AlphaSm {
+impl<C: AlphaCtx> SmHandler<C> for AlphaSm {
     type Input = AlphaInput;
-    type Ctx = AlphaCtx;
 
-    fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         if let Some(ref mut cb) = self.on_handle {
             cb(&input, ctx);
         }
@@ -120,7 +119,7 @@ impl SmHandler for AlphaSm {
 
 struct BetaSm {
     deliveries: Vec<BetaInput>,
-    on_handle: Option<Box<dyn FnMut(&BetaInput, &mut BetaCtx)>>,
+    on_handle: Option<Box<dyn FnMut(&BetaInput, &mut dyn BetaCtx)>>,
 }
 
 impl BetaSm {
@@ -132,11 +131,10 @@ impl BetaSm {
     }
 }
 
-impl SmHandler for BetaSm {
+impl<C: BetaCtx> SmHandler<C> for BetaSm {
     type Input = BetaInput;
-    type Ctx = BetaCtx;
 
-    fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         if let Some(ref mut cb) = self.on_handle {
             cb(&input, ctx);
         }
@@ -1526,18 +1524,17 @@ mod auto_id {
         }
     }
 
-    impl SmHandler for ServiceSm {
+    impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
         type Input = ServiceInput;
-        type Ctx = ServiceCtx;
 
-        fn handle(&mut self, input: Self::Input, _ctx: &mut Self::Ctx) {
+        fn handle(&mut self, input: Self::Input, _ctx: &mut C) {
             self.deliveries.push(input);
         }
     }
 
     struct WorkerSm {
         deliveries: Vec<WorkerInput>,
-        on_handle: Option<Box<dyn FnMut(&WorkerInput, &mut WorkerCtx)>>,
+        on_handle: Option<Box<dyn FnMut(&WorkerInput, &mut dyn WorkerCtx)>>,
     }
 
     impl WorkerSm {
@@ -1549,11 +1546,10 @@ mod auto_id {
         }
     }
 
-    impl SmHandler for WorkerSm {
+    impl<C: WorkerCtx> SmHandler<C> for WorkerSm {
         type Input = WorkerInput;
-        type Ctx = WorkerCtx;
 
-        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+        fn handle(&mut self, input: Self::Input, ctx: &mut C) {
             if let Some(ref mut cb) = self.on_handle {
                 cb(&input, ctx);
             }
@@ -1972,7 +1968,7 @@ mod invariant_tests {
     }
 
     struct SrcSm {
-        on_handle: Option<Box<dyn FnMut(&SrcInput, &mut SrcCtx)>>,
+        on_handle: Option<Box<dyn FnMut(&SrcInput, &mut dyn SrcCtx)>>,
     }
 
     impl SrcSm {
@@ -1981,11 +1977,10 @@ mod invariant_tests {
         }
     }
 
-    impl SmHandler for SrcSm {
+    impl<C: SrcCtx> SmHandler<C> for SrcSm {
         type Input = SrcInput;
-        type Ctx = SrcCtx;
 
-        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+        fn handle(&mut self, input: Self::Input, ctx: &mut C) {
             if let Some(ref mut cb) = self.on_handle {
                 cb(&input, ctx);
             }
@@ -1993,7 +1988,7 @@ mod invariant_tests {
     }
 
     struct DstSm {
-        on_handle: Option<Box<dyn FnMut(&DstInput, &mut DstCtx)>>,
+        on_handle: Option<Box<dyn FnMut(&DstInput, &mut dyn DstCtx)>>,
     }
 
     impl DstSm {
@@ -2002,11 +1997,10 @@ mod invariant_tests {
         }
     }
 
-    impl SmHandler for DstSm {
+    impl<C: DstCtx> SmHandler<C> for DstSm {
         type Input = DstInput;
-        type Ctx = DstCtx;
 
-        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+        fn handle(&mut self, input: Self::Input, ctx: &mut C) {
             if let Some(ref mut cb) = self.on_handle {
                 cb(&input, ctx);
             }
@@ -2216,8 +2210,8 @@ mod initialize_tests {
     // --- ParentSm: configurable initialize via closure ---
 
     struct ParentSm {
-        on_init: Option<Box<dyn FnMut(&mut ParentCtx)>>,
-        on_handle: Option<Box<dyn FnMut(&ParentInput, &mut ParentCtx)>>,
+        on_init: Option<Box<dyn FnMut(&mut dyn ParentCtx)>>,
+        on_handle: Option<Box<dyn FnMut(&ParentInput, &mut dyn ParentCtx)>>,
     }
 
     impl ParentSm {
@@ -2228,29 +2222,28 @@ mod initialize_tests {
             }
         }
 
-        fn with_init(mut self, f: impl FnMut(&mut ParentCtx) + 'static) -> Self {
+        fn with_init(mut self, f: impl FnMut(&mut dyn ParentCtx) + 'static) -> Self {
             self.on_init = Some(Box::new(f));
             self
         }
 
         #[allow(dead_code)]
-        fn with_handle(mut self, f: impl FnMut(&ParentInput, &mut ParentCtx) + 'static) -> Self {
+        fn with_handle(mut self, f: impl FnMut(&ParentInput, &mut dyn ParentCtx) + 'static) -> Self {
             self.on_handle = Some(Box::new(f));
             self
         }
     }
 
-    impl SmHandler for ParentSm {
+    impl<C: ParentCtx> SmHandler<C> for ParentSm {
         type Input = ParentInput;
-        type Ctx = ParentCtx;
 
-        fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+        fn handle(&mut self, input: Self::Input, ctx: &mut C) {
             if let Some(ref mut cb) = self.on_handle {
                 cb(&input, ctx);
             }
         }
 
-        fn initialize(&mut self, ctx: &mut Self::Ctx) {
+        fn initialize(&mut self, ctx: &mut C) {
             if let Some(ref mut cb) = self.on_init {
                 cb(ctx);
             }
@@ -2260,7 +2253,7 @@ mod initialize_tests {
     // --- ChildSm: configurable initialize via closure ---
 
     struct ChildSm {
-        on_init: Option<Box<dyn FnMut(&mut ChildCtx)>>,
+        on_init: Option<Box<dyn FnMut(&mut dyn ChildCtx)>>,
         deliveries: Vec<ChildInput>,
     }
 
@@ -2272,21 +2265,20 @@ mod initialize_tests {
             }
         }
 
-        fn with_init(mut self, f: impl FnMut(&mut ChildCtx) + 'static) -> Self {
+        fn with_init(mut self, f: impl FnMut(&mut dyn ChildCtx) + 'static) -> Self {
             self.on_init = Some(Box::new(f));
             self
         }
     }
 
-    impl SmHandler for ChildSm {
+    impl<C: ChildCtx> SmHandler<C> for ChildSm {
         type Input = ChildInput;
-        type Ctx = ChildCtx;
 
-        fn handle(&mut self, input: Self::Input, _ctx: &mut Self::Ctx) {
+        fn handle(&mut self, input: Self::Input, _ctx: &mut C) {
             self.deliveries.push(input);
         }
 
-        fn initialize(&mut self, ctx: &mut Self::Ctx) {
+        fn initialize(&mut self, ctx: &mut C) {
             if let Some(ref mut cb) = self.on_init {
                 cb(ctx);
             }

@@ -465,7 +465,7 @@ impl ServiceSm {
         }
     }
 
-    fn update_timer_signal(&self, ctx: &mut ServiceCtx) {
+    fn update_timer_signal(&self, ctx: &mut impl ServiceCtx) {
         if self.idle_timer_active {
             ctx.set_svc_wanted_timers(vec![ServiceTimerRequest {
                 key: ServiceTimerKey::IdleTimeout,
@@ -476,7 +476,7 @@ impl ServiceSm {
         }
     }
 
-    fn update_status_signals(&self, ctx: &mut ServiceCtx) {
+    fn update_status_signals(&self, ctx: &mut impl ServiceCtx) {
         let status = match &self.state {
             ServiceState::Idle => SvcStatus::Idle,
             ServiceState::NeedBackend => SvcStatus::NeedBackend,
@@ -487,16 +487,15 @@ impl ServiceSm {
     }
 }
 
-impl SmHandler for ServiceSm {
+impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
     type Input = ServiceInput;
-    type Ctx = ServiceCtx;
 
-    fn initialize(&mut self, ctx: &mut Self::Ctx) {
+    fn initialize(&mut self, ctx: &mut C) {
         ctx.set_service_to_timer_edges(vec![self.timer_id]);
         self.update_status_signals(ctx);
     }
 
-    fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         match input {
             ServiceInput::ReadinessInput(readiness_list) => {
                 let ready = readiness_list.into_iter().next().flatten();
@@ -692,16 +691,15 @@ impl WorkloadSm {
     }
 }
 
-impl SmHandler for WorkloadSm {
+impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
     type Input = WorkloadInput;
-    type Ctx = WorkloadCtx;
 
-    fn initialize(&mut self, ctx: &mut Self::Ctx) {
+    fn initialize(&mut self, ctx: &mut C) {
         ctx.set_workload_to_timer_edges(vec![self.timer_id]);
         self.update_status_signals(ctx);
     }
 
-    fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         match input {
             WorkloadInput::DemandInput(demand) => {
                 let old_demand = self.has_demand;
@@ -862,7 +860,7 @@ impl WorkloadSm {
     /// 1. Spec changed since launch → restart with new spec
     /// 2. No demand → deactivate (committed_to_boot fulfilled)
     /// 3. Otherwise → emit readiness
-    fn on_pod_running(&mut self, ctx: &mut WorkloadCtx) {
+    fn on_pod_running(&mut self, ctx: &mut impl WorkloadCtx) {
         self.committed_to_boot = false;
         self.consecutive_failures = 0;
 
@@ -884,7 +882,7 @@ impl WorkloadSm {
     }
 
     /// Emit readiness signal with current pod and worker info.
-    fn update_readiness(&self, ctx: &mut WorkloadCtx) {
+    fn update_readiness(&self, ctx: &mut impl WorkloadCtx) {
         ctx.set_readiness(Some(ReadyInfo {
             pod_id: self.pod_id.unwrap_or(PodId(0)),
             worker_id: self.pod_worker_id.unwrap_or(WorkerId(0)),
@@ -893,7 +891,7 @@ impl WorkloadSm {
 
     /// Called when a pod reports Finished status (graceful exit, exit code 0).
     /// Not counted as a failure. Cleans up and reconciles.
-    fn on_pod_finished(&mut self, ctx: &mut WorkloadCtx) {
+    fn on_pod_finished(&mut self, ctx: &mut impl WorkloadCtx) {
         self.pod_running = false;
         self.awaiting_suspend = false;
         ctx.set_readiness(None);
@@ -917,7 +915,7 @@ impl WorkloadSm {
 
     /// Called when a pod reports Failed status. Cleans up tracking and enters
     /// backoff for retry, or gives up if max retries exceeded.
-    fn on_pod_failed(&mut self, ctx: &mut WorkloadCtx) {
+    fn on_pod_failed(&mut self, ctx: &mut impl WorkloadCtx) {
         // Clear readiness — pod is no longer usable.
         self.pod_running = false;
         self.awaiting_suspend = false;
@@ -958,7 +956,7 @@ impl WorkloadSm {
     /// Abandon the current pod by removing the ownership edge.
     /// The pod will drive itself to a terminal state and self-destruct.
     /// Any suspended artifact is discarded (this is a hard kill).
-    fn destroy_current_pod(&mut self, ctx: &mut WorkloadCtx) {
+    fn destroy_current_pod(&mut self, ctx: &mut impl WorkloadCtx) {
         if self.pod_id.is_some() {
             ctx.set_workload_to_pod_edges(vec![]);
             ctx.set_pod_intent(PodIntent::None);
@@ -970,7 +968,7 @@ impl WorkloadSm {
         ctx.set_readiness(None);
     }
 
-    fn update_timer_signal(&self, ctx: &mut WorkloadCtx) {
+    fn update_timer_signal(&self, ctx: &mut impl WorkloadCtx) {
         if self.in_backoff {
             ctx.set_wanted_timers(vec![TimerRequest {
                 key: WorkloadTimerKey::RetryBackoff,
@@ -981,7 +979,7 @@ impl WorkloadSm {
         }
     }
 
-    fn update_status_signals(&self, ctx: &mut WorkloadCtx) {
+    fn update_status_signals(&self, ctx: &mut impl WorkloadCtx) {
         let is_failed = self.consecutive_failures >= self.max_retries
             && (self.has_demand || self.committed_to_boot);
         let status = if is_failed {
@@ -1008,7 +1006,7 @@ impl WorkloadSm {
         );
     }
 
-    fn reconcile(&mut self, ctx: &mut WorkloadCtx) {
+    fn reconcile(&mut self, ctx: &mut impl WorkloadCtx) {
         // If we're waiting for a suspend to complete, don't touch the pod.
         if self.awaiting_suspend {
             return;
@@ -1113,14 +1111,14 @@ impl PodSm {
     }
 
     /// Self-destruct if terminal and no owner (the reaping rule).
-    fn maybe_reap(&self, ctx: &mut PodCtx) {
+    fn maybe_reap(&self, ctx: &mut impl PodCtx) {
         if self.status.is_terminal() && self.workload_id.is_none() {
             ctx.self_destruct();
         }
     }
 
     /// Update the timer signal based on current pod status.
-    fn update_timer_signal(&self, ctx: &mut PodCtx) {
+    fn update_timer_signal(&self, ctx: &mut impl PodCtx) {
         match &self.status {
             PodStatus::Pending => {
                 ctx.set_wanted_pod_timers(vec![PodTimerRequest {
@@ -1141,16 +1139,15 @@ impl PodSm {
     }
 }
 
-impl SmHandler for PodSm {
+impl<C: PodCtx> SmHandler<C> for PodSm {
     type Input = PodInput;
-    type Ctx = PodCtx;
 
-    fn initialize(&mut self, ctx: &mut Self::Ctx) {
+    fn initialize(&mut self, ctx: &mut C) {
         ctx.set_pod_to_timer_edges(vec![self.timer_id]);
         self.update_timer_signal(ctx);
     }
 
-    fn handle(&mut self, input: Self::Input, ctx: &mut Self::Ctx) {
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         match input {
             PodInput::WorkerInput(worker) => {
                 // Track assigned worker.

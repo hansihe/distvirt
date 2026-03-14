@@ -9,17 +9,15 @@ struct AlphaId(u64);
 struct BetaId(u64);
 
 struct AlphaSm;
-impl SmHandler for AlphaSm {
+impl<C: AlphaCtx> SmHandler<C> for AlphaSm {
     type Input = AlphaInput;
-    type Ctx = AlphaCtx;
-    fn handle(&mut self, _input: Self::Input, _ctx: &mut Self::Ctx) {}
+    fn handle(&mut self, _input: Self::Input, _ctx: &mut C) {}
 }
 
 struct BetaSm;
-impl SmHandler for BetaSm {
+impl<C: BetaCtx> SmHandler<C> for BetaSm {
     type Input = BetaInput;
-    type Ctx = BetaCtx;
-    fn handle(&mut self, _input: Self::Input, _ctx: &mut Self::Ctx) {}
+    fn handle(&mut self, _input: Self::Input, _ctx: &mut C) {}
 }
 
 distvirt_sm_router::router! {
