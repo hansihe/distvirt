@@ -2,6 +2,7 @@ mod ctx;
 mod enums;
 mod helpers;
 mod router;
+mod snapshot;
 
 use crate::parse::*;
 use proc_macro2::TokenStream;

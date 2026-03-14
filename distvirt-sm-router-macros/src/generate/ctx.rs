@@ -293,7 +293,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
             quote! {
                 // Trait — public API for SM handlers
                 #[allow(dead_code)]
-                trait #ctx_trait_name {
+                pub trait #ctx_trait_name {
                     fn id(&self) -> #id_type;
                     #(#trait_signal_setters)*
                     #(#trait_edge_setters)*

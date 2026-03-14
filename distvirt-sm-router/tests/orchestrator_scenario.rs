@@ -442,6 +442,7 @@ enum ServiceState {
     Active { ready: ReadyInfo },
 }
 
+#[derive(Clone)]
 struct ServiceSm {
     state: ServiceState,
     has_activation: bool,
@@ -591,6 +592,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
 
 const MAX_RETRIES: u32 = 5;
 
+#[derive(Clone)]
 struct WorkloadSm {
     has_spec: bool,
     has_demand: bool,
@@ -1081,6 +1083,7 @@ impl WorkloadSm {
 //   Abandon:  workload removes edge → pod drives itself to terminal
 //             (owner loss while live = failure) → pod self-destructs.
 
+#[derive(Clone)]
 struct PodSm {
     status: PodStatus,
     workload_id: Option<WorkloadId>,

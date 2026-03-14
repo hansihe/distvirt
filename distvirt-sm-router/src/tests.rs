@@ -97,6 +97,12 @@ struct AlphaSm {
     on_handle: Option<Box<dyn FnMut(&AlphaInput, &mut dyn AlphaCtx)>>,
 }
 
+impl Clone for AlphaSm {
+    fn clone(&self) -> Self {
+        AlphaSm { deliveries: self.deliveries.clone(), on_handle: None }
+    }
+}
+
 impl AlphaSm {
     fn new() -> Self {
         AlphaSm {
@@ -120,6 +126,12 @@ impl<C: AlphaCtx> SmHandler<C> for AlphaSm {
 struct BetaSm {
     deliveries: Vec<BetaInput>,
     on_handle: Option<Box<dyn FnMut(&BetaInput, &mut dyn BetaCtx)>>,
+}
+
+impl Clone for BetaSm {
+    fn clone(&self) -> Self {
+        BetaSm { deliveries: self.deliveries.clone(), on_handle: None }
+    }
 }
 
 impl BetaSm {
@@ -1512,6 +1524,7 @@ mod auto_id {
         }
     }
 
+    #[derive(Clone)]
     struct ServiceSm {
         deliveries: Vec<ServiceInput>,
     }
@@ -1535,6 +1548,12 @@ mod auto_id {
     struct WorkerSm {
         deliveries: Vec<WorkerInput>,
         on_handle: Option<Box<dyn FnMut(&WorkerInput, &mut dyn WorkerCtx)>>,
+    }
+
+    impl Clone for WorkerSm {
+        fn clone(&self) -> Self {
+            WorkerSm { deliveries: self.deliveries.clone(), on_handle: None }
+        }
     }
 
     impl WorkerSm {
@@ -1971,6 +1990,12 @@ mod invariant_tests {
         on_handle: Option<Box<dyn FnMut(&SrcInput, &mut dyn SrcCtx)>>,
     }
 
+    impl Clone for SrcSm {
+        fn clone(&self) -> Self {
+            SrcSm { on_handle: None }
+        }
+    }
+
     impl SrcSm {
         fn new() -> Self {
             SrcSm { on_handle: None }
@@ -1989,6 +2014,12 @@ mod invariant_tests {
 
     struct DstSm {
         on_handle: Option<Box<dyn FnMut(&DstInput, &mut dyn DstCtx)>>,
+    }
+
+    impl Clone for DstSm {
+        fn clone(&self) -> Self {
+            DstSm { on_handle: None }
+        }
     }
 
     impl DstSm {
@@ -2214,6 +2245,12 @@ mod initialize_tests {
         on_handle: Option<Box<dyn FnMut(&ParentInput, &mut dyn ParentCtx)>>,
     }
 
+    impl Clone for ParentSm {
+        fn clone(&self) -> Self {
+            ParentSm { on_init: None, on_handle: None }
+        }
+    }
+
     impl ParentSm {
         fn new() -> Self {
             ParentSm {
@@ -2255,6 +2292,12 @@ mod initialize_tests {
     struct ChildSm {
         on_init: Option<Box<dyn FnMut(&mut dyn ChildCtx)>>,
         deliveries: Vec<ChildInput>,
+    }
+
+    impl Clone for ChildSm {
+        fn clone(&self) -> Self {
+            ChildSm { on_init: None, deliveries: self.deliveries.clone() }
+        }
     }
 
     impl ChildSm {

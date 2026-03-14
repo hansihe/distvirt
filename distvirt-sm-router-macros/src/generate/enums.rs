@@ -46,7 +46,7 @@ pub(super) fn gen_auto_id_types(def: &TopologyDef) -> TokenStream {
             types.push(quote! {
                 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
                 #[allow(dead_code)]
-                struct #id_name(u64);
+                pub struct #id_name(u64);
             });
         }
     }
@@ -57,7 +57,7 @@ pub(super) fn gen_auto_id_types(def: &TopologyDef) -> TokenStream {
             types.push(quote! {
                 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
                 #[allow(dead_code)]
-                struct #id_name(u64);
+                pub struct #id_name(u64);
             });
         }
     }
@@ -91,7 +91,7 @@ pub(super) fn gen_source_enums(def: &TopologyDef) -> TokenStream {
             quote! {
                 #[derive(Debug, Clone, PartialEq)]
                 #[allow(dead_code)]
-                enum #enum_name {
+                pub enum #enum_name {
                     #(#variants,)*
                 }
             }
@@ -116,7 +116,7 @@ pub(super) fn gen_input_enums(def: &TopologyDef) -> TokenStream {
                     let variant = &inp.input_name;
                     let agg = &inp.aggregator;
                     quote! {
-                        #variant(<#agg as crate::Aggregator>::Output)
+                        #variant(<#agg as ::distvirt_sm_router::Aggregator>::Output)
                     }
                 })
                 .collect();
@@ -135,9 +135,9 @@ pub(super) fn gen_input_enums(def: &TopologyDef) -> TokenStream {
                 .collect();
 
             quote! {
-                #[derive(Debug, PartialEq)]
+                #[derive(Debug, Clone, PartialEq)]
                 #[allow(dead_code)]
-                enum #enum_name {
+                pub enum #enum_name {
                     #(#input_variants,)*
                     #(#event_variants,)*
                 }
@@ -164,15 +164,15 @@ pub(super) fn gen_port_input_enums(def: &TopologyDef) -> TokenStream {
                     let variant = &inp.input_name;
                     let agg = &inp.aggregator;
                     quote! {
-                        #variant(<#agg as crate::Aggregator>::Output)
+                        #variant(<#agg as ::distvirt_sm_router::Aggregator>::Output)
                     }
                 })
                 .collect();
 
             quote! {
-                #[derive(Debug, PartialEq)]
+                #[derive(Debug, Clone, PartialEq)]
                 #[allow(dead_code)]
-                enum #enum_name {
+                pub enum #enum_name {
                     #(#input_variants,)*
                 }
             }

@@ -249,6 +249,11 @@ impl<Id, V> Default for ListAggregator<Id, V> {
     }
 }
 
+// Allow the crate to refer to itself by extern name, so that the proc-macro
+// generated code (`::distvirt_sm_router::trace::...`) resolves both from within
+// this crate and from external crates.
+extern crate self as distvirt_sm_router;
+
 pub use distvirt_sm_router_macros::router;
 
 impl<Id, V: Clone> Aggregator for ListAggregator<Id, V> {

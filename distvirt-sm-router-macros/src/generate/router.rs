@@ -3,6 +3,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 
 use super::helpers::*;
+use super::snapshot;
 
 pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     let expose = def.expose_internals;
@@ -68,7 +69,7 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         let agg = &inp.aggregator;
         let vis = &field_vis;
         fields.push(
-            quote! { #vis #f: std::collections::BTreeMap<#id, <#agg as crate::Aggregator>::Output> },
+            quote! { #vis #f: std::collections::BTreeMap<#id, <#agg as ::distvirt_sm_router::Aggregator>::Output> },
         );
         inits.push(quote! { #f: std::collections::BTreeMap::new() });
     }
@@ -161,27 +162,29 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         quote! {}
     };
 
+    let snapshot_tokens = snapshot::gen_snapshot(def);
+
     quote! {
         #[allow(dead_code)]
         mod __router {
             use super::*;
 
-            pub struct Router<__Tracer: crate::trace::Tracer = crate::trace::NoopTracer> {
+            pub struct Router<__Tracer: ::distvirt_sm_router::trace::Tracer = ::distvirt_sm_router::trace::NoopTracer> {
                 #(#fields,)*
             }
 
             #[allow(dead_code)]
-            impl Router<crate::trace::NoopTracer> {
+            impl Router<::distvirt_sm_router::trace::NoopTracer> {
                 pub fn new(depth_limit: usize) -> Self {
                     Router {
                         #(#inits,)*
-                        tracer: crate::trace::NoopTracer,
+                        tracer: ::distvirt_sm_router::trace::NoopTracer,
                     }
                 }
             }
 
             #[allow(dead_code)]
-            impl<__Tracer: crate::trace::Tracer> Router<__Tracer> {
+            impl<__Tracer: ::distvirt_sm_router::trace::Tracer> Router<__Tracer> {
                 pub fn new_traced(depth_limit: usize, tracer: __Tracer) -> Self {
                     Router {
                         #(#inits,)*
@@ -192,10 +195,15 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
                 #(pub #public_methods)*
                 #(#internal_vis #internal_methods)*
             }
+
+            #snapshot_tokens
         }
 
         #[allow(unused_imports)]
         use __router::Router;
+
+        #[allow(unused_imports)]
+        use __router::RouterSnapshot;
     }
 }
 
@@ -254,9 +262,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
-                    self.tracer.trace(crate::trace::TraceEvent::PortCreated {
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortCreated {
                         node: #node_str,
-                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                     });
                     self.#instances.insert(id);
                     #(#sig_inits)*
@@ -267,9 +275,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type) {
-                    self.tracer.trace(crate::trace::TraceEvent::PortCreated {
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortCreated {
                         node: #node_str,
-                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                     });
                     self.#instances.insert(id);
                     #(#sig_inits)*
@@ -400,9 +408,9 @@ fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) {
-                self.tracer.trace(crate::trace::TraceEvent::PortDestroyed {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortDestroyed {
                     node: #node_str,
-                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 self.#instances.remove(&id);
                 #(#sig_removes)*
@@ -494,12 +502,12 @@ fn gen_signal_setters(
                 if self.#field.get(&id) == Some(&value) {
                     return;
                 }
-                self.tracer.trace(crate::trace::TraceEvent::SignalChanged {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SignalChanged {
                     node: #node_str,
-                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                     signal: #signal_str,
-                    old: crate::trace::DebugValue::Borrowed(&self.#field.get(&id) as &dyn std::fmt::Debug),
-                    new: crate::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
+                    old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&self.#field.get(&id) as &dyn std::fmt::Debug),
+                    new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
                 });
                 self.#field.insert(id, value);
                 #(#enqueue_code)*
@@ -556,11 +564,11 @@ fn gen_edge_setters(
                     return;
                 }
 
-                self.tracer.trace(crate::trace::TraceEvent::EdgeChanged {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
                     edge: #edge_str,
-                    source: crate::trace::DebugValue::Borrowed(&source as &dyn std::fmt::Debug),
-                    added: crate::trace::DebugValue::Borrowed(&added as &dyn std::fmt::Debug),
-                    removed: crate::trace::DebugValue::Borrowed(&removed as &dyn std::fmt::Debug),
+                    source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &dyn std::fmt::Debug),
+                    added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&added as &dyn std::fmt::Debug),
+                    removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&removed as &dyn std::fmt::Debug),
                 });
 
                 if new_targets.is_empty() {
@@ -655,11 +663,11 @@ fn gen_event_send_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, sender_id: #sender_id, receiver_id: #receiver_id, payload: #payload) {
-                self.tracer.trace(crate::trace::TraceEvent::EventQueued {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EventQueued {
                     event: #event_str,
-                    sender: crate::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
-                    receiver: crate::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
-                    payload: crate::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                    sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
+                    receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
+                    payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
                 });
                 self.pending_events.push_back(PendingEvent::#variant(sender_id, receiver_id, payload));
             }
@@ -722,7 +730,7 @@ fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         };
 
         methods.push(quote! {
-            fn #method(&self, target_id: #target_id) -> <#agg as crate::Aggregator>::Output {
+            fn #method(&self, target_id: #target_id) -> <#agg as ::distvirt_sm_router::Aggregator>::Output {
                 let mut inputs: #vec_type = Vec::new();
                 #(#collect_code)*
                 <#agg as Default>::default().aggregate(&inputs)
@@ -802,11 +810,11 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 let event_str = ev.name.to_string();
                 quote! {
                     PendingEvent::#variant(sender_id, receiver_id, payload) => {
-                        self.tracer.trace(crate::trace::TraceEvent::EventQueued {
+                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EventQueued {
                             event: #event_str,
-                            sender: crate::trace::DebugValue::Borrowed(sender_id as &dyn std::fmt::Debug),
-                            receiver: crate::trace::DebugValue::Borrowed(receiver_id as &dyn std::fmt::Debug),
-                            payload: crate::trace::DebugValue::Borrowed(payload as &dyn std::fmt::Debug),
+                            sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(sender_id as &dyn std::fmt::Debug),
+                            receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(receiver_id as &dyn std::fmt::Debug),
+                            payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(payload as &dyn std::fmt::Debug),
                         });
                     }
                 }
@@ -842,9 +850,9 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, id: #id_type, ctx: #ctx_name) -> bool {
-                self.tracer.trace(crate::trace::TraceEvent::EffectsStart {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EffectsStart {
                     node: #node_str,
-                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 #(#counter_updates)*
                 #create_apply
@@ -852,15 +860,15 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 #(#edge_applies)*
                 #event_apply
                 if ctx.pending_self_destruct {
-                    self.tracer.trace(crate::trace::TraceEvent::SmDestroyed {
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmDestroyed {
                         node: #node_str,
-                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                     });
                 }
                 #self_destruct_apply
-                self.tracer.trace(crate::trace::TraceEvent::EffectsEnd {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EffectsEnd {
                     node: #node_str,
-                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 ctx.pending_self_destruct
             }
@@ -891,9 +899,9 @@ fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) {
-                self.tracer.trace(crate::trace::TraceEvent::SmInitialized {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmInitialized {
                     node: #node_str,
-                    id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 let mut sm = self.#instances.remove(&id).unwrap();
                 let mut ctx = #ctx_name::new(id #(#counter_passes)*);
@@ -958,20 +966,20 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                         }
                         let result = self.#aggregate(target_id);
                         if self.#last.get(&target_id) == Some(&result) {
-                            self.tracer.trace(crate::trace::TraceEvent::InputSuppressed {
+                            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
-                                id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
                                 input: #input_str,
                             });
                             continue;
                         }
                         self.#last.insert(target_id, result.clone());
 
-                        self.tracer.trace(crate::trace::TraceEvent::InputDelivered {
+                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
                             node: #node_str,
-                            id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
                             input: #input_str,
-                            value: crate::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
+                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
                         });
 
                         let mut sm = self.#instances.remove(&target_id).unwrap();
@@ -997,20 +1005,20 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                         }
                         let result = self.#aggregate(target_id);
                         if self.#last.get(&target_id) == Some(&result) {
-                            self.tracer.trace(crate::trace::TraceEvent::InputSuppressed {
+                            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
-                                id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
                                 input: #input_str,
                             });
                             continue;
                         }
                         self.#last.insert(target_id, result.clone());
 
-                        self.tracer.trace(crate::trace::TraceEvent::InputDelivered {
+                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
                             node: #node_str,
-                            id: crate::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
                             input: #input_str,
-                            value: crate::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
+                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
                         });
 
                         self.#pending_field.push((target_id, #port_input_enum::#input_variant(result)));
@@ -1050,11 +1058,11 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     }
 
                     if let Some(mut sm) = self.#instances.remove(&receiver_id) {
-                        self.tracer.trace(crate::trace::TraceEvent::EventDelivered {
+                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EventDelivered {
                             event: #event_str,
-                            sender: crate::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
-                            receiver: crate::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
-                            payload: crate::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                            sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
+                            receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
+                            payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
                         });
                         let mut ctx = #ctx_name::new(receiver_id #(#counter_passes)*);
                         sm.handle(#input_enum::#variant(payload), &mut ctx);
@@ -1086,11 +1094,11 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             quote! {
                 for (id, value) in &self.#field {
                     if !(#expr) {
-                        self.tracer.trace(crate::trace::TraceEvent::InvariantViolation {
+                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InvariantViolation {
                             node: #node_str,
-                            id: crate::trace::DebugValue::Borrowed(id as &dyn std::fmt::Debug),
+                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(id as &dyn std::fmt::Debug),
                             signal: #signal_str,
-                            value: crate::trace::DebugValue::Borrowed(value as &dyn std::fmt::Debug),
+                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(value as &dyn std::fmt::Debug),
                             invariant_expr: #expr_str,
                         });
                     }
@@ -1101,7 +1109,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
     methods.push(quote! {
         fn propagate(&mut self) {
-            self.tracer.trace(crate::trace::TraceEvent::PropagateStart);
+            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PropagateStart);
             let mut depth = 0;
 
             while !self.dirty.is_empty() || !self.pending_events.is_empty()
@@ -1121,7 +1129,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     );
                 }
 
-                self.tracer.trace(crate::trace::TraceEvent::RoundStart { depth });
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::RoundStart { depth });
 
                 // Start-of-round: materialize pending creates
                 self.materialize_pending_creates();
@@ -1148,12 +1156,12 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     }
                 }
 
-                self.tracer.trace(crate::trace::TraceEvent::RoundEnd { depth });
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::RoundEnd { depth });
             }
 
             #(#invariant_checks)*
 
-            self.tracer.trace(crate::trace::TraceEvent::PropagateEnd { rounds: depth });
+            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PropagateEnd { rounds: depth });
         }
     });
 }
@@ -1189,9 +1197,9 @@ fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
             quote! {
                 PendingCreate::#variant(new_id, new_sm) => {
-                    self.tracer.trace(crate::trace::TraceEvent::SmCreated {
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmCreated {
                         node: #node_str,
-                        id: crate::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
                     });
                     self.#instances.insert(new_id, new_sm);
                     #(#sig_inits)*

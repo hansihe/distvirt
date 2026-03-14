@@ -1,8 +1,8 @@
-warning: unused import: `ListAggregator`
- --> tests/compile_fail/signal_missing_partial_eq.rs:3:45
+warning: unused imports: `ListAggregator` and `trace`
+ --> tests/compile_fail/signal_missing_partial_eq.rs:3:26
   |
 3 | use distvirt_sm_router::{trace, Aggregator, ListAggregator, SmHandler};
-  |                                             ^^^^^^^^^^^^^^
+  |                          ^^^^^              ^^^^^^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
@@ -96,4 +96,72 @@ help: consider annotating `BadSignalType` with `#[derive(PartialEq)]`
    |
 13 + #[derive(PartialEq)]
 14 | struct BadSignalType(u32);
+   |
+
+error[E0599]: the method `clone` exists for struct `BTreeMap<AlphaId, AlphaSm>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/signal_missing_partial_eq.rs:37:1
+   |
+15 |   struct AlphaSm;
+   |   -------------- doesn't satisfy `AlphaSm: Clone`
+...
+37 |   distvirt_sm_router::router! {
+   |  _^
+38 | |     state_machines {
+39 | |         Alpha(AlphaId, AlphaSm),
+40 | |         Beta(BetaId, BetaSm),
+...  |
+56 | | }
+   | |_^ method cannot be called on `BTreeMap<AlphaId, AlphaSm>` due to unsatisfied trait bounds
+   |
+  ::: $RUST/alloc/src/collections/btree/map.rs
+   |
+   | / pub struct BTreeMap<
+   | |     K,
+   | |     V,
+   | |     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator + Clone = Global,
+   | | > {
+   | |_- doesn't satisfy `BTreeMap<AlphaId, AlphaSm>: Clone`
+   |
+   = note: the following trait bounds were not satisfied:
+           `AlphaSm: Clone`
+           which is required by `BTreeMap<AlphaId, AlphaSm>: Clone`
+   = note: this error originates in the macro `distvirt_sm_router::router` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `AlphaSm` with `#[derive(Clone)]`
+   |
+15 + #[derive(Clone)]
+16 | struct AlphaSm;
+   |
+
+error[E0599]: the method `clone` exists for struct `BTreeMap<BetaId, BetaSm>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/signal_missing_partial_eq.rs:37:1
+   |
+21 |   struct BetaSm;
+   |   ------------- doesn't satisfy `BetaSm: Clone`
+...
+37 |   distvirt_sm_router::router! {
+   |  _^
+38 | |     state_machines {
+39 | |         Alpha(AlphaId, AlphaSm),
+40 | |         Beta(BetaId, BetaSm),
+...  |
+56 | | }
+   | |_^ method cannot be called on `BTreeMap<BetaId, BetaSm>` due to unsatisfied trait bounds
+   |
+  ::: $RUST/alloc/src/collections/btree/map.rs
+   |
+   | / pub struct BTreeMap<
+   | |     K,
+   | |     V,
+   | |     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator + Clone = Global,
+   | | > {
+   | |_- doesn't satisfy `BTreeMap<BetaId, BetaSm>: Clone`
+   |
+   = note: the following trait bounds were not satisfied:
+           `BetaSm: Clone`
+           which is required by `BTreeMap<BetaId, BetaSm>: Clone`
+   = note: this error originates in the macro `distvirt_sm_router::router` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `BetaSm` with `#[derive(Clone)]`
+   |
+21 + #[derive(Clone)]
+22 | struct BetaSm;
    |

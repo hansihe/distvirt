@@ -13,6 +13,7 @@ tonic = "0.12"
 prost = "0.13"
 tokio-stream = "0.1"
 distvirt-client-protocol = { path = "../distvirt-client-protocol" }
+distvirt-sm-router = { path = "../distvirt-sm-router" }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
 subtle = "2"
