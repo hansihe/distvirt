@@ -206,7 +206,7 @@ pub fn generate(def: &TopologyDef) -> TokenStream {
     }
 }
 
-/// Generate compile-time checks that signal value types implement PartialEq.
+/// Generate compile-time checks that signal value types implement PartialEq and Debug.
 /// Produces clear error messages pointing at the user's type rather than generated code.
 fn gen_signal_bound_checks(def: &TopologyDef) -> TokenStream {
     let checks: Vec<_> = def
@@ -214,15 +214,23 @@ fn gen_signal_bound_checks(def: &TopologyDef) -> TokenStream {
         .iter()
         .map(|sig| {
             let vt = &sig.value_type;
-            let fn_name = format_ident!(
+            let eq_fn = format_ident!(
                 "__assert_signal_partial_eq_{}_{}",
+                to_snake_case(&sig.node.to_string()),
+                to_snake_case(&sig.signal.to_string())
+            );
+            let dbg_fn = format_ident!(
+                "__assert_signal_debug_{}_{}",
                 to_snake_case(&sig.node.to_string()),
                 to_snake_case(&sig.signal.to_string())
             );
             quote! {
                 #[doc(hidden)]
-                const fn #fn_name<T: PartialEq>() {}
-                const _: () = #fn_name::<#vt>();
+                const fn #eq_fn<T: PartialEq>() {}
+                const _: () = #eq_fn::<#vt>();
+                #[doc(hidden)]
+                const fn #dbg_fn<T: std::fmt::Debug>() {}
+                const _: () = #dbg_fn::<#vt>();
             }
         })
         .collect();
@@ -397,6 +405,38 @@ fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
+            // SM lifecycle fields: create/destroy for each SM type
+            let create_fields: Vec<_> = def
+                .state_machines
+                .iter()
+                .map(|target_sm| {
+                    let f = format_ident!(
+                        "pending_create_{}",
+                        to_snake_case(&target_sm.name.to_string())
+                    );
+                    let tid = sm_id_type(target_sm);
+                    let handler = &target_sm.handler_type;
+                    quote! { #f: Vec<(#tid, #handler)> }
+                })
+                .collect();
+
+            let destroy_fields: Vec<TokenStream> = vec![
+                quote! { pending_self_destruct: bool },
+            ];
+
+            let counter_fields: Vec<_> = def
+                .state_machines
+                .iter()
+                .filter(|s| s.id_type.is_none())
+                .map(|target_sm| {
+                    let f = format_ident!(
+                        "next_{}_id",
+                        to_snake_case(&target_sm.name.to_string())
+                    );
+                    quote! { #f: u64 }
+                })
+                .collect();
+
             // Constructor init
             let signal_inits: Vec<_> = signals
                 .iter()
@@ -419,6 +459,49 @@ fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 .map(|edge| {
                     let f = format_ident!("{}", edge_snake(edge));
                     quote! { #f: None }
+                })
+                .collect();
+
+            let create_inits: Vec<_> = def
+                .state_machines
+                .iter()
+                .map(|target_sm| {
+                    let f = format_ident!(
+                        "pending_create_{}",
+                        to_snake_case(&target_sm.name.to_string())
+                    );
+                    quote! { #f: Vec::new() }
+                })
+                .collect();
+
+            let destroy_inits: Vec<TokenStream> = vec![
+                quote! { pending_self_destruct: false },
+            ];
+
+            // Counter constructor params and pass-through inits
+            let counter_params: Vec<_> = def
+                .state_machines
+                .iter()
+                .filter(|s| s.id_type.is_none())
+                .map(|target_sm| {
+                    let f = format_ident!(
+                        "next_{}_id",
+                        to_snake_case(&target_sm.name.to_string())
+                    );
+                    quote! { #f: u64 }
+                })
+                .collect();
+
+            let counter_inits: Vec<_> = def
+                .state_machines
+                .iter()
+                .filter(|s| s.id_type.is_none())
+                .map(|target_sm| {
+                    let f = format_ident!(
+                        "next_{}_id",
+                        to_snake_case(&target_sm.name.to_string())
+                    );
+                    quote! { #f }
                 })
                 .collect();
 
@@ -473,6 +556,50 @@ fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
+            // SM create methods
+            let create_methods: Vec<_> = def
+                .state_machines
+                .iter()
+                .map(|target_sm| {
+                    let target_snake = to_snake_case(&target_sm.name.to_string());
+                    let method = format_ident!("create_{}", target_snake);
+                    let field = format_ident!("pending_create_{}", target_snake);
+                    let tid = sm_id_type(target_sm);
+                    let handler = &target_sm.handler_type;
+
+                    if target_sm.id_type.is_none() {
+                        let id_name = format_ident!("{}Id", target_sm.name);
+                        let counter = format_ident!("next_{}_id", target_snake);
+                        quote! {
+                            #[allow(dead_code)]
+                            pub fn #method(&mut self, sm: #handler) -> #tid {
+                                let id = #id_name(self.#counter);
+                                self.#counter += 1;
+                                self.#field.push((id, sm));
+                                id
+                            }
+                        }
+                    } else {
+                        quote! {
+                            #[allow(dead_code)]
+                            pub fn #method(&mut self, id: #tid, sm: #handler) {
+                                self.#field.push((id, sm));
+                            }
+                        }
+                    }
+                })
+                .collect();
+
+            // Self-destruct method
+            let destroy_methods: Vec<TokenStream> = vec![
+                quote! {
+                    #[allow(dead_code)]
+                    pub fn self_destruct(&mut self) {
+                        self.pending_self_destruct = true;
+                    }
+                },
+            ];
+
             quote! {
                 #[allow(dead_code)]
                 struct #ctx_name {
@@ -481,16 +608,22 @@ fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                     #(#signal_fields,)*
                     #(#edge_fields,)*
                     #(#event_fields,)*
+                    #(#create_fields,)*
+                    #(#destroy_fields,)*
+                    #(#counter_fields,)*
                 }
 
                 #[allow(dead_code)]
                 impl #ctx_name {
-                    fn new(id: #id_type) -> Self {
+                    fn new(id: #id_type #(, #counter_params)*) -> Self {
                         #ctx_name {
                             id,
                             #(#signal_inits,)*
                             #(#edge_inits,)*
                             #(#event_inits,)*
+                            #(#create_inits,)*
+                            #(#destroy_inits,)*
+                            #(#counter_inits,)*
                         }
                     }
 
@@ -502,6 +635,8 @@ fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                     #(#signal_setters)*
                     #(#edge_setters)*
                     #(#event_senders)*
+                    #(#create_methods)*
+                    #(#destroy_methods)*
                 }
             }
         })
@@ -645,21 +780,35 @@ fn gen_router_module(def: &TopologyDef) -> TokenStream {
         }
     }
 
-    // Dirty queue, pending events, depth limit
+    // Dirty queue, pending events, depth limit, tracer
     fields.push(quote! { dirty: std::collections::VecDeque<DirtyInput> });
     fields.push(quote! { pending_events: std::collections::VecDeque<PendingEvent> });
     fields.push(quote! { depth_limit: usize });
+    fields.push(quote! { tracer: __Tracer });
     inits.push(quote! { dirty: std::collections::VecDeque::new() });
     inits.push(quote! { pending_events: std::collections::VecDeque::new() });
     inits.push(quote! { depth_limit });
+    // tracer init is handled separately for each constructor
 
     // Collect methods by visibility category
     let mut public_methods = Vec::new();
     let mut internal_methods = Vec::new();
 
+    // Tracer accessor
+    public_methods.push(quote! {
+        fn tracer(&self) -> &__Tracer {
+            &self.tracer
+        }
+    });
+    public_methods.push(quote! {
+        fn tracer_mut(&mut self) -> &mut __Tracer {
+            &mut self.tracer
+        }
+    });
+
     // Always public: SM lifecycle, port lifecycle, propagate, SM accessors
     gen_create_methods(def, &mut public_methods);
-    gen_destroy_methods(def, &mut public_methods);
+    gen_destroy_methods(def, &mut internal_methods);
     gen_remove_methods(def, &mut public_methods);
     gen_sm_accessors(def, &mut public_methods);
     gen_propagate(def, &mut public_methods);
@@ -686,15 +835,26 @@ fn gen_router_module(def: &TopologyDef) -> TokenStream {
         mod __router {
             use super::*;
 
-            pub struct Router {
+            pub struct Router<__Tracer: crate::trace::Tracer = crate::trace::NoopTracer> {
                 #(#fields,)*
             }
 
             #[allow(dead_code)]
-            impl Router {
+            impl Router<crate::trace::NoopTracer> {
                 pub fn new(depth_limit: usize) -> Self {
                     Router {
                         #(#inits,)*
+                        tracer: crate::trace::NoopTracer,
+                    }
+                }
+            }
+
+            #[allow(dead_code)]
+            impl<__Tracer: crate::trace::Tracer> Router<__Tracer> {
+                pub fn new_traced(depth_limit: usize, tracer: __Tracer) -> Self {
+                    Router {
+                        #(#inits,)*
+                        tracer,
                     }
                 }
 
@@ -715,6 +875,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let instances = format_ident!("{}_instances", to_snake_case(&sm.name.to_string()));
         let id_type = sm_id_type(sm);
         let handler = &sm.handler_type;
+        let node_str = sm.name.to_string();
 
         let sig_inits: Vec<_> = def
             .signals
@@ -734,6 +895,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self, sm: #handler) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
+                    if let Some(__tracer) = &mut self.tracer {
+                        __tracer.sm_created(#node_str, &id as &dyn std::fmt::Debug);
+                    }
                     self.#instances.insert(id, sm);
                     #(#sig_inits)*
                     id
@@ -743,6 +907,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type, sm: #handler) {
+                    if let Some(__tracer) = &mut self.tracer {
+                        __tracer.sm_created(#node_str, &id as &dyn std::fmt::Debug);
+                    }
                     self.#instances.insert(id, sm);
                     #(#sig_inits)*
                 }
@@ -755,6 +922,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let method = format_ident!("create_{}", to_snake_case(&port.name.to_string()));
         let instances = format_ident!("{}_instances", to_snake_case(&port.name.to_string()));
         let id_type = port_id_type(port);
+        let node_str = port.name.to_string();
 
         let sig_inits: Vec<_> = def
             .signals
@@ -774,6 +942,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
+                    if let Some(__tracer) = &mut self.tracer {
+                        __tracer.port_created(#node_str, &id as &dyn std::fmt::Debug);
+                    }
                     self.#instances.insert(id);
                     #(#sig_inits)*
                     id
@@ -783,6 +954,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type) {
+                    if let Some(__tracer) = &mut self.tracer {
+                        __tracer.port_created(#node_str, &id as &dyn std::fmt::Debug);
+                    }
                     self.#instances.insert(id);
                     #(#sig_inits)*
                 }
@@ -828,6 +1002,10 @@ fn gen_destroy_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             })
             .collect();
 
+        // Note: sm_destroyed trace is emitted from apply_effects for
+        // self-destruct, or NOT emitted here because destroy_ is called
+        // from apply_effects. External destroy calls that bypass
+        // apply_effects should add their own tracing if needed.
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) -> Option<#handler> {
                 let sm = self.#instances.remove(&id);
@@ -845,6 +1023,7 @@ fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let method = format_ident!("destroy_{}", to_snake_case(&port.name.to_string()));
         let instances = format_ident!("{}_instances", to_snake_case(&port.name.to_string()));
         let id_type = port_id_type(port);
+        let node_str = port.name.to_string();
 
         let sig_removes: Vec<_> = def
             .signals
@@ -890,6 +1069,9 @@ fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) {
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.port_destroyed(#node_str, &id as &dyn std::fmt::Debug);
+                }
                 self.#instances.remove(&id);
                 #(#sig_removes)*
                 #(#edge_clears)*
@@ -951,11 +1133,19 @@ fn gen_signal_setters(
             })
             .collect();
 
+        let node_str = sig.node.to_string();
+        let signal_str = sig.signal.to_string();
+
         let body = quote! {
             fn #method(&mut self, id: #id_type, value: #vt) {
                 if self.#field.get(&id) == Some(&value) {
                     return;
                 }
+                self.tracer.signal_changed(
+                    #node_str, &id, #signal_str,
+                    &self.#field.get(&id) as &dyn std::fmt::Debug,
+                    &value as &dyn std::fmt::Debug,
+                );
                 self.#field.insert(id, value);
                 #(#enqueue_code)*
             }
@@ -993,6 +1183,8 @@ fn gen_edge_setters(
             })
             .collect();
 
+        let edge_str = edge.name.to_string();
+
         let body = quote! {
             fn #method(&mut self, source: #src_id, new_targets: impl IntoIterator<Item = #tgt_id>) {
                 let new_targets: Vec<#tgt_id> = new_targets.into_iter().collect();
@@ -1007,6 +1199,15 @@ fn gen_edge_setters(
 
                 if removed.is_empty() && added.is_empty() {
                     return;
+                }
+
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.edge_changed(
+                        #edge_str,
+                        &source as &dyn std::fmt::Debug,
+                        &added as &dyn std::fmt::Debug,
+                        &removed as &dyn std::fmt::Debug,
+                    );
                 }
 
                 if new_targets.is_empty() {
@@ -1097,9 +1298,18 @@ fn gen_event_send_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let receiver_id = node_id_type(def, &ev.receiver);
         let payload = &ev.payload_type;
         let variant = &ev.name;
+        let event_str = ev.name.to_string();
 
         methods.push(quote! {
             fn #method(&mut self, sender_id: #sender_id, receiver_id: #receiver_id, payload: #payload) {
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.event_queued(
+                        #event_str,
+                        &sender_id as &dyn std::fmt::Debug,
+                        &receiver_id as &dyn std::fmt::Debug,
+                        &payload as &dyn std::fmt::Debug,
+                    );
+                }
                 self.pending_events.push_back(PendingEvent::#variant(sender_id, receiver_id, payload));
             }
         });
@@ -1175,7 +1385,53 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let method = format_ident!("apply_{}_effects", to_snake_case(&sm.name.to_string()));
         let ctx_name = format_ident!("{}Ctx", sm.name);
         let id_type = sm_id_type(sm);
+        let node_str = sm.name.to_string();
 
+        // 1. Create new SMs (so they exist before edges reference them)
+        let create_applies: Vec<_> = def
+            .state_machines
+            .iter()
+            .map(|target_sm| {
+                let target_snake = to_snake_case(&target_sm.name.to_string());
+                let target_str = target_sm.name.to_string();
+                let ctx_field = format_ident!("pending_create_{}", target_snake);
+                let instances = format_ident!("{}_instances", target_snake);
+
+                let sig_inits: Vec<_> = def
+                    .signals
+                    .iter()
+                    .filter(|s| s.node == target_sm.name)
+                    .map(|sig| {
+                        let f = signal_field(sig);
+                        quote! { self.#f.insert(new_id, Default::default()); }
+                    })
+                    .collect();
+
+                quote! {
+                    for (new_id, new_sm) in ctx.#ctx_field {
+                        if let Some(__tracer) = &mut self.tracer {
+                            __tracer.sm_created(#target_str, &new_id as &dyn std::fmt::Debug);
+                        }
+                        self.#instances.insert(new_id, new_sm);
+                        #(#sig_inits)*
+                    }
+                }
+            })
+            .collect();
+
+        // 2. Update auto-ID counters
+        let counter_updates: Vec<_> = def
+            .state_machines
+            .iter()
+            .filter(|s| s.id_type.is_none())
+            .map(|target_sm| {
+                let target_snake = to_snake_case(&target_sm.name.to_string());
+                let counter = format_ident!("next_{}_id", target_snake);
+                quote! { self.#counter = ctx.#counter; }
+            })
+            .collect();
+
+        // 3. Apply signals
         let signal_applies: Vec<_> = def
             .signals
             .iter()
@@ -1196,6 +1452,7 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             })
             .collect();
 
+        // 4. Apply edges (may reference newly created SMs)
         let edge_applies: Vec<_> = def
             .edges
             .iter()
@@ -1211,6 +1468,7 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             })
             .collect();
 
+        // 5. Queue events
         let event_applies: Vec<_> = def
             .events
             .iter()
@@ -1218,25 +1476,68 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             .map(|ev| {
                 let ctx_field = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
                 let variant = &ev.name;
+                let event_str = ev.name.to_string();
                 quote! {
                     for (receiver_id, payload) in ctx.#ctx_field {
+                        if let Some(__tracer) = &mut self.tracer {
+                            __tracer.event_queued(
+                                #event_str,
+                                &id as &dyn std::fmt::Debug,
+                                &receiver_id as &dyn std::fmt::Debug,
+                                &payload as &dyn std::fmt::Debug,
+                            );
+                        }
                         self.pending_events.push_back(PendingEvent::#variant(id, receiver_id, payload));
                     }
                 }
             })
             .collect();
 
+        // 6. Self-destruct
+        let destroy_method = format_ident!("destroy_{}", to_snake_case(&sm.name.to_string()));
+        let self_destruct_apply = quote! {
+            if ctx.pending_self_destruct {
+                self.#destroy_method(id);
+            }
+        };
+
         methods.push(quote! {
-            fn #method(&mut self, id: #id_type, ctx: #ctx_name) {
+            fn #method(&mut self, id: #id_type, ctx: #ctx_name) -> bool {
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.effects_start(#node_str, &id as &dyn std::fmt::Debug);
+                }
+                #(#create_applies)*
+                #(#counter_updates)*
                 #(#signal_applies)*
                 #(#edge_applies)*
                 #(#event_applies)*
+                if ctx.pending_self_destruct {
+                    if let Some(__tracer) = &mut self.tracer {
+                        __tracer.sm_destroyed(#node_str, &id as &dyn std::fmt::Debug);
+                    }
+                }
+                #self_destruct_apply
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.effects_end(#node_str, &id as &dyn std::fmt::Debug);
+                }
+                ctx.pending_self_destruct
             }
         });
     }
 }
 
 fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
+    // Generate counter passing code for Ctx::new calls
+    let counter_passes: Vec<_> = def
+        .state_machines
+        .iter()
+        .filter(|s| s.id_type.is_none())
+        .map(|sm| {
+            let f = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
+            quote! { , self.#f }
+        })
+        .collect();
+
     let match_arms: Vec<_> = def
         .inputs
         .iter()
@@ -1263,6 +1564,9 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 "apply_{}_effects",
                 to_snake_case(&inp.node.to_string())
             );
+            let counter_passes = &counter_passes;
+            let node_str = inp.node.to_string();
+            let input_str = inp.input_name.to_string();
 
             quote! {
                 DirtyInput::#variant(target_id) => {
@@ -1271,16 +1575,34 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     }
                     let result = self.#aggregate(target_id);
                     if self.#last.get(&target_id) == Some(&result) {
+                        if let Some(__tracer) = &mut self.tracer {
+                            __tracer.input_suppressed(
+                                #node_str,
+                                &target_id as &dyn std::fmt::Debug,
+                                #input_str,
+                            );
+                        }
                         continue;
                     }
                     self.#last.insert(target_id, result.clone());
 
-                    let mut sm = self.#instances.remove(&target_id).unwrap();
-                    let mut ctx = #ctx_name::new(target_id);
-                    sm.handle(#input_enum::#input_variant(result), &mut ctx);
-                    self.#instances.insert(target_id, sm);
+                    if let Some(__tracer) = &mut self.tracer {
+                        __tracer.input_delivered(
+                            #node_str,
+                            &target_id as &dyn std::fmt::Debug,
+                            #input_str,
+                            &result as &dyn std::fmt::Debug,
+                        );
+                    }
 
-                    self.#apply(target_id, ctx);
+                    let mut sm = self.#instances.remove(&target_id).unwrap();
+                    let mut ctx = #ctx_name::new(target_id #(#counter_passes)*);
+                    sm.handle(#input_enum::#input_variant(result), &mut ctx);
+
+                    let self_destructed = self.#apply(target_id, ctx);
+                    if !self_destructed {
+                        self.#instances.insert(target_id, sm);
+                    }
                 }
             }
         })
@@ -1300,6 +1622,8 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 "apply_{}_effects",
                 to_snake_case(&ev.receiver.to_string())
             );
+            let counter_passes = &counter_passes;
+            let event_str = ev.name.to_string();
 
             let connectivity = gen_connectivity_check(def, ev);
 
@@ -1314,10 +1638,21 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     }
 
                     if let Some(mut sm) = self.#instances.remove(&receiver_id) {
-                        let mut ctx = #ctx_name::new(receiver_id);
+                        if let Some(__tracer) = &mut self.tracer {
+                            __tracer.event_delivered(
+                                #event_str,
+                                &sender_id as &dyn std::fmt::Debug,
+                                &receiver_id as &dyn std::fmt::Debug,
+                                &payload as &dyn std::fmt::Debug,
+                            );
+                        }
+                        let mut ctx = #ctx_name::new(receiver_id #(#counter_passes)*);
                         sm.handle(#input_enum::#variant(payload), &mut ctx);
-                        self.#instances.insert(receiver_id, sm);
-                        self.#apply(receiver_id, ctx);
+
+                        let self_destructed = self.#apply(receiver_id, ctx);
+                        if !self_destructed {
+                            self.#instances.insert(receiver_id, sm);
+                        }
                     }
                 }
             }
@@ -1326,6 +1661,9 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
     methods.push(quote! {
         fn propagate(&mut self) {
+            if let Some(__tracer) = &mut self.tracer {
+                __tracer.propagate_start();
+            }
             let mut depth = 0;
 
             while !self.dirty.is_empty() || !self.pending_events.is_empty() {
@@ -1341,6 +1679,10 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                         "WARNING: Signal router approaching depth limit ({}/{})",
                         depth, self.depth_limit
                     );
+                }
+
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.round_start(depth);
                 }
 
                 // Process dirty signal queue
@@ -1364,6 +1706,14 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                         #(#event_arms)*
                     }
                 }
+
+                if let Some(__tracer) = &mut self.tracer {
+                    __tracer.round_end(depth);
+                }
+            }
+
+            if let Some(__tracer) = &mut self.tracer {
+                __tracer.propagate_end(depth);
             }
         }
     });

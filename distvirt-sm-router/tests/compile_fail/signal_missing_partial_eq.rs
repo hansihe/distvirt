@@ -1,6 +1,6 @@
 // Signal value type doesn't implement PartialEq — should fail.
 
-use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
+use distvirt_sm_router::{trace, Aggregator, ListAggregator, SmHandler};
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 struct AlphaId(u64);

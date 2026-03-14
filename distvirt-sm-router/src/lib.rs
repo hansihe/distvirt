@@ -185,9 +185,13 @@ pub trait Aggregator {
 ///   - `ctx.set_{signal_name}(value)` — update an output signal
 ///   - `ctx.set_{edge_name}_edges(targets)` — update outgoing edges
 ///   - `ctx.send_{event_name}(target, payload)` — send a discrete event
+///   - `ctx.create_{sm_name}(sm)` — create a new SM instance (returns ID for auto-ID types)
+///   - `ctx.destroy_{sm_name}(id)` — destroy an SM instance
 ///
-/// Signal and edge changes are queued and applied after the handler returns.
-/// The router then cascades any resulting changes within the same round.
+/// All changes are queued and applied after the handler returns. Creates are
+/// applied first (so edges can reference new SMs), then signals, edges, events,
+/// and finally destroys. The router then cascades any resulting changes within
+/// the same round.
 pub trait SmHandler {
     type Input;
     type Ctx;
@@ -224,6 +228,9 @@ impl<Id, V: Clone> Aggregator for ListAggregator<Id, V> {
         inputs.iter().map(|(_, v)| v.clone()).collect()
     }
 }
+
+pub mod model_check;
+pub mod trace;
 
 #[cfg(test)]
 mod tests;

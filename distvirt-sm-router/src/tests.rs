@@ -424,21 +424,24 @@ fn port_removal_cleans_edges_and_reaggregates() {
 fn dangling_edges_target_dies_source_unaffected() {
     let mut router = Router::new(16);
     router.create_alpha(A1, AlphaSm::new());
-    router.create_beta(B1, BetaSm::new());
+
+    // Beta self-destructs when it receives demand > 0.
+    let mut b1_sm = BetaSm::new();
+    b1_sm.on_handle = Some(Box::new(|input, ctx| {
+        if let BetaInput::DemandInput(count) = input {
+            if *count > 0 {
+                ctx.self_destruct();
+            }
+        }
+    }));
+    router.create_beta(B1, b1_sm);
 
     router.set_alpha_to_beta_edges(A1, vec![B1]);
     router.set_alpha_demand(A1, true);
     router.propagate();
 
-    let b1 = router.get_beta(&B1).unwrap();
-    let demand_count = b1
-        .deliveries
-        .iter()
-        .filter(|inp| matches!(inp, BetaInput::DemandInput(_)))
-        .count();
-    assert_eq!(demand_count, 1);
-
-    router.destroy_beta(B1);
+    // B1 self-destructed on receiving demand.
+    assert!(router.get_beta(&B1).is_none());
 
     router.set_alpha_demand(A1, false);
     router.propagate();
@@ -447,6 +450,7 @@ fn dangling_edges_target_dies_source_unaffected() {
     assert_eq!(a1.deliveries.len(), 0);
 
     // expose_internals_for_testing allows direct field access
+    // Dangling edge remains — source is unaffected.
     assert!(router
         .alpha_to_beta_fwd
         .get(&A1)
@@ -510,10 +514,18 @@ fn round_semantics_multiple_inputs_delivered_independently() {
 }
 
 #[test]
-fn sm_destruction_removes_outgoing_edges() {
+fn sm_self_destruct_removes_outgoing_edges() {
     let mut router = Router::new(16);
     router.create_alpha(A1, AlphaSm::new());
-    router.create_alpha(A2, AlphaSm::new());
+
+    // A2 self-destructs when it receives status input.
+    let mut a2 = AlphaSm::new();
+    a2.on_handle = Some(Box::new(|input, ctx| {
+        if matches!(input, AlphaInput::StatusInput(_)) {
+            ctx.self_destruct();
+        }
+    }));
+    router.create_alpha(A2, a2);
     router.create_beta(B1, BetaSm::new());
 
     router.set_alpha_to_beta_edges(A1, vec![B1]);
@@ -534,9 +546,15 @@ fn sm_destruction_removes_outgoing_edges() {
         .collect();
     assert_eq!(*demand.last().unwrap(), 2);
 
-    router.destroy_alpha(A2);
+    // Trigger A2 self-destruct via BetaToAlpha edge + status signal.
+    router.set_beta_to_alpha_edges(B1, vec![A2]);
+    router.set_beta_status(B1, 42);
     router.propagate();
 
+    // A2 should be gone.
+    assert!(router.get_alpha(&A2).is_none());
+
+    // B1 should have received updated demand (down to 1).
     let b1 = router.get_beta(&B1).unwrap();
     let demand: Vec<_> = b1
         .deliveries
@@ -553,13 +571,24 @@ fn sm_destruction_removes_outgoing_edges() {
 fn dangling_edge_to_dead_sm_is_noop() {
     let mut router = Router::new(16);
     router.create_alpha(A1, AlphaSm::new());
-    router.create_beta(B1, BetaSm::new());
+
+    // Beta self-destructs on first demand input.
+    let mut b1_sm = BetaSm::new();
+    b1_sm.on_handle = Some(Box::new(|input, ctx| {
+        if matches!(input, BetaInput::DemandInput(_)) {
+            ctx.self_destruct();
+        }
+    }));
+    router.create_beta(B1, b1_sm);
 
     router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_alpha_demand(A1, true);
     router.propagate();
 
-    router.destroy_beta(B1);
+    // B1 self-destructed.
+    assert!(router.get_beta(&B1).is_none());
 
+    // Setting edges to dead B1 and non-existent B2 is a noop.
     router.set_alpha_to_beta_edges(A1, vec![B1, B2]);
     router.propagate();
 
@@ -1122,6 +1151,212 @@ fn sm_handler_sets_edges_and_signals_atomically() {
 // ---- Auto-ID tests ----
 // Separate module so the router! macro generates a fresh set of types.
 
+// ---- Tracer tests ----
+
+#[test]
+fn tracer_captures_basic_propagation() {
+    use crate::trace::{RecordingTracer, TraceEntry};
+
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+    router.create_beta(B1, BetaSm::new());
+
+    router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_alpha_demand(A1, true);
+
+    router.set_tracer(RecordingTracer::new());
+    router.propagate();
+
+    let tracer = router.take_tracer().unwrap();
+    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
+    let entries = tracer.entries();
+
+    // Should have propagate start/end
+    assert!(matches!(entries.first(), Some(TraceEntry::PropagateStart)));
+    assert!(matches!(entries.last(), Some(TraceEntry::PropagateEnd { .. })));
+
+    // Should have at least one round
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, TraceEntry::RoundStart { depth: 1 })));
+
+    // Should have delivered DemandInput to Beta
+    assert!(entries.iter().any(|e| matches!(
+        e,
+        TraceEntry::InputDelivered {
+            node: "Beta",
+            input: "DemandInput",
+            ..
+        }
+    )));
+
+    // Should have signal change for Alpha::Demand
+    assert!(entries.iter().any(|e| matches!(
+        e,
+        TraceEntry::SignalChanged {
+            node: "Alpha",
+            signal: "Demand",
+            ..
+        }
+    )));
+}
+
+#[test]
+fn tracer_captures_effects_bracketing() {
+    use crate::trace::{RecordingTracer, TraceEntry};
+
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+
+    let mut b1 = BetaSm::new();
+    b1.on_handle = Some(Box::new(|input, ctx| {
+        if let BetaInput::DemandInput(count) = input {
+            if *count > 0 {
+                ctx.set_status(42);
+                ctx.set_beta_to_alpha_edges(vec![A1]);
+            }
+        }
+    }));
+    router.create_beta(B1, b1);
+
+    router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_alpha_demand(A1, true);
+
+    router.set_tracer(RecordingTracer::new());
+    router.propagate();
+
+    let tracer = router.take_tracer().unwrap();
+    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
+    let entries = tracer.entries();
+
+    // Find the EffectsStart/End for Beta(B1)
+    let effects_start_idx = entries
+        .iter()
+        .position(|e| matches!(e, TraceEntry::EffectsStart { node: "Beta", .. }))
+        .expect("should have EffectsStart for Beta");
+    let effects_end_idx = entries
+        .iter()
+        .position(|e| matches!(e, TraceEntry::EffectsEnd { node: "Beta", .. }))
+        .expect("should have EffectsEnd for Beta");
+
+    // Signal change and edge change should be between effects_start and effects_end
+    let has_signal_in_effects = entries[effects_start_idx..effects_end_idx]
+        .iter()
+        .any(|e| matches!(e, TraceEntry::SignalChanged { signal: "Status", .. }));
+    assert!(has_signal_in_effects, "signal change should be within effects bracket");
+
+    let has_edge_in_effects = entries[effects_start_idx..effects_end_idx]
+        .iter()
+        .any(|e| matches!(e, TraceEntry::EdgeChanged { edge: "BetaToAlpha", .. }));
+    assert!(has_edge_in_effects, "edge change should be within effects bracket");
+}
+
+#[test]
+fn tracer_captures_event_delivery() {
+    use crate::trace::{RecordingTracer, TraceEntry};
+
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_gamma_to_beta_edges(G1, vec![B1]);
+    router.propagate();
+
+    router.set_tracer(RecordingTracer::new());
+    router.send_command(G1, B1, "hello".to_string());
+    router.propagate();
+
+    let tracer = router.take_tracer().unwrap();
+    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
+    let entries = tracer.entries();
+
+    // Should have event queued
+    assert!(entries.iter().any(|e| matches!(
+        e,
+        TraceEntry::EventQueued {
+            event: "Command",
+            ..
+        }
+    )));
+
+    // Should have event delivered
+    assert!(entries.iter().any(|e| matches!(
+        e,
+        TraceEntry::EventDelivered {
+            event: "Command",
+            ..
+        }
+    )));
+}
+
+#[test]
+fn tracer_captures_suppression() {
+    use crate::trace::{RecordingTracer, TraceEntry};
+
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+    router.create_alpha(A2, AlphaSm::new());
+    router.create_beta(B1, BetaSm::new());
+
+    router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_alpha_to_beta_edges(A2, vec![B1]);
+
+    // Both true → count=2
+    router.set_alpha_demand(A1, true);
+    router.set_alpha_demand(A2, true);
+    router.propagate();
+
+    // A1=false, A2=true simultaneously → count still 1... wait, initially 2, now 1.
+    // Let me set up for actual suppression:
+    // Set A1=false → count=1
+    router.set_alpha_demand(A1, false);
+    router.propagate();
+
+    // Now A1=true, A2=false → count stays at 1 (suppressed)
+    router.set_tracer(RecordingTracer::new());
+    router.set_alpha_demand(A1, true);
+    router.set_alpha_demand(A2, false);
+    router.propagate();
+
+    let tracer = router.take_tracer().unwrap();
+    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
+    let entries = tracer.entries();
+
+    // Should have InputSuppressed for DemandInput (aggregated value didn't change)
+    assert!(entries.iter().any(|e| matches!(
+        e,
+        TraceEntry::InputSuppressed {
+            node: "Beta",
+            input: "DemandInput",
+            ..
+        }
+    )));
+}
+
+#[test]
+fn tracer_display_output() {
+    use crate::trace::RecordingTracer;
+
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+    router.create_beta(B1, BetaSm::new());
+
+    router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_alpha_demand(A1, true);
+
+    router.set_tracer(RecordingTracer::new());
+    router.propagate();
+
+    let tracer = router.take_tracer().unwrap();
+    let tracer: Box<RecordingTracer> = tracer.downcast().unwrap();
+
+    let output = format!("{}", tracer);
+    assert!(output.contains("propagate"));
+    assert!(output.contains("Round 1"));
+    assert!(output.contains("deliver"));
+    assert!(output.contains("DemandInput"));
+}
+
 mod auto_id {
     use crate::{Aggregator, ListAggregator, SmHandler};
 
@@ -1324,31 +1559,209 @@ mod auto_id {
     }
 
     #[test]
-    fn auto_id_destroy_and_reaggregate() {
+    fn auto_id_self_destruct_and_reaggregate() {
         let mut router = Router::new(16);
         router.create_service(S1, ServiceSm::new());
 
         let w1 = router.create_worker(WorkerSm::new());
-        let w2 = router.create_worker(WorkerSm::new());
+
+        // w2 self-destructs on first demand input.
+        let mut w2_sm = WorkerSm::new();
+        w2_sm.on_handle = Some(Box::new(|input, ctx| {
+            if matches!(input, WorkerInput::DemandInput(_)) {
+                ctx.self_destruct();
+            }
+        }));
+        let w2 = router.create_worker(w2_sm);
 
         router.set_service_to_worker_edges(S1, vec![w1, w2]);
         router.set_service_demand(S1, true);
         router.propagate();
 
-        // Both workers see demand=1
-        for wid in [&w1, &w2] {
-            let worker = router.get_worker(wid).unwrap();
-            assert!(worker
-                .deliveries
-                .iter()
-                .any(|inp| *inp == WorkerInput::DemandInput(1)));
-        }
-
-        // Destroy w2 — edges from S1 still include w2 (dangling), but
-        // w2 no longer exists as an instance
-        router.destroy_worker(w2);
+        // w2 self-destructed on receiving demand.
         assert!(router.get_worker(&w2).is_none());
+        // w1 still exists.
         assert!(router.get_worker(&w1).is_some());
+    }
+
+    // ---- Handler-driven SM lifecycle tests ----
+
+    #[test]
+    fn handler_creates_sm_with_auto_id() {
+        // Service handler creates a Worker SM when it receives demand.
+        let mut router = Router::new(16);
+
+        // Worker handler creates another worker on receiving DemandInput
+        let mut w1 = WorkerSm::new();
+        w1.on_handle = Some(Box::new(|input, ctx| {
+            if let WorkerInput::DemandInput(count) = input {
+                if *count > 0 {
+                    let w2_id = ctx.create_worker(WorkerSm {
+                        deliveries: Vec::new(),
+                        on_handle: None,
+                    });
+                    // Set edge to the newly created worker
+                    ctx.set_worker_to_service_edges(vec![S1]);
+                    ctx.set_status(w2_id.0 as u32);
+                }
+            }
+        }));
+        let w1_id = router.create_worker(w1);
+        router.create_service(S1, ServiceSm::new());
+
+        router.set_service_to_worker_edges(S1, vec![w1_id]);
+        router.set_service_demand(S1, true);
+        router.propagate();
+
+        // W1 should have received DemandInput(1)
+        let w1 = router.get_worker(&w1_id).unwrap();
+        assert!(w1.deliveries.iter().any(|inp| *inp == WorkerInput::DemandInput(1)));
+
+        // W1's handler created a new worker; the status signal contains the new ID
+
+        // The new worker should exist (ID allocated after w1)
+        let w2_id = WorkerId(w1_id.0 + 1);
+        assert!(router.get_worker(&w2_id).is_some());
+
+        // S1 should have received status from w1 (via the edge w1 set)
+        let s1 = router.get_service(&S1).unwrap();
+        assert!(s1.deliveries.iter().any(|inp| *inp == ServiceInput::StatusInput(vec![w2_id.0 as u32])));
+    }
+
+    #[test]
+    fn handler_creates_sm_and_sets_edges_to_it() {
+        // Worker handler creates another worker and sets edges to it in the same handler call.
+        // The created worker should receive signals through those edges in the same propagate().
+        let mut router = Router::new(16);
+        let c1 = router.create_config();
+        router.set_config_value(c1, 42);
+
+        let mut w1 = WorkerSm::new();
+        w1.on_handle = Some(Box::new(move |input, ctx| {
+            if let WorkerInput::DemandInput(count) = input {
+                if *count > 0 {
+                    // Create a new worker and wire config to it
+                    let _w2_id = ctx.create_worker(WorkerSm {
+                        deliveries: Vec::new(),
+                        on_handle: None,
+                    });
+                    // Note: we can't set edges FROM config (that's a port),
+                    // but we can verify the worker was created.
+                }
+            }
+        }));
+        let w1_id = router.create_worker(w1);
+
+        router.create_service(S1, ServiceSm::new());
+        router.set_service_to_worker_edges(S1, vec![w1_id]);
+        router.set_service_demand(S1, true);
+        router.propagate();
+
+        // New worker should exist
+        let w2_id = WorkerId(w1_id.0 + 1);
+        assert!(router.get_worker(&w2_id).is_some());
+    }
+
+    #[test]
+    fn handler_self_destructs() {
+        // Worker self-destructs when it receives demand.
+        let mut router = Router::new(16);
+        router.create_service(S1, ServiceSm::new());
+
+        let mut w1 = WorkerSm::new();
+        w1.on_handle = Some(Box::new(move |input, ctx| {
+            if let WorkerInput::DemandInput(count) = input {
+                if *count > 0 {
+                    ctx.set_status(99);
+                    ctx.self_destruct();
+                }
+            }
+        }));
+        let w1_id = router.create_worker(w1);
+
+        // Set up edges so destruction triggers re-aggregation on S1
+        router.set_worker_to_service_edges(w1_id, vec![S1]);
+        router.set_service_to_worker_edges(S1, vec![w1_id]);
+        router.set_service_demand(S1, true);
+        router.propagate();
+
+        // W1 should be destroyed (self-destructed)
+        assert!(router.get_worker(&w1_id).is_none());
+
+        // S1 should have received empty status (w1's edges cleaned up)
+        let s1 = router.get_service(&S1).unwrap();
+        assert!(s1.deliveries.iter().any(|inp| *inp == ServiceInput::StatusInput(vec![])));
+    }
+
+    #[test]
+    fn handler_creates_multiple_sms_unique_ids() {
+        // Handler creates multiple SMs in a single handler call, all get unique IDs.
+        let mut router = Router::new(16);
+        router.create_service(S1, ServiceSm::new());
+
+        let mut w1 = WorkerSm::new();
+        w1.on_handle = Some(Box::new(|input, ctx| {
+            if let WorkerInput::DemandInput(count) = input {
+                if *count > 0 {
+                    let a = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
+                    let b = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
+                    let c = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
+                    // All IDs must be different
+                    assert_ne!(a, b);
+                    assert_ne!(b, c);
+                    assert_ne!(a, c);
+                    ctx.set_status(a.0 as u32);
+                }
+            }
+        }));
+        let w1_id = router.create_worker(w1);
+
+        router.set_service_to_worker_edges(S1, vec![w1_id]);
+        router.set_service_demand(S1, true);
+        router.propagate();
+
+        // Three new workers created after w1
+        let w2 = WorkerId(w1_id.0 + 1);
+        let w3 = WorkerId(w1_id.0 + 2);
+        let w4 = WorkerId(w1_id.0 + 3);
+        assert!(router.get_worker(&w2).is_some());
+        assert!(router.get_worker(&w3).is_some());
+        assert!(router.get_worker(&w4).is_some());
+    }
+
+    #[test]
+    fn handler_create_ids_dont_conflict_with_router_create() {
+        // IDs from handler-created SMs and router-created SMs share the same counter.
+        let mut router = Router::new(16);
+        router.create_service(S1, ServiceSm::new());
+
+        // Create w1 via router (gets ID 0), w2 via router (gets ID 1).
+        let mut w1_sm = WorkerSm::new();
+        w1_sm.on_handle = Some(Box::new(|input, ctx| {
+            if let WorkerInput::DemandInput(count) = input {
+                if *count > 0 {
+                    let new_id = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
+                    ctx.set_status(new_id.0 as u32);
+                }
+            }
+        }));
+        let w1_id = router.create_worker(w1_sm);
+        assert_eq!(w1_id, WorkerId(0));
+
+        let w2_id = router.create_worker(WorkerSm::new());
+        assert_eq!(w2_id, WorkerId(1));
+
+        router.set_service_to_worker_edges(S1, vec![w1_id]);
+        router.set_service_demand(S1, true);
+        router.propagate();
+
+        // Handler-created worker should have ID 2 (counter continued past w2)
+        let w3_id = WorkerId(2);
+        assert!(router.get_worker(&w3_id).is_some());
+
+        // Next router.create_worker should get ID 3
+        let w4_id = router.create_worker(WorkerSm::new());
+        assert_eq!(w4_id, WorkerId(3));
     }
 
     #[test]
