@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crabtime = "1"
+distvirt-sm-router-macros = { path = "../distvirt-sm-router-macros" }
 
 [dev-dependencies]
+trybuild = "1"

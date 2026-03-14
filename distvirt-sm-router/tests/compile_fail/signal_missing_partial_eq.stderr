@@ -1,0 +1,99 @@
+warning: unused import: `ListAggregator`
+ --> tests/compile_fail/signal_missing_partial_eq.rs:3:38
+  |
+3 | use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
+  |                                      ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: can't compare `BadSignalType` with `BadSignalType`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:46:22
+   |
+46 |         Alpha::Value(BadSignalType),
+   |                      ^^^^^^^^^^^^^ no implementation for `BadSignalType == BadSignalType`
+   |
+   = help: the trait `PartialEq` is not implemented for `BadSignalType`
+note: required by a bound in `__assert_signal_partial_eq_alpha_value`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:39:1
+   |
+39 | / distvirt_sm_router::router! {
+40 | |     state_machines {
+41 | |         Alpha(AlphaId, AlphaSm),
+42 | |         Beta(BetaId, BetaSm),
+...  |
+58 | | }
+   | |_^ required by this bound in `__assert_signal_partial_eq_alpha_value`
+   = note: this error originates in the macro `distvirt_sm_router::router` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `BadSignalType` with `#[derive(PartialEq)]`
+   |
+13 + #[derive(PartialEq)]
+14 | struct BadSignalType(u32);
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `&Vec<BadSignalType>`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:39:1
+   |
+39 | / distvirt_sm_router::router! {
+40 | |     state_machines {
+41 | |         Alpha(AlphaId, AlphaSm),
+42 | |         Beta(BetaId, BetaSm),
+...  |
+58 | | }
+   | |_^
+   |
+note: an implementation of `PartialEq` might be missing for `BadSignalType`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:13:1
+   |
+13 | struct BadSignalType(u32);
+   | ^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `BadSignalType` with `#[derive(PartialEq)]`
+   |
+13 + #[derive(PartialEq)]
+14 | struct BadSignalType(u32);
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `Option<&Vec<BadSignalType>>`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:39:1
+   |
+39 | / distvirt_sm_router::router! {
+40 | |     state_machines {
+41 | |         Alpha(AlphaId, AlphaSm),
+42 | |         Beta(BetaId, BetaSm),
+...  |
+58 | | }
+   | |_^
+   |
+note: an implementation of `PartialEq` might be missing for `BadSignalType`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:13:1
+   |
+13 | struct BadSignalType(u32);
+   | ^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+   = note: this error originates in the macro `distvirt_sm_router::router` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `BadSignalType` with `#[derive(PartialEq)]`
+   |
+13 + #[derive(PartialEq)]
+14 | struct BadSignalType(u32);
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `Option<&BadSignalType>`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:39:1
+   |
+39 | / distvirt_sm_router::router! {
+40 | |     state_machines {
+41 | |         Alpha(AlphaId, AlphaSm),
+42 | |         Beta(BetaId, BetaSm),
+...  |
+58 | | }
+   | |_^
+   |
+note: an implementation of `PartialEq` might be missing for `BadSignalType`
+  --> tests/compile_fail/signal_missing_partial_eq.rs:13:1
+   |
+13 | struct BadSignalType(u32);
+   | ^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+   = note: this error originates in the macro `distvirt_sm_router::router` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `BadSignalType` with `#[derive(PartialEq)]`
+   |
+13 + #[derive(PartialEq)]
+14 | struct BadSignalType(u32);
+   |

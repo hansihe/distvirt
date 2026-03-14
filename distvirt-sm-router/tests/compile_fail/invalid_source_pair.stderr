@@ -1,0 +1,44 @@
+error: proc macro panicked
+  --> tests/compile_fail/invalid_source_pair.rs:25:1
+   |
+25 | / distvirt_sm_router::router! {
+26 | |     state_machines {
+27 | |         Alpha(AlphaId, AlphaSm),
+28 | |         Beta(BetaId, BetaSm),
+...  |
+45 | | }
+   | |_^
+   |
+   = help: message: input Beta::StatusInput: edge AlphaToBeta source is Alpha, but signal is on Beta
+
+error[E0412]: cannot find type `AlphaInput` in this scope
+  --> tests/compile_fail/invalid_source_pair.rs:13:18
+   |
+13 |     type Input = AlphaInput;
+   |                  ^^^^^^^^^^ not found in this scope
+
+error[E0412]: cannot find type `AlphaCtx` in this scope
+  --> tests/compile_fail/invalid_source_pair.rs:14:16
+   |
+14 |     type Ctx = AlphaCtx;
+   |                ^^^^^^^^ not found in this scope
+
+error[E0412]: cannot find type `BetaInput` in this scope
+  --> tests/compile_fail/invalid_source_pair.rs:20:18
+   |
+20 |     type Input = BetaInput;
+   |                  ^^^^^^^^^ not found in this scope
+
+error[E0412]: cannot find type `BetaCtx` in this scope
+  --> tests/compile_fail/invalid_source_pair.rs:21:16
+   |
+21 |     type Ctx = BetaCtx;
+   |                ^^^^^^^ not found in this scope
+
+warning: unused imports: `Aggregator` and `ListAggregator`
+ --> tests/compile_fail/invalid_source_pair.rs:3:26
+  |
+3 | use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
+  |                          ^^^^^^^^^^  ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
