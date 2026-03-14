@@ -202,6 +202,33 @@ pub(super) fn gen_dirty_enum(def: &TopologyDef) -> TokenStream {
     }
 }
 
+pub(super) fn gen_pending_create_enum(def: &TopologyDef) -> TokenStream {
+    if def.state_machines.is_empty() {
+        return quote! {
+            #[allow(dead_code)]
+            enum PendingCreate {}
+        };
+    }
+
+    let variants: Vec<_> = def
+        .state_machines
+        .iter()
+        .map(|sm| {
+            let variant = &sm.name;
+            let id = sm_id_type(sm);
+            let handler = &sm.handler_type;
+            quote! { #variant(#id, #handler) }
+        })
+        .collect();
+
+    quote! {
+        #[allow(dead_code)]
+        enum PendingCreate {
+            #(#variants,)*
+        }
+    }
+}
+
 pub(super) fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
     if def.events.is_empty() {
         return quote! {

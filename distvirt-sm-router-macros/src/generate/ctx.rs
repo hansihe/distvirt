@@ -49,30 +49,14 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
-            let event_fields: Vec<_> = out_events
-                .iter()
-                .map(|ev| {
-                    let f = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
-                    let receiver_id = node_id_type(def, &ev.receiver);
-                    let payload = &ev.payload_type;
-                    quote! { #f: Vec<(#receiver_id, #payload)> }
-                })
-                .collect();
+            // Unified pending events and creates
+            let event_fields: Vec<_> = vec![
+                quote! { pending_events: Vec<PendingEvent> },
+            ];
 
-            // SM lifecycle fields: create/destroy for each SM type
-            let create_fields: Vec<_> = def
-                .state_machines
-                .iter()
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "pending_create_{}",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    let tid = sm_id_type(target_sm);
-                    let handler = &target_sm.handler_type;
-                    quote! { #f: Vec<(#tid, #handler)> }
-                })
-                .collect();
+            let create_fields: Vec<_> = vec![
+                quote! { pending_creates: Vec<PendingCreate> },
+            ];
 
             let destroy_fields: Vec<TokenStream> = vec![
                 quote! { pending_self_destruct: bool },
@@ -100,13 +84,9 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
-            let event_inits: Vec<_> = out_events
-                .iter()
-                .map(|ev| {
-                    let f = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
-                    quote! { #f: Vec::new() }
-                })
-                .collect();
+            let event_inits: Vec<_> = vec![
+                quote! { pending_events: Vec::new() },
+            ];
 
             let edge_inits: Vec<_> = out_edges
                 .iter()
@@ -116,17 +96,9 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
-            let create_inits: Vec<_> = def
-                .state_machines
-                .iter()
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "pending_create_{}",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f: Vec::new() }
-                })
-                .collect();
+            let create_inits: Vec<_> = vec![
+                quote! { pending_creates: Vec::new() },
+            ];
 
             let destroy_inits: Vec<TokenStream> = vec![
                 quote! { pending_self_destruct: false },
@@ -182,13 +154,13 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 .iter()
                 .map(|ev| {
                     let method = format_ident!("send_{}", to_snake_case(&ev.name.to_string()));
-                    let field = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
                     let receiver_id = node_id_type(def, &ev.receiver);
                     let payload = &ev.payload_type;
+                    let variant = &ev.name;
                     quote! {
                         #[allow(dead_code)]
                         pub fn #method(&mut self, target: #receiver_id, payload: #payload) {
-                            self.#field.push((target, payload));
+                            self.pending_events.push(PendingEvent::#variant(self.id, target, payload));
                         }
                     }
                 })
@@ -217,9 +189,9 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 .map(|target_sm| {
                     let target_snake = to_snake_case(&target_sm.name.to_string());
                     let method = format_ident!("create_{}", target_snake);
-                    let field = format_ident!("pending_create_{}", target_snake);
                     let tid = sm_id_type(target_sm);
                     let handler = &target_sm.handler_type;
+                    let variant = &target_sm.name;
 
                     if target_sm.id_type.is_none() {
                         let id_name = format_ident!("{}Id", target_sm.name);
@@ -229,7 +201,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                             pub fn #method(&mut self, sm: #handler) -> #tid {
                                 let id = #id_name(self.#counter);
                                 self.#counter += 1;
-                                self.#field.push((id, sm));
+                                self.pending_creates.push(PendingCreate::#variant(id, sm));
                                 id
                             }
                         }
@@ -237,7 +209,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                         quote! {
                             #[allow(dead_code)]
                             pub fn #method(&mut self, id: #tid, sm: #handler) {
-                                self.#field.push((id, sm));
+                                self.pending_creates.push(PendingCreate::#variant(id, sm));
                             }
                         }
                     }

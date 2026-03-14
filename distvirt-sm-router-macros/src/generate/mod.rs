@@ -15,6 +15,7 @@ pub fn generate(def: &TopologyDef) -> TokenStream {
     let port_input_enums = enums::gen_port_input_enums(def);
     let ctx_structs = ctx::gen_ctx_structs(def);
     let dirty_enum = enums::gen_dirty_enum(def);
+    let pending_create_enum = enums::gen_pending_create_enum(def);
     let pending_event_enum = enums::gen_pending_event_enum(def);
     let router_module = router::gen_router_module(def);
 
@@ -26,6 +27,7 @@ pub fn generate(def: &TopologyDef) -> TokenStream {
         #port_input_enums
         #ctx_structs
         #dirty_enum
+        #pending_create_enum
         #pending_event_enum
         #router_module
     }

@@ -74,13 +74,8 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     }
 
     // Pending creates
-    for sm in &def.state_machines {
-        let f = format_ident!("pending_create_{}", to_snake_case(&sm.name.to_string()));
-        let id = sm_id_type(sm);
-        let handler = &sm.handler_type;
-        fields.push(quote! { #f: Vec<(#id, #handler)> });
-        inits.push(quote! { #f: Vec::new() });
-    }
+    fields.push(quote! { pending_creates: Vec<PendingCreate> });
+    inits.push(quote! { pending_creates: Vec::new() });
 
     // Auto-ID counters
     for sm in &def.state_machines {
@@ -205,12 +200,12 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
 }
 
 fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
-    // SM creation — just accumulate into pending_create_*
+    // SM creation — just accumulate into pending_creates
     for sm in &def.state_machines {
         let method = format_ident!("create_{}", to_snake_case(&sm.name.to_string()));
-        let pending = format_ident!("pending_create_{}", to_snake_case(&sm.name.to_string()));
         let id_type = sm_id_type(sm);
         let handler = &sm.handler_type;
+        let variant = &sm.name;
 
         if sm.id_type.is_none() {
             // Auto-ID: generate ID internally, return it
@@ -220,7 +215,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self, sm: #handler) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
-                    self.#pending.push((id, sm));
+                    self.pending_creates.push(PendingCreate::#variant(id, sm));
                     id
                 }
             });
@@ -228,7 +223,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type, sm: #handler) {
-                    self.#pending.push((id, sm));
+                    self.pending_creates.push(PendingCreate::#variant(id, sm));
                 }
             });
         }
@@ -743,20 +738,10 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let id_type = sm_id_type(sm);
         let node_str = sm.name.to_string();
 
-        // 1. Accumulate creates into pending_create_* (materialized end-of-round)
-        let create_applies: Vec<_> = def
-            .state_machines
-            .iter()
-            .map(|target_sm| {
-                let target_snake = to_snake_case(&target_sm.name.to_string());
-                let ctx_field = format_ident!("pending_create_{}", target_snake);
-                let pending = format_ident!("pending_create_{}", target_snake);
-
-                quote! {
-                    self.#pending.extend(ctx.#ctx_field);
-                }
-            })
-            .collect();
+        // 1. Accumulate creates into pending_creates (materialized end-of-round)
+        let create_apply = quote! {
+            self.pending_creates.extend(ctx.pending_creates);
+        };
 
         // 2. Update auto-ID counters
         let counter_updates: Vec<_> = def
@@ -807,28 +792,45 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             })
             .collect();
 
-        // 5. Queue events
-        let event_applies: Vec<_> = def
+        // 5. Queue events - trace each one, then extend
+        let event_trace_arms: Vec<_> = def
             .events
             .iter()
             .filter(|ev| ev.sender == sm.name)
             .map(|ev| {
-                let ctx_field = format_ident!("pending_{}", to_snake_case(&ev.name.to_string()));
                 let variant = &ev.name;
                 let event_str = ev.name.to_string();
                 quote! {
-                    for (receiver_id, payload) in ctx.#ctx_field {
+                    PendingEvent::#variant(sender_id, receiver_id, payload) => {
                         self.tracer.trace(crate::trace::TraceEvent::EventQueued {
                             event: #event_str,
-                            sender: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
-                            receiver: crate::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
-                            payload: crate::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                            sender: crate::trace::DebugValue::Borrowed(sender_id as &dyn std::fmt::Debug),
+                            receiver: crate::trace::DebugValue::Borrowed(receiver_id as &dyn std::fmt::Debug),
+                            payload: crate::trace::DebugValue::Borrowed(payload as &dyn std::fmt::Debug),
                         });
-                        self.pending_events.push_back(PendingEvent::#variant(id, receiver_id, payload));
                     }
                 }
             })
             .collect();
+
+        // Check if this SM sends any events at all
+        let has_outgoing_events = def.events.iter().any(|ev| ev.sender == sm.name);
+
+        let event_apply = if has_outgoing_events {
+            quote! {
+                for event in &ctx.pending_events {
+                    match event {
+                        #(#event_trace_arms)*
+                        _ => {}
+                    }
+                }
+                self.pending_events.extend(ctx.pending_events);
+            }
+        } else {
+            quote! {
+                self.pending_events.extend(ctx.pending_events);
+            }
+        };
 
         // 6. Self-destruct
         let destroy_method = format_ident!("destroy_{}", to_snake_case(&sm.name.to_string()));
@@ -845,10 +847,10 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 #(#counter_updates)*
-                #(#create_applies)*
+                #create_apply
                 #(#signal_applies)*
                 #(#edge_applies)*
-                #(#event_applies)*
+                #event_apply
                 if ctx.pending_self_destruct {
                     self.tracer.trace(crate::trace::TraceEvent::SmDestroyed {
                         node: #node_str,
@@ -1158,28 +1160,19 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
 fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
     // has_pending_creates
-    let pending_checks: Vec<_> = def
-        .state_machines
-        .iter()
-        .map(|sm| {
-            let f = format_ident!("pending_create_{}", to_snake_case(&sm.name.to_string()));
-            quote! { !self.#f.is_empty() }
-        })
-        .collect();
-
     methods.push(quote! {
         fn has_pending_creates(&self) -> bool {
-            #(#pending_checks)||*
+            !self.pending_creates.is_empty()
         }
     });
 
-    // materialize_pending_creates
-    let materialize_per_sm: Vec<_> = def
+    // materialize_pending_creates - match on PendingCreate variants
+    let match_arms: Vec<_> = def
         .state_machines
         .iter()
         .map(|sm| {
+            let variant = &sm.name;
             let snake = to_snake_case(&sm.name.to_string());
-            let pending = format_ident!("pending_create_{}", snake);
             let instances = format_ident!("{}_instances", snake);
             let node_str = sm.name.to_string();
             let initialize = format_ident!("initialize_{}_sm", snake);
@@ -1195,8 +1188,7 @@ fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 .collect();
 
             quote! {
-                let wave = std::mem::take(&mut self.#pending);
-                for (new_id, new_sm) in wave {
+                PendingCreate::#variant(new_id, new_sm) => {
                     self.tracer.trace(crate::trace::TraceEvent::SmCreated {
                         node: #node_str,
                         id: crate::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
@@ -1211,8 +1203,13 @@ fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 
     methods.push(quote! {
         fn materialize_pending_creates(&mut self) {
-            while self.has_pending_creates() {
-                #(#materialize_per_sm)*
+            while !self.pending_creates.is_empty() {
+                let wave = std::mem::take(&mut self.pending_creates);
+                for pending in wave {
+                    match pending {
+                        #(#match_arms)*
+                    }
+                }
             }
         }
     });
