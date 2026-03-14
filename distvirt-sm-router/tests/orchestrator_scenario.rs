@@ -528,6 +528,9 @@ impl SmHandler for ServiceSm {
                         }
                     }
                     ctx.set_service_to_workload_edges(vec![spec.workload]);
+                } else {
+                    // Spec removed — self-destruct.
+                    ctx.self_destruct();
                 }
             }
             ServiceInput::ActivateService(active) => {
@@ -733,6 +736,13 @@ impl SmHandler for WorkloadSm {
                     if self.pod_running {
                         self.destroy_current_pod(ctx);
                     }
+                }
+
+                if self.has_spec && !new_has_spec {
+                    // Spec removed — clean up and self-destruct.
+                    self.destroy_current_pod(ctx);
+                    ctx.self_destruct();
+                    return;
                 }
 
                 self.has_spec = new_has_spec;
@@ -1551,12 +1561,11 @@ fn spec_via_management_port() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.has_spec);
 
-    // Remove management port — spec gone.
+    // Remove management port — workload self-destructs.
     router.destroy_management(mgmt);
     router.propagate();
 
-    let wl = router.get_workload(&W1).unwrap();
-    assert!(!wl.has_spec);
+    assert!(router.get_workload(&W1).is_none());
 }
 
 /// 6. Service spec via management port: service reads its spec, creates
@@ -3689,6 +3698,7 @@ fn pod_tracks_worker_from_input() {
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let pod_id = router.create_pod(PodSm::new(timer));
+    router.propagate();
 
     // No worker assigned yet.
     let pod = router.get_pod(&pod_id).unwrap();
@@ -4124,4 +4134,206 @@ fn service_fan_in_with_retarget() {
     let wl2 = router.get_workload(&W2).unwrap();
     assert!(wl1.pod_running);
     assert!(wl2.pod_running);
+}
+
+/// 57. Service self-destructs when its management spec is removed.
+#[test]
+fn service_self_destructs_on_spec_removal() {
+    let mut router = Router::new(16);
+    let timer = router.create_timer();
+    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_service(S1, ServiceSm::new(timer, false)); // always-on
+
+    // Use separate mgmt ports so we can remove the service spec independently.
+    let mgmt_wl = router.create_management();
+    router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
+    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
+
+    let mgmt_svc = router.create_management();
+    router.set_management_to_service_edges(mgmt_svc, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt_svc,
+        ServiceSpec {
+            workload: W1,
+            has_activation: false,
+        },
+    );
+    router.propagate();
+
+    // Service is alive and workload has demand.
+    assert!(router.get_service(&S1).is_some());
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.has_demand);
+
+    // Remove service management port — service spec becomes None.
+    router.destroy_management(mgmt_svc);
+    router.propagate();
+
+    // Service should have self-destructed.
+    assert!(router.get_service(&S1).is_none());
+
+    // Workload should have lost demand (service's outgoing edges vanished).
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+}
+
+/// 58. Workload self-destructs when its management spec is removed, pod cleans up.
+#[test]
+fn workload_self_destructs_on_spec_removal() {
+    let mut router = Router::new(16);
+    let (mgmt, worker, _timer) = setup_running_workload(&mut router, 5);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_running);
+    let pod_id = wl.pod_id.unwrap();
+
+    // Service is active.
+    let s1 = router.get_service(&S1).unwrap();
+    assert!(matches!(s1.state, ServiceState::Active { .. }));
+
+    // Remove management port — workload spec becomes None.
+    router.destroy_management(mgmt);
+    router.propagate();
+
+    // Workload should have self-destructed.
+    assert!(router.get_workload(&W1).is_none());
+
+    // Service should also have self-destructed (its spec also came from mgmt).
+    assert!(router.get_service(&S1).is_none());
+
+    // Pod lost its owner edge → terminal + no owner → self-destruct.
+    // The pod may need a worker status update to reach terminal first.
+    // Send a Failed status to trigger the reaping rule.
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.propagate();
+
+    assert!(router.get_pod(&pod_id).is_none());
+}
+
+/// 59. Full teardown cascade: management → service → workload → pod, all gone.
+#[test]
+fn full_teardown_cascade() {
+    let mut router = Router::new(16);
+    let timer = router.create_timer();
+    let worker = router.create_worker();
+    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+
+    // Set up two independent service→workload subgraphs via separate mgmt ports.
+    let mgmt_wl = router.create_management();
+    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W2, WorkloadSm::new(timer));
+    router.set_management_to_workload_edges(mgmt_wl, vec![W1, W2]);
+    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
+
+    let mgmt_s1 = router.create_management();
+    router.create_service(S1, ServiceSm::new(timer, false));
+    router.set_management_to_service_edges(mgmt_s1, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt_s1,
+        ServiceSpec {
+            workload: W1,
+            has_activation: false,
+        },
+    );
+
+    let mgmt_s2 = router.create_management();
+    router.create_service(S2, ServiceSm::new(timer, false));
+    router.set_management_to_service_edges(mgmt_s2, vec![S2]);
+    router.set_management_svc_spec(
+        mgmt_s2,
+        ServiceSpec {
+            workload: W2,
+            has_activation: false,
+        },
+    );
+    router.propagate();
+
+    // Both workloads have pods.
+    let pod1 = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    let pod2 = router.get_workload(&W2).unwrap().pod_id.unwrap();
+
+    // Make both pods running.
+    router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
+    router.send_notify_pod_status(worker, pod1, PodStatus::Running);
+    router.send_notify_pod_status(worker, pod2, PodStatus::Running);
+    router.propagate();
+
+    assert!(router.get_workload(&W1).unwrap().pod_running);
+    assert!(router.get_workload(&W2).unwrap().pod_running);
+
+    // Remove all management ports.
+    router.destroy_management(mgmt_wl);
+    router.destroy_management(mgmt_s1);
+    router.destroy_management(mgmt_s2);
+    router.propagate();
+
+    // Both services and workloads should have self-destructed.
+    assert!(router.get_service(&S1).is_none());
+    assert!(router.get_service(&S2).is_none());
+    assert!(router.get_workload(&W1).is_none());
+    assert!(router.get_workload(&W2).is_none());
+
+    // Pods lost owners — send terminal status to trigger reaping.
+    router.send_notify_pod_status(worker, pod1, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod2, PodStatus::Failed);
+    router.propagate();
+
+    assert!(router.get_pod(&pod1).is_none());
+    assert!(router.get_pod(&pod2).is_none());
+}
+
+/// 60. Workload in retry backoff self-destructs cleanly on spec removal.
+#[test]
+fn teardown_during_backoff() {
+    let mut router = Router::new(16);
+    let (mgmt, worker, _timer) = setup_running_workload(&mut router, 5);
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+
+    // Pod fails → workload enters backoff.
+    make_pod_failed(&mut router, worker, pod_id);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.in_backoff);
+    assert!(wl.pod_id.is_none());
+
+    // Remove management port during backoff.
+    router.destroy_management(mgmt);
+    router.propagate();
+
+    // Workload and service should have self-destructed.
+    assert!(router.get_workload(&W1).is_none());
+    assert!(router.get_service(&S1).is_none());
+}
+
+/// 61. Workload awaiting suspend self-destructs on spec removal, pod cleans up.
+#[test]
+fn teardown_during_suspend() {
+    let mut router = Router::new(16);
+    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_running);
+    let pod_id = wl.pod_id.unwrap();
+
+    // Deactivate service → demand drops → workload signals Suspend.
+    router.send_activate_service(mgmt, S1, false);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.awaiting_suspend);
+
+    // Remove management port while awaiting suspend.
+    router.destroy_management(mgmt);
+    router.propagate();
+
+    // Workload and service should have self-destructed.
+    assert!(router.get_workload(&W1).is_none());
+    assert!(router.get_service(&S1).is_none());
+
+    // Pod lost owner — send terminal status to trigger reaping.
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.propagate();
+
+    assert!(router.get_pod(&pod_id).is_none());
 }

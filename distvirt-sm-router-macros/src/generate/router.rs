@@ -73,6 +73,15 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         inits.push(quote! { #f: std::collections::BTreeMap::new() });
     }
 
+    // Pending creates
+    for sm in &def.state_machines {
+        let f = format_ident!("pending_create_{}", to_snake_case(&sm.name.to_string()));
+        let id = sm_id_type(sm);
+        let handler = &sm.handler_type;
+        fields.push(quote! { #f: Vec<(#id, #handler)> });
+        inits.push(quote! { #f: Vec::new() });
+    }
+
     // Auto-ID counters
     for sm in &def.state_machines {
         if sm.id_type.is_none() {
@@ -144,10 +153,11 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     gen_edge_setters(def, &mut public_methods, &mut internal_methods);
     gen_event_send_methods(def, &mut public_methods);
 
-    // Always internal: aggregate, apply_effects, initialize
+    // Always internal: aggregate, apply_effects, initialize, materialize
     gen_aggregate_methods(def, &mut internal_methods);
     gen_apply_effects(def, &mut internal_methods);
     gen_initialize_methods(def, &mut internal_methods);
+    gen_materialize_methods(def, &mut internal_methods);
 
     // If expose_internals, internal methods become pub too
     let internal_vis: TokenStream = if expose {
@@ -195,25 +205,12 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
 }
 
 fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
-    // SM creation
+    // SM creation — just accumulate into pending_create_*
     for sm in &def.state_machines {
         let method = format_ident!("create_{}", to_snake_case(&sm.name.to_string()));
-        let instances = format_ident!("{}_instances", to_snake_case(&sm.name.to_string()));
+        let pending = format_ident!("pending_create_{}", to_snake_case(&sm.name.to_string()));
         let id_type = sm_id_type(sm);
         let handler = &sm.handler_type;
-        let node_str = sm.name.to_string();
-
-        let sig_inits: Vec<_> = def
-            .signals
-            .iter()
-            .filter(|s| s.node == sm.name)
-            .map(|sig| {
-                let f = signal_field(sig);
-                quote! { self.#f.insert(id, Default::default()); }
-            })
-            .collect();
-
-        let initialize = format_ident!("initialize_{}_sm", to_snake_case(&sm.name.to_string()));
 
         if sm.id_type.is_none() {
             // Auto-ID: generate ID internally, return it
@@ -223,13 +220,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 fn #method(&mut self, sm: #handler) -> #id_type {
                     let id = #id_name(self.#counter);
                     self.#counter += 1;
-                    self.tracer.trace(crate::trace::TraceEvent::SmCreated {
-                        node: #node_str,
-                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
-                    });
-                    self.#instances.insert(id, sm);
-                    #(#sig_inits)*
-                    self.#initialize(id);
+                    self.#pending.push((id, sm));
                     id
                 }
             });
@@ -237,13 +228,7 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             // User-provided ID
             methods.push(quote! {
                 fn #method(&mut self, id: #id_type, sm: #handler) {
-                    self.tracer.trace(crate::trace::TraceEvent::SmCreated {
-                        node: #node_str,
-                        id: crate::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
-                    });
-                    self.#instances.insert(id, sm);
-                    #(#sig_inits)*
-                    self.#initialize(id);
+                    self.#pending.push((id, sm));
                 }
             });
         }
@@ -758,38 +743,17 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let id_type = sm_id_type(sm);
         let node_str = sm.name.to_string();
 
-        // 1. Create new SMs (so they exist before edges reference them)
+        // 1. Accumulate creates into pending_create_* (materialized end-of-round)
         let create_applies: Vec<_> = def
             .state_machines
             .iter()
             .map(|target_sm| {
                 let target_snake = to_snake_case(&target_sm.name.to_string());
-                let target_str = target_sm.name.to_string();
                 let ctx_field = format_ident!("pending_create_{}", target_snake);
-                let instances = format_ident!("{}_instances", target_snake);
-
-                let sig_inits: Vec<_> = def
-                    .signals
-                    .iter()
-                    .filter(|s| s.node == target_sm.name)
-                    .map(|sig| {
-                        let f = signal_field(sig);
-                        quote! { self.#f.insert(new_id, Default::default()); }
-                    })
-                    .collect();
-
-                let initialize = format_ident!("initialize_{}_sm", target_snake);
+                let pending = format_ident!("pending_create_{}", target_snake);
 
                 quote! {
-                    for (new_id, new_sm) in ctx.#ctx_field {
-                        self.tracer.trace(crate::trace::TraceEvent::SmCreated {
-                            node: #target_str,
-                            id: crate::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
-                        });
-                        self.#instances.insert(new_id, new_sm);
-                        #(#sig_inits)*
-                        self.#initialize(new_id);
-                    }
+                    self.#pending.extend(ctx.#ctx_field);
                 }
             })
             .collect();
@@ -1138,7 +1102,9 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             self.tracer.trace(crate::trace::TraceEvent::PropagateStart);
             let mut depth = 0;
 
-            while !self.dirty.is_empty() || !self.pending_events.is_empty() {
+            while !self.dirty.is_empty() || !self.pending_events.is_empty()
+                || self.has_pending_creates()
+            {
                 depth += 1;
                 if depth == self.depth_limit {
                     panic!(
@@ -1154,6 +1120,9 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 }
 
                 self.tracer.trace(crate::trace::TraceEvent::RoundStart { depth });
+
+                // Start-of-round: materialize pending creates
+                self.materialize_pending_creates();
 
                 // Process dirty signal queue
                 let wave: Vec<DirtyInput> = self.dirty.drain(..).collect();
@@ -1183,6 +1152,68 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             #(#invariant_checks)*
 
             self.tracer.trace(crate::trace::TraceEvent::PropagateEnd { rounds: depth });
+        }
+    });
+}
+
+fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
+    // has_pending_creates
+    let pending_checks: Vec<_> = def
+        .state_machines
+        .iter()
+        .map(|sm| {
+            let f = format_ident!("pending_create_{}", to_snake_case(&sm.name.to_string()));
+            quote! { !self.#f.is_empty() }
+        })
+        .collect();
+
+    methods.push(quote! {
+        fn has_pending_creates(&self) -> bool {
+            #(#pending_checks)||*
+        }
+    });
+
+    // materialize_pending_creates
+    let materialize_per_sm: Vec<_> = def
+        .state_machines
+        .iter()
+        .map(|sm| {
+            let snake = to_snake_case(&sm.name.to_string());
+            let pending = format_ident!("pending_create_{}", snake);
+            let instances = format_ident!("{}_instances", snake);
+            let node_str = sm.name.to_string();
+            let initialize = format_ident!("initialize_{}_sm", snake);
+
+            let sig_inits: Vec<_> = def
+                .signals
+                .iter()
+                .filter(|s| s.node == sm.name)
+                .map(|sig| {
+                    let f = signal_field(sig);
+                    quote! { self.#f.entry(new_id).or_insert_with(Default::default); }
+                })
+                .collect();
+
+            quote! {
+                let wave = std::mem::take(&mut self.#pending);
+                for (new_id, new_sm) in wave {
+                    self.tracer.trace(crate::trace::TraceEvent::SmCreated {
+                        node: #node_str,
+                        id: crate::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
+                    });
+                    self.#instances.insert(new_id, new_sm);
+                    #(#sig_inits)*
+                    self.#initialize(new_id);
+                }
+            }
+        })
+        .collect();
+
+    methods.push(quote! {
+        fn materialize_pending_creates(&mut self) {
+            while self.has_pending_creates() {
+                #(#materialize_per_sm)*
+            }
         }
     });
 }
