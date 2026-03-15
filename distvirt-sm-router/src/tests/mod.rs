@@ -2490,4 +2490,5 @@ mod initialize_tests {
     }
 }
 
+mod model_checkable;
 mod manual_propagate;

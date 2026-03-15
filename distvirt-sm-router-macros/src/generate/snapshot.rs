@@ -29,10 +29,76 @@ use super::helpers::*;
 pub(super) fn gen_snapshot(def: &TopologyDef) -> TokenStream {
     let snapshot_struct = gen_snapshot_struct(def);
     let snapshot_methods = gen_snapshot_methods(def);
+    let snapshot_clone = if def.model_checkable {
+        gen_snapshot_clone(def)
+    } else {
+        quote! {}
+    };
 
     quote! {
         #snapshot_struct
+        #snapshot_clone
         #snapshot_methods
+    }
+}
+
+fn gen_snapshot_clone(def: &TopologyDef) -> TokenStream {
+    let mut clone_fields = Vec::new();
+    let mut where_bounds = Vec::new();
+
+    // SM instances
+    for sm in &def.state_machines {
+        let f = format_ident!("{}_instances", snake_ident(&sm.name.to_string()));
+        let handler = &sm.handler_type;
+        clone_fields.push(quote! { #f: self.#f.clone() });
+        where_bounds.push(quote! { #handler: Clone });
+    }
+
+    // Port instances
+    for port in &def.ports {
+        let f = format_ident!("{}_instances", snake_ident(&port.name.to_string()));
+        clone_fields.push(quote! { #f: self.#f.clone() });
+    }
+
+    // SignalState maps
+    for node in nodes_with_signal_state(def) {
+        let f = signal_state_field(node);
+        clone_fields.push(quote! { #f: self.#f.clone() });
+    }
+
+    // Signal value types
+    for sig in &def.signals {
+        let vt = &sig.value_type;
+        where_bounds.push(quote! { #vt: Clone });
+    }
+
+    // Aggregator output types
+    for inp in &def.inputs {
+        let agg = &inp.aggregator;
+        where_bounds.push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+    }
+
+    // Edges (forward only)
+    for edge in &def.edges {
+        let snake = edge_snake(edge);
+        let fwd = format_ident!("{}_fwd", snake);
+        clone_fields.push(quote! { #fwd: self.#fwd.clone() });
+    }
+
+    // ID allocator snapshot
+    clone_fields.push(quote! { id_alloc_snapshot: self.id_alloc_snapshot.clone() });
+
+    quote! {
+        impl<__AllocSnapshot: Clone> Clone for RouterSnapshot<__AllocSnapshot>
+        where
+            #(#where_bounds,)*
+        {
+            fn clone(&self) -> Self {
+                RouterSnapshot {
+                    #(#clone_fields,)*
+                }
+            }
+        }
     }
 }
 

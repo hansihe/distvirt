@@ -8,6 +8,126 @@ use super::router_propagate::*;
 use super::router_setters::*;
 use super::snapshot;
 
+fn gen_clone_impls(
+    def: &TopologyDef,
+    _instance_fields: &[TokenStream],
+    _instance_inits: &[TokenStream],
+    _fields: &[TokenStream],
+    _inits: &[TokenStream],
+) -> TokenStream {
+    // RouterInstances Clone impl
+    let mut inst_clone_fields = Vec::new();
+    let mut inst_where_bounds = Vec::new();
+
+    for sm in &def.state_machines {
+        let f = format_ident!("{}_instances", snake_ident(&sm.name.to_string()));
+        let handler = &sm.handler_type;
+        inst_clone_fields.push(quote! { #f: self.#f.clone() });
+        inst_where_bounds.push(quote! { #handler: Clone });
+    }
+    for port in &def.ports {
+        let f = format_ident!("{}_instances", snake_ident(&port.name.to_string()));
+        inst_clone_fields.push(quote! { #f: self.#f.clone() });
+    }
+
+    let inst_where = if inst_where_bounds.is_empty() {
+        quote! {}
+    } else {
+        quote! { where #(#inst_where_bounds,)* }
+    };
+
+    let instances_clone = quote! {
+        impl Clone for RouterInstances #inst_where {
+            fn clone(&self) -> Self {
+                RouterInstances {
+                    #(#inst_clone_fields,)*
+                }
+            }
+        }
+    };
+
+    // Router Clone impl
+    let mut router_clone_fields = Vec::new();
+    let mut router_where_bounds = Vec::new();
+
+    router_clone_fields.push(quote! { instances: self.instances.clone() });
+    router_where_bounds.push(quote! { RouterInstances: Clone });
+
+    // Signal value types
+    for sig in &def.signals {
+        let vt = &sig.value_type;
+        router_where_bounds.push(quote! { #vt: Clone });
+    }
+
+    // Event payload types
+    for ev in &def.events {
+        let pt = &ev.payload_type;
+        router_where_bounds.push(quote! { #pt: Clone });
+    }
+
+    // Aggregator output types
+    for inp in &def.inputs {
+        let agg = &inp.aggregator;
+        router_where_bounds.push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+    }
+
+    // SignalState maps
+    for node in nodes_with_signal_state(def) {
+        let f = signal_state_field(node);
+        router_clone_fields.push(quote! { #f: self.#f.clone() });
+    }
+
+    // Edges (fwd + rev)
+    for edge in &def.edges {
+        let snake = edge_snake(edge);
+        let fwd = format_ident!("{}_fwd", snake);
+        let rev = format_ident!("{}_rev", snake);
+        router_clone_fields.push(quote! { #fwd: self.#fwd.clone() });
+        router_clone_fields.push(quote! { #rev: self.#rev.clone() });
+    }
+
+    // Pending creates
+    router_clone_fields.push(quote! { pending_creates: self.pending_creates.clone() });
+
+    // ID allocator
+    router_clone_fields.push(quote! { id_alloc: self.id_alloc.clone() });
+
+    // Port input output queues
+    for port in &def.ports {
+        let has_inputs = def.inputs.iter().any(|inp| inp.node == port.name);
+        if has_inputs {
+            let f = format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
+            router_clone_fields.push(quote! { #f: self.#f.clone() });
+        }
+    }
+
+    // Transient fields
+    router_clone_fields.push(quote! { dirty: self.dirty.clone() });
+    router_clone_fields.push(quote! { pending_events: self.pending_events.clone() });
+    router_clone_fields.push(quote! { depth_limit: self.depth_limit });
+    router_clone_fields.push(quote! { manual_phase: self.manual_phase.clone() });
+    router_clone_fields.push(quote! { tracer: self.tracer.clone() });
+
+    let router_clone = quote! {
+        impl<__Tracer: ::distvirt_sm_router::trace::Tracer + Clone, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind> + Clone>
+            Clone for Router<__Tracer, __IdAlloc>
+        where
+            #(#router_where_bounds,)*
+        {
+            fn clone(&self) -> Self {
+                Router {
+                    #(#router_clone_fields,)*
+                }
+            }
+        }
+    };
+
+    quote! {
+        #instances_clone
+        #router_clone
+    }
+}
+
 pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     let expose = def.expose_internals;
 
@@ -187,6 +307,12 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
 
     let snapshot_tokens = snapshot::gen_snapshot(def);
 
+    let clone_impls = if def.model_checkable {
+        gen_clone_impls(def, &instance_fields, &instance_inits, &fields, &inits)
+    } else {
+        quote! {}
+    };
+
     let instances_vis: TokenStream = if expose {
         quote! { pub }
     } else {
@@ -256,6 +382,8 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
                 #(pub #public_methods)*
                 #(#internal_vis #internal_methods)*
             }
+
+            #clone_impls
 
             #snapshot_tokens
         }

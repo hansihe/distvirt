@@ -279,8 +279,15 @@ pub(super) fn gen_dirty_enum(def: &TopologyDef) -> TokenStream {
 }
 
 pub(super) fn gen_pending_create_enum(def: &TopologyDef) -> TokenStream {
+    let clone_derive = if def.model_checkable {
+        quote! { #[derive(Clone)] }
+    } else {
+        quote! {}
+    };
+
     if def.state_machines.is_empty() {
         return quote! {
+            #clone_derive
             #[allow(dead_code)]
             enum PendingCreate {}
         };
@@ -298,6 +305,7 @@ pub(super) fn gen_pending_create_enum(def: &TopologyDef) -> TokenStream {
         .collect();
 
     quote! {
+        #clone_derive
         #[allow(dead_code)]
         enum PendingCreate {
             #(#variants,)*
@@ -370,8 +378,14 @@ pub(super) fn gen_pending_delivery_enum(def: &TopologyDef) -> TokenStream {
         }
     };
 
+    let clone_derive = if def.model_checkable {
+        quote! { , Clone }
+    } else {
+        quote! {}
+    };
+
     quote! {
-        #[derive(Debug)]
+        #[derive(Debug #clone_derive)]
         #[allow(dead_code)]
         pub enum PendingDelivery {
             DirtyInput(DirtyInput),
@@ -393,9 +407,15 @@ pub(super) fn gen_pending_delivery_enum(def: &TopologyDef) -> TokenStream {
 }
 
 pub(super) fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
+    let clone_derive = if def.model_checkable {
+        quote! { , Clone }
+    } else {
+        quote! {}
+    };
+
     if def.events.is_empty() {
         return quote! {
-            #[derive(Debug)]
+            #[derive(Debug #clone_derive)]
             #[allow(dead_code)]
             enum PendingEvent {}
         };
@@ -414,7 +434,7 @@ pub(super) fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
         .collect();
 
     quote! {
-        #[derive(Debug)]
+        #[derive(Debug #clone_derive)]
         #[allow(dead_code)]
         enum PendingEvent {
             #(#variants,)*

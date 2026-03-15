@@ -662,6 +662,7 @@ pub trait Tracer {
 
 /// A tracer that does nothing. The empty `trace()` method monomorphizes away
 /// entirely, so untraced routers pay zero cost.
+#[derive(Clone)]
 pub struct NoopTracer;
 
 impl Tracer for NoopTracer {

@@ -14,10 +14,12 @@ mod kw {
     syn::custom_keyword!(expose_internals_for_testing);
     syn::custom_keyword!(invariants);
     syn::custom_keyword!(auto);
+    syn::custom_keyword!(model_checkable);
 }
 
 pub struct TopologyDef {
     pub expose_internals: bool,
+    pub model_checkable: bool,
     pub state_machines: Vec<SmDef>,
     pub ports: Vec<PortDef>,
     pub signals: Vec<SignalDef>,
@@ -82,6 +84,7 @@ pub struct InvariantDef {
 impl Parse for TopologyDef {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut expose_internals = false;
+        let mut model_checkable = false;
         let mut state_machines = Vec::new();
         let mut ports = Vec::new();
         let mut signals = Vec::new();
@@ -90,10 +93,14 @@ impl Parse for TopologyDef {
         let mut inputs = Vec::new();
         let mut invariants = Vec::new();
 
-        // Optional leading flag
+        // Optional leading flags
         if input.peek(kw::expose_internals_for_testing) {
             input.parse::<kw::expose_internals_for_testing>()?;
             expose_internals = true;
+        }
+        if input.peek(kw::model_checkable) {
+            input.parse::<kw::model_checkable>()?;
+            model_checkable = true;
         }
 
         while !input.is_empty() {
@@ -161,6 +168,7 @@ impl Parse for TopologyDef {
 
         Ok(TopologyDef {
             expose_internals,
+            model_checkable,
             state_machines,
             ports,
             signals,
