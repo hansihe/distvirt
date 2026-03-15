@@ -8,7 +8,7 @@ use super::*;
 #[test]
 fn pod_failure_backoff_and_retry() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // Kill worker → pod fails.
     router.destroy_worker(worker);
@@ -21,13 +21,13 @@ fn pod_failure_backoff_and_retry() {
     assert!(wl.pod_id.is_none()); // pod released
 
     // Workload should have signaled a retry backoff timer.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
 
     // Timer fires — backoff cleared, reconcile creates new pod.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -36,7 +36,7 @@ fn pod_failure_backoff_and_retry() {
     let new_pod = wl.pod_id.unwrap();
 
     // Timer signal should now be empty (backoff cleared).
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 
     // New worker + make pod running.
     let worker2 = router.create_worker();
@@ -48,14 +48,14 @@ fn pod_failure_backoff_and_retry() {
     assert_eq!(wl.consecutive_failures, 0); // reset on success
 
     // No timers while running.
-    assert_no_timer_output(&mut router, timer);
+    assert_no_timer_output(&mut router);
 }
 
 /// 21. Multiple failures increment the counter.
 #[test]
 fn consecutive_failures_increment() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // First failure.
     router.destroy_worker(worker);
@@ -66,13 +66,13 @@ fn consecutive_failures_increment() {
     assert!(wl.in_backoff);
 
     // Generation 1 timer requested.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
 
     // Timer fires → retry.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -87,7 +87,7 @@ fn consecutive_failures_increment() {
     assert!(wl.in_backoff);
 
     // Generation 2 timer requested (new backoff cycle).
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 2,
     }]);
@@ -97,7 +97,7 @@ fn consecutive_failures_increment() {
 #[test]
 fn max_retries_enters_failed() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 2);
+    let (mgmt, worker) = setup_running_workload(&mut router, 2);
 
     // First failure.
     router.destroy_worker(worker);
@@ -108,13 +108,13 @@ fn max_retries_enters_failed() {
     assert!(wl.in_backoff); // still under limit
 
     // Timer requested for first backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
 
     // Timer fires → retry.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -131,14 +131,14 @@ fn max_retries_enters_failed() {
     assert!(!wl.wants_pod); // reconcile says no
 
     // Terminal failure: no timer requested (timers cleared).
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 }
 
 /// 23. Failed state + spec change → resets failures and retries.
 #[test]
 fn failed_recovery_via_spec_change() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_workload(&mut router, 1);
+    let (mgmt, worker) = setup_running_workload(&mut router, 1);
 
     // One failure → hits max_retries (1) → terminal.
     router.destroy_worker(worker);
@@ -163,7 +163,7 @@ fn failed_recovery_via_spec_change() {
 #[test]
 fn failed_recovery_via_restart() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_workload(&mut router, 1);
+    let (mgmt, worker) = setup_running_workload(&mut router, 1);
 
     // One failure → terminal.
     router.destroy_worker(worker);
@@ -187,18 +187,18 @@ fn failed_recovery_via_restart() {
 #[test]
 fn failed_recovery_via_demand_cycle() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::with_max_retries(timer, 1));
+    router.create_workload(W1, WorkloadSm::with_max_retries(1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
     // Activation-based service so we can toggle demand.
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -244,7 +244,7 @@ fn failed_recovery_via_demand_cycle() {
 #[test]
 fn failed_ignores_new_demand() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 1);
+    let (mgmt, worker) = setup_running_workload(&mut router, 1);
 
     // Fail → terminal.
     router.destroy_worker(worker);
@@ -255,7 +255,7 @@ fn failed_ignores_new_demand() {
     assert!(wl.pod_id.is_none());
 
     // Add another service with demand — still Failed, no new pod.
-    router.create_service(S2, ServiceSm::new(timer, false));
+    router.create_service(S2, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1, S2]);
     router.set_management_svc_spec(
         mgmt,
@@ -276,17 +276,17 @@ fn failed_ignores_new_demand() {
 #[test]
 fn backoff_cleared_on_demand_drop() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::with_max_retries(timer, 5));
+    router.create_workload(W1, WorkloadSm::with_max_retries(5));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -313,7 +313,7 @@ fn backoff_cleared_on_demand_drop() {
     assert_eq!(wl.consecutive_failures, 1);
 
     // Timer requested during backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
@@ -328,14 +328,14 @@ fn backoff_cleared_on_demand_drop() {
     assert!(wl.pod_id.is_none());
 
     // Timer cleared after demand drop.
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 }
 
 /// 28. In backoff + spec change → clears backoff, immediate retry.
 #[test]
 fn backoff_cleared_on_spec_change() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // Fail → enters backoff.
     router.destroy_worker(worker);
@@ -345,7 +345,7 @@ fn backoff_cleared_on_spec_change() {
     assert!(wl.in_backoff);
 
     // Timer requested during backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
@@ -360,14 +360,14 @@ fn backoff_cleared_on_spec_change() {
     assert!(wl.pod_id.is_some()); // new pod created immediately
 
     // Timer cleared after spec change.
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 }
 
 /// 29. Scavenge during backoff clears everything, goes dormant.
 #[test]
 fn scavenge_during_backoff() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // Fail → enters backoff.
     router.destroy_worker(worker);
@@ -377,7 +377,7 @@ fn scavenge_during_backoff() {
     assert!(wl.in_backoff);
 
     // Timer requested during backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
@@ -390,24 +390,24 @@ fn scavenge_during_backoff() {
     // Still in backoff because demand is active — timer unchanged (dedup suppresses).
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
-    assert_no_timer_output(&mut router, timer);
+    assert_no_timer_output(&mut router);
 }
 
 /// 30. Scavenge during Failed clears failures (when no demand).
 #[test]
 fn scavenge_during_failed() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::with_max_retries(timer, 1));
+    router.create_workload(W1, WorkloadSm::with_max_retries(1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -450,7 +450,7 @@ fn scavenge_during_failed() {
 #[test]
 fn success_resets_failure_counter() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // First failure.
     router.destroy_worker(worker);
@@ -460,13 +460,13 @@ fn success_resets_failure_counter() {
     assert_eq!(wl.consecutive_failures, 1);
 
     // First backoff: generation 1.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
 
     // Timer fires → retry.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -489,7 +489,7 @@ fn success_resets_failure_counter() {
     assert!(wl.in_backoff);
 
     // Second backoff: generation 2 (incremented again after success reset).
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 2,
     }]);

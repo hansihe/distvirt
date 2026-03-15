@@ -222,11 +222,11 @@ impl Model for WlNewModel {
     type Action = WlNewAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        let timer_id = TimerId(0);
+        
         let sm = if self.enable_suspend {
-            WorkloadSm::new_suspendable(timer_id)
+            WorkloadSm::new_suspendable()
         } else {
-            WorkloadSm::new(timer_id)
+            WorkloadSm::new()
         };
         vec![WlNewModelState {
             sm,

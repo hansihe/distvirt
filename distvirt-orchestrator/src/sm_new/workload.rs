@@ -36,9 +36,6 @@ pub(crate) struct WorkloadSm {
     /// Incremented each time we enter backoff, used for timer identity.
     pub(crate) backoff_generation: u64,
 
-    /// Timer port ID, passed to pods created by this workload.
-    pub(crate) timer_id: TimerId,
-
     /// Worker ID of the current pod, learned from PodWorkerInput.
     pub(crate) pod_worker_id: Option<WorkerId>,
 
@@ -55,12 +52,12 @@ pub(crate) struct WorkloadSm {
 }
 
 impl WorkloadSm {
-    pub(crate) fn new(timer_id: TimerId) -> Self {
-        Self::with_max_retries(timer_id, MAX_RETRIES)
+    pub(crate) fn new() -> Self {
+        Self::with_max_retries(MAX_RETRIES)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn with_max_retries(timer_id: TimerId, max_retries: u32) -> Self {
+    pub(crate) fn with_max_retries(max_retries: u32) -> Self {
         WorkloadSm {
             has_spec: false,
             has_demand: false,
@@ -74,7 +71,6 @@ impl WorkloadSm {
             max_retries,
             in_backoff: false,
             backoff_generation: 0,
-            timer_id,
             pod_worker_id: None,
             suspend_on_idle: false,
             suspended_artifact: None,
@@ -84,18 +80,18 @@ impl WorkloadSm {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn new_suspendable(timer_id: TimerId) -> Self {
+    pub(crate) fn new_suspendable() -> Self {
         WorkloadSm {
             suspend_on_idle: true,
-            ..Self::new(timer_id)
+            ..Self::new()
         }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn new_suspendable_with_max_retries(timer_id: TimerId, max_retries: u32) -> Self {
+    pub(crate) fn new_suspendable_with_max_retries(max_retries: u32) -> Self {
         WorkloadSm {
             suspend_on_idle: true,
-            ..Self::with_max_retries(timer_id, max_retries)
+            ..Self::with_max_retries(max_retries)
         }
     }
 
@@ -110,7 +106,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
     type Input = WorkloadInput;
 
     fn initialize(&mut self, ctx: &mut C) {
-        ctx.set_workload_to_timer_edges(vec![self.timer_id]);
+        ctx.set_workload_to_timer_edges(vec![TIMER]);
         self.update_status_signals(ctx);
     }
 
@@ -446,9 +442,9 @@ impl WorkloadSm {
         if want_pod && self.pod_id.is_none() {
             // Create new pod — resume from artifact if available.
             let pod = if let Some(artifact_id) = self.suspended_artifact.take() {
-                PodSm::new_from_artifact(self.timer_id, artifact_id)
+                PodSm::new_from_artifact(artifact_id)
             } else {
-                PodSm::new(self.timer_id)
+                PodSm::new()
             };
             let pod_id = ctx.create_pod(pod);
             self.pod_id = Some(pod_id);

@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn graceful_exit_no_failure_count() {
     let mut router = Router::new(16);
-    let (mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
@@ -29,7 +29,7 @@ fn graceful_exit_no_failure_count() {
     assert_ne!(wl.pod_id.unwrap(), pod_id); // new pod
 
     // No retry timer needed.
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 }
 
 /// 47. Graceful exit (Finished) does not count as failure even after prior
@@ -37,7 +37,7 @@ fn graceful_exit_no_failure_count() {
 #[test]
 fn graceful_exit_after_failures_preserves_count() {
     let mut router = Router::new(16);
-    let (_mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // First failure via worker loss.
     router.destroy_worker(worker);
@@ -48,7 +48,7 @@ fn graceful_exit_after_failures_preserves_count() {
     assert!(wl.in_backoff);
 
     // Timer fires → retry.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -78,7 +78,7 @@ fn graceful_exit_after_failures_preserves_count() {
 fn finished_vs_failed_backoff_behavior() {
     // Finished path: no backoff.
     let mut router = Router::new(16);
-    let (_mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     router.send_notify_pod_status(worker, pod_id, PodStatus::Finished);
@@ -91,7 +91,7 @@ fn finished_vs_failed_backoff_behavior() {
 
     // Failed path: enters backoff.
     let mut router = Router::new(16);
-    let (_mgmt, worker, timer) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
@@ -107,13 +107,13 @@ fn finished_vs_failed_backoff_behavior() {
 #[test]
 fn finished_pod_self_destructs() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Create a standalone pod (no workload owner).
-    let pod_id = router.create_pod(PodSm::new(timer));
+    let pod_id = router.create_pod(PodSm::new());
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
@@ -132,17 +132,17 @@ fn finished_pod_self_destructs() {
 #[test]
 fn worker_identity_in_readiness() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, false)); // always-on
+    router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -182,7 +182,7 @@ fn worker_identity_in_readiness() {
 #[test]
 fn worker_identity_updates_on_new_worker() {
     let mut router = Router::new(16);
-    let (_mgmt, worker1, timer) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker1) = setup_running_workload(&mut router, 5);
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.pod_worker_id, Some(worker1));
@@ -196,7 +196,7 @@ fn worker_identity_updates_on_new_worker() {
     assert_eq!(wl.pod_worker_id, None); // cleared on failure
 
     // Timer fires → new pod created.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     let new_pod = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -224,12 +224,12 @@ fn worker_identity_updates_on_new_worker() {
 #[test]
 fn pod_tracks_worker_from_input() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
-    let pod_id = router.create_pod(PodSm::new(timer));
+    let pod_id = router.create_pod(PodSm::new());
     router.propagate();
 
     // No worker assigned yet.

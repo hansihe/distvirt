@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn suspend_on_demand_drop() {
     let mut router = Router::new(16);
-    let (mgmt, _worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, _worker) = setup_running_suspendable_workload(&mut router);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
@@ -49,7 +49,7 @@ fn suspend_on_demand_drop() {
 #[test]
 fn resume_from_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
@@ -96,7 +96,7 @@ fn resume_from_artifact() {
 #[test]
 fn demand_returns_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
@@ -145,7 +145,7 @@ fn demand_returns_during_suspend() {
 #[test]
 fn spec_change_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
@@ -188,7 +188,7 @@ fn spec_change_during_suspend() {
 #[test]
 fn worker_loss_on_suspendable_workload() {
     let mut router = Router::new(16);
-    let (_mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (_mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     // Worker dies — this is NOT a suspend, it's a failure.
     router.destroy_worker(worker);
@@ -209,7 +209,7 @@ fn worker_loss_on_suspendable_workload() {
 #[test]
 fn destroy_discards_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
@@ -248,7 +248,7 @@ fn destroy_discards_artifact() {
 #[test]
 fn suspend_resume_suspend_cycle() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     // First suspend.
     let pod1 = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -295,7 +295,7 @@ fn suspend_resume_suspend_cycle() {
 #[test]
 fn scavenge_clears_suspended_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 

@@ -17,13 +17,12 @@ pub(crate) enum ServiceState {
 pub(crate) struct ServiceSm {
     pub(crate) state: ServiceState,
     pub(crate) has_activation: bool,
-    pub(crate) timer_id: TimerId,
     pub(crate) idle_generation: u64,
     pub(crate) idle_timer_active: bool,
 }
 
 impl ServiceSm {
-    pub(crate) fn new(timer_id: TimerId, has_activation: bool) -> Self {
+    pub(crate) fn new(has_activation: bool) -> Self {
         ServiceSm {
             state: if has_activation {
                 ServiceState::Idle
@@ -31,7 +30,6 @@ impl ServiceSm {
                 ServiceState::NeedBackend
             },
             has_activation,
-            timer_id,
             idle_generation: 0,
             idle_timer_active: false,
         }
@@ -56,6 +54,12 @@ impl ServiceSm {
         };
         ctx.set_svc_status_signal(status);
         ctx.set_idle_timer_active_signal(self.idle_timer_active);
+
+        let endpoint_info = match &self.state {
+            ServiceState::Active { ready } => Some(ready.clone()),
+            _ => None,
+        };
+        ctx.set_endpoint_info(endpoint_info);
     }
 }
 
@@ -63,7 +67,8 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
     type Input = ServiceInput;
 
     fn initialize(&mut self, ctx: &mut C) {
-        ctx.set_service_to_timer_edges(vec![self.timer_id]);
+        ctx.set_service_to_timer_edges(vec![TIMER]);
+        ctx.set_service_to_endpoint_edges(vec![ENDPOINT]);
         self.update_status_signals(ctx);
     }
 

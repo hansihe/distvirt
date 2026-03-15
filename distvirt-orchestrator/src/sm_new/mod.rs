@@ -59,7 +59,7 @@ pub(crate) enum PodIntent {
 
 /// Identifier for a suspend/resume artifact (snapshot).
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct ArtifactId(u64);
+pub(crate) struct ArtifactId(pub(crate) u64);
 
 /// Manual ID for the singleton schedule-request port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -67,6 +67,20 @@ pub(crate) struct ScheduleRequestId(pub(crate) u64);
 
 /// The singleton schedule-request port ID.
 pub(crate) const SCHEDULE_REQUEST: ScheduleRequestId = ScheduleRequestId(0);
+
+/// Manual ID for the singleton endpoint port.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) struct EndpointId(pub(crate) u64);
+
+/// The singleton endpoint port ID.
+pub(crate) const ENDPOINT: EndpointId = EndpointId(0);
+
+/// Manual ID for the singleton timer port.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) struct TimerId(pub(crate) u64);
+
+/// The singleton timer port ID.
+pub(crate) const TIMER: TimerId = TimerId(0);
 
 /// Schedule request emitted by pod to the schedule-request port.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -367,15 +381,17 @@ distvirt_sm_router::router! {
         Worker(auto),
         BackendNeed(auto),
         Management(auto),
-        Timer(auto),
+        Timer(TimerId),
         ScheduleRequest(ScheduleRequestId),
         ScheduleLease(auto),
+        Endpoint(EndpointId),
     }
     signals {
         Service::Demand(bool),
         Service::SvcWantedTimers(Vec<ServiceTimerRequest>),
         Service::SvcStatusSignal(SvcStatus),
         Service::IdleTimerActiveSignal(bool),
+        Service::EndpointInfo(Option<ReadyInfo>),
         Workload::Readiness(Option<ReadyInfo>),
         Workload::PodIntent(PodIntent),
         Workload::WantedTimers(Vec<TimerRequest>),
@@ -407,6 +423,7 @@ distvirt_sm_router::router! {
         PodToScheduleRequest: Pod -> ScheduleRequest,
         ScheduleLeaseToPod: ScheduleLease -> Pod,
         PodToWorker: Pod -> Worker,
+        ServiceToEndpoint: Service -> Endpoint,
     }
     events {
         AdminCommand(AdminCmd): Management -> Workload,
@@ -464,11 +481,11 @@ distvirt_sm_router::router! {
         },
         Worker::AssignedPodsInput {
             sources: [(PodToWorker, Pod::ScheduleRequest)],
-            aggregator: ListAggregator<PodId, PodScheduleRequest>,
+            aggregator: IdListAggregator<PodId, PodScheduleRequest>,
         },
         ScheduleRequest::PodRequestsInput {
             sources: [(PodToScheduleRequest, Pod::ScheduleRequest)],
-            aggregator: ListAggregator<PodId, PodScheduleRequest>,
+            aggregator: IdListAggregator<PodId, PodScheduleRequest>,
         },
         Timer::WorkloadTimersInput {
             sources: [(WorkloadToTimer, Workload::WantedTimers)],
@@ -482,6 +499,24 @@ distvirt_sm_router::router! {
             sources: [(PodToTimer, Pod::WantedPodTimers)],
             aggregator: IdListAggregator<PodId, Vec<PodTimerRequest>>,
         },
+        Endpoint::ServiceEndpointsInput {
+            sources: [(ServiceToEndpoint, Service::EndpointInfo)],
+            aggregator: IdListAggregator<ServiceId, Option<ReadyInfo>>,
+        },
+    }
+}
+
+#[cfg(test)]
+impl PodId {
+    pub(crate) fn test(id: u64) -> Self {
+        PodId(id)
+    }
+}
+
+#[cfg(test)]
+impl WorkerId {
+    pub(crate) fn test(id: u64) -> Self {
+        WorkerId(id)
     }
 }
 

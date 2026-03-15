@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use crate::sm_new::{
     PodTimerKey, Router, ServiceTimerKey, TimerPortInput,
-    TimerId, WorkloadTimerKey,
+    WorkloadTimerKey,
     PodId, ServiceId, WorkloadId,
+    TIMER,
 };
 
 #[cfg(test)]
@@ -41,16 +42,14 @@ pub(crate) struct TimerConfig {
 }
 
 pub(crate) struct TimerAdapter {
-    timer_id: TimerId,
     config: TimerConfig,
     /// Active timers: identity → generation.
     active: HashMap<TimerIdentity, u64>,
 }
 
 impl TimerAdapter {
-    pub(crate) fn new(timer_id: TimerId, config: TimerConfig) -> Self {
+    pub(crate) fn new(config: TimerConfig) -> Self {
         TimerAdapter {
-            timer_id,
             config,
             active: HashMap::new(),
         }
@@ -69,7 +68,7 @@ impl TimerAdapter {
         let mut had_pod = false;
 
         for (timer_id, input) in inputs {
-            if timer_id != self.timer_id {
+            if timer_id != TIMER {
                 continue;
             }
             match input {
@@ -161,13 +160,13 @@ impl TimerAdapter {
     pub(crate) fn fire(&self, router: &mut Router, identity: &TimerIdentity) {
         match identity {
             TimerIdentity::Workload(wl_id, key) => {
-                router.send_workload_timer_fired(self.timer_id, *wl_id, key.clone());
+                router.send_workload_timer_fired(TIMER, *wl_id, key.clone());
             }
             TimerIdentity::Service(svc_id, key) => {
-                router.send_service_timer_fired(self.timer_id, *svc_id, key.clone());
+                router.send_service_timer_fired(TIMER, *svc_id, key.clone());
             }
             TimerIdentity::Pod(pod_id, key) => {
-                router.send_pod_timer_fired(self.timer_id, *pod_id, key.clone());
+                router.send_pod_timer_fired(TIMER, *pod_id, key.clone());
             }
         }
     }

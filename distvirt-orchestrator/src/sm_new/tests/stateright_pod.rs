@@ -171,8 +171,8 @@ impl Model for PodNewModel {
     type Action = PodNewAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        let timer_id = TimerId(0);
-        let sm = PodSm::new(timer_id);
+        
+        let sm = PodSm::new();
         vec![PodNewModelState {
             sm,
             worker_env: WorkerEnv::None,

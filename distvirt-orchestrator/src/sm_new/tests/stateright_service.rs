@@ -151,8 +151,8 @@ impl Model for SvcNewModel {
     type Action = SvcNewAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        let timer_id = TimerId(0);
-        let sm = ServiceSm::new(timer_id, self.has_activation);
+        
+        let sm = ServiceSm::new(self.has_activation);
         vec![SvcNewModelState {
             demand_set: !self.has_activation, // always-on starts with demand
             sm,

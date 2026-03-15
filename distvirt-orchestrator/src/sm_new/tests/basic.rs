@@ -4,12 +4,12 @@ use super::*;
 #[test]
 fn demand_aggregation() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_service(S1, ServiceSm::new(timer, true));
-    router.create_service(S2, ServiceSm::new(timer, true));
-    router.create_service(S3, ServiceSm::new(timer, true));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S2, ServiceSm::new(true));
+    router.create_service(S3, ServiceSm::new(true));
 
     // Deliver specs through management port — services get edges to W1.
     let mgmt = router.create_management();
@@ -55,15 +55,15 @@ fn demand_aggregation() {
 #[test]
 fn reactive_readiness_edges() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_service(S1, ServiceSm::new(timer, false)); // always-on
-    router.create_service(S2, ServiceSm::new(timer, false));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S2, ServiceSm::new(false));
 
     // Deliver workload spec.
     router.set_management_to_workload_edges(mgmt, vec![W1]);
@@ -101,7 +101,7 @@ fn reactive_readiness_edges() {
     assert!(matches!(s2.state, ServiceState::Active { .. }));
 
     // Add a third service — it should immediately get readiness.
-    router.create_service(S3, ServiceSm::new(timer, false));
+    router.create_service(S3, ServiceSm::new(false));
 
     // Use same mgmt port, update edges to include S3.
     router.set_management_to_service_edges(mgmt, vec![S1, S2, S3]);
@@ -118,13 +118,13 @@ fn reactive_readiness_edges() {
 #[test]
 fn pod_lifecycle() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into() });
     router.propagate();
@@ -134,7 +134,7 @@ fn pod_lifecycle() {
     assert!(!wl.has_demand);
 
     // Add an always-on service with demand.
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -173,17 +173,17 @@ fn pod_lifecycle() {
 #[test]
 fn worker_loss_via_port_removal() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -205,7 +205,7 @@ fn worker_loss_via_port_removal() {
     assert!(matches!(s1.state, ServiceState::Active { .. }));
 
     // No timers wanted while running.
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 
     // Worker dies — remove the port.
     router.destroy_worker(worker);
@@ -218,7 +218,7 @@ fn worker_loss_via_port_removal() {
     assert!(wl.in_backoff);
 
     // Timer signal should show a retry backoff request.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
@@ -232,9 +232,9 @@ fn worker_loss_via_port_removal() {
 #[test]
 fn spec_via_management_port() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
 
     let mgmt = router.create_management();
     router.set_management_to_workload_edges(mgmt, vec![W1]);
@@ -263,10 +263,10 @@ fn spec_via_management_port() {
 #[test]
 fn service_spec_creates_edges_reactively() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_service(S1, ServiceSm::new(false));
 
     // Management port delivers service spec that points at W1.
     let mgmt = router.create_management();
@@ -294,17 +294,17 @@ fn service_spec_creates_edges_reactively() {
 #[test]
 fn admin_restart_event() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -338,7 +338,7 @@ fn admin_restart_event() {
 #[test]
 fn full_end_to_end() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
 
     // Infrastructure.
     let worker = router.create_worker();
@@ -351,9 +351,9 @@ fn full_end_to_end() {
     let mgmt_s2 = router.create_management();
 
     // Create SMs.
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_service(S1, ServiceSm::new(timer, false));
-    router.create_service(S2, ServiceSm::new(timer, true)); // activation-based
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S2, ServiceSm::new(true)); // activation-based
 
     // Wire management → SMs.
     router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
@@ -416,7 +416,7 @@ fn full_end_to_end() {
     );
 
     // No timers requested while running normally.
-    assert_no_timers_wanted(&mut router, timer);
+    assert_no_timers_wanted(&mut router);
 
     // Worker dies.
     router.destroy_worker(worker);
@@ -428,7 +428,7 @@ fn full_end_to_end() {
     assert!(wl.in_backoff);
 
     // Timer signal: workload wants a retry backoff timer.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
+    assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
     }]);
@@ -447,19 +447,19 @@ fn full_end_to_end() {
 #[test]
 fn handler_driven_pod_creation() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
 
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
     // Always-on service
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -500,20 +500,20 @@ fn handler_driven_pod_creation() {
 #[test]
 fn handler_and_router_share_id_counter() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     let mgmt = router.create_management();
 
     // Create first pod via router.
-    let p1 = router.create_pod(PodSm::new(timer));
+    let p1 = router.create_pod(PodSm::new());
 
     // Create workload and wire it.
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test".into() });
 
     // Create service to give workload demand → workload creates pod in handler.
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -532,6 +532,6 @@ fn handler_and_router_share_id_counter() {
     assert!(p2.0 > p1.0);
 
     // Create another pod via router — should continue the counter.
-    let p3 = router.create_pod(PodSm::new(timer));
+    let p3 = router.create_pod(PodSm::new());
     assert!(p3.0 > p2.0);
 }

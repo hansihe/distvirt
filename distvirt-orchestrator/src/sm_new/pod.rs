@@ -29,8 +29,6 @@ pub(crate) struct PodSm {
     /// Artifact to resume from (set at creation for resumed pods).
     /// The worker port can read this to know whether to cold-boot or resume.
     pub(crate) resume_artifact: Option<ArtifactId>,
-    /// Timer port ID for requesting timeouts.
-    pub(crate) timer_id: TimerId,
     /// Generation counter for timer requests.
     pub(crate) timer_generation: u64,
     /// Worker assigned via lease signal.
@@ -38,27 +36,25 @@ pub(crate) struct PodSm {
 }
 
 impl PodSm {
-    pub(crate) fn new(timer_id: TimerId) -> Self {
+    pub(crate) fn new() -> Self {
         PodSm {
             status: PodStatus::Pending,
             workload_id: None,
             worker_id: None,
             intent: PodIntent::None,
             resume_artifact: None,
-            timer_id,
             timer_generation: 0,
             assigned_worker: None,
         }
     }
 
-    pub(crate) fn new_from_artifact(timer_id: TimerId, artifact_id: ArtifactId) -> Self {
+    pub(crate) fn new_from_artifact(artifact_id: ArtifactId) -> Self {
         PodSm {
             status: PodStatus::Pending,
             workload_id: None,
             worker_id: None,
             intent: PodIntent::None,
             resume_artifact: Some(artifact_id),
-            timer_id,
             timer_generation: 0,
             assigned_worker: None,
         }
@@ -97,7 +93,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
     type Input = PodInput;
 
     fn initialize(&mut self, ctx: &mut C) {
-        ctx.set_pod_to_timer_edges(vec![self.timer_id]);
+        ctx.set_pod_to_timer_edges(vec![TIMER]);
         ctx.set_pod_to_schedule_request_edges(vec![SCHEDULE_REQUEST]);
         ctx.set_schedule_request(PodScheduleRequest {
             resume_artifact: self.resume_artifact,

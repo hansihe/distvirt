@@ -9,17 +9,17 @@ use super::*;
 #[test]
 fn traffic_triggered_activation() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true)); // activation-based
+    router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -65,17 +65,17 @@ fn traffic_triggered_activation() {
 #[test]
 fn idle_timeout_deactivation() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -112,7 +112,7 @@ fn idle_timeout_deactivation() {
     assert_eq!(s1.idle_generation, 1);
 
     // Fire the idle timer → service deactivates.
-    router.send_service_timer_fired(timer, S1, ServiceTimerKey::IdleTimeout);
+    router.send_service_timer_fired(TIMER, S1, ServiceTimerKey::IdleTimeout);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
@@ -130,17 +130,17 @@ fn idle_timeout_deactivation() {
 #[test]
 fn traffic_cancels_idle_timer() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -189,17 +189,17 @@ fn traffic_cancels_idle_timer() {
 #[test]
 fn idle_timeout_suspend_integration() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new_suspendable(timer));
+    router.create_workload(W1, WorkloadSm::new_suspendable());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -235,7 +235,7 @@ fn idle_timeout_suspend_integration() {
 
     // Idle timer fires → service deactivates → demand drops →
     // workload signals pod to suspend (suspend_on_idle=true).
-    router.send_service_timer_fired(timer, S1, ServiceTimerKey::IdleTimeout);
+    router.send_service_timer_fired(TIMER, S1, ServiceTimerKey::IdleTimeout);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
@@ -267,17 +267,17 @@ fn idle_timeout_suspend_integration() {
 #[test]
 fn worker_loss_removes_backend_need() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -325,7 +325,7 @@ fn worker_loss_removes_backend_need() {
 #[test]
 fn multiple_workers_one_loses_traffic() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker1 = router.create_worker();
     let worker2 = router.create_worker();
     router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
@@ -333,11 +333,11 @@ fn multiple_workers_one_loses_traffic() {
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,

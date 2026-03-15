@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn shared_worker_death_independent_failure() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
@@ -17,14 +17,14 @@ fn shared_worker_death_independent_failure() {
     let mgmt = router.create_management();
 
     // Create two workloads, each with their own always-on service.
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_workload(W2, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W2, WorkloadSm::new());
 
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, false));
-    router.create_service(S2, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S2, ServiceSm::new(false));
 
     // S1 → W1, S2 → W2 (different management ports for different specs).
     let mgmt_s1 = router.create_management();
@@ -98,8 +98,8 @@ fn shared_worker_death_independent_failure() {
     assert_eq!(s2.state, ServiceState::NeedBackend);
 
     // Fire both backoff timers.
-    router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
-    router.send_workload_timer_fired(timer, W2, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
+    router.send_workload_timer_fired(TIMER, W2, WorkloadTimerKey::RetryBackoff);
     router.propagate();
 
     // Both should have created new pods.
@@ -139,7 +139,7 @@ fn shared_worker_death_independent_failure() {
 #[test]
 fn service_retarget_workload() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
@@ -147,13 +147,13 @@ fn service_retarget_workload() {
     let mgmt = router.create_management();
 
     // Create two workloads with specs.
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_workload(W2, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W2, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
     // One always-on service pointing at W1.
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     let mgmt_s1 = router.create_management();
     router.set_management_to_service_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
@@ -220,14 +220,14 @@ fn service_retarget_workload() {
 #[test]
 fn independent_workload_subgraphs() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // W1 + S1 subgraph.
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_service(S1, ServiceSm::new(timer, true)); // activation-based
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_service(S1, ServiceSm::new(true)); // activation-based
 
     let mgmt1 = router.create_management();
     router.set_management_to_workload_edges(mgmt1, vec![W1]);
@@ -242,8 +242,8 @@ fn independent_workload_subgraphs() {
     );
 
     // W2 + S2 subgraph.
-    router.create_workload(W2, WorkloadSm::new(timer));
-    router.create_service(S2, ServiceSm::new(timer, false)); // always-on
+    router.create_workload(W2, WorkloadSm::new());
+    router.create_service(S2, ServiceSm::new(false)); // always-on
 
     let mgmt2 = router.create_management();
     router.set_management_to_workload_edges(mgmt2, vec![W2]);
@@ -320,21 +320,21 @@ fn independent_workload_subgraphs() {
 #[test]
 fn service_fan_in_with_retarget() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Both workloads get specs.
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_workload(W2, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W2, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
     // Two always-on services both pointing at W1.
-    router.create_service(S1, ServiceSm::new(timer, false));
-    router.create_service(S2, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S2, ServiceSm::new(false));
 
     let mgmt_s1 = router.create_management();
     router.set_management_to_service_edges(mgmt_s1, vec![S1]);
@@ -424,10 +424,10 @@ fn service_fan_in_with_retarget() {
 #[test]
 fn service_self_destructs_on_spec_removal() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_service(S1, ServiceSm::new(timer, false)); // always-on
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_service(S1, ServiceSm::new(false)); // always-on
 
     // Use separate mgmt ports so we can remove the service spec independently.
     let mgmt_wl = router.create_management();
@@ -466,7 +466,7 @@ fn service_self_destructs_on_spec_removal() {
 #[test]
 fn workload_self_destructs_on_spec_removal() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
@@ -499,20 +499,20 @@ fn workload_self_destructs_on_spec_removal() {
 #[test]
 fn full_teardown_cascade() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
+    router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Set up two independent service→workload subgraphs via separate mgmt ports.
     let mgmt_wl = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
-    router.create_workload(W2, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
+    router.create_workload(W2, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt_wl, vec![W1, W2]);
     router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
 
     let mgmt_s1 = router.create_management();
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
@@ -523,7 +523,7 @@ fn full_teardown_cascade() {
     );
 
     let mgmt_s2 = router.create_management();
-    router.create_service(S2, ServiceSm::new(timer, false));
+    router.create_service(S2, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt_s2, vec![S2]);
     router.set_management_svc_spec(
         mgmt_s2,
@@ -572,7 +572,7 @@ fn full_teardown_cascade() {
 #[test]
 fn teardown_during_backoff() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_workload(&mut router, 5);
+    let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
@@ -596,7 +596,7 @@ fn teardown_during_backoff() {
 #[test]
 fn teardown_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _timer) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);

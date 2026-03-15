@@ -22,7 +22,6 @@ fn test_config() -> TimerConfig {
 /// Returns (router, adapter, mgmt, worker).
 fn setup_workload(
     router: &mut Router,
-    timer: TimerId,
     adapter: &mut TimerAdapter,
 ) -> (crate::sm_new::ManagementId, crate::sm_new::WorkerId) {
     let worker = router.create_worker();
@@ -30,11 +29,11 @@ fn setup_workload(
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, false)); // always-on
+    router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -58,8 +57,8 @@ fn setup_workload(
 #[test]
 fn no_timers_no_actions() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let mut adapter = TimerAdapter::new(timer, test_config());
+    router.create_timer(TIMER);
+    let mut adapter = TimerAdapter::new(test_config());
 
     // No SMs, just propagate.
     router.propagate();
@@ -74,9 +73,9 @@ fn no_timers_no_actions() {
 #[test]
 fn new_timer_produces_start() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let mut adapter = TimerAdapter::new(timer, test_config());
-    let (_, worker) = setup_workload(&mut router, timer, &mut adapter);
+    router.create_timer(TIMER);
+    let mut adapter = TimerAdapter::new(test_config());
+    let (_, worker) = setup_workload(&mut router, &mut adapter);
 
     // Pod created, make it fail so workload enters RetryBackoff and requests timer.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -120,9 +119,9 @@ fn new_timer_produces_start() {
 #[test]
 fn timer_removed_produces_cancel() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let mut adapter = TimerAdapter::new(timer, test_config());
-    let (_, worker) = setup_workload(&mut router, timer, &mut adapter);
+    router.create_timer(TIMER);
+    let mut adapter = TimerAdapter::new(test_config());
+    let (_, worker) = setup_workload(&mut router, &mut adapter);
 
     // Make pod fail → retry backoff timer wanted.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -171,9 +170,9 @@ fn timer_removed_produces_cancel() {
 #[test]
 fn same_generation_no_action() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let mut adapter = TimerAdapter::new(timer, test_config());
-    let (_, worker) = setup_workload(&mut router, timer, &mut adapter);
+    router.create_timer(TIMER);
+    let mut adapter = TimerAdapter::new(test_config());
+    let (_, worker) = setup_workload(&mut router, &mut adapter);
 
     // Make pod fail → retry timer wanted.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -208,8 +207,8 @@ fn same_generation_no_action() {
 #[test]
 fn generation_change_restarts_timer() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let mut adapter = TimerAdapter::new(timer, test_config());
+    router.create_timer(TIMER);
+    let mut adapter = TimerAdapter::new(test_config());
 
     // Set up activation-based service so we can trigger idle timer generation changes.
     let worker = router.create_worker();
@@ -217,11 +216,11 @@ fn generation_change_restarts_timer() {
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true)); // activation-based
+    router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -296,8 +295,8 @@ fn generation_change_restarts_timer() {
 #[test]
 fn multiple_sm_kinds_in_one_cycle() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let mut adapter = TimerAdapter::new(timer, test_config());
+    router.create_timer(TIMER);
+    let mut adapter = TimerAdapter::new(test_config());
 
     // Set up activation-based service.
     let worker = router.create_worker();
@@ -305,11 +304,11 @@ fn multiple_sm_kinds_in_one_cycle() {
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -382,18 +381,18 @@ fn multiple_sm_kinds_in_one_cycle() {
 #[test]
 fn fire_dispatches_workload_timer() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let adapter = TimerAdapter::new(timer, test_config());
+    router.create_timer(TIMER);
+    let adapter = TimerAdapter::new(test_config());
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, false));
+    router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -436,18 +435,18 @@ fn fire_dispatches_workload_timer() {
 #[test]
 fn fire_dispatches_service_timer() {
     let mut router = Router::new(16);
-    let timer = router.create_timer();
-    let adapter = TimerAdapter::new(timer, test_config());
+    router.create_timer(TIMER);
+    let adapter = TimerAdapter::new(test_config());
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new(timer));
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
 
-    router.create_service(S1, ServiceSm::new(timer, true));
+    router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
