@@ -268,5 +268,56 @@ impl<Id, V: Clone> Aggregator for ListAggregator<Id, V> {
 pub mod model_check;
 pub mod trace;
 
+/// Trait implemented by generated `NodeKind` enums.
+pub trait IdKind: Copy + Clone + 'static {
+    const AUTO_COUNT: usize;
+    const COUNT: usize;
+    fn index(self) -> usize;
+    fn name(self) -> &'static str;
+    fn is_auto(self) -> bool {
+        self.index() < Self::AUTO_COUNT
+    }
+}
+
+/// Swappable ID allocation strategy.
+pub trait IdAllocator<K: IdKind>: Clone {
+    /// Allocate a new u64 for the given auto-ID node kind.
+    /// `creator` is `Some((kind, raw_id))` when called from an SM handler.
+    fn alloc(&mut self, kind: K, creator: Option<(K, u64)>) -> u64;
+    /// Export counter state for snapshotting.
+    fn counter_snapshot(&self) -> Vec<u64>;
+    /// Reconstruct from snapshotted counter state.
+    fn from_counter_snapshot(counters: Vec<u64>) -> Self;
+}
+
+/// Default allocator: simple sequential counters (replicates current behavior).
+#[derive(Clone, Debug)]
+pub struct SequentialIds {
+    counters: Vec<u64>,
+}
+
+impl SequentialIds {
+    pub fn new(auto_count: usize) -> Self {
+        Self {
+            counters: vec![0; auto_count],
+        }
+    }
+}
+
+impl<K: IdKind> IdAllocator<K> for SequentialIds {
+    fn alloc(&mut self, kind: K, _creator: Option<(K, u64)>) -> u64 {
+        let idx = kind.index();
+        let id = self.counters[idx];
+        self.counters[idx] += 1;
+        id
+    }
+    fn counter_snapshot(&self) -> Vec<u64> {
+        self.counters.clone()
+    }
+    fn from_counter_snapshot(counters: Vec<u64>) -> Self {
+        Self { counters }
+    }
+}
+
 #[cfg(test)]
 mod tests;

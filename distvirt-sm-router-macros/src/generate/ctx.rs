@@ -131,18 +131,9 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 quote! { pending_self_destruct: bool },
             ];
 
-            let counter_fields: Vec<_> = def
-                .state_machines
-                .iter()
-                .filter(|s| s.id_type.is_none())
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "next_{}_id",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f: u64 }
-                })
-                .collect();
+            let counter_fields: Vec<_> = vec![
+                quote! { id_alloc: __IdAlloc },
+            ];
 
             // ================================================================
             // Constructor
@@ -176,31 +167,13 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 quote! { pending_self_destruct: false },
             ];
 
-            let counter_params: Vec<_> = def
-                .state_machines
-                .iter()
-                .filter(|s| s.id_type.is_none())
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "next_{}_id",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f: u64 }
-                })
-                .collect();
+            let counter_params: Vec<_> = vec![
+                quote! { id_alloc: __IdAlloc },
+            ];
 
-            let counter_inits: Vec<_> = def
-                .state_machines
-                .iter()
-                .filter(|s| s.id_type.is_none())
-                .map(|target_sm| {
-                    let f = format_ident!(
-                        "next_{}_id",
-                        to_snake_case(&target_sm.name.to_string())
-                    );
-                    quote! { #f }
-                })
-                .collect();
+            let counter_inits: Vec<_> = vec![
+                quote! { id_alloc },
+            ];
 
             // ================================================================
             // Trait impl for concrete struct
@@ -263,11 +236,9 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
 
                     if target_sm.id_type.is_none() {
                         let id_name = format_ident!("{}Id", target_sm.name);
-                        let counter = format_ident!("next_{}_id", target_snake);
                         quote! {
                             fn #method(&mut self, sm: #handler) -> #tid {
-                                let id = #id_name(self.#counter);
-                                self.#counter += 1;
+                                let id = #id_name(self.id_alloc.alloc(NodeKind::#variant, None));
                                 self.pending_creates.push(PendingCreate::#variant(id, sm));
                                 id
                             }
@@ -304,7 +275,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
 
                 // Concrete struct — used internally by the router
                 #[allow(dead_code)]
-                struct #ctx_concrete_name {
+                struct #ctx_concrete_name<__IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> {
                     #[allow(dead_code)]
                     id: #id_type,
                     #(#signal_fields,)*
@@ -316,7 +287,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 }
 
                 #[allow(dead_code)]
-                impl #ctx_concrete_name {
+                impl<__IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_concrete_name<__IdAlloc> {
                     fn new(id: #id_type #(, #counter_params)*) -> Self {
                         #ctx_concrete_name {
                             id,
@@ -332,7 +303,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
 
                 // Trait impl for concrete struct
                 #[allow(dead_code)]
-                impl #ctx_trait_name for #ctx_concrete_name {
+                impl<__IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_trait_name for #ctx_concrete_name<__IdAlloc> {
                     fn id(&self) -> #id_type {
                         self.id
                     }

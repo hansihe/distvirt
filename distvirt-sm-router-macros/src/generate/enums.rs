@@ -182,6 +182,82 @@ pub(super) fn gen_port_input_enums(def: &TopologyDef) -> TokenStream {
     quote! { #(#enums)* }
 }
 
+pub(super) fn gen_node_kind_enum(def: &TopologyDef) -> TokenStream {
+    let auto_count = auto_id_count(def);
+    let total_count = def.state_machines.len() + def.ports.len();
+
+    // Build variants: auto-ID first (SMs then ports), then manual-ID (SMs then ports)
+    let mut variants = Vec::new();
+    let mut match_arms = Vec::new();
+    let mut idx = 0usize;
+
+    // Auto-ID SMs
+    for sm in &def.state_machines {
+        if sm.id_type.is_none() {
+            let name = &sm.name;
+            let name_str = name.to_string();
+            variants.push(quote! { #name = #idx });
+            match_arms.push(quote! { NodeKind::#name => #name_str });
+            idx += 1;
+        }
+    }
+    // Auto-ID ports
+    for port in &def.ports {
+        if port.id_type.is_none() {
+            let name = &port.name;
+            let name_str = name.to_string();
+            variants.push(quote! { #name = #idx });
+            match_arms.push(quote! { NodeKind::#name => #name_str });
+            idx += 1;
+        }
+    }
+    // Manual-ID SMs
+    for sm in &def.state_machines {
+        if sm.id_type.is_some() {
+            let name = &sm.name;
+            let name_str = name.to_string();
+            variants.push(quote! { #name = #idx });
+            match_arms.push(quote! { NodeKind::#name => #name_str });
+            idx += 1;
+        }
+    }
+    // Manual-ID ports
+    for port in &def.ports {
+        if port.id_type.is_some() {
+            let name = &port.name;
+            let name_str = name.to_string();
+            variants.push(quote! { #name = #idx });
+            match_arms.push(quote! { NodeKind::#name => #name_str });
+            idx += 1;
+        }
+    }
+
+    quote! {
+        #[derive(Copy, Clone, Debug)]
+        #[repr(usize)]
+        #[allow(dead_code)]
+        pub enum NodeKind {
+            #(#variants,)*
+        }
+
+        impl NodeKind {
+            pub const AUTO_COUNT: usize = #auto_count;
+            pub const COUNT: usize = #total_count;
+        }
+
+        impl ::distvirt_sm_router::IdKind for NodeKind {
+            const AUTO_COUNT: usize = #auto_count;
+            const COUNT: usize = #total_count;
+            fn index(self) -> usize { self as usize }
+            fn name(self) -> &'static str {
+                match self {
+                    #(#match_arms,)*
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn gen_dirty_enum(def: &TopologyDef) -> TokenStream {
     let variants: Vec<_> = def
         .inputs

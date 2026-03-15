@@ -78,21 +78,10 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     fields.push(quote! { pending_creates: Vec<PendingCreate> });
     inits.push(quote! { pending_creates: Vec::new() });
 
-    // Auto-ID counters
-    for sm in &def.state_machines {
-        if sm.id_type.is_none() {
-            let counter = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
-            fields.push(quote! { #counter: u64 });
-            inits.push(quote! { #counter: 0 });
-        }
-    }
-    for port in &def.ports {
-        if port.id_type.is_none() {
-            let counter = format_ident!("next_{}_id", to_snake_case(&port.name.to_string()));
-            fields.push(quote! { #counter: u64 });
-            inits.push(quote! { #counter: 0 });
-        }
-    }
+    // ID allocator (replaces individual next_*_id counters)
+    let auto_count = auto_id_count(def);
+    fields.push(quote! { id_alloc: __IdAlloc });
+    // id_alloc init is handled separately for each constructor (like tracer)
 
     // Port input output queues
     for port in &def.ports {
@@ -169,26 +158,42 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         mod __router {
             use super::*;
 
-            pub struct Router<__Tracer: ::distvirt_sm_router::trace::Tracer = ::distvirt_sm_router::trace::NoopTracer> {
+            pub struct Router<
+                __Tracer: ::distvirt_sm_router::trace::Tracer = ::distvirt_sm_router::trace::NoopTracer,
+                __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind> = ::distvirt_sm_router::SequentialIds,
+            > {
                 #(#fields,)*
             }
 
             #[allow(dead_code)]
-            impl Router<::distvirt_sm_router::trace::NoopTracer> {
+            impl Router<::distvirt_sm_router::trace::NoopTracer, ::distvirt_sm_router::SequentialIds> {
                 pub fn new(depth_limit: usize) -> Self {
                     Router {
                         #(#inits,)*
                         tracer: ::distvirt_sm_router::trace::NoopTracer,
+                        id_alloc: ::distvirt_sm_router::SequentialIds::new(#auto_count),
                     }
                 }
             }
 
             #[allow(dead_code)]
-            impl<__Tracer: ::distvirt_sm_router::trace::Tracer> Router<__Tracer> {
+            impl<__Tracer: ::distvirt_sm_router::trace::Tracer> Router<__Tracer, ::distvirt_sm_router::SequentialIds> {
                 pub fn new_traced(depth_limit: usize, tracer: __Tracer) -> Self {
                     Router {
                         #(#inits,)*
                         tracer,
+                        id_alloc: ::distvirt_sm_router::SequentialIds::new(#auto_count),
+                    }
+                }
+            }
+
+            #[allow(dead_code)]
+            impl<__Tracer: ::distvirt_sm_router::trace::Tracer, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> Router<__Tracer, __IdAlloc> {
+                pub fn new_with_allocator(depth_limit: usize, id_alloc: __IdAlloc, tracer: __Tracer) -> Self {
+                    Router {
+                        #(#inits,)*
+                        tracer,
+                        id_alloc,
                     }
                 }
 
@@ -218,11 +223,9 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         if sm.id_type.is_none() {
             // Auto-ID: generate ID internally, return it
             let id_name = format_ident!("{}Id", sm.name);
-            let counter = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
             methods.push(quote! {
                 fn #method(&mut self, sm: #handler) -> #id_type {
-                    let id = #id_name(self.#counter);
-                    self.#counter += 1;
+                    let id = #id_name(self.id_alloc.alloc(NodeKind::#variant, None));
                     self.pending_creates.push(PendingCreate::#variant(id, sm));
                     id
                 }
@@ -257,11 +260,10 @@ fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         if port.id_type.is_none() {
             // Auto-ID: generate ID internally, return it
             let id_name = format_ident!("{}Id", port.name);
-            let counter = format_ident!("next_{}_id", to_snake_case(&port.name.to_string()));
+            let port_variant = &port.name;
             methods.push(quote! {
                 fn #method(&mut self) -> #id_type {
-                    let id = #id_name(self.#counter);
-                    self.#counter += 1;
+                    let id = #id_name(self.id_alloc.alloc(NodeKind::#port_variant, None));
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortCreated {
                         node: #node_str,
                         id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
@@ -751,17 +753,10 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
             self.pending_creates.extend(ctx.pending_creates);
         };
 
-        // 2. Update auto-ID counters
-        let counter_updates: Vec<_> = def
-            .state_machines
-            .iter()
-            .filter(|s| s.id_type.is_none())
-            .map(|target_sm| {
-                let target_snake = to_snake_case(&target_sm.name.to_string());
-                let counter = format_ident!("next_{}_id", target_snake);
-                quote! { self.#counter = ctx.#counter; }
-            })
-            .collect();
+        // 2. Sync allocator state back from ctx
+        let counter_updates: Vec<_> = vec![
+            quote! { self.id_alloc = ctx.id_alloc; },
+        ];
 
         // 3. Apply signals
         let signal_applies: Vec<_> = def
@@ -849,7 +844,7 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         };
 
         methods.push(quote! {
-            fn #method(&mut self, id: #id_type, ctx: #ctx_name) -> bool {
+            fn #method(&mut self, id: #id_type, ctx: #ctx_name<__IdAlloc>) -> bool {
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EffectsStart {
                     node: #node_str,
                     id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
@@ -877,17 +872,6 @@ fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 }
 
 fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
-    // Generate counter passing code for Ctx::new calls
-    let counter_passes: Vec<_> = def
-        .state_machines
-        .iter()
-        .filter(|s| s.id_type.is_none())
-        .map(|sm| {
-            let f = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
-            quote! { , self.#f }
-        })
-        .collect();
-
     for sm in &def.state_machines {
         let method = format_ident!("initialize_{}_sm", to_snake_case(&sm.name.to_string()));
         let instances = format_ident!("{}_instances", to_snake_case(&sm.name.to_string()));
@@ -895,7 +879,6 @@ fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
         let ctx_name = format_ident!("{}CtxConcrete", sm.name);
         let apply = format_ident!("apply_{}_effects", to_snake_case(&sm.name.to_string()));
         let node_str = sm.name.to_string();
-        let counter_passes = &counter_passes;
 
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) {
@@ -904,7 +887,7 @@ fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 let mut sm = self.#instances.remove(&id).unwrap();
-                let mut ctx = #ctx_name::new(id #(#counter_passes)*);
+                let mut ctx = #ctx_name::new(id, self.id_alloc.clone());
                 sm.initialize(&mut ctx);
                 let self_destructed = self.#apply(id, ctx);
                 if !self_destructed {
@@ -916,17 +899,6 @@ fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
 }
 
 fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
-    // Generate counter passing code for Ctx::new calls
-    let counter_passes: Vec<_> = def
-        .state_machines
-        .iter()
-        .filter(|s| s.id_type.is_none())
-        .map(|sm| {
-            let f = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
-            quote! { , self.#f }
-        })
-        .collect();
-
     let match_arms: Vec<_> = def
         .inputs
         .iter()
@@ -957,7 +929,6 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                     "apply_{}_effects",
                     to_snake_case(&inp.node.to_string())
                 );
-                let counter_passes = &counter_passes;
 
                 quote! {
                     DirtyInput::#variant(target_id) => {
@@ -983,7 +954,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                         });
 
                         let mut sm = self.#instances.remove(&target_id).unwrap();
-                        let mut ctx = #ctx_name::new(target_id #(#counter_passes)*);
+                        let mut ctx = #ctx_name::new(target_id, self.id_alloc.clone());
                         sm.handle(#input_enum::#input_variant(result), &mut ctx);
 
                         let self_destructed = self.#apply(target_id, ctx);
@@ -1042,7 +1013,6 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                 "apply_{}_effects",
                 to_snake_case(&ev.receiver.to_string())
             );
-            let counter_passes = &counter_passes;
             let event_str = ev.name.to_string();
 
             let connectivity = gen_connectivity_check(def, ev);
@@ -1064,7 +1034,7 @@ fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
                             receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
                             payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
                         });
-                        let mut ctx = #ctx_name::new(receiver_id #(#counter_passes)*);
+                        let mut ctx = #ctx_name::new(receiver_id, self.id_alloc.clone());
                         sm.handle(#input_enum::#variant(payload), &mut ctx);
 
                         let self_destructed = self.#apply(receiver_id, ctx);

@@ -81,19 +81,8 @@ fn gen_snapshot_struct(def: &TopologyDef) -> TokenStream {
         );
     }
 
-    // Auto-ID counters
-    for sm in &def.state_machines {
-        if sm.id_type.is_none() {
-            let counter = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
-            fields.push(quote! { pub #counter: u64 });
-        }
-    }
-    for port in &def.ports {
-        if port.id_type.is_none() {
-            let counter = format_ident!("next_{}_id", to_snake_case(&port.name.to_string()));
-            fields.push(quote! { pub #counter: u64 });
-        }
-    }
+    // ID allocator counter snapshot
+    fields.push(quote! { pub id_alloc_counters: Vec<u64> });
 
     quote! {
         #[allow(dead_code)]
@@ -161,21 +150,9 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
         from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
-    // Auto-ID counters
-    for sm in &def.state_machines {
-        if sm.id_type.is_none() {
-            let counter = format_ident!("next_{}_id", to_snake_case(&sm.name.to_string()));
-            snapshot_fields.push(quote! { #counter: self.#counter });
-            from_snapshot_fields.push(quote! { #counter: snapshot.#counter });
-        }
-    }
-    for port in &def.ports {
-        if port.id_type.is_none() {
-            let counter = format_ident!("next_{}_id", to_snake_case(&port.name.to_string()));
-            snapshot_fields.push(quote! { #counter: self.#counter });
-            from_snapshot_fields.push(quote! { #counter: snapshot.#counter });
-        }
-    }
+    // ID allocator counters
+    snapshot_fields.push(quote! { id_alloc_counters: ::distvirt_sm_router::IdAllocator::<NodeKind>::counter_snapshot(&self.id_alloc) });
+    from_snapshot_fields.push(quote! { id_alloc: <__IdAlloc as ::distvirt_sm_router::IdAllocator<NodeKind>>::from_counter_snapshot(snapshot.id_alloc_counters.clone()) });
 
     // Transient fields initialized to empty in from_snapshot
     let mut transient_inits = Vec::new();
@@ -194,7 +171,7 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
 
     quote! {
         #[allow(dead_code)]
-        impl<__Tracer: ::distvirt_sm_router::trace::Tracer> Router<__Tracer> {
+        impl<__Tracer: ::distvirt_sm_router::trace::Tracer, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> Router<__Tracer, __IdAlloc> {
             pub fn snapshot(&self) -> RouterSnapshot {
                 RouterSnapshot {
                     #(#snapshot_fields,)*

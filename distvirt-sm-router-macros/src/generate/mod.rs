@@ -10,6 +10,7 @@ use quote::quote;
 
 pub fn generate(def: &TopologyDef) -> TokenStream {
     let auto_id_types = enums::gen_auto_id_types(def);
+    let node_kind_enum = enums::gen_node_kind_enum(def);
     let signal_bounds = enums::gen_signal_bound_checks(def);
     let source_enums = enums::gen_source_enums(def);
     let input_enums = enums::gen_input_enums(def);
@@ -22,6 +23,7 @@ pub fn generate(def: &TopologyDef) -> TokenStream {
 
     quote! {
         #auto_id_types
+        #node_kind_enum
         #signal_bounds
         #source_enums
         #input_enums
