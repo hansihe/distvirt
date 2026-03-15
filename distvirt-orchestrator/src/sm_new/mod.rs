@@ -4,15 +4,15 @@ mod service;
 mod workload;
 mod pod;
 
-use service::*;
-use workload::*;
-use pod::*;
+pub(crate) use service::*;
+pub(crate) use workload::*;
+pub(crate) use pod::*;
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct ServiceId(u64);
+pub(crate) struct ServiceId(pub(crate) u64);
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-pub(crate) struct WorkloadId(u64);
+pub(crate) struct WorkloadId(pub(crate) u64);
 
 /// Readiness info broadcast from workload to services.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -171,7 +171,7 @@ pub(crate) enum BackendNeed {
 }
 
 /// Timer key enum for service-specific timers.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum ServiceTimerKey {
     #[default]
     IdleTimeout,
@@ -180,7 +180,7 @@ pub(crate) enum ServiceTimerKey {
 /// Timer request: service declares which timers it wants active.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct ServiceTimerRequest {
-    key: ServiceTimerKey,
+    pub(crate) key: ServiceTimerKey,
     pub(crate) generation: u64,
 }
 
@@ -195,7 +195,7 @@ pub(crate) enum PodTimerKey {
 /// Timer request: pod declares which timers it wants active.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct PodTimerRequest {
-    key: PodTimerKey,
+    pub(crate) key: PodTimerKey,
     pub(crate) generation: u64,
 }
 
@@ -274,10 +274,10 @@ impl Aggregator for OwnerAggregator {
 pub(crate) struct BackendNeedAggregator;
 
 impl Aggregator for BackendNeedAggregator {
-    type Input = (WorkerId, BackendNeed);
+    type Input = (BackendNeedId, BackendNeed);
     type Output = BackendNeed;
 
-    fn aggregate(&self, inputs: &[(WorkerId, BackendNeed)]) -> BackendNeed {
+    fn aggregate(&self, inputs: &[(BackendNeedId, BackendNeed)]) -> BackendNeed {
         let mut result = BackendNeed::None;
         for (_, need) in inputs {
             match need {
@@ -317,6 +317,25 @@ impl Aggregator for WorkerAssignmentAggregator {
     }
 }
 
+/// Aggregator that preserves source IDs. Like ListAggregator but keeps (Id, V) pairs.
+/// Used by timer inputs so the adapter can map requests back to their source SM.
+pub(crate) struct IdListAggregator<Id, V>(std::marker::PhantomData<(Id, V)>);
+
+impl<Id, V> Default for IdListAggregator<Id, V> {
+    fn default() -> Self {
+        IdListAggregator(std::marker::PhantomData)
+    }
+}
+
+impl<Id: Clone, V: Clone> Aggregator for IdListAggregator<Id, V> {
+    type Input = (Id, V);
+    type Output = Vec<(Id, V)>;
+
+    fn aggregate(&self, inputs: &[(Id, V)]) -> Vec<(Id, V)> {
+        inputs.to_vec()
+    }
+}
+
 /// Aggregates the service spec, preserving the management port ID.
 /// Expects at most one spec source.
 #[derive(Default)]
@@ -346,6 +365,7 @@ distvirt_sm_router::router! {
     }
     ports {
         Worker(auto),
+        BackendNeed(auto),
         Management(auto),
         Timer(auto),
         ScheduleRequest(ScheduleRequestId),
@@ -367,7 +387,7 @@ distvirt_sm_router::router! {
         Pod::WantedPodTimers(Vec<PodTimerRequest>),
         Pod::ScheduleRequest(PodScheduleRequest),
         Worker::Info(WorkerInfo),
-        Worker::BackendNeed(BackendNeed),
+        BackendNeed::Level(BackendNeed),
         Management::WlSpec(WorkloadSpec),
         Management::SvcSpec(ServiceSpec),
         ScheduleLease::Lease(LeaseInfo),
@@ -378,7 +398,7 @@ distvirt_sm_router::router! {
         WorkloadToPod: Workload -> Pod,
         PodToWorkload: Pod -> Workload,
         WorkerToPod: Worker -> Pod,
-        WorkerToService: Worker -> Service,
+        BackendNeedToService: BackendNeed -> Service,
         ManagementToWorkload: Management -> Workload,
         ManagementToService: Management -> Service,
         WorkloadToTimer: Workload -> Timer,
@@ -427,7 +447,7 @@ distvirt_sm_router::router! {
             aggregator: SvcSpecAggregator,
         },
         Service::BackendNeedInput {
-            sources: [(WorkerToService, Worker::BackendNeed)],
+            sources: [(BackendNeedToService, BackendNeed::Level)],
             aggregator: BackendNeedAggregator,
         },
         Pod::WorkerInput {
@@ -442,21 +462,25 @@ distvirt_sm_router::router! {
             sources: [(ScheduleLeaseToPod, ScheduleLease::Lease)],
             aggregator: LeaseAggregator,
         },
+        Worker::AssignedPodsInput {
+            sources: [(PodToWorker, Pod::ScheduleRequest)],
+            aggregator: ListAggregator<PodId, PodScheduleRequest>,
+        },
         ScheduleRequest::PodRequestsInput {
             sources: [(PodToScheduleRequest, Pod::ScheduleRequest)],
             aggregator: ListAggregator<PodId, PodScheduleRequest>,
         },
         Timer::WorkloadTimersInput {
             sources: [(WorkloadToTimer, Workload::WantedTimers)],
-            aggregator: ListAggregator<WorkloadId, Vec<TimerRequest>>,
+            aggregator: IdListAggregator<WorkloadId, Vec<TimerRequest>>,
         },
         Timer::ServiceTimersInput {
             sources: [(ServiceToTimer, Service::SvcWantedTimers)],
-            aggregator: ListAggregator<ServiceId, Vec<ServiceTimerRequest>>,
+            aggregator: IdListAggregator<ServiceId, Vec<ServiceTimerRequest>>,
         },
         Timer::PodTimersInput {
             sources: [(PodToTimer, Pod::WantedPodTimers)],
-            aggregator: ListAggregator<PodId, Vec<PodTimerRequest>>,
+            aggregator: IdListAggregator<PodId, Vec<PodTimerRequest>>,
         },
     }
 }

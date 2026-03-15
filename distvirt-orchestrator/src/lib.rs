@@ -2,6 +2,7 @@ pub mod config;
 pub mod types;
 pub mod sm;
 pub(crate) mod sm_new;
+pub(crate) mod adapter;
 pub mod wg_peers;
 pub mod pod_map;
 pub mod broadcast;

@@ -22,9 +22,9 @@ const W2: WorkloadId = WorkloadId(2);
 // ============================================================================
 
 /// Extract workload timer requests from timer port inputs.
-/// Each delivery is a `Vec<Vec<TimerRequest>>` — one inner Vec per workload connected
-/// to the timer port.
-fn drain_timer_requests(router: &mut Router, timer: TimerId) -> Vec<Vec<Vec<TimerRequest>>> {
+/// Each delivery is a `Vec<(WorkloadId, Vec<TimerRequest>)>` — one entry per workload
+/// connected to the timer port.
+fn drain_timer_requests(router: &mut Router, timer: TimerId) -> Vec<Vec<(WorkloadId, Vec<TimerRequest>)>> {
     router
         .drain_timer_inputs()
         .into_iter()
@@ -48,14 +48,14 @@ fn assert_timer_requested(router: &mut Router, timer: TimerId, expected: &[Timer
     // Last delivery should have one workload's timer list matching expected.
     let last = deliveries.last().unwrap();
     assert_eq!(last.len(), 1, "expected 1 workload's timers, got {:?}", last);
-    assert_eq!(last[0].as_slice(), expected, "timer requests mismatch");
+    assert_eq!(last[0].1.as_slice(), expected, "timer requests mismatch");
 }
 
 /// Assert that timer output is either absent or empty (no active timers).
 fn assert_no_timers_wanted(router: &mut Router, timer: TimerId) {
     let deliveries = drain_timer_requests(router, timer);
     for delivery in &deliveries {
-        for workload_timers in delivery {
+        for (_, workload_timers) in delivery {
             assert!(
                 workload_timers.is_empty(),
                 "expected no timers wanted, got {:?}",

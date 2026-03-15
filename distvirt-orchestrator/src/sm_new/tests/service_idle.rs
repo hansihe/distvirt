@@ -5,7 +5,7 @@ use super::*;
 // ============================================================================
 
 /// 40. Traffic-triggered activation: idle service receives BackendNeed(Traffic)
-///     from worker → activates → demand → pod boots.
+///     from a BackendNeed port → activates → demand → pod boots.
 #[test]
 fn traffic_triggered_activation() {
     let mut router = Router::new(16);
@@ -36,9 +36,10 @@ fn traffic_triggered_activation() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.has_demand);
 
-    // Worker reports traffic → service activates.
-    router.set_worker_to_service_edges(worker, vec![S1]);
-    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    // BackendNeed port reports traffic → service activates.
+    let bn = router.create_backend_need();
+    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     // Service: Idle → NeedBackend, demand=true.
@@ -86,8 +87,9 @@ fn idle_timeout_deactivation() {
     router.propagate();
 
     // Traffic activates the service.
-    router.set_worker_to_service_edges(worker, vec![S1]);
-    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    let bn = router.create_backend_need();
+    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     // Make pod running.
@@ -101,7 +103,7 @@ fn idle_timeout_deactivation() {
     assert!(!s1.idle_timer_active);
 
     // Traffic stops → idle timer starts.
-    router.set_worker_backend_need(worker, BackendNeed::None);
+    router.set_backend_need_level(bn, BackendNeed::None);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
@@ -150,8 +152,9 @@ fn traffic_cancels_idle_timer() {
     router.propagate();
 
     // Traffic → activate → pod running.
-    router.set_worker_to_service_edges(worker, vec![S1]);
-    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    let bn = router.create_backend_need();
+    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -160,14 +163,14 @@ fn traffic_cancels_idle_timer() {
     router.propagate();
 
     // Traffic stops → idle timer starts.
-    router.set_worker_backend_need(worker, BackendNeed::None);
+    router.set_backend_need_level(bn, BackendNeed::None);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
     assert!(s1.idle_timer_active);
 
     // Traffic returns → idle timer cancelled.
-    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
@@ -208,8 +211,9 @@ fn idle_timeout_suspend_integration() {
     router.propagate();
 
     // Traffic → activate → pod running.
-    router.set_worker_to_service_edges(worker, vec![S1]);
-    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    let bn = router.create_backend_need();
+    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -224,7 +228,7 @@ fn idle_timeout_suspend_integration() {
     assert!(router.get_workload(&W1).unwrap().pod_running);
 
     // Traffic stops → idle timer starts.
-    router.set_worker_backend_need(worker, BackendNeed::None);
+    router.set_backend_need_level(bn, BackendNeed::None);
     router.propagate();
 
     assert!(router.get_service(&S1).unwrap().idle_timer_active);
@@ -285,8 +289,9 @@ fn worker_loss_removes_backend_need() {
     router.propagate();
 
     // Traffic → activate → pod running.
-    router.set_worker_to_service_edges(worker, vec![S1]);
-    router.set_worker_backend_need(worker, BackendNeed::Traffic);
+    let bn = router.create_backend_need();
+    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -302,7 +307,9 @@ fn worker_loss_removes_backend_need() {
 
     // Worker dies → BackendNeed aggregates to None → idle timer starts.
     // (Pod also fails, but service idle timer is the focus here.)
+    // Also destroy the BackendNeed port (adapter would do this on worker disconnect).
     router.destroy_worker(worker);
+    router.destroy_backend_need(bn);
     router.propagate();
 
     // Service lost readiness (pod failed) → back to NeedBackend.
@@ -341,11 +348,13 @@ fn multiple_workers_one_loses_traffic() {
     );
     router.propagate();
 
-    // Both workers report traffic.
-    router.set_worker_to_service_edges(worker1, vec![S1]);
-    router.set_worker_to_service_edges(worker2, vec![S1]);
-    router.set_worker_backend_need(worker1, BackendNeed::Traffic);
-    router.set_worker_backend_need(worker2, BackendNeed::Traffic);
+    // Both workers report traffic via separate BackendNeed ports.
+    let bn1 = router.create_backend_need();
+    let bn2 = router.create_backend_need();
+    router.set_backend_need_to_service_edges(bn1, vec![S1]);
+    router.set_backend_need_to_service_edges(bn2, vec![S1]);
+    router.set_backend_need_level(bn1, BackendNeed::Traffic);
+    router.set_backend_need_level(bn2, BackendNeed::Traffic);
     router.propagate();
 
     // Service activated via traffic.
@@ -362,8 +371,8 @@ fn multiple_workers_one_loses_traffic() {
     assert!(matches!(s1.state, ServiceState::Active { .. }));
     assert!(!s1.idle_timer_active);
 
-    // Worker1 drops to None → aggregate still Traffic (worker2 has Traffic).
-    router.set_worker_backend_need(worker1, BackendNeed::None);
+    // Worker1 drops to None → aggregate still Traffic (bn2 has Traffic).
+    router.set_backend_need_level(bn1, BackendNeed::None);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
@@ -371,18 +380,18 @@ fn multiple_workers_one_loses_traffic() {
     assert!(!s1.idle_timer_active); // no idle timer — still has traffic
 
     // Worker1 reports Active (highest priority) → still no idle timer.
-    router.set_worker_backend_need(worker1, BackendNeed::Active);
+    router.set_backend_need_level(bn1, BackendNeed::Active);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();
     assert!(!s1.idle_timer_active);
 
     // Worker1 back to None.
-    router.set_worker_backend_need(worker1, BackendNeed::None);
+    router.set_backend_need_level(bn1, BackendNeed::None);
     router.propagate();
 
     // Worker2 also drops → aggregate None → idle timer starts.
-    router.set_worker_backend_need(worker2, BackendNeed::None);
+    router.set_backend_need_level(bn2, BackendNeed::None);
     router.propagate();
 
     let s1 = router.get_service(&S1).unwrap();

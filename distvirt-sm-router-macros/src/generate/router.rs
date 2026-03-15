@@ -399,9 +399,9 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         }
 
         #[allow(unused_imports)]
-        use __router::Router;
+        pub use __router::Router;
 
         #[allow(unused_imports)]
-        use __router::RouterSnapshot;
+        pub use __router::RouterSnapshot;
     }
 }

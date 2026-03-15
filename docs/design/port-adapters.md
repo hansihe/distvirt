@@ -76,19 +76,14 @@ That sequencing is stateright-testable.
 Each "component" (adapter) has a single responsibility and trivial sequencing.
 Complex interactions are modelled through SMs where they can be verified.
 
-## Topology Changes Required
+## Topology Changes (Done)
 
-The current topology needs two additions to support the adapter layer.
+The following topology changes have been implemented to support the adapter layer.
 
-### 1. Worker port: assigned-pods input
+### 1. Worker port: assigned-pods input ✓
 
-The Worker port currently has no declared inputs — it only produces signals
-(`Info`, `BackendNeed`) and has outgoing edges (`WorkerToPod`,
-`WorkerToService`). But the worker adapter needs to **see** which pods have
-been assigned to its worker (via `PodToWorker` edges set by the Pod SM after
-receiving a lease).
-
-Add a new input on the Worker port:
+The Worker port now has an `AssignedPodsInput` that aggregates `Pod::ScheduleRequest`
+signals from pods connected via `PodToWorker` edges:
 
 ```
 Worker::AssignedPodsInput {
@@ -110,14 +105,11 @@ may need to extend it, or add another signal that carries the pod's launch
 config. Alternatively, the spec could be part of the Pod SM's initial state and
 exposed as a signal read by the worker adapter. Design this when implementing.
 
-### 2. BackendNeed: separate port type
+### 2. BackendNeed: separate port type ✓
 
-The current topology has `Worker::BackendNeed` as a signal on the Worker port,
-flowing through `WorkerToService` edges. This is wrong for the real system:
-backend need is reported **per worker per service**, and a single Worker port's
-`BackendNeed` signal applies to all services it has edges to.
-
-Replace with a dedicated port type:
+`BackendNeed` is now a dedicated port type with its own signal (`BackendNeed::Level`)
+and edge type (`BackendNeedToService`). The old `Worker::BackendNeed` signal and
+`WorkerToService` edge have been removed.
 
 ```
 ports {
@@ -126,7 +118,7 @@ ports {
 }
 signals {
     ...
-    BackendNeed::Need(BackendNeed),
+    BackendNeed::Level(BackendNeed),
 }
 edges {
     ...
@@ -134,16 +126,14 @@ edges {
 }
 inputs {
     Service::BackendNeedInput {
-        sources: [(BackendNeedToService, BackendNeed::Need)],
+        sources: [(BackendNeedToService, BackendNeed::Level)],
         aggregator: BackendNeedAggregator,
     },
 }
 ```
 
-Remove `Worker::BackendNeed` signal and `WorkerToService` edge.
-
 The worker adapter creates one `BackendNeed` port per (worker, service) pair
-when the worker reports `ServiceBackendNeed`. It sets the `Need` signal and a
+when the worker reports `ServiceBackendNeed`. It sets the `Level` signal and a
 `BackendNeedToService` edge to the target service. When the worker disconnects,
 all its `BackendNeed` ports are removed, which naturally clears the need signal
 to the services.
@@ -152,49 +142,95 @@ This maintains the per-service granularity while keeping the port logic trivial.
 
 ## Adapter Specifications
 
-### Timer Adapter
+### Timer Adapter (Implemented)
+
+**Location:** `distvirt-orchestrator/src/adapter/timer/mod.rs`
 
 **Port type:** `Timer` (one instance per router)
 
-**State:**
+**Implementation notes:**
+
+The timer adapter is split into a pure reconciliation layer (implemented) and
+the async shell integration (not yet implemented). The pure layer returns
+`Vec<TimerAction>` — the shell will iterate over these to spawn/cancel tokio
+timers and manage `JoinHandle`s.
+
+**Core types:**
+
 ```rust
+/// Identifies a specific timer across all SM kinds.
+enum TimerIdentity {
+    Workload(WorkloadId, WorkloadTimerKey),
+    Service(ServiceId, ServiceTimerKey),
+    Pod(PodId, PodTimerKey),
+}
+
+/// Action returned by reconcile — shell executes these.
+enum TimerAction {
+    Start { identity: TimerIdentity, generation: u64, duration: Duration },
+    Cancel { identity: TimerIdentity },
+}
+
+/// Duration configuration — adapter owns timer durations, not the SMs.
+struct TimerConfig {
+    pub retry_backoff: Duration,
+    pub launch_timeout: Duration,
+    pub suspend_timeout: Duration,
+    pub idle_timeout: Duration,
+}
+
+/// Pure adapter state. The shell wraps this and adds JoinHandle tracking.
 struct TimerAdapter {
     timer_id: TimerId,
-    /// Active timers keyed by (SM kind + SM ID + timer key).
-    /// Value is (generation, JoinHandle).
-    active: HashMap<TimerIdentity, (u64, JoinHandle<()>)>,
+    config: TimerConfig,
+    /// Active timers: identity → generation.
+    active: HashMap<TimerIdentity, u64>,
 }
 ```
 
 **Push (inward):**
-- `fire(router, sm_kind, sm_id, key)` — called when a tokio timer fires.
-  Calls `router.send_workload_timer_fired(timer_id, workload_id, key)`,
-  `router.send_service_timer_fired(...)`, or `router.send_pod_timer_fired(...)`
-  depending on `sm_kind`.
+- `fire(router, identity)` — called when a tokio timer fires. Dispatches to
+  `router.send_workload_timer_fired(...)`, `send_service_timer_fired(...)`, or
+  `send_pod_timer_fired(...)` based on the `TimerIdentity` variant.
 
 **Reconcile (outward):**
-- Drains `router.drain_timer_inputs()`.
+- `reconcile(&mut self, router) -> Vec<TimerAction>` — drains
+  `router.drain_timer_inputs()`, builds the wanted set, diffs against
+  `self.active`, returns Start/Cancel actions.
 - Each delivery is `(TimerId, TimerPortInput)`. Variants:
   - `WorkloadTimersInput(Vec<(WorkloadId, Vec<TimerRequest>)>)` — flatten
     to a set of `(WorkloadId, key, generation)` tuples.
   - `ServiceTimersInput(...)` — same pattern.
   - `PodTimersInput(...)` — same pattern.
 - Diff against `self.active`:
-  - Present in wanted but not active (or generation changed) → spawn tokio
-    timer, insert into active. Timer duration is determined by the key
-    (e.g., `RetryBackoff` → exponential backoff, `LaunchTimeout` → 60s,
-    `IdleTimeout` → configured idle timeout).
-  - Present in active but not wanted → abort handle, remove from active.
+  - Present in wanted but not active (or generation changed) → `TimerAction::Start`.
+  - Present in active but not wanted → `TimerAction::Cancel`.
+- If no deliveries were received (nothing changed), returns empty vec.
 
-**Timer durations:** The adapter owns the mapping from timer key to duration.
-This is configuration, not SM logic. The SM declares *what* timer it wants;
-the adapter decides *how long*.
+**Partial delivery handling:** Signal dedup means a reconcile call may receive
+deliveries for only some input variants (e.g., workload timers changed but
+service timers didn't). The adapter preserves its cached state for variants
+that had no new delivery, only clearing and rebuilding the portions that did.
+
+**Timer durations:** The adapter owns the mapping from timer key to duration
+via `TimerConfig`. This is configuration, not SM logic. The SM declares *what*
+timer it wants; the adapter decides *how long*.
 
 **Why generation matters:** When a timer is cancelled and re-requested (e.g.,
 pod restarts and gets a new launch timeout), the generation increments. The
 adapter sees a generation mismatch, cancels the old timer, and starts a new
 one. Without generations, a stale fire from the old timer could be
 misdelivered.
+
+**Tests:** `adapter/timer/tests.rs` — 8 unit tests exercise the pure diff
+logic using a real `Router` (no tokio). Tests cover: no-op, start, cancel,
+dedup stability, generation restart, multiple SM kinds, and fire dispatch for
+both workload and service timers.
+
+**Aggregator change:** The timer port inputs were changed from `ListAggregator`
+(which drops source IDs) to `IdListAggregator` (which preserves `(Id, V)`
+pairs). This is required so the adapter can map timer requests back to their
+source SM to build `TimerIdentity`. See "Infrastructure changes" section below.
 
 ### Scheduler Adapter
 
@@ -377,6 +413,113 @@ as a port with an input aggregating service status signals. That would give us
 the drain-and-diff pattern consistently. However, since endpoints are a
 broadcast to multiple workers (not a 1:1 relationship), the port model doesn't
 fit as naturally. Reading SM state post-propagation is simpler and adequate.
+
+## Infrastructure Changes (Done)
+
+Changes made to support the adapter layer beyond topology changes.
+
+### 1. IdListAggregator ✓
+
+`ListAggregator<Id, V>` drops the source ID during aggregation (`Output =
+Vec<V>`). Adapters need source IDs to map port input entries back to their
+originating SM (e.g., to build `TimerIdentity::Workload(wl_id, key)`).
+
+`IdListAggregator<Id, V>` preserves pairs (`Output = Vec<(Id, V)>`). Currently
+used by all three timer port inputs. Future adapters that need source IDs from
+`ListAggregator`-style inputs should use `IdListAggregator` instead.
+
+**Location:** Defined in `sm_new/mod.rs` alongside the other aggregators.
+
+### 2. Macro visibility: pub use for Router ✓
+
+The `router!` macro generates types inside a private `mod __router` and
+re-exports `Router` and `RouterSnapshot` into the calling module. These
+re-exports were `use` (private) — changed to `pub use` so adapter code in
+sibling modules (`adapter::timer`) can access them via `crate::sm_new::Router`.
+
+**Location:** `distvirt-sm-router-macros/src/generate/router.rs`
+
+### 3. Field visibility for adapter access ✓
+
+Several types needed visibility adjustments for adapter use:
+
+- `ServiceTimerKey`: added `Eq, Hash` derives (needed as `HashMap` key in
+  `TimerIdentity`).
+- `ServiceTimerRequest::key`, `PodTimerRequest::key`: changed to `pub(crate)`
+  (adapter reads these fields during reconcile).
+- `ServiceId`, `WorkloadId`: inner `u64` field changed to `pub(crate)` (adapter
+  tests construct IDs directly).
+- `sm_new` submodule re-exports: changed `use service::*` etc. to
+  `pub(crate) use service::*` so types are accessible from `adapter::*`.
+
+## Notes for Implementing Future Adapters
+
+### Module structure
+
+Follow the timer adapter pattern:
+```
+distvirt-orchestrator/src/adapter/
+├── mod.rs              # pub(crate) mod timer; pub(crate) mod scheduler; ...
+├── timer/
+│   ├── mod.rs          # Pure adapter logic
+│   └── tests.rs        # Unit tests (no tokio)
+└── scheduler/          # Next adapter to implement
+    ├── mod.rs
+    └── tests.rs
+```
+
+### Pure vs shell separation
+
+Keep adapters as pure functions that return action enums. This pattern:
+- Makes tests trivial (assert on returned actions, no async runtime needed).
+- Keeps the shell event loop simple (iterate actions, perform side effects).
+- Ensures adapters stay "dumb" per the design philosophy.
+
+The shell integration (tokio spawning, `JoinHandle` management, channel wiring)
+lives outside the adapter, likely in `shell/`.
+
+### Aggregator choice: ListAggregator vs IdListAggregator
+
+- Use `ListAggregator` when the adapter doesn't need to know which SM produced
+  each value (e.g., the BackendNeed aggregator already reduces to a single
+  priority level).
+- Use `IdListAggregator` when the adapter needs source SM IDs to build identity
+  keys, dispatch events back, or make per-SM decisions. The timer adapter
+  needed this; the scheduler adapter will likely need it too (for
+  `ScheduleRequest::PodRequestsInput` — the current `ListAggregator` drops
+  `PodId`).
+
+### Reconcile partial-delivery semantics
+
+Port inputs are signal-derived — each delivery is a **full replacement** for
+that input variant, not a delta. But a reconcile call may only receive some
+variants (signal dedup suppresses unchanged ones). The adapter must:
+
+1. Start from its cached `active` state.
+2. For each received variant, clear the corresponding portion of the wanted
+   set, then rebuild from the delivery.
+3. Leave untouched portions for variants with no delivery.
+4. Diff wanted vs active to produce actions.
+
+The timer adapter demonstrates this pattern with `had_workload`/`had_service`/
+`had_pod` flags.
+
+### Type visibility
+
+If a future adapter needs access to types defined in `sm_new` submodules
+(service.rs, workload.rs, pod.rs), those types should already be accessible
+via `crate::sm_new::*` thanks to the `pub(crate) use` re-exports. If the
+macro-generated types (e.g., new port input enums) aren't visible, check the
+`__router` module re-exports in `distvirt-sm-router-macros/src/generate/router.rs`.
+
+### Testing
+
+Use the same `Router::new(16)` setup as `sm_new/tests/`. Create real SMs,
+propagate, and call the adapter's reconcile method. Assert on the returned
+action list. The existing test helpers in `sm_new/tests/mod.rs` (like
+`setup_workload_with_pending_pod`) are not directly reusable from adapter tests
+(they're in a `#[cfg(test)]` submodule), so adapter tests define their own
+lightweight setup helpers.
 
 ## Event Loop Phases — Detailed
 
