@@ -61,19 +61,16 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
             .iter()
             .map(|sp| {
                 let rev = format_ident!("{}_rev", to_snake_case(&sp.edge.to_string()));
-                let sig_field = format_ident!(
-                    "{}_{}",
-                    to_snake_case(&sp.node.to_string()),
-                    to_snake_case(&sp.signal.to_string())
-                );
+                let source_node_state = signal_state_field(&sp.node);
+                let out_f = out_field_name(&sp.signal);
                 if multi_source {
                     let enum_name = format_ident!("{}Source", inp.input_name);
                     let variant_name = format_ident!("{}{}", sp.node, sp.signal);
                     quote! {
                         if let Some(sources) = self.#rev.get(&target_id) {
                             for &source_id in sources {
-                                if let Some(value) = self.#sig_field.get(&source_id) {
-                                    inputs.push(#enum_name::#variant_name(source_id, value.clone()));
+                                if let Some(state) = self.#source_node_state.get(&source_id) {
+                                    inputs.push(#enum_name::#variant_name(source_id, state.#out_f.clone()));
                                 }
                             }
                         }
@@ -82,8 +79,8 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
                     quote! {
                         if let Some(sources) = self.#rev.get(&target_id) {
                             for &source_id in sources {
-                                if let Some(value) = self.#sig_field.get(&source_id) {
-                                    inputs.push((source_id, value.clone()));
+                                if let Some(state) = self.#source_node_state.get(&source_id) {
+                                    inputs.push((source_id, state.#out_f.clone()));
                                 }
                             }
                         }
@@ -247,7 +244,8 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                 to_snake_case(&inp.node.to_string()),
                 to_snake_case(&inp.input_name.to_string())
             );
-            let last = last_field(inp);
+            let node_state = signal_state_field(&inp.node);
+            let in_f = in_field_name(&inp.input_name);
             let node_str = inp.node.to_string();
             let input_str = inp.input_name.to_string();
 
@@ -271,7 +269,7 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                             return;
                         }
                         let result = self.#aggregate(target_id);
-                        if self.#last.get(&target_id) == Some(&result) {
+                        if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
                             self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
                                 id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
@@ -279,7 +277,7 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                             });
                             return;
                         }
-                        self.#last.insert(target_id, result.clone());
+                        self.#node_state.get_mut(&target_id).unwrap().#in_f = Some(result.clone());
 
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
                             node: #node_str,
@@ -308,7 +306,7 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                             return;
                         }
                         let result = self.#aggregate(target_id);
-                        if self.#last.get(&target_id) == Some(&result) {
+                        if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
                             self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
                                 id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
@@ -316,7 +314,7 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                             });
                             return;
                         }
-                        self.#last.insert(target_id, result.clone());
+                        self.#node_state.get_mut(&target_id).unwrap().#in_f = Some(result.clone());
 
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
                             node: #node_str,
@@ -384,18 +382,15 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
         .invariants
         .iter()
         .map(|inv| {
-            let sig = def
-                .signals
-                .iter()
-                .find(|s| s.node == inv.node && s.signal == inv.signal)
-                .expect("invariant references valid signal (validated)");
-            let field = signal_field(sig);
+            let node_state = signal_state_field(&inv.node);
+            let out_f = out_field_name(&inv.signal);
             let expr = &inv.expr;
             let node_str = inv.node.to_string();
             let signal_str = inv.signal.to_string();
             let expr_str = expr.to_token_stream().to_string();
             quote! {
-                for (id, value) in &self.#field {
+                for (id, state) in &self.#node_state {
+                    let value = &state.#out_f;
                     if !(#expr) {
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InvariantViolation {
                             node: #node_str,

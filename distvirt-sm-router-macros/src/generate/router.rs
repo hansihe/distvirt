@@ -45,14 +45,14 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     let mut fields = Vec::new();
     let mut inits = Vec::new();
 
-    // Signals
-    for sig in &def.signals {
-        let f = signal_field(sig);
-        let id = node_id_type(def, &sig.node);
-        let vt = &sig.value_type;
+    // SignalState map per node (consolidated signals + last-delivered)
+    for node in nodes_with_signal_state(def) {
+        let state_field = signal_state_field(node);
+        let state_struct = signal_state_struct_name(node);
+        let id = node_id_type(def, node);
         let vis = &field_vis;
-        fields.push(quote! { #vis #f: std::collections::BTreeMap<#id, #vt> });
-        inits.push(quote! { #f: std::collections::BTreeMap::new() });
+        fields.push(quote! { #vis #state_field: std::collections::BTreeMap<#id, #state_struct> });
+        inits.push(quote! { #state_field: std::collections::BTreeMap::new() });
     }
 
     // Edges (fwd + rev)
@@ -67,18 +67,6 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         fields.push(quote! { #vis #rev: std::collections::BTreeMap<#tgt_id, std::collections::BTreeSet<#src_id>> });
         inits.push(quote! { #fwd: std::collections::BTreeMap::new() });
         inits.push(quote! { #rev: std::collections::BTreeMap::new() });
-    }
-
-    // Last delivered
-    for inp in &def.inputs {
-        let f = last_field(inp);
-        let id = node_id_type(def, &inp.node);
-        let agg = &inp.aggregator;
-        let vis = &field_vis;
-        fields.push(
-            quote! { #vis #f: std::collections::BTreeMap<#id, <#agg as ::distvirt_sm_router::Aggregator>::Output> },
-        );
-        inits.push(quote! { #f: std::collections::BTreeMap::new() });
     }
 
     // Pending creates
@@ -160,6 +148,43 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         quote! {}
     };
 
+    // Generate SignalState structs
+    let mut signal_state_structs = Vec::new();
+    for node in nodes_with_signal_state(def) {
+        let struct_name = signal_state_struct_name(node);
+
+        let mut ss_fields = Vec::new();
+        let mut ss_defaults = Vec::new();
+
+        for sig in def.signals.iter().filter(|s| s.node == *node) {
+            let out_f = out_field_name(&sig.signal);
+            let vt = &sig.value_type;
+            ss_fields.push(quote! { pub #out_f: #vt });
+            ss_defaults.push(quote! { #out_f: Default::default() });
+        }
+
+        for inp in def.inputs.iter().filter(|i| i.node == *node) {
+            let in_f = in_field_name(&inp.input_name);
+            let agg = &inp.aggregator;
+            ss_fields.push(quote! { pub #in_f: Option<<#agg as ::distvirt_sm_router::Aggregator>::Output> });
+            ss_defaults.push(quote! { #in_f: None });
+        }
+
+        signal_state_structs.push(quote! {
+            #[derive(Clone)]
+            pub struct #struct_name {
+                #(#ss_fields,)*
+            }
+            impl Default for #struct_name {
+                fn default() -> Self {
+                    #struct_name {
+                        #(#ss_defaults,)*
+                    }
+                }
+            }
+        });
+    }
+
     let snapshot_tokens = snapshot::gen_snapshot(def);
 
     let instances_vis: TokenStream = if expose {
@@ -172,6 +197,8 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         #[allow(dead_code)]
         mod __router {
             use super::*;
+
+            #(#signal_state_structs)*
 
             pub struct RouterInstances {
                 #(#instance_fields,)*

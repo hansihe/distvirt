@@ -54,12 +54,12 @@ fn gen_snapshot_struct(def: &TopologyDef) -> TokenStream {
         fields.push(quote! { pub #f: std::collections::BTreeSet<#id> });
     }
 
-    // Signals
-    for sig in &def.signals {
-        let f = signal_field(sig);
-        let id = node_id_type(def, &sig.node);
-        let vt = &sig.value_type;
-        fields.push(quote! { pub #f: std::collections::BTreeMap<#id, #vt> });
+    // SignalState maps (consolidated signals + last-delivered)
+    for node in nodes_with_signal_state(def) {
+        let state_field = signal_state_field(node);
+        let state_struct = signal_state_struct_name(node);
+        let id = node_id_type(def, node);
+        fields.push(quote! { pub #state_field: std::collections::BTreeMap<#id, #state_struct> });
     }
 
     // Edges (forward only — reverse is derived)
@@ -69,16 +69,6 @@ fn gen_snapshot_struct(def: &TopologyDef) -> TokenStream {
         let src_id = node_id_type(def, &edge.source);
         let tgt_id = node_id_type(def, &edge.target);
         fields.push(quote! { pub #fwd: std::collections::BTreeMap<#src_id, Vec<#tgt_id>> });
-    }
-
-    // Last delivered values
-    for inp in &def.inputs {
-        let f = last_field(inp);
-        let id = node_id_type(def, &inp.node);
-        let agg = &inp.aggregator;
-        fields.push(
-            quote! { pub #f: std::collections::BTreeMap<#id, <#agg as ::distvirt_sm_router::Aggregator>::Output> },
-        );
     }
 
     // ID allocator snapshot — generic with default matching SequentialIds
@@ -113,9 +103,9 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
         from_snapshot_instance_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
-    // Signals
-    for sig in &def.signals {
-        let f = signal_field(sig);
+    // SignalState maps (consolidated signals + last-delivered)
+    for node in nodes_with_signal_state(def) {
+        let f = signal_state_field(node);
         snapshot_fields.push(quote! { #f: self.#f.clone() });
         from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
     }
@@ -144,13 +134,6 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
                 rev_map
             }
         });
-    }
-
-    // Last delivered values
-    for inp in &def.inputs {
-        let f = last_field(inp);
-        snapshot_fields.push(quote! { #f: self.#f.clone() });
-        from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
     // ID allocator snapshot

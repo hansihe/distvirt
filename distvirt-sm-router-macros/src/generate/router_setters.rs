@@ -15,7 +15,6 @@ pub(super) fn gen_signal_setters(
             to_snake_case(&sig.node.to_string()),
             to_snake_case(&sig.signal.to_string())
         );
-        let field = signal_field(sig);
         let id_type = node_id_type(def, &sig.node);
         let vt = &sig.value_type;
 
@@ -44,19 +43,34 @@ pub(super) fn gen_signal_setters(
         let node_str = sig.node.to_string();
         let signal_str = sig.signal.to_string();
 
+        let node_state = signal_state_field(&sig.node);
+        let out_field = out_field_name(&sig.signal);
+
+        let state_struct = signal_state_struct_name(&sig.node);
+
         let body = quote! {
             fn #method(&mut self, id: #id_type, value: #vt) {
-                if self.#field.get(&id) == Some(&value) {
-                    return;
+                if let Some(state) = self.#node_state.get(&id) {
+                    if state.#out_field == value {
+                        return;
+                    }
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SignalChanged {
+                        node: #node_str,
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        signal: #signal_str,
+                        old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&state.#out_field as &dyn std::fmt::Debug),
+                        new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
+                    });
+                } else {
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SignalChanged {
+                        node: #node_str,
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        signal: #signal_str,
+                        old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&None::<()> as &dyn std::fmt::Debug),
+                        new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
+                    });
                 }
-                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SignalChanged {
-                    node: #node_str,
-                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
-                    signal: #signal_str,
-                    old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&self.#field.get(&id) as &dyn std::fmt::Debug),
-                    new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
-                });
-                self.#field.insert(id, value);
+                self.#node_state.entry(id).or_insert_with(#state_struct::default).#out_field = value;
                 #(#enqueue_code)*
             }
         };

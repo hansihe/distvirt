@@ -75,7 +75,7 @@ help: consider annotating `BadSignalType` with `#[derive(PartialEq)]`
 14 | struct BadSignalType(u32);
    |
 
-error[E0369]: binary operation `==` cannot be applied to type `Option<&BadSignalType>`
+error[E0369]: binary operation `==` cannot be applied to type `BadSignalType`
   --> tests/compile_fail/signal_missing_partial_eq.rs:37:1
    |
 37 | / distvirt_sm_router::router! {

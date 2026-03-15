@@ -2342,7 +2342,7 @@ mod initialize_tests {
         router.propagate();
 
         // Signal should be set after propagate materializes the SM
-        assert_eq!(router.parent_flag.get(&P1), Some(&true));
+        assert_eq!(router.parent_signal_state.get(&P1).map(|s| &s.out_flag), Some(&true));
     }
 
     #[test]
@@ -2431,7 +2431,7 @@ mod initialize_tests {
         );
         // Its own initialize should have run and set the signal
         assert_eq!(
-            router.child_status.get(&c2),
+            router.child_signal_state.get(&c2).map(|s| &s.out_status),
             Some(&42),
             "child's initialize should have set its status signal"
         );
@@ -2483,7 +2483,7 @@ mod initialize_tests {
             "child c3 should exist after propagate"
         );
         assert_eq!(
-            router.child_status.get(&c3),
+            router.child_signal_state.get(&c3).map(|s| &s.out_status),
             Some(&99),
             "child c3's initialize should have set status"
         );

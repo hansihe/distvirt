@@ -39,15 +39,13 @@ pub(super) fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
         let id_type = port_id_type(port);
         let node_str = port.name.to_string();
 
-        let sig_inits: Vec<_> = def
-            .signals
-            .iter()
-            .filter(|s| s.node == port.name)
-            .map(|sig| {
-                let f = signal_field(sig);
-                quote! { self.#f.insert(id, Default::default()); }
-            })
-            .collect();
+        let has_signal_state = nodes_with_signal_state(def).iter().any(|n| **n == port.name);
+        let state_init = if has_signal_state {
+            let state_field = signal_state_field(&port.name);
+            quote! { self.#state_field.insert(id, Default::default()); }
+        } else {
+            quote! {}
+        };
 
         if port.id_type.is_none() {
             // Auto-ID: generate ID internally, return it
@@ -61,7 +59,7 @@ pub(super) fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
                         id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                     });
                     self.instances.#instances.insert(id);
-                    #(#sig_inits)*
+                    #state_init
                     id
                 }
             });
@@ -74,7 +72,7 @@ pub(super) fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
                         id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                     });
                     self.instances.#instances.insert(id);
-                    #(#sig_inits)*
+                    #state_init
                 }
             });
         }
@@ -88,25 +86,13 @@ pub(super) fn gen_destroy_methods(def: &TopologyDef, methods: &mut Vec<TokenStre
         let id_type = sm_id_type(sm);
         let handler = &sm.handler_type;
 
-        let sig_removes: Vec<_> = def
-            .signals
-            .iter()
-            .filter(|s| s.node == sm.name)
-            .map(|sig| {
-                let f = signal_field(sig);
-                quote! { self.#f.remove(&id); }
-            })
-            .collect();
-
-        let last_removes: Vec<_> = def
-            .inputs
-            .iter()
-            .filter(|inp| inp.node == sm.name)
-            .map(|inp| {
-                let f = last_field(inp);
-                quote! { self.#f.remove(&id); }
-            })
-            .collect();
+        let has_signal_state = nodes_with_signal_state(def).iter().any(|n| **n == sm.name);
+        let state_remove = if has_signal_state {
+            let state_field = signal_state_field(&sm.name);
+            quote! { self.#state_field.remove(&id); }
+        } else {
+            quote! {}
+        };
 
         let edge_clears: Vec<_> = def
             .edges
@@ -125,8 +111,7 @@ pub(super) fn gen_destroy_methods(def: &TopologyDef, methods: &mut Vec<TokenStre
         methods.push(quote! {
             fn #method(&mut self, id: #id_type) -> Option<#handler> {
                 let sm = self.instances.#instances.remove(&id);
-                #(#sig_removes)*
-                #(#last_removes)*
+                #state_remove
                 #(#edge_clears)*
                 sm
             }
@@ -141,15 +126,13 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
         let id_type = port_id_type(port);
         let node_str = port.name.to_string();
 
-        let sig_removes: Vec<_> = def
-            .signals
-            .iter()
-            .filter(|s| s.node == port.name)
-            .map(|sig| {
-                let f = signal_field(sig);
-                quote! { self.#f.remove(&id); }
-            })
-            .collect();
+        let has_signal_state = nodes_with_signal_state(def).iter().any(|n| **n == port.name);
+        let state_remove = if has_signal_state {
+            let state_field = signal_state_field(&port.name);
+            quote! { self.#state_field.remove(&id); }
+        } else {
+            quote! {}
+        };
 
         let edge_clears: Vec<_> = def
             .edges
@@ -183,16 +166,6 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
             })
             .collect();
 
-        let last_removes: Vec<_> = def
-            .inputs
-            .iter()
-            .filter(|inp| inp.node == port.name)
-            .map(|inp| {
-                let f = last_field(inp);
-                quote! { self.#f.remove(&id); }
-            })
-            .collect();
-
         let queue_retains: Vec<_> = if def.inputs.iter().any(|inp| inp.node == port.name) {
             let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
             vec![quote! { self.#pending_field.retain(|(pid, _)| *pid != id); }]
@@ -207,8 +180,7 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
                     id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
                 });
                 self.instances.#instances.remove(&id);
-                #(#sig_removes)*
-                #(#last_removes)*
+                #state_remove
                 #(#edge_clears)*
                 #(#incoming_edge_clears)*
                 #(#queue_retains)*
@@ -300,15 +272,13 @@ pub(super) fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<Token
             let node_str = sm.name.to_string();
             let initialize = format_ident!("initialize_{}_sm", snake);
 
-            let sig_inits: Vec<_> = def
-                .signals
-                .iter()
-                .filter(|s| s.node == sm.name)
-                .map(|sig| {
-                    let f = signal_field(sig);
-                    quote! { self.#f.entry(new_id).or_insert_with(Default::default); }
-                })
-                .collect();
+            let has_signal_state = nodes_with_signal_state(def).iter().any(|n| **n == sm.name);
+            let state_init = if has_signal_state {
+                let state_field = signal_state_field(&sm.name);
+                quote! { self.#state_field.entry(new_id).or_default(); }
+            } else {
+                quote! {}
+            };
 
             quote! {
                 PendingCreate::#variant(new_id, new_sm) => {
@@ -317,7 +287,7 @@ pub(super) fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<Token
                         id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
                     });
                     self.instances.#instances.insert(new_id, new_sm);
-                    #(#sig_inits)*
+                    #state_init
                     self.#initialize(new_id);
                 }
             }

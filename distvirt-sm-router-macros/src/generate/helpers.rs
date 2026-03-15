@@ -57,28 +57,45 @@ pub(super) fn is_sm_node(def: &TopologyDef, node: &Ident) -> bool {
     def.state_machines.iter().any(|s| s.name == *node)
 }
 
-pub(super) fn signal_field(sig: &SignalDef) -> Ident {
-    format_ident!(
-        "{}_{}",
-        to_snake_case(&sig.node.to_string()),
-        to_snake_case(&sig.signal.to_string())
-    )
-}
-
 pub(super) fn edge_snake(edge: &EdgeDef) -> String {
     to_snake_case(&edge.name.to_string())
 }
 
-pub(super) fn last_field(inp: &InputDef) -> Ident {
-    format_ident!(
-        "last_{}_{}",
-        to_snake_case(&inp.node.to_string()),
-        to_snake_case(&inp.input_name.to_string())
-    )
-}
-
 pub(super) fn dirty_variant(inp: &InputDef) -> Ident {
     format_ident!("{}{}", inp.node, inp.input_name)
+}
+
+pub(super) fn signal_state_struct_name(node: &Ident) -> Ident {
+    format_ident!("{}SignalState", node)
+}
+
+pub(super) fn signal_state_field(node: &Ident) -> Ident {
+    format_ident!("{}_signal_state", to_snake_case(&node.to_string()))
+}
+
+pub(super) fn out_field_name(signal: &Ident) -> Ident {
+    format_ident!("out_{}", to_snake_case(&signal.to_string()))
+}
+
+pub(super) fn in_field_name(input_name: &Ident) -> Ident {
+    format_ident!("in_{}", to_snake_case(&input_name.to_string()))
+}
+
+/// Returns unique node names that have at least one signal or input.
+pub(super) fn nodes_with_signal_state(def: &TopologyDef) -> Vec<&Ident> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for sig in &def.signals {
+        if seen.insert(&sig.node) {
+            names.push(&sig.node);
+        }
+    }
+    for inp in &def.inputs {
+        if seen.insert(&inp.node) {
+            names.push(&inp.node);
+        }
+    }
+    names
 }
 
 /// Returns the auto-ID index for a node, or None for manual-ID nodes.
