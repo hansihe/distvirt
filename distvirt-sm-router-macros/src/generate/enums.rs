@@ -289,7 +289,7 @@ pub(super) fn gen_pending_create_enum(def: &TopologyDef) -> TokenStream {
         return quote! {
             #clone_derive
             #[allow(dead_code)]
-            enum PendingCreate {}
+            pub enum PendingCreate {}
         };
     }
 
@@ -307,7 +307,7 @@ pub(super) fn gen_pending_create_enum(def: &TopologyDef) -> TokenStream {
     quote! {
         #clone_derive
         #[allow(dead_code)]
-        enum PendingCreate {
+        pub enum PendingCreate {
             #(#variants,)*
         }
     }
@@ -417,7 +417,7 @@ pub(super) fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
         return quote! {
             #[derive(Debug #clone_derive)]
             #[allow(dead_code)]
-            enum PendingEvent {}
+            pub enum PendingEvent {}
         };
     }
 
@@ -436,7 +436,7 @@ pub(super) fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
     quote! {
         #[derive(Debug #clone_derive)]
         #[allow(dead_code)]
-        enum PendingEvent {
+        pub enum PendingEvent {
             #(#variants,)*
         }
     }

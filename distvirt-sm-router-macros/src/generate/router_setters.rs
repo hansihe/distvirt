@@ -112,6 +112,33 @@ pub(super) fn gen_edge_setters(
         let body = quote! {
             fn #method(&mut self, source: #src_id, new_targets: impl IntoIterator<Item = #tgt_id>) {
                 let new_targets: Vec<#tgt_id> = new_targets.into_iter().collect();
+
+                // Fast path: clearing all edges — skip BTreeSet diff
+                if new_targets.is_empty() {
+                    if let Some(old_targets) = self.#fwd.remove(&source) {
+                        if old_targets.is_empty() {
+                            return;
+                        }
+                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
+                            edge: #edge_str,
+                            source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &dyn std::fmt::Debug),
+                            added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&Vec::<#tgt_id>::new() as &dyn std::fmt::Debug),
+                            removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&old_targets as &dyn std::fmt::Debug),
+                        });
+                        for tgt in &old_targets {
+                            if let Some(sources) = self.#rev.get_mut(tgt) {
+                                sources.remove(&source);
+                                if sources.is_empty() {
+                                    self.#rev.remove(tgt);
+                                }
+                            }
+                            #(#dirty_enqueues)*
+                        }
+                        return;
+                    }
+                    return;
+                }
+
                 let old_set: std::collections::BTreeSet<#tgt_id> = self.#fwd
                     .get(&source)
                     .map(|v| v.iter().copied().collect())
@@ -132,11 +159,7 @@ pub(super) fn gen_edge_setters(
                     removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&removed as &dyn std::fmt::Debug),
                 });
 
-                if new_targets.is_empty() {
-                    self.#fwd.remove(&source);
-                } else {
-                    self.#fwd.insert(source, new_targets);
-                }
+                self.#fwd.insert(source, new_targets);
 
                 for &tgt in &removed {
                     if let Some(sources) = self.#rev.get_mut(&tgt) {

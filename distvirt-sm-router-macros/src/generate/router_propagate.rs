@@ -16,13 +16,12 @@ pub(super) fn gen_connectivity_check(def: &TopologyDef, ev: &EventDef) -> TokenS
                 || (e.source == ev.receiver && e.target == ev.sender)
         })
         .map(|e| {
-            let fwd = format_ident!("{}_fwd", edge_snake(e));
             let rev = format_ident!("{}_rev", edge_snake(e));
             if e.source == ev.sender && e.target == ev.receiver {
-                // sender is source: check fwd map
+                // sender is source: check rev map (O(log n) BTreeSet lookup)
                 quote! {
-                    if let Some(targets) = self.#fwd.get(&sender_id) {
-                        if targets.contains(&receiver_id) { return true; }
+                    if let Some(sources) = self.#rev.get(&receiver_id) {
+                        if sources.contains(&sender_id) { return true; }
                     }
                 }
             } else {
@@ -428,14 +427,16 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
         }
     });
 
-    // Drain dirty queue, deduplicate, return the unique entries
+    // Drain dirty queue, deduplicate into reusable dedup_wave buffer
     internal_methods.push(quote! {
-        fn drain_and_dedup_dirty(&mut self) -> Vec<DirtyInput> {
-            let wave: Vec<DirtyInput> = self.dirty.drain(..).collect();
-            let mut seen = std::collections::BTreeSet::new();
-            wave.into_iter()
-                .filter(|e| seen.insert(e.clone()))
-                .collect()
+        fn drain_and_dedup_dirty(&mut self) {
+            self.dedup_seen.clear();
+            self.dedup_wave.clear();
+            for entry in self.dirty.drain(..) {
+                if self.dedup_seen.insert(entry.clone()) {
+                    self.dedup_wave.push(entry);
+                }
+            }
         }
     });
 
@@ -478,17 +479,21 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                 // Start-of-round: materialize pending creates
                 self.materialize_pending_creates();
 
-                // Process dirty signal queue
-                let wave = self.drain_and_dedup_dirty();
-                for entry in wave {
+                // Process dirty signal queue (reuse scratch buffers)
+                self.drain_and_dedup_dirty();
+                let mut wave = std::mem::take(&mut self.dedup_wave);
+                for entry in wave.drain(..) {
                     self.process_dirty_input(entry);
                 }
+                self.dedup_wave = wave;
 
-                // Process pending events
-                let events: Vec<PendingEvent> = self.pending_events.drain(..).collect();
-                for event in events {
+                // Process pending events (reuse scratch buffer)
+                let mut events = std::mem::take(&mut self.event_wave);
+                events.extend(self.pending_events.drain(..));
+                for event in events.drain(..) {
                     self.process_event(event);
                 }
+                self.event_wave = events;
 
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::RoundEnd { depth });
             }
@@ -506,9 +511,8 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                 ::distvirt_sm_router::ManualPhase::Idle | ::distvirt_sm_router::ManualPhase::Events(0) => {
                     // Start new round: materialize creates, drain dirty inputs
                     self.materialize_pending_creates();
-                    let wave = self.drain_and_dedup_dirty();
-                    let deliveries: Vec<PendingDelivery> = wave
-                        .into_iter()
+                    self.drain_and_dedup_dirty();
+                    let deliveries: Vec<PendingDelivery> = self.dedup_wave.drain(..)
                         .map(PendingDelivery::DirtyInput)
                         .collect();
                     self.manual_phase = ::distvirt_sm_router::ManualPhase::Inputs(deliveries.len());
@@ -516,9 +520,9 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                 }
                 ::distvirt_sm_router::ManualPhase::Inputs(0) => {
                     // Inputs sub-round done, drain pending events
-                    let events: Vec<PendingEvent> = self.pending_events.drain(..).collect();
-                    let deliveries: Vec<PendingDelivery> = events
-                        .into_iter()
+                    self.event_wave.clear();
+                    self.event_wave.extend(self.pending_events.drain(..));
+                    let deliveries: Vec<PendingDelivery> = self.event_wave.drain(..)
                         .map(PendingDelivery::Event)
                         .collect();
                     self.manual_phase = ::distvirt_sm_router::ManualPhase::Events(deliveries.len());

@@ -107,6 +107,10 @@ fn gen_clone_impls(
     router_clone_fields.push(quote! { depth_limit: self.depth_limit });
     router_clone_fields.push(quote! { manual_phase: self.manual_phase.clone() });
     router_clone_fields.push(quote! { tracer: self.tracer.clone() });
+    // Scratch buffers — NOT cloned, initialized empty
+    router_clone_fields.push(quote! { dedup_wave: Vec::new() });
+    router_clone_fields.push(quote! { dedup_seen: std::collections::BTreeSet::new() });
+    router_clone_fields.push(quote! { event_wave: Vec::new() });
 
     let router_clone = quote! {
         impl<__Tracer: ::distvirt_sm_router::trace::Tracer + Clone, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind> + Clone>
@@ -194,7 +198,6 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     inits.push(quote! { pending_creates: Vec::new() });
 
     // ID allocator
-    let auto_count = auto_id_count(def);
     fields.push(quote! { id_alloc: __IdAlloc });
     // id_alloc init is handled separately for each constructor (like tracer)
 
@@ -217,10 +220,17 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     fields.push(quote! { depth_limit: usize });
     fields.push(quote! { manual_phase: ::distvirt_sm_router::ManualPhase });
     fields.push(quote! { tracer: __Tracer });
+    // Reusable scratch buffers for propagation (transient, not cloned/snapshotted)
+    fields.push(quote! { dedup_wave: Vec<DirtyInput> });
+    fields.push(quote! { dedup_seen: std::collections::BTreeSet<DirtyInput> });
+    fields.push(quote! { event_wave: Vec<PendingEvent> });
     inits.push(quote! { dirty: std::collections::VecDeque::new() });
     inits.push(quote! { pending_events: std::collections::VecDeque::new() });
     inits.push(quote! { depth_limit });
     inits.push(quote! { manual_phase: ::distvirt_sm_router::ManualPhase::Idle });
+    inits.push(quote! { dedup_wave: Vec::new() });
+    inits.push(quote! { dedup_seen: std::collections::BTreeSet::new() });
+    inits.push(quote! { event_wave: Vec::new() });
     // tracer init is handled separately for each constructor
 
     // Collect methods by visibility category
@@ -332,14 +342,14 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
 
             pub struct Router<
                 __Tracer: ::distvirt_sm_router::trace::Tracer = ::distvirt_sm_router::trace::NoopTracer,
-                __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind> = ::distvirt_sm_router::SequentialIds,
+                __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind> = ::distvirt_sm_router::SequentialIds<NodeKind>,
             > {
                 #instances_vis instances: RouterInstances,
                 #(#fields,)*
             }
 
             #[allow(dead_code)]
-            impl Router<::distvirt_sm_router::trace::NoopTracer, ::distvirt_sm_router::SequentialIds> {
+            impl Router<::distvirt_sm_router::trace::NoopTracer, ::distvirt_sm_router::SequentialIds<NodeKind>> {
                 pub fn new(depth_limit: usize) -> Self {
                     Router {
                         instances: RouterInstances {
@@ -347,13 +357,13 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
                         },
                         #(#inits,)*
                         tracer: ::distvirt_sm_router::trace::NoopTracer,
-                        id_alloc: ::distvirt_sm_router::SequentialIds::new(#auto_count),
+                        id_alloc: <::distvirt_sm_router::SequentialIds<NodeKind>>::new(),
                     }
                 }
             }
 
             #[allow(dead_code)]
-            impl<__Tracer: ::distvirt_sm_router::trace::Tracer> Router<__Tracer, ::distvirt_sm_router::SequentialIds> {
+            impl<__Tracer: ::distvirt_sm_router::trace::Tracer> Router<__Tracer, ::distvirt_sm_router::SequentialIds<NodeKind>> {
                 pub fn new_traced(depth_limit: usize, tracer: __Tracer) -> Self {
                     Router {
                         instances: RouterInstances {
@@ -361,7 +371,7 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
                         },
                         #(#inits,)*
                         tracer,
-                        id_alloc: ::distvirt_sm_router::SequentialIds::new(#auto_count),
+                        id_alloc: <::distvirt_sm_router::SequentialIds<NodeKind>>::new(),
                     }
                 }
             }

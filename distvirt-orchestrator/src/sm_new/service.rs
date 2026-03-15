@@ -3,7 +3,7 @@ use super::*;
 
 // ---- Service SM ----
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ServiceState {
     /// Has activation, currently idle (no demand signal).
     Idle,
@@ -13,7 +13,7 @@ pub(crate) enum ServiceState {
     Active { ready: ReadyInfo },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ServiceSm {
     pub(crate) state: ServiceState,
     pub(crate) has_activation: bool,
@@ -97,6 +97,12 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                         if matches!(self.state, ServiceState::Idle) {
                             self.state = ServiceState::NeedBackend;
                         }
+                    }
+                    // The idle timer is only meaningful with has_activation.
+                    // Clear it to avoid stale timer state after a spec change.
+                    if self.idle_timer_active && !self.has_activation {
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
                     }
                     ctx.set_service_to_workload_edges(vec![spec.workload]);
                 } else {

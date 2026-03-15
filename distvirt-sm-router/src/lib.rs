@@ -235,25 +235,48 @@ pub trait Aggregator {
 
 /// Handler trait for state machines. Each SM type implements this on its struct.
 ///
-/// The associated types are generated per-SM-type by the [`router!`] macro:
+/// ## Generated types per SM
 ///
-/// - **`Input`**: An enum with one variant per aggregated input declared for this SM,
-///   plus one variant per event channel where this SM is the receiver. This gives
-///   exhaustive match coverage — adding a new input or event is a compile error until
-///   handled.
+/// The [`router!`] macro generates several types for each declared SM (e.g. `Workload`):
 ///
-/// - **`Ctx`**: A context trait scoped to this SM type. It exposes methods to:
+/// - **`{Sm}Input`** (enum): One variant per aggregated input plus one per event
+///   channel where this SM is the receiver. Exhaustive matching ensures all inputs
+///   are handled.
+///
+/// - **`{Sm}Ctx`** (trait): The context interface that handlers program against.
+///   Methods:
 ///   - `ctx.id()` — get this instance's ID
-///   - `ctx.set_{signal_name}(value)` — update an output signal
-///   - `ctx.set_{edge_name}_edges(targets)` — update outgoing edges
-///   - `ctx.send_{event_name}(target, payload)` — send a discrete event
-///   - `ctx.create_{sm_name}(sm)` — create a new SM instance (returns ID for auto-ID types)
-///   - `ctx.destroy_{sm_name}(id)` — destroy an SM instance
+///   - `ctx.set_{signal}(value)` — update an output signal
+///   - `ctx.set_{edge}_edges(targets)` — update outgoing edges
+///   - `ctx.send_{event}(target, payload)` — send a discrete event
+///   - `ctx.create_{sm}(sm)` — create a new SM (returns ID for auto-ID types)
+///   - `ctx.self_destruct()` — destroy this instance after effects are applied
 ///
-/// All changes are queued and applied after the handler returns. Creates are
-/// applied first (so edges can reference new SMs), then signals, edges, events,
-/// and finally destroys. The router then cascades any resulting changes within
-/// the same round.
+/// - **`{Sm}CtxConcrete`** (struct): The concrete [`Ctx`] implementation, generic
+///   over an [`IdAllocator`]. Construct with `::new(id, &mut allocator)`, pass to
+///   a handler, then call `.into_effects()` to extract the buffered effects. This
+///   is useful for testing SM handlers in isolation or for model checking — you
+///   supply your own allocator and inspect the resulting effects without a router.
+///
+/// - **`{Sm}Effects`** (struct): Owned record of all effects a handler produced.
+///   Public fields for each signal (`Option<T>`), each outgoing edge
+///   (`Option<Vec<TargetId>>`), plus `pending_events`, `pending_creates`, and
+///   `pending_self_destruct`. The router applies these via internal
+///   `apply_{sm}_effects`, but they can also be inspected directly for testing
+///   or model checking.
+///
+/// - **`PendingEvent`** (enum): One variant per declared event channel. Each
+///   variant holds `(SenderId, ReceiverId, Payload)`.
+///
+/// - **`PendingCreate`** (enum): One variant per declared SM type. Each variant
+///   holds `(Id, HandlerStruct)`.
+///
+/// ## Effect buffering
+///
+/// All changes made through the context are queued and applied after the handler
+/// returns. Creates are applied first (so edges can reference new SMs), then
+/// signals, edges, events, and finally self-destruct. The router then cascades
+/// any resulting changes within the same round.
 ///
 /// ## Lifecycle
 ///
@@ -367,18 +390,44 @@ impl<D: Delivery> ManualPropagate<D> {
     }
 }
 
-/// Trait implemented by generated `NodeKind` enums.
+/// Trait implemented by the generated `NodeKind` enum.
+///
+/// `NodeKind` has one variant per declared SM and port type. Auto-ID variants
+/// come first (in declaration order), followed by manual-ID variants. The
+/// `index()` method returns the discriminant, which is used by [`IdAllocator`]
+/// to maintain per-kind counters.
 pub trait IdKind: Copy + Clone + 'static {
+    /// Number of node kinds that use auto-generated IDs.
     const AUTO_COUNT: usize;
+    /// Total number of node kinds (auto + manual).
     const COUNT: usize;
+    /// Discriminant index for this kind.
     fn index(self) -> usize;
+    /// Human-readable name (e.g. `"Workload"`).
     fn name(self) -> &'static str;
+    /// Whether this kind uses auto-generated IDs.
     fn is_auto(self) -> bool {
         self.index() < Self::AUTO_COUNT
     }
 }
 
-/// Swappable ID allocation strategy.
+/// Swappable ID allocation strategy for auto-ID node types.
+///
+/// The router and [`CtxConcrete`] are generic over this trait. The default
+/// implementation is [`SequentialIds`]. Custom allocators can be used for
+/// model checking (e.g. per-creator-instance counters to avoid false state
+/// divergence from ID ordering).
+///
+/// To use `CtxConcrete` outside the router (for isolated SM testing or model
+/// checking), supply any `IdAllocator` implementation:
+///
+/// ```rust,ignore
+/// let mut alloc = SequentialIds::<NodeKind>::new();
+/// let mut ctx = WorkloadCtxConcrete::new(workload_id, &mut alloc);
+/// sm.handle(input, &mut ctx);
+/// let effects = ctx.into_effects();
+/// // inspect effects...
+/// ```
 pub trait IdAllocator<K: IdKind>: Clone {
     /// Snapshot representation for serialization.
     type Snapshot: Clone;
@@ -391,21 +440,29 @@ pub trait IdAllocator<K: IdKind>: Clone {
     fn from_snapshot(snapshot: &Self::Snapshot) -> Self;
 }
 
-/// Default allocator: simple sequential counters (replicates current behavior).
+/// Default allocator: simple sequential counters per auto-ID node kind.
 #[derive(Clone, Debug)]
-pub struct SequentialIds {
+pub struct SequentialIds<K: IdKind> {
     counters: Vec<u64>,
+    _kind: std::marker::PhantomData<K>,
 }
 
-impl SequentialIds {
-    pub fn new(auto_count: usize) -> Self {
+impl<K: IdKind> SequentialIds<K> {
+    pub fn new() -> Self {
         Self {
-            counters: vec![0; auto_count],
+            counters: vec![0; K::AUTO_COUNT],
+            _kind: std::marker::PhantomData,
         }
     }
 }
 
-impl<K: IdKind> IdAllocator<K> for SequentialIds {
+impl<K: IdKind> Default for SequentialIds<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: IdKind> IdAllocator<K> for SequentialIds<K> {
     type Snapshot = Vec<u64>;
     fn alloc(&mut self, kind: K, _creator: Option<(K, u64)>) -> u64 {
         let idx = kind.index();
@@ -417,7 +474,10 @@ impl<K: IdKind> IdAllocator<K> for SequentialIds {
         self.counters.clone()
     }
     fn from_snapshot(snapshot: &Vec<u64>) -> Self {
-        Self { counters: snapshot.clone() }
+        Self {
+            counters: snapshot.clone(),
+            _kind: std::marker::PhantomData,
+        }
     }
 }
 

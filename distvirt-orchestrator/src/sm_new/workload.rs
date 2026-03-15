@@ -5,7 +5,7 @@ use super::*;
 
 pub(crate) const MAX_RETRIES: u32 = 5;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct WorkloadSm {
     pub(crate) has_spec: bool,
     pub(crate) has_demand: bool,

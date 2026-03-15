@@ -7,6 +7,9 @@ mod suspend;
 mod service_idle;
 mod misc;
 mod multi;
+mod stateright_workload;
+mod stateright_service;
+mod stateright_pod;
 
 const S1: ServiceId = ServiceId(1);
 const S2: ServiceId = ServiceId(2);

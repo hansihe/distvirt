@@ -143,7 +143,7 @@ fn gen_snapshot_struct(def: &TopologyDef) -> TokenStream {
     quote! {
         #[allow(dead_code)]
         pub struct RouterSnapshot<
-            __AllocSnapshot = <::distvirt_sm_router::SequentialIds as ::distvirt_sm_router::IdAllocator<NodeKind>>::Snapshot,
+            __AllocSnapshot = <::distvirt_sm_router::SequentialIds<NodeKind> as ::distvirt_sm_router::IdAllocator<NodeKind>>::Snapshot,
         > {
             #(#fields,)*
         }
@@ -212,6 +212,10 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
     transient_inits.push(quote! { dirty: std::collections::VecDeque::new() });
     transient_inits.push(quote! { pending_events: std::collections::VecDeque::new() });
     transient_inits.push(quote! { manual_phase: ::distvirt_sm_router::ManualPhase::Idle });
+    // Scratch buffers (transient, not snapshotted)
+    transient_inits.push(quote! { dedup_wave: Vec::new() });
+    transient_inits.push(quote! { dedup_seen: std::collections::BTreeSet::new() });
+    transient_inits.push(quote! { event_wave: Vec::new() });
 
     // Port pending input queues
     for port in &def.ports {

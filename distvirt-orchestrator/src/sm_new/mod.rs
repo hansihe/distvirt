@@ -15,14 +15,14 @@ pub(crate) struct ServiceId(u64);
 pub(crate) struct WorkloadId(u64);
 
 /// Readiness info broadcast from workload to services.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ReadyInfo {
     pub(crate) pod_id: PodId,
     pub(crate) worker_id: WorkerId,
 }
 
 /// Pod status reported from pod SM back to workload.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum PodStatus {
     #[default]
     Pending,
@@ -43,10 +43,11 @@ impl PodStatus {
             PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished
         )
     }
+
 }
 
 /// Intent signal from workload to pod via ownership edge.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum PodIntent {
     #[default]
     None,
@@ -61,7 +62,7 @@ pub(crate) enum PodIntent {
 pub(crate) struct ArtifactId(u64);
 
 /// Workload spec delivered by management port.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) struct WorkloadSpec {
     pub(crate) image: String,
 }
@@ -93,7 +94,7 @@ pub(crate) enum AdminCmd {
 }
 
 /// Observable workload lifecycle status.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum WlStatus {
     /// No demand, no pod, no spec — nothing happening.
     #[default]
@@ -127,7 +128,7 @@ pub(crate) enum SvcStatus {
 }
 
 /// Timer key enum for workload-specific timers.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum WorkloadTimerKey {
     #[default]
     RetryBackoff,
@@ -135,7 +136,7 @@ pub(crate) enum WorkloadTimerKey {
 
 /// Backend need level reported by workers to services.
 /// Priority: Active > Traffic > None.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum BackendNeed {
     #[default]
     None,
@@ -158,7 +159,7 @@ pub(crate) struct ServiceTimerRequest {
 }
 
 /// Timer key enum for pod-specific timers.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) enum PodTimerKey {
     #[default]
     LaunchTimeout,
@@ -177,7 +178,7 @@ pub(crate) struct PodTimerRequest {
 // ============================================================================
 
 /// Timer request: workload declares which timers it wants active.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) struct TimerRequest {
     pub(crate) key: WorkloadTimerKey,
     pub(crate) generation: u64,

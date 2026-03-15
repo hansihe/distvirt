@@ -283,17 +283,17 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
 
                 // Effects struct — owned buffered effects extracted from Ctx
                 #[allow(dead_code)]
-                struct #effects_name {
-                    #(#effects_signal_fields,)*
-                    #(#effects_edge_fields,)*
-                    pending_events: Vec<PendingEvent>,
-                    pending_creates: Vec<PendingCreate>,
-                    pending_self_destruct: bool,
+                pub struct #effects_name {
+                    #(pub #effects_signal_fields,)*
+                    #(pub #effects_edge_fields,)*
+                    pub pending_events: Vec<PendingEvent>,
+                    pub pending_creates: Vec<PendingCreate>,
+                    pub pending_self_destruct: bool,
                 }
 
-                // Concrete struct — used internally by the router, borrows allocator
+                // Concrete struct — implements the Ctx trait, borrows allocator
                 #[allow(dead_code)]
-                struct #ctx_concrete_name<'a, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> {
+                pub struct #ctx_concrete_name<'a, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> {
                     #[allow(dead_code)]
                     id: #id_type,
                     #(#signal_fields,)*
@@ -306,7 +306,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
 
                 #[allow(dead_code)]
                 impl<'a, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_concrete_name<'a, __IdAlloc> {
-                    fn new(id: #id_type, id_alloc: &'a mut __IdAlloc) -> Self {
+                    pub fn new(id: #id_type, id_alloc: &'a mut __IdAlloc) -> Self {
                         #ctx_concrete_name {
                             id,
                             #(#signal_inits,)*
@@ -318,7 +318,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                         }
                     }
 
-                    fn into_effects(self) -> #effects_name {
+                    pub fn into_effects(self) -> #effects_name {
                         #effects_name {
                             #(#effects_signal_transfers,)*
                             #(#effects_edge_transfers,)*

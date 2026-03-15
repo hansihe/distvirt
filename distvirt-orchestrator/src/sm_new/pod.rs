@@ -20,7 +20,7 @@ use super::*;
 //   Abandon:  workload removes edge → pod drives itself to terminal
 //             (owner loss while live = failure) → pod self-destructs.
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PodSm {
     pub(crate) status: PodStatus,
     pub(crate) workload_id: Option<WorkloadId>,
@@ -150,7 +150,22 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                 self.maybe_reap(ctx);
             }
             PodInput::NotifyPodStatus(new_status) => {
-                if !self.status.is_terminal() {
+                // Only accept valid worker-reported status transitions.
+                // Pending and Suspending are SM-internal states (managed by
+                // initialization and OwnerInput respectively), so they are
+                // rejected here. This prevents inconsistent state from
+                // out-of-order or stale worker notifications.
+                let accept = !self.status.is_terminal() && match &new_status {
+                    // Worker reports pod is running. Only valid from Pending.
+                    PodStatus::Running => matches!(self.status, PodStatus::Pending),
+                    // Worker reports failure or graceful exit. Valid from any
+                    // non-terminal state.
+                    PodStatus::Failed | PodStatus::Finished => true,
+                    // All other statuses are SM-internal or use dedicated
+                    // inputs (NotifyPodSuspended).
+                    _ => false,
+                };
+                if accept {
                     self.status = new_status.clone();
                     ctx.set_status(new_status);
                     self.update_timer_signal(ctx);
