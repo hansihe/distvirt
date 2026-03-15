@@ -11,7 +11,7 @@ use super::helpers::*;
 /// - Port instance sets
 /// - Signal values
 /// - Edge sets (forward only — reverse is derived)
-/// - Auto-ID counters
+/// - Allocator snapshot (via associated `Snapshot` type)
 /// - Last delivered values
 ///
 /// Excluded (transient processing state):
@@ -81,12 +81,14 @@ fn gen_snapshot_struct(def: &TopologyDef) -> TokenStream {
         );
     }
 
-    // ID allocator counter snapshot
-    fields.push(quote! { pub id_alloc_counters: Vec<u64> });
+    // ID allocator snapshot — generic with default matching SequentialIds
+    fields.push(quote! { pub id_alloc_snapshot: __AllocSnapshot });
 
     quote! {
         #[allow(dead_code)]
-        pub struct RouterSnapshot {
+        pub struct RouterSnapshot<
+            __AllocSnapshot = <::distvirt_sm_router::SequentialIds as ::distvirt_sm_router::IdAllocator<NodeKind>>::Snapshot,
+        > {
             #(#fields,)*
         }
     }
@@ -95,19 +97,20 @@ fn gen_snapshot_struct(def: &TopologyDef) -> TokenStream {
 fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
     let mut snapshot_fields = Vec::new();
     let mut from_snapshot_fields = Vec::new();
+    let mut from_snapshot_instance_fields = Vec::new();
 
     // SM instances
     for sm in &def.state_machines {
         let f = format_ident!("{}_instances", snake_ident(&sm.name.to_string()));
-        snapshot_fields.push(quote! { #f: self.#f.clone() });
-        from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
+        snapshot_fields.push(quote! { #f: self.instances.#f.clone() });
+        from_snapshot_instance_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
     // Port instances
     for port in &def.ports {
         let f = format_ident!("{}_instances", snake_ident(&port.name.to_string()));
-        snapshot_fields.push(quote! { #f: self.#f.clone() });
-        from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
+        snapshot_fields.push(quote! { #f: self.instances.#f.clone() });
+        from_snapshot_instance_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
     // Signals
@@ -150,15 +153,16 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
         from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
-    // ID allocator counters
-    snapshot_fields.push(quote! { id_alloc_counters: ::distvirt_sm_router::IdAllocator::<NodeKind>::counter_snapshot(&self.id_alloc) });
-    from_snapshot_fields.push(quote! { id_alloc: <__IdAlloc as ::distvirt_sm_router::IdAllocator<NodeKind>>::from_counter_snapshot(snapshot.id_alloc_counters.clone()) });
+    // ID allocator snapshot
+    snapshot_fields.push(quote! { id_alloc_snapshot: ::distvirt_sm_router::IdAllocator::<NodeKind>::snapshot(&self.id_alloc) });
+    from_snapshot_fields.push(quote! { id_alloc: <__IdAlloc as ::distvirt_sm_router::IdAllocator<NodeKind>>::from_snapshot(&snapshot.id_alloc_snapshot) });
 
     // Transient fields initialized to empty in from_snapshot
     let mut transient_inits = Vec::new();
     transient_inits.push(quote! { pending_creates: Vec::new() });
     transient_inits.push(quote! { dirty: std::collections::VecDeque::new() });
     transient_inits.push(quote! { pending_events: std::collections::VecDeque::new() });
+    transient_inits.push(quote! { manual_phase: ::distvirt_sm_router::ManualPhase::Idle });
 
     // Port pending input queues
     for port in &def.ports {
@@ -172,14 +176,21 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
     quote! {
         #[allow(dead_code)]
         impl<__Tracer: ::distvirt_sm_router::trace::Tracer, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> Router<__Tracer, __IdAlloc> {
-            pub fn snapshot(&self) -> RouterSnapshot {
+            pub fn snapshot(&self) -> RouterSnapshot<<__IdAlloc as ::distvirt_sm_router::IdAllocator<NodeKind>>::Snapshot> {
                 RouterSnapshot {
                     #(#snapshot_fields,)*
                 }
             }
 
-            pub fn from_snapshot_traced(snapshot: &RouterSnapshot, depth_limit: usize, tracer: __Tracer) -> Self {
+            pub fn from_snapshot_traced(
+                snapshot: &RouterSnapshot<<__IdAlloc as ::distvirt_sm_router::IdAllocator<NodeKind>>::Snapshot>,
+                depth_limit: usize,
+                tracer: __Tracer,
+            ) -> Self {
                 Router {
+                    instances: RouterInstances {
+                        #(#from_snapshot_instance_fields,)*
+                    },
                     #(#from_snapshot_fields,)*
                     #(#transient_inits,)*
                     depth_limit,

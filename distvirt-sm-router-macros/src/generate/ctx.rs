@@ -11,6 +11,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
         .map(|sm| {
             let ctx_trait_name = format_ident!("{}Ctx", sm.name);
             let ctx_concrete_name = format_ident!("{}CtxConcrete", sm.name);
+            let effects_name = format_ident!("{}Effects", sm.name);
             let id_type = sm_id_type(sm);
 
             // Signals this SM produces
@@ -32,7 +33,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 .collect();
 
             // ================================================================
-            // Trait definition
+            // Trait definition (unchanged — no lifetime, no allocator generic)
             // ================================================================
 
             let trait_signal_setters: Vec<_> = signals
@@ -98,7 +99,29 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
             ];
 
             // ================================================================
-            // Concrete struct fields
+            // Effects struct — owned buffered effects, no lifetime
+            // ================================================================
+
+            let effects_signal_fields: Vec<_> = signals
+                .iter()
+                .map(|sig| {
+                    let f = format_ident!("{}", to_snake_case(&sig.signal.to_string()));
+                    let vt = &sig.value_type;
+                    quote! { #f: Option<#vt> }
+                })
+                .collect();
+
+            let effects_edge_fields: Vec<_> = out_edges
+                .iter()
+                .map(|edge| {
+                    let f = format_ident!("{}", edge_snake(edge));
+                    let tgt_id = node_id_type(def, &edge.target);
+                    quote! { #f: Option<Vec<#tgt_id>> }
+                })
+                .collect();
+
+            // ================================================================
+            // Concrete struct fields — borrows allocator
             // ================================================================
 
             let signal_fields: Vec<_> = signals
@@ -119,22 +142,6 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
-            let event_fields: Vec<_> = vec![
-                quote! { pending_events: Vec<PendingEvent> },
-            ];
-
-            let create_fields: Vec<_> = vec![
-                quote! { pending_creates: Vec<PendingCreate> },
-            ];
-
-            let destroy_fields: Vec<TokenStream> = vec![
-                quote! { pending_self_destruct: bool },
-            ];
-
-            let counter_fields: Vec<_> = vec![
-                quote! { id_alloc: __IdAlloc },
-            ];
-
             // ================================================================
             // Constructor
             // ================================================================
@@ -147,10 +154,6 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
-            let event_inits: Vec<_> = vec![
-                quote! { pending_events: Vec::new() },
-            ];
-
             let edge_inits: Vec<_> = out_edges
                 .iter()
                 .map(|edge| {
@@ -159,21 +162,25 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
-            let create_inits: Vec<_> = vec![
-                quote! { pending_creates: Vec::new() },
-            ];
+            // ================================================================
+            // into_effects() field transfers
+            // ================================================================
 
-            let destroy_inits: Vec<TokenStream> = vec![
-                quote! { pending_self_destruct: false },
-            ];
+            let effects_signal_transfers: Vec<_> = signals
+                .iter()
+                .map(|sig| {
+                    let f = format_ident!("{}", to_snake_case(&sig.signal.to_string()));
+                    quote! { #f: self.#f }
+                })
+                .collect();
 
-            let counter_params: Vec<_> = vec![
-                quote! { id_alloc: __IdAlloc },
-            ];
-
-            let counter_inits: Vec<_> = vec![
-                quote! { id_alloc },
-            ];
+            let effects_edge_transfers: Vec<_> = out_edges
+                .iter()
+                .map(|edge| {
+                    let f = format_ident!("{}", edge_snake(edge));
+                    quote! { #f: self.#f }
+                })
+                .collect();
 
             // ================================================================
             // Trait impl for concrete struct
@@ -224,6 +231,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                 })
                 .collect();
 
+            let sm_variant = &sm.name;
             let impl_create_methods: Vec<_> = def
                 .state_machines
                 .iter()
@@ -238,7 +246,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                         let id_name = format_ident!("{}Id", target_sm.name);
                         quote! {
                             fn #method(&mut self, sm: #handler) -> #tid {
-                                let id = #id_name(self.id_alloc.alloc(NodeKind::#variant, None));
+                                let id = #id_name(self.id_alloc.alloc(NodeKind::#variant, Some((NodeKind::#sm_variant, self.id.0))));
                                 self.pending_creates.push(PendingCreate::#variant(id, sm));
                                 id
                             }
@@ -262,7 +270,7 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
             ];
 
             quote! {
-                // Trait — public API for SM handlers
+                // Trait — public API for SM handlers (no lifetime, no allocator generic)
                 #[allow(dead_code)]
                 pub trait #ctx_trait_name {
                     fn id(&self) -> #id_type;
@@ -273,37 +281,57 @@ pub(super) fn gen_ctx_structs(def: &TopologyDef) -> TokenStream {
                     #(#trait_destroy_methods)*
                 }
 
-                // Concrete struct — used internally by the router
+                // Effects struct — owned buffered effects extracted from Ctx
                 #[allow(dead_code)]
-                struct #ctx_concrete_name<__IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> {
+                struct #effects_name {
+                    #(#effects_signal_fields,)*
+                    #(#effects_edge_fields,)*
+                    pending_events: Vec<PendingEvent>,
+                    pending_creates: Vec<PendingCreate>,
+                    pending_self_destruct: bool,
+                }
+
+                // Concrete struct — used internally by the router, borrows allocator
+                #[allow(dead_code)]
+                struct #ctx_concrete_name<'a, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> {
                     #[allow(dead_code)]
                     id: #id_type,
                     #(#signal_fields,)*
                     #(#edge_fields,)*
-                    #(#event_fields,)*
-                    #(#create_fields,)*
-                    #(#destroy_fields,)*
-                    #(#counter_fields,)*
+                    pending_events: Vec<PendingEvent>,
+                    pending_creates: Vec<PendingCreate>,
+                    pending_self_destruct: bool,
+                    id_alloc: &'a mut __IdAlloc,
                 }
 
                 #[allow(dead_code)]
-                impl<__IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_concrete_name<__IdAlloc> {
-                    fn new(id: #id_type #(, #counter_params)*) -> Self {
+                impl<'a, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_concrete_name<'a, __IdAlloc> {
+                    fn new(id: #id_type, id_alloc: &'a mut __IdAlloc) -> Self {
                         #ctx_concrete_name {
                             id,
                             #(#signal_inits,)*
                             #(#edge_inits,)*
-                            #(#event_inits,)*
-                            #(#create_inits,)*
-                            #(#destroy_inits,)*
-                            #(#counter_inits,)*
+                            pending_events: Vec::new(),
+                            pending_creates: Vec::new(),
+                            pending_self_destruct: false,
+                            id_alloc,
+                        }
+                    }
+
+                    fn into_effects(self) -> #effects_name {
+                        #effects_name {
+                            #(#effects_signal_transfers,)*
+                            #(#effects_edge_transfers,)*
+                            pending_events: self.pending_events,
+                            pending_creates: self.pending_creates,
+                            pending_self_destruct: self.pending_self_destruct,
                         }
                     }
                 }
 
                 // Trait impl for concrete struct
                 #[allow(dead_code)]
-                impl<__IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_trait_name for #ctx_concrete_name<__IdAlloc> {
+                impl<'a, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind>> #ctx_trait_name for #ctx_concrete_name<'a, __IdAlloc> {
                     fn id(&self) -> #id_type {
                         self.id
                     }

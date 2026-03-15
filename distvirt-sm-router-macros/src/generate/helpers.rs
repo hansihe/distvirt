@@ -104,6 +104,22 @@ pub(super) fn auto_id_index(def: &TopologyDef, node_name: &Ident) -> Option<usiz
     None
 }
 
+/// Returns a unique group index for a node (SM or port) for delivery grouping.
+/// SMs are indexed first (in declaration order), then ports.
+pub(super) fn node_group_index(def: &TopologyDef, node_name: &Ident) -> usize {
+    for (i, sm) in def.state_machines.iter().enumerate() {
+        if sm.name == *node_name {
+            return i;
+        }
+    }
+    for (i, port) in def.ports.iter().enumerate() {
+        if port.name == *node_name {
+            return def.state_machines.len() + i;
+        }
+    }
+    panic!("unknown node for group_index: {}", node_name)
+}
+
 /// Total count of auto-ID nodes (SMs + ports).
 pub(super) fn auto_id_count(def: &TopologyDef) -> usize {
     let sm_count = def

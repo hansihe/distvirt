@@ -305,6 +305,93 @@ pub(super) fn gen_pending_create_enum(def: &TopologyDef) -> TokenStream {
     }
 }
 
+pub(super) fn gen_pending_delivery_enum(def: &TopologyDef) -> TokenStream {
+    // Build group_key match arms for DirtyInput
+    let dirty_group_arms: Vec<_> = def
+        .inputs
+        .iter()
+        .map(|inp| {
+            let variant = dirty_variant(inp);
+            let idx = node_group_index(def, &inp.node);
+            quote! { DirtyInput::#variant(_) => #idx }
+        })
+        .collect();
+
+    // Build group_key match arms for PendingEvent
+    let event_group_arms: Vec<_> = def
+        .events
+        .iter()
+        .map(|ev| {
+            let variant = &ev.name;
+            let idx = node_group_index(def, &ev.receiver);
+            quote! { PendingEvent::#variant(_, _, _) => #idx }
+        })
+        .collect();
+
+    // DirtyInput::group_key() — may be empty if no inputs
+    let dirty_group_key = if dirty_group_arms.is_empty() {
+        quote! {
+            impl DirtyInput {
+                fn group_key(&self) -> usize {
+                    match *self {}
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl DirtyInput {
+                fn group_key(&self) -> usize {
+                    match self {
+                        #(#dirty_group_arms,)*
+                    }
+                }
+            }
+        }
+    };
+
+    // PendingEvent::group_key() — may be empty if no events
+    let event_group_key = if event_group_arms.is_empty() {
+        quote! {
+            impl PendingEvent {
+                fn group_key(&self) -> usize {
+                    match *self {}
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl PendingEvent {
+                fn group_key(&self) -> usize {
+                    match self {
+                        #(#event_group_arms,)*
+                    }
+                }
+            }
+        }
+    };
+
+    quote! {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        pub enum PendingDelivery {
+            DirtyInput(DirtyInput),
+            Event(PendingEvent),
+        }
+
+        #dirty_group_key
+        #event_group_key
+
+        impl ::distvirt_sm_router::Delivery for PendingDelivery {
+            fn group_key(&self) -> usize {
+                match self {
+                    PendingDelivery::DirtyInput(d) => d.group_key(),
+                    PendingDelivery::Event(e) => e.group_key(),
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn gen_pending_event_enum(def: &TopologyDef) -> TokenStream {
     if def.events.is_empty() {
         return quote! {

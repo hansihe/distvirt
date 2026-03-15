@@ -132,18 +132,58 @@
 //!
 //! ## Propagation model
 //!
-//! Signal propagation is organized into **rounds**. When `propagate()` is called,
-//! all cascading effects resolve before it returns:
+//! Signal propagation is organized into **sub-rounds**. When `propagate()` is
+//! called, all cascading effects resolve before it returns. The propagation loop
+//! alternates between two sub-round types:
 //!
-//! 1. A signal change or edge change marks affected inputs as dirty
-//! 2. The router re-aggregates each dirty input and delivers it to the SM handler
-//!    (only if the aggregated value actually changed — `PartialEq` comparison)
-//! 3. The handler may update signals and edges via its context, which feeds back
-//!    into step 1
-//! 4. The round ends when no more updates propagate
+//! 1. **Input sub-round:** All dirty aggregated inputs are re-aggregated and
+//!    delivered to SM handlers (only if the aggregated value actually changed —
+//!    `PartialEq` comparison). Pending creates are materialized before delivery.
+//! 2. **Event sub-round:** All pending events are delivered to receiver handlers
+//!    (connectivity is verified — at least one edge must connect sender and
+//!    receiver in either direction).
 //!
-//! A configurable depth limit (passed to `Router::new()`) prevents infinite loops.
-//! The router warns at `limit - 1` and panics at `limit`.
+//! Each handler call may update signals, edges, queue events, create or destroy
+//! SMs via the context. These effects are applied atomically after the handler
+//! returns, and feed into subsequent sub-rounds.
+//!
+//! The loop terminates when no dirty inputs, pending events, or pending creates
+//! remain (quiescence). A configurable depth limit (passed to `Router::new()`)
+//! prevents infinite loops. The router warns at `limit - 1` and panics at
+//! `limit`.
+//!
+//! ### Effect application order
+//!
+//! When a handler returns, its buffered effects are applied in this order:
+//! 1. **Creates** — buffered for materialization at the start of the next
+//!    input sub-round
+//! 2. **Signal changes** — applied immediately, dirty inputs enqueued
+//! 3. **Edge changes** — applied immediately, dirty inputs enqueued
+//! 4. **Events** — buffered into the pending events queue
+//! 5. **Self-destruct** — instance removed, edges cleared (enqueues dirty inputs)
+//!
+//! ### Isolation within a sub-round
+//!
+//! Within a single sub-round, SM handlers are **fully independent**: no handler
+//! observes the effects of another handler in the same sub-round. Signal changes,
+//! edge changes, events, and creates produced by a handler all go into queues
+//! processed in subsequent sub-rounds. This means the order in which different
+//! SMs are processed within a sub-round does not affect the outcome.
+//!
+//! The only ordering that matters within a sub-round is when a **single SM**
+//! receives multiple deliveries (e.g., two dirty inputs). The handler is called
+//! sequentially for each, and the SM's internal state mutates between calls, so
+//! the order can affect the SM's final state. The **lattice property** asserts
+//! that this should not matter — any permutation of deliveries to a single SM
+//! within a sub-round should produce the same final state at quiescence.
+//!
+//! ### Sub-round phasing
+//!
+//! The implementation processes input and event sub-rounds in a single loop
+//! iteration (inputs first, then events). This is an optimization — conceptually
+//! they are separate sub-rounds. Events queued during an input sub-round are
+//! delivered in the immediately following event sub-round. Events queued during
+//! an event sub-round are delivered in the next iteration's event sub-round.
 //!
 //! ## Self-destruct ordering guarantees
 //!
@@ -268,6 +308,65 @@ impl<Id, V: Clone> Aggregator for ListAggregator<Id, V> {
 pub mod model_check;
 pub mod trace;
 
+/// Phase state machine for manual (step-by-step) propagation.
+///
+/// Tracks which sub-round the router is currently in:
+/// - `Idle`: no manual propagation in progress.
+/// - `Inputs(n)`: delivering dirty inputs; `n` outstanding.
+/// - `Events(n)`: delivering events; `n` outstanding.
+#[derive(Clone, Debug)]
+pub enum ManualPhase {
+    Idle,
+    Inputs(usize),
+    Events(usize),
+}
+
+/// Trait for delivery items that can be grouped by target SM.
+pub trait Delivery {
+    /// Returns the SM index for grouping. Items with the same key target
+    /// the same SM within the current sub-round.
+    fn group_key(&self) -> usize;
+}
+
+/// Step-by-step propagation controller.
+///
+/// Holds sorted deliveries and yields them one SM group at a time.
+/// Created by `router.begin_manual_propagate()`.
+pub struct ManualPropagate<D> {
+    /// Sorted by group_key (ascending). We pop from the back.
+    deliveries: Vec<D>,
+}
+
+impl<D: Delivery> ManualPropagate<D> {
+    pub fn new(mut deliveries: Vec<D>) -> Self {
+        // Sort ascending by sm_index — we pop groups from the back
+        deliveries.sort_by_key(|d| d.group_key());
+        ManualPropagate { deliveries }
+    }
+
+    /// Returns all deliveries for one SM group, or None if empty.
+    /// Groups are returned in reverse order (last sorted group first),
+    /// but since SM groups are independent, order doesn't matter.
+    pub fn next_group(&mut self) -> Option<Vec<D>> {
+        if self.deliveries.is_empty() {
+            return None;
+        }
+        let last_key = self.deliveries.last().unwrap().group_key();
+        let group_start = self
+            .deliveries
+            .iter()
+            .rposition(|d| d.group_key() != last_key)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        Some(self.deliveries.split_off(group_start))
+    }
+
+    /// Number of remaining deliveries across all groups.
+    pub fn remaining(&self) -> usize {
+        self.deliveries.len()
+    }
+}
+
 /// Trait implemented by generated `NodeKind` enums.
 pub trait IdKind: Copy + Clone + 'static {
     const AUTO_COUNT: usize;
@@ -281,13 +380,15 @@ pub trait IdKind: Copy + Clone + 'static {
 
 /// Swappable ID allocation strategy.
 pub trait IdAllocator<K: IdKind>: Clone {
+    /// Snapshot representation for serialization.
+    type Snapshot: Clone;
     /// Allocate a new u64 for the given auto-ID node kind.
     /// `creator` is `Some((kind, raw_id))` when called from an SM handler.
     fn alloc(&mut self, kind: K, creator: Option<(K, u64)>) -> u64;
-    /// Export counter state for snapshotting.
-    fn counter_snapshot(&self) -> Vec<u64>;
-    /// Reconstruct from snapshotted counter state.
-    fn from_counter_snapshot(counters: Vec<u64>) -> Self;
+    /// Export state for snapshotting.
+    fn snapshot(&self) -> Self::Snapshot;
+    /// Reconstruct from a snapshot.
+    fn from_snapshot(snapshot: &Self::Snapshot) -> Self;
 }
 
 /// Default allocator: simple sequential counters (replicates current behavior).
@@ -305,17 +406,18 @@ impl SequentialIds {
 }
 
 impl<K: IdKind> IdAllocator<K> for SequentialIds {
+    type Snapshot = Vec<u64>;
     fn alloc(&mut self, kind: K, _creator: Option<(K, u64)>) -> u64 {
         let idx = kind.index();
         let id = self.counters[idx];
         self.counters[idx] += 1;
         id
     }
-    fn counter_snapshot(&self) -> Vec<u64> {
+    fn snapshot(&self) -> Vec<u64> {
         self.counters.clone()
     }
-    fn from_counter_snapshot(counters: Vec<u64>) -> Self {
-        Self { counters }
+    fn from_snapshot(snapshot: &Vec<u64>) -> Self {
+        Self { counters: snapshot.clone() }
     }
 }
 

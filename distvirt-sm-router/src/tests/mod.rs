@@ -2337,7 +2337,7 @@ mod initialize_tests {
         router.create_parent(P1, sm);
 
         // SM is not yet materialized before propagate
-        assert!(router.parent_instances.is_empty());
+        assert!(router.instances.parent_instances.is_empty());
 
         router.propagate();
 
@@ -2380,14 +2380,14 @@ mod initialize_tests {
         router.create_parent(P1, sm);
 
         // Nothing materialized yet
-        assert!(router.parent_instances.is_empty());
-        assert!(router.child_instances.is_empty());
+        assert!(router.instances.parent_instances.is_empty());
+        assert!(router.instances.child_instances.is_empty());
 
         router.propagate();
 
         // Child should have been created
-        assert_eq!(router.child_instances.len(), 1);
-        assert!(router.child_instances.contains_key(&C1));
+        assert_eq!(router.instances.child_instances.len(), 1);
+        assert!(router.instances.child_instances.contains_key(&C1));
 
         // Verify trace contains SmInitialized events
         let events = router.tracer().entries();
@@ -2419,14 +2419,14 @@ mod initialize_tests {
         router.create_parent(P1, sm);
 
         // Nothing materialized yet
-        assert!(router.parent_instances.is_empty());
-        assert!(router.child_instances.is_empty());
+        assert!(router.instances.parent_instances.is_empty());
+        assert!(router.instances.child_instances.is_empty());
 
         router.propagate();
 
         // The child created during Parent's initialize should exist
         assert!(
-            router.child_instances.contains_key(&c2),
+            router.instances.child_instances.contains_key(&c2),
             "child C2 should have been created during parent's initialize"
         );
         // Its own initialize should have run and set the signal
@@ -2471,7 +2471,7 @@ mod initialize_tests {
 
         // Not yet materialized
         assert!(
-            !router.child_instances.contains_key(&c3),
+            !router.instances.child_instances.contains_key(&c3),
             "child c3 should not exist before propagate"
         );
 
@@ -2479,7 +2479,7 @@ mod initialize_tests {
 
         // Now it should exist with its initialize having run
         assert!(
-            router.child_instances.contains_key(&c3),
+            router.instances.child_instances.contains_key(&c3),
             "child c3 should exist after propagate"
         );
         assert_eq!(
@@ -2489,3 +2489,5 @@ mod initialize_tests {
         );
     }
 }
+
+mod manual_propagate;

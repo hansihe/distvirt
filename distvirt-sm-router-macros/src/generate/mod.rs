@@ -2,6 +2,9 @@ mod ctx;
 mod enums;
 mod helpers;
 mod router;
+mod router_lifecycle;
+mod router_propagate;
+mod router_setters;
 mod snapshot;
 
 use crate::parse::*;
@@ -19,6 +22,7 @@ pub fn generate(def: &TopologyDef) -> TokenStream {
     let dirty_enum = enums::gen_dirty_enum(def);
     let pending_create_enum = enums::gen_pending_create_enum(def);
     let pending_event_enum = enums::gen_pending_event_enum(def);
+    let pending_delivery_enum = enums::gen_pending_delivery_enum(def);
     let router_module = router::gen_router_module(def);
 
     quote! {
@@ -32,6 +36,7 @@ pub fn generate(def: &TopologyDef) -> TokenStream {
         #dirty_enum
         #pending_create_enum
         #pending_event_enum
+        #pending_delivery_enum
         #router_module
     }
 }

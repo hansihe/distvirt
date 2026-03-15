@@ -14,7 +14,7 @@
 //!
 //! The design doc's **lattice property** ("any path through the state space
 //! should reach the same final state regardless of delivery order within a
-//! round") is exactly what stateright is built to verify.
+//! sub-round") is exactly what stateright is built to verify.
 //!
 //! ## Two levels of model checking
 //!
@@ -33,11 +33,39 @@
 //!
 //! Model-check the **entire router** with all SMs. The stateright model state
 //! is the full router state. External actions (port signal changes, port
-//! add/remove, events) trigger rounds, and stateright explores all valid
-//! delivery orderings within each round.
+//! add/remove, events) trigger sub-rounds, and stateright explores all valid
+//! delivery orderings within each sub-round.
 //!
 //! This catches interaction bugs, cascade issues, and delivery-order-dependent
 //! behavior — things no amount of individual SM testing finds.
+//!
+//! ## Key insight: per-SM independence within a sub-round
+//!
+//! Within a single sub-round (input or event), SM handlers are **fully
+//! independent** — no handler observes another handler's effects in the same
+//! sub-round. All outputs (signal changes, edge changes, events, creates) go
+//! into queues processed in subsequent sub-rounds.
+//!
+//! This means the order in which *different* SMs are processed within a
+//! sub-round does not affect the outcome. The **only meaningful reordering** is
+//! when a single SM receives multiple deliveries in the same sub-round (e.g.,
+//! two dirty inputs, or three events). The handler is called sequentially for
+//! each, and the SM's internal state mutates between calls.
+//!
+//! ### State space reduction
+//!
+//! This independence property dramatically reduces the state space. Instead of
+//! exploring all permutations of N pending deliveries (`N!`), we only need to
+//! explore permutations **per SM**. If SM A has 2 pending inputs and SM B has
+//! 3 pending inputs, the total orderings to explore are `2! × 3! = 12`, not
+//! `5! = 120`. SMs with only 1 pending delivery (the common case) contribute
+//! a factor of 1.
+//!
+//! Furthermore, the model checker respects the sub-round phasing that the
+//! runtime guarantees: all dirty inputs are processed before any events within
+//! a loop iteration. There is no need to explore interleavings across this
+//! barrier — such orderings cannot occur in production, so exploring them
+//! would only bloat the state space with unreachable states.
 //!
 //! ## `model_checkable` macro flag
 //!
@@ -107,27 +135,84 @@
 //! ### Step-by-step propagation
 //!
 //! The existing `propagate()` resolves all cascading effects atomically. For
-//! model checking, we need to explore **all valid delivery orderings** within a
-//! round.
+//! model checking, we need to explore delivery orderings within sub-rounds.
+//!
+//! The router tracks a `ManualPhase` state machine:
+//!
+//! ```text
+//! Idle ──begin_manual_propagate()──→ Inputs(N)
+//!          materialize creates,
+//!          drain dirty
+//!
+//! Inputs(0) ──begin_manual_propagate()──→ Events(M)
+//!               drain pending_events
+//!
+//! Events(0) ──begin_manual_propagate()──→ Inputs(N)
+//!               materialize creates,        (new round)
+//!               drain dirty
+//!
+//! Inputs(n>0) or Events(n>0) ──begin_manual_propagate()──→ PANIC
+//! ```
+//!
+//! The API uses an external `ManualPropagate` controller that sorts deliveries
+//! by target SM and yields them one group at a time:
 //!
 //! ```rust,ignore
 //! impl Router {
-//!     /// Returns the set of deliverable items (dirty inputs + pending events).
-//!     /// Empty when quiescent.
-//!     fn pending_deliveries(&self) -> Vec<PendingDelivery>;
+//!     /// Begin the next sub-round of step-by-step propagation.
+//!     ///
+//!     /// From `Idle` or `Events(0)`: materializes creates, drains dirty
+//!     /// inputs, transitions to `Inputs(N)`.
+//!     /// From `Inputs(0)`: drains pending events, transitions to `Events(M)`.
+//!     /// Panics if outstanding deliveries remain.
+//!     fn begin_manual_propagate(&mut self) -> ManualPropagate<PendingDelivery>;
 //!
-//!     /// Process exactly one pending delivery. May enqueue new dirty items
-//!     /// from signal/edge changes in the handler.
-//!     fn deliver_one(&mut self, delivery: &PendingDelivery);
+//!     /// Process exactly one pending delivery. Decrements the outstanding
+//!     /// delivery counter in the current phase. Effects are buffered for
+//!     /// subsequent sub-rounds.
+//!     fn deliver_one(&mut self, delivery: PendingDelivery);
 //!
-//!     /// True when no pending deliveries remain.
+//!     /// True when no pending deliveries remain and no dirty state exists.
+//!     /// Valid from `Idle` or `Events(0)` only.
 //!     fn is_quiescent(&self) -> bool;
 //!
 //!     /// Existing method — resolves everything. Convenience, not for model
-//!     /// checking.
+//!     /// checking. Valid from `Idle` or `Events(0)`.
 //!     fn propagate(&mut self);
 //! }
 //! ```
+//!
+//! #### Usage protocol
+//!
+//! Each round requires exactly two `begin_manual_propagate` calls — one for
+//! the inputs sub-round and one for the events sub-round:
+//!
+//! ```rust,ignore
+//! loop {
+//!     // Inputs sub-round
+//!     let mut mp = router.begin_manual_propagate();
+//!     while let Some(group) = mp.next_group() {
+//!         for d in group { router.deliver_one(d); }
+//!     }
+//!     // Events sub-round
+//!     let mut mp = router.begin_manual_propagate();
+//!     while let Some(group) = mp.next_group() {
+//!         for d in group { router.deliver_one(d); }
+//!     }
+//!     if router.is_quiescent() { break; }
+//! }
+//! ```
+//!
+//! `next_group()` returns all deliveries targeting the same SM within the
+//! current sub-round. The model checker only needs to permute within each
+//! group — different SMs are independent within a sub-round.
+//!
+//! #### Per-SM permutation grouping
+//!
+//! Because different SMs are independent within a sub-round, `ManualPropagate`
+//! sorts deliveries by target SM and yields one group at a time via
+//! `next_group()`. The model checker only explores permutations within each
+//! group, taking the cartesian product across groups.
 //!
 //! ### Signal, edge, and instance accessors
 //!
@@ -166,6 +251,11 @@
 //! - Ordering 2: B creates first -> `PodId(5)`, A creates -> `PodId(6)`
 //!
 //! Same topology, different IDs. False divergence.
+//!
+//! Note: the per-SM independence property means creates from different SMs
+//! within a sub-round are never reordered relative to each other (creates are
+//! buffered and materialized deterministically). However, creates from
+//! different sub-rounds (e.g., cascading effects) can still hit this problem.
 //!
 //! ### The solution: per-creator-instance counters
 //!
@@ -227,8 +317,7 @@
 //! enum Phase {
 //!     /// Quiescent — ready for external actions.
 //!     External,
-//!     /// Processing pending deliveries within a round. Contains the set of
-//!     /// pending items at the start of this delivery step.
+//!     /// Processing pending deliveries within a sub-round.
 //!     Delivering,
 //! }
 //!
@@ -240,7 +329,7 @@
 //!     SendEvent { /* ... */ },
 //!
 //!     // Internal delivery choice (only in Delivering phase)
-//!     Deliver(usize),  // index into pending_deliveries()
+//!     Deliver(PendingDelivery),
 //! }
 //! ```
 //!
@@ -250,15 +339,33 @@
 //! - Applying an action transitions to `Delivering`.
 //!
 //! When `phase == Delivering`:
-//! - If pending items exist: actions are `Deliver(i)` for each `i` in
-//!   `0..pending_deliveries().len()`.
-//! - If no pending items: auto-transition back to `External` (call
-//!   `round_complete` if applicable).
+//! - Call `pending_deliveries()` once to get the full sub-round set.
+//! - If empty: transition back to `External`.
+//! - If non-empty: the stateright model generates one successor state per
+//!   permutation of the deliveries (grouped per-SM — see below). Each
+//!   permutation calls `deliver_one()` for every item in the set, then
+//!   calls `pending_deliveries()` again. If the next call returns items,
+//!   remain in `Delivering`; if empty, transition to `External`.
+//!
+//! ### Optimized exploration via per-SM grouping
+//!
+//! A naive model checker would explore all `N!` permutations of pending
+//! deliveries. Since different SMs are independent within a sub-round, an
+//! optimized checker can:
+//!
+//! 1. Group pending deliveries by target SM.
+//! 2. For each SM with >1 pending delivery, explore all permutations of that
+//!    SM's deliveries.
+//! 3. Take the cartesian product across SM groups.
+//!
+//! This reduces the state space from `N!` to `∏(nᵢ!)` where `nᵢ` is the
+//! number of pending deliveries for SM `i`. In practice most SMs have 0 or 1
+//! pending delivery per sub-round, so the branching factor is small.
 //!
 //! ### Lattice property verification
 //!
 //! The lattice property falls out naturally from this model structure. If two
-//! delivery orderings within a round lead to different quiescent states,
+//! delivery orderings within a sub-round lead to different quiescent states,
 //! stateright's state space branches at the `Delivering` phase. Safety
 //! properties checked in the `External` phase will detect any divergence.
 //!
@@ -277,22 +384,36 @@
 //! For targeted testing outside of full stateright exploration:
 //!
 //! ```rust,ignore
-//! /// Check that all delivery orderings of currently pending items reach the
+//! /// Check that all delivery orderings within each sub-round reach the
 //! /// same quiescent state. Call after an external action, before propagate().
+//! ///
+//! /// Only permutes deliveries per-SM (exploiting the independence property),
+//! /// keeping the number of orderings tractable.
 //! fn verify_lattice(router: &Router) -> Result<(), LatticeViolation> {
-//!     let pending = router.pending_deliveries();
-//!     if pending.len() <= 1 { return Ok(()); }
+//!     let mut mp = router.begin_manual_propagate();
+//!     // Collect all groups
+//!     let mut groups = Vec::new();
+//!     while let Some(group) = mp.next_group() {
+//!         groups.push(group);
+//!     }
 //!
+//!     // Only groups with >1 delivery need permutation
+//!     let multi: Vec<&Vec<PendingDelivery>> = groups
+//!         .iter()
+//!         .filter(|g| g.len() > 1)
+//!         .collect();
+//!
+//!     if multi.is_empty() { return Ok(()); }
+//!
+//!     // Explore cartesian product of per-SM permutations
 //!     let mut reference: Option<RouterSnapshot> = None;
-//!
-//!     for perm in permutations(&pending) {
+//!     for ordering in cartesian_permutations(&multi) {
 //!         let mut r = router.clone();
-//!         for item in &perm {
-//!             r.deliver_one(item);
-//!             // Each delivery may cascade — resolve cascades canonically
-//!             // since we only care about the final state.
-//!             r.propagate();
+//!         for delivery in ordering {
+//!             r.deliver_one(delivery);
 //!         }
+//!         // Resolve remaining cascades canonically
+//!         r.propagate();
 //!         let snap = r.snapshot();
 //!         match &reference {
 //!             None => reference = Some(snap),
@@ -306,9 +427,22 @@
 //! }
 //! ```
 //!
-//! Note: this permutes the initial pending set and resolves cascades
-//! canonically. It catches most ordering bugs but doesn't explore all cascade
-//! orderings — full stateright exploration does that.
+//! ## Zero-overhead design
+//!
+//! The step-by-step propagation methods (`begin_manual_propagate`, `deliver_one`,
+//! `is_quiescent`) share the same per-item processing logic as `propagate()`.
+//! The difference is only in the driving loop:
+//!
+//! - **Production:** `propagate()` eagerly drains all queues in a tight loop.
+//!   No virtual dispatch, no trait objects, no overhead from the model checking
+//!   API existing.
+//! - **Model checking:** The caller drives the loop externally via
+//!   `begin_manual_propagate()` + `next_group()` + `deliver_one()`, allowing
+//!   stateright to explore ordering choices.
+//!
+//! Both paths call the same generated aggregate, handler invocation, and effect
+//! application methods. The model checking entry points simply aren't called in
+//! production code.
 //!
 //! ## Implementation plan
 //!
@@ -322,12 +456,14 @@
 //!    Router, add Clone bound to SM/signal types.
 //!
 //! 4. **Step-by-step propagation** — `pending_deliveries()` + `deliver_one()`.
-//!    This is the core enabler.
+//!    Extract per-item processing from the propagation loop into shared methods.
+//!    `pending_deliveries()` respects sub-round phasing internally.
 //!
 //! 5. **`RouterSnapshot`** with Hash+Eq — for stateright state dedup.
 //!
 //! 6. **Per-creator-instance IDs** — change auto-ID generation under
 //!    `model_checkable` to eliminate false state divergence from ID ordering.
 //!
-//! 7. **Lattice verifier utility** — standalone function, useful for targeted
-//!    property-based tests (e.g., with proptest generating random topologies).
+//! 7. **Lattice verifier utility** — standalone function using per-SM
+//!    permutation grouping for tractable targeted testing (e.g., with proptest
+//!    generating random topologies).
