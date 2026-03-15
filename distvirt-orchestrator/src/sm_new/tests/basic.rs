@@ -5,6 +5,7 @@ use super::*;
 fn demand_aggregation() {
     let mut router = Router::new(16);
     let timer = router.create_timer();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new(timer));
     router.create_service(S1, ServiceSm::new(timer, true));
     router.create_service(S2, ServiceSm::new(timer, true));
@@ -57,6 +58,7 @@ fn reactive_readiness_edges() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -100,6 +102,7 @@ fn reactive_readiness_edges() {
 
     // Add a third service — it should immediately get readiness.
     router.create_service(S3, ServiceSm::new(timer, false));
+
     // Use same mgmt port, update edges to include S3.
     router.set_management_to_service_edges(mgmt, vec![S1, S2, S3]);
     router.propagate();
@@ -118,6 +121,7 @@ fn pod_lifecycle() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -172,6 +176,7 @@ fn worker_loss_via_port_removal() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -228,6 +233,7 @@ fn worker_loss_via_port_removal() {
 fn spec_via_management_port() {
     let mut router = Router::new(16);
     let timer = router.create_timer();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new(timer));
 
     let mgmt = router.create_management();
@@ -258,6 +264,7 @@ fn spec_via_management_port() {
 fn service_spec_creates_edges_reactively() {
     let mut router = Router::new(16);
     let timer = router.create_timer();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new(timer));
     router.create_service(S1, ServiceSm::new(timer, false));
 
@@ -290,6 +297,7 @@ fn admin_restart_event() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -335,6 +343,7 @@ fn full_end_to_end() {
     // Infrastructure.
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Management ports: one for workload, one per service (different specs).
     let mgmt_wl = router.create_management();
@@ -441,6 +450,7 @@ fn handler_driven_pod_creation() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
 
@@ -491,6 +501,7 @@ fn handler_driven_pod_creation() {
 fn handler_and_router_share_id_counter() {
     let mut router = Router::new(16);
     let timer = router.create_timer();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     let mgmt = router.create_management();
 
     // Create first pod via router.

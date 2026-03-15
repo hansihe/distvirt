@@ -110,6 +110,7 @@ fn finished_pod_self_destructs() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Create a standalone pod (no workload owner).
     let pod_id = router.create_pod(PodSm::new(timer));
@@ -134,6 +135,7 @@ fn worker_identity_in_readiness() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -225,6 +227,7 @@ fn pod_tracks_worker_from_input() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let pod_id = router.create_pod(PodSm::new(timer));
     router.propagate();

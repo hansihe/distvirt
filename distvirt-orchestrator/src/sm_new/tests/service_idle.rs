@@ -12,6 +12,7 @@ fn traffic_triggered_activation() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -66,6 +67,7 @@ fn idle_timeout_deactivation() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -129,6 +131,7 @@ fn traffic_cancels_idle_timer() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -186,6 +189,7 @@ fn idle_timeout_suspend_integration() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new_suspendable(timer));
@@ -262,6 +266,7 @@ fn worker_loss_removes_backend_need() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -318,6 +323,7 @@ fn multiple_workers_one_loses_traffic() {
     let worker2 = router.create_worker();
     router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));

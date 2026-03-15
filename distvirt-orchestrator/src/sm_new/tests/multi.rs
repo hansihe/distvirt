@@ -12,6 +12,7 @@ fn shared_worker_death_independent_failure() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
 
@@ -141,6 +142,7 @@ fn service_retarget_workload() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
 
@@ -221,6 +223,7 @@ fn independent_workload_subgraphs() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     // W1 + S1 subgraph.
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -320,6 +323,7 @@ fn service_fan_in_with_retarget() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Both workloads get specs.
     let mgmt = router.create_management();
@@ -421,6 +425,7 @@ fn service_fan_in_with_retarget() {
 fn service_self_destructs_on_spec_removal() {
     let mut router = Router::new(16);
     let timer = router.create_timer();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new(timer));
     router.create_service(S1, ServiceSm::new(timer, false)); // always-on
 
@@ -497,6 +502,7 @@ fn full_teardown_cascade() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Set up two independent service→workload subgraphs via separate mgmt ports.
     let mgmt_wl = router.create_management();

@@ -33,6 +33,8 @@ pub(crate) struct PodSm {
     pub(crate) timer_id: TimerId,
     /// Generation counter for timer requests.
     pub(crate) timer_generation: u64,
+    /// Worker assigned via lease signal.
+    pub(crate) assigned_worker: Option<WorkerId>,
 }
 
 impl PodSm {
@@ -45,6 +47,7 @@ impl PodSm {
             resume_artifact: None,
             timer_id,
             timer_generation: 0,
+            assigned_worker: None,
         }
     }
 
@@ -57,6 +60,7 @@ impl PodSm {
             resume_artifact: Some(artifact_id),
             timer_id,
             timer_generation: 0,
+            assigned_worker: None,
         }
     }
 
@@ -94,6 +98,10 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
 
     fn initialize(&mut self, ctx: &mut C) {
         ctx.set_pod_to_timer_edges(vec![self.timer_id]);
+        ctx.set_pod_to_schedule_request_edges(vec![SCHEDULE_REQUEST]);
+        ctx.set_schedule_request(PodScheduleRequest {
+            resume_artifact: self.resume_artifact,
+        });
         self.update_timer_signal(ctx);
     }
 
@@ -180,6 +188,26 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     ctx.set_status(PodStatus::Suspended { artifact_id });
                     self.update_timer_signal(ctx);
                     self.maybe_reap(ctx);
+                }
+            }
+            PodInput::LeaseInput(lease) => {
+                let had_lease = self.assigned_worker.is_some();
+                match lease {
+                    Some(info) if !had_lease && matches!(self.status, PodStatus::Pending) => {
+                        // Lease granted — target the assigned worker.
+                        self.assigned_worker = Some(info.worker_id);
+                        ctx.set_pod_to_worker_edges(vec![info.worker_id]);
+                    }
+                    None if had_lease && !self.status.is_terminal() => {
+                        // Lease revoked — preemption.
+                        self.assigned_worker = None;
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        ctx.set_pod_to_worker_edges(vec![]);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
+                    }
+                    _ => {}
                 }
             }
             PodInput::PodTimerFired(key) => {

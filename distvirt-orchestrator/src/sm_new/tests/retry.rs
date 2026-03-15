@@ -192,6 +192,7 @@ fn failed_recovery_via_demand_cycle() {
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, 1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
@@ -280,6 +281,7 @@ fn backoff_cleared_on_demand_drop() {
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, 5));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
@@ -400,6 +402,7 @@ fn scavenge_during_failed() {
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
+    router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, 1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });

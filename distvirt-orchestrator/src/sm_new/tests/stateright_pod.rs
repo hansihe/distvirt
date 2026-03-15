@@ -490,6 +490,11 @@ impl Representative for PodNewModelState {
             s.sm.resume_artifact = Some(ArtifactId(0));
         }
 
+        // Normalize assigned_worker — only presence matters.
+        if let Some(_) = s.sm.assigned_worker {
+            s.sm.assigned_worker = Some(WorkerId(0));
+        }
+
         s
     }
 }

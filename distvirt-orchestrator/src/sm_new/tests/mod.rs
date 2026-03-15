@@ -87,6 +87,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
@@ -114,18 +115,31 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     (mgmt, worker, pod_id, timer)
 }
 
-/// Helper: make a pending pod Running.
-fn make_pod_running(router: &mut Router, worker: WorkerId, pod_id: PodId) {
+/// Helper: schedule a pod to a worker by creating a lease port.
+fn schedule_pod(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
+    let lease = router.create_schedule_lease();
+    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_schedule_lease_lease(lease, LeaseInfo { worker_id: worker });
+    router.propagate();
+    lease
+}
+
+/// Helper: make a pending pod Running (schedule + worker assignment + status).
+fn make_pod_running(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
+    let lease = schedule_pod(router, worker, pod_id);
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
+    lease
 }
 
 /// Helper: make a pending pod fail via worker notification.
-fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) {
+fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
+    let lease = schedule_pod(router, worker, pod_id);
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
+    lease
 }
 
 /// Helper: set up a workload (with configurable max_retries) with an always-on
@@ -134,6 +148,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, max_retries));
@@ -165,6 +180,7 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new_suspendable(timer));

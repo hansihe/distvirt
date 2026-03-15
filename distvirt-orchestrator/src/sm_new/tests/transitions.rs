@@ -156,6 +156,7 @@ fn scavenge_idle_workload() {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));

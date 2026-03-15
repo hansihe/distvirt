@@ -61,6 +61,32 @@ pub(crate) enum PodIntent {
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct ArtifactId(u64);
 
+/// Manual ID for the singleton schedule-request port.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) struct ScheduleRequestId(pub(crate) u64);
+
+/// The singleton schedule-request port ID.
+pub(crate) const SCHEDULE_REQUEST: ScheduleRequestId = ScheduleRequestId(0);
+
+/// Schedule request emitted by pod to the schedule-request port.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub(crate) struct PodScheduleRequest {
+    pub(crate) resume_artifact: Option<ArtifactId>,
+}
+
+/// Lease info signaled from a per-pod ScheduleLease port.
+/// Carries the assigned worker ID.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LeaseInfo {
+    pub(crate) worker_id: WorkerId,
+}
+
+impl Default for LeaseInfo {
+    fn default() -> Self {
+        LeaseInfo { worker_id: WorkerId(0) }
+    }
+}
+
 /// Workload spec delivered by management port.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub(crate) struct WorkloadSpec {
@@ -264,6 +290,19 @@ impl Aggregator for BackendNeedAggregator {
     }
 }
 
+/// Aggregates lease info for a pod. Expects 0 or 1 lease source.
+#[derive(Default)]
+pub(crate) struct LeaseAggregator;
+
+impl Aggregator for LeaseAggregator {
+    type Input = (ScheduleLeaseId, LeaseInfo);
+    type Output = Option<LeaseInfo>;
+
+    fn aggregate(&self, inputs: &[(ScheduleLeaseId, LeaseInfo)]) -> Option<LeaseInfo> {
+        inputs.first().map(|(_, info)| info.clone())
+    }
+}
+
 /// Aggregates worker assignment for a pod. A pod expects at most one worker.
 /// Preserves the WorkerId (unlike ListAggregator which drops IDs).
 #[derive(Default)]
@@ -309,6 +348,8 @@ distvirt_sm_router::router! {
         Worker(auto),
         Management(auto),
         Timer(auto),
+        ScheduleRequest(ScheduleRequestId),
+        ScheduleLease(auto),
     }
     signals {
         Service::Demand(bool),
@@ -324,10 +365,12 @@ distvirt_sm_router::router! {
         Pod::Status(PodStatus),
         Pod::Worker(Option<WorkerId>),
         Pod::WantedPodTimers(Vec<PodTimerRequest>),
+        Pod::ScheduleRequest(PodScheduleRequest),
         Worker::Info(WorkerInfo),
         Worker::BackendNeed(BackendNeed),
         Management::WlSpec(WorkloadSpec),
         Management::SvcSpec(ServiceSpec),
+        ScheduleLease::Lease(LeaseInfo),
     }
     edges {
         ServiceToWorkload: Service -> Workload,
@@ -341,6 +384,9 @@ distvirt_sm_router::router! {
         WorkloadToTimer: Workload -> Timer,
         ServiceToTimer: Service -> Timer,
         PodToTimer: Pod -> Timer,
+        PodToScheduleRequest: Pod -> ScheduleRequest,
+        ScheduleLeaseToPod: ScheduleLease -> Pod,
+        PodToWorker: Pod -> Worker,
     }
     events {
         AdminCommand(AdminCmd): Management -> Workload,
@@ -391,6 +437,14 @@ distvirt_sm_router::router! {
         Pod::OwnerInput {
             sources: [(WorkloadToPod, Workload::PodIntent)],
             aggregator: OwnerAggregator,
+        },
+        Pod::LeaseInput {
+            sources: [(ScheduleLeaseToPod, ScheduleLease::Lease)],
+            aggregator: LeaseAggregator,
+        },
+        ScheduleRequest::PodRequestsInput {
+            sources: [(PodToScheduleRequest, Pod::ScheduleRequest)],
+            aggregator: ListAggregator<PodId, PodScheduleRequest>,
         },
         Timer::WorkloadTimersInput {
             sources: [(WorkloadToTimer, Workload::WantedTimers)],
