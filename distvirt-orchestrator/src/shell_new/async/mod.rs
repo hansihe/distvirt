@@ -3,17 +3,22 @@
 //! This module owns an `OrchestratorCore`, handles all I/O (channels, timers,
 //! worker connections), and executes effects produced by the core.
 //! The shell contains **no logic** — only boilerplate.
+//!
+//! Timers are driven via the core's `TimerWheel` — the shell queries
+//! `next_deadline()` and sleeps until that instant, then calls `advance_to()`.
 
 pub(crate) mod worker_reader;
 pub(crate) mod worker_writer;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use distvirt_worker_protocol::OrchestratorConnection;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
-use crate::adapter::timer::{TimerAction, TimerConfig, TimerIdentity};
+use crate::adapter::timer::TimerConfig;
 use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
     SchedulerCoreInput, WorkerConnectedInfo, WorkerStateCoreEvent,
@@ -38,12 +43,6 @@ pub(crate) enum ShellEvent {
     WorkerStateEvent(WorkerStateCoreEvent),
     /// Scheduler event (artifact placement) from a worker reader.
     SchedulerInput(SchedulerCoreInput),
-    /// A timer fired.
-    TimerFired {
-        namespace_id: NamespaceId,
-        identity: TimerIdentity,
-        generation: u64,
-    },
     /// Worker reader exited.
     WorkerDisconnected { worker_id: GlobalWorkerId },
 }
@@ -123,8 +122,8 @@ struct Shell {
 
     workers: HashMap<GlobalWorkerId, WorkerSlot>,
 
-    /// Timer handles: (namespace_id, identity) → (generation, JoinHandle)
-    timer_handles: HashMap<(NamespaceId, TimerIdentity), (u64, JoinHandle<()>)>,
+    /// Boot instant — used to convert between logical Duration and real Instant.
+    start: Instant,
 
     rx: mpsc::Receiver<ShellEvent>,
     self_tx: mpsc::Sender<ShellEvent>,
@@ -133,95 +132,95 @@ struct Shell {
 }
 
 impl Shell {
+    /// Current logical time (Duration since shell boot).
+    fn now(&self) -> Duration {
+        self.start.elapsed()
+    }
+
     async fn run(mut self) {
-        while let Some(event) = self.rx.recv().await {
-            match event {
-                ShellEvent::Command(cmd) => match cmd {
-                    ShellCommand::WorkerConnection { conn } => {
-                        if let Err(e) = self.handle_worker_connection(conn).await {
-                            eprintln!("worker connection error: {}", e);
-                        }
+        loop {
+            // Compute the next timer deadline as a real Instant.
+            let timer_sleep = match self.orchestrator.next_deadline() {
+                Some(deadline) => tokio::time::sleep_until(self.start + deadline),
+                None => tokio::time::sleep(Duration::MAX),
+            };
+            let has_timer = self.orchestrator.next_deadline().is_some();
+
+            tokio::select! {
+                event = self.rx.recv() => {
+                    let Some(event) = event else { break };
+                    self.handle_event(event).await;
+                }
+                _ = timer_sleep, if has_timer => {
+                    // Timer expired — advance_to will fire it and process effects.
+                }
+            }
+
+            // After either branch, fire any expired timers.
+            let now = self.now();
+            let effects = self.orchestrator.advance_to(now);
+            self.execute_effects(effects).await;
+        }
+    }
+
+    async fn handle_event(&mut self, event: ShellEvent) {
+        let now = self.now();
+        match event {
+            ShellEvent::Command(cmd) => match cmd {
+                ShellCommand::WorkerConnection { conn } => {
+                    if let Err(e) = self.handle_worker_connection(conn).await {
+                        eprintln!("worker connection error: {}", e);
                     }
-                    ShellCommand::CreateNamespace {
-                        namespace_id,
-                        network,
-                    } => {
-                        let effects =
-                            self.orchestrator.create_namespace(CreateNamespaceInfo {
-                                namespace_id,
-                                network,
-                            });
-                        self.execute_effects(effects).await;
-                    }
-                    ShellCommand::DestroyNamespace { namespace_id } => {
-                        let effects = self.orchestrator.destroy_namespace(&namespace_id);
-                        self.execute_effects(effects).await;
-                        // Cancel all timers for this namespace.
-                        let timer_keys: Vec<_> = self
-                            .timer_handles
-                            .keys()
-                            .filter(|(ns_id, _)| *ns_id == namespace_id)
-                            .cloned()
-                            .collect();
-                        for key in timer_keys {
-                            if let Some((_, handle)) = self.timer_handles.remove(&key) {
-                                handle.abort();
-                            }
-                        }
-                    }
-                },
-                ShellEvent::NamespaceEvent {
+                }
+                ShellCommand::CreateNamespace {
                     namespace_id,
-                    event,
+                    network,
                 } => {
                     let effects =
-                        self.orchestrator.process(OrchestratorInput::NamespaceEvent {
+                        self.orchestrator.create_namespace(
+                            CreateNamespaceInfo {
+                                namespace_id,
+                                network,
+                            },
+                            now,
+                        );
+                    self.execute_effects(effects).await;
+                }
+                ShellCommand::DestroyNamespace { namespace_id } => {
+                    let effects = self.orchestrator.destroy_namespace(&namespace_id);
+                    self.execute_effects(effects).await;
+                }
+            },
+            ShellEvent::NamespaceEvent {
+                namespace_id,
+                event,
+            } => {
+                let effects =
+                    self.orchestrator.process(
+                        OrchestratorInput::NamespaceEvent {
                             namespace_id,
                             event,
-                        });
-                    self.execute_effects(effects).await;
-                }
-                ShellEvent::WorkerStateEvent(event) => {
-                    let effects = self
-                        .orchestrator
-                        .process(OrchestratorInput::WorkerStateEvent(event));
-                    self.execute_effects(effects).await;
-                }
-                ShellEvent::SchedulerInput(input) => {
-                    let effects = self
-                        .orchestrator
-                        .process(OrchestratorInput::SchedulerEvent(input));
-                    self.execute_effects(effects).await;
-                }
-                ShellEvent::TimerFired {
-                    namespace_id,
-                    identity,
-                    generation,
-                } => {
-                    let key = (namespace_id.clone(), identity.clone());
-                    let valid = self
-                        .timer_handles
-                        .get(&key)
-                        .map(|(g, _)| *g == generation)
-                        .unwrap_or(false);
-                    if valid {
-                        self.timer_handles.remove(&key);
-                        let effects =
-                            self.orchestrator.process(OrchestratorInput::NamespaceEvent {
-                                namespace_id,
-                                event: NamespaceCoreEvent::TimerFired {
-                                    identity,
-                                    generation,
-                                },
-                            });
-                        self.execute_effects(effects).await;
-                    }
-                }
-                ShellEvent::WorkerDisconnected { worker_id } => {
-                    let effects = self.orchestrator.worker_disconnected(worker_id);
-                    self.execute_effects(effects).await;
-                    self.workers.remove(&worker_id);
-                }
+                        },
+                        now,
+                    );
+                self.execute_effects(effects).await;
+            }
+            ShellEvent::WorkerStateEvent(event) => {
+                let effects = self
+                    .orchestrator
+                    .process(OrchestratorInput::WorkerStateEvent(event), now);
+                self.execute_effects(effects).await;
+            }
+            ShellEvent::SchedulerInput(input) => {
+                let effects = self
+                    .orchestrator
+                    .process(OrchestratorInput::SchedulerEvent(input), now);
+                self.execute_effects(effects).await;
+            }
+            ShellEvent::WorkerDisconnected { worker_id } => {
+                let effects = self.orchestrator.worker_disconnected(worker_id, now);
+                self.execute_effects(effects).await;
+                self.workers.remove(&worker_id);
             }
         }
     }
@@ -274,13 +273,18 @@ impl Shell {
         let reader_handle =
             worker_reader::spawn(global_id, reader, self.self_tx.clone());
 
+        let now = self.now();
+
         // Tell the orchestrator about the new worker (handles all fan-out).
-        let effects = self.orchestrator.worker_connected(WorkerConnectedInfo {
-            worker_id: global_id,
-            capabilities: hello.capabilities,
-            tunnel_info,
-            proto_worker_id,
-        });
+        let effects = self.orchestrator.worker_connected(
+            WorkerConnectedInfo {
+                worker_id: global_id,
+                capabilities: hello.capabilities,
+                tunnel_info,
+                proto_worker_id,
+            },
+            now,
+        );
         self.execute_effects(effects).await;
 
         self.workers.insert(
@@ -297,46 +301,8 @@ impl Shell {
     }
 
     /// Execute effects produced by the sync orchestrator.
-    /// Pure boilerplate: send commands, spawn/cancel timers.
+    /// Pure boilerplate: send commands on the wire.
     async fn execute_effects(&mut self, effects: OrchestratorEffects) {
-        // Timer actions.
-        for (namespace_id, timer_actions) in effects.timer_actions {
-            for action in timer_actions {
-                match action {
-                    TimerAction::Start {
-                        identity,
-                        generation,
-                        duration,
-                    } => {
-                        let key = (namespace_id.clone(), identity.clone());
-                        if let Some((_, handle)) = self.timer_handles.remove(&key) {
-                            handle.abort();
-                        }
-                        let self_tx = self.self_tx.clone();
-                        let ns_id = namespace_id.clone();
-                        let ident = identity.clone();
-                        let handle = tokio::spawn(async move {
-                            tokio::time::sleep(duration).await;
-                            let _ = self_tx
-                                .send(ShellEvent::TimerFired {
-                                    namespace_id: ns_id,
-                                    identity: ident,
-                                    generation,
-                                })
-                                .await;
-                        });
-                        self.timer_handles.insert(key, (generation, handle));
-                    }
-                    TimerAction::Cancel { identity } => {
-                        let key = (namespace_id.clone(), identity);
-                        if let Some((_, handle)) = self.timer_handles.remove(&key) {
-                            handle.abort();
-                        }
-                    }
-                }
-            }
-        }
-
         // Direct wire commands (e.g. CreateNamespace sent before fabric is ready).
         for direct in effects.direct_worker_commands {
             if let Some(slot) = self.workers.get(&direct.worker_id) {
@@ -390,7 +356,7 @@ pub(crate) fn spawn(
         orchestrator: OrchestratorCore::new(timer_config),
         next_worker_id: 0,
         workers: HashMap::new(),
-        timer_handles: HashMap::new(),
+        start: Instant::now(),
         rx,
         self_tx: tx.clone(),
         worker_secret,

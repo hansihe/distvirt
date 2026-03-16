@@ -92,7 +92,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -153,7 +153,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(max_retries));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -174,7 +174,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     (mgmt, worker)
 }
 
-/// Helper: set up a suspendable workload (suspend_on_idle=true) with an
+/// Helper: set up a suspendable workload (suspend_on_idle=true via spec) with an
 /// activation-based service, a running pod, and return (mgmt, worker).
 fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, WorkerId) {
     router.create_timer(TIMER);
@@ -183,9 +183,9 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
-    router.create_workload(W1, WorkloadSm::new_suspendable());
+    router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: true });
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);

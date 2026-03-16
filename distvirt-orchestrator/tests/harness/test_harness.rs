@@ -1,376 +1,405 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::time::Duration;
 
-use distvirt_orchestrator::shell::OrchestratorShell;
+use distvirt_orchestrator::adapter::timer::TimerConfig;
+use distvirt_orchestrator::core::namespace::NamespaceCore;
+use distvirt_orchestrator::shell_new::sync::{MockWorkerConfig, SyncShell};
+use distvirt_orchestrator::sm_new::{WlStatus, SvcStatus, WorkloadSm, ServiceSm, ServiceState};
+use distvirt_orchestrator::task::{ClientCommand, GlobalWorkerId};
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed, OrchestratorConnection, PsiMetrics, WorkerEvent};
+use distvirt_worker_protocol::{PsiMetrics, WorkerCommand, WorkerEvent};
 
-use super::mock_worker::{MockWorkerConfig, MockWorkerHandle, spawn_mock_worker};
+fn test_timer_config() -> TimerConfig {
+    TimerConfig {
+        retry_backoff: Duration::from_millis(500),
+        launch_timeout: Duration::from_secs(30),
+        suspend_timeout: Duration::from_secs(30),
+        idle_timeout: Duration::from_secs(60),
+    }
+}
 
 pub struct TestHarness {
-    pub shell: OrchestratorShell,
-    pub workers: HashMap<WorkerId, MockWorkerHandle>,
-    next_client_id: u64,
+    pub shell: SyncShell,
+    pending_events: RefCell<Vec<(GlobalWorkerId, WorkerEvent)>>,
 }
 
 impl TestHarness {
-    pub const TEST_SECRET: &str = "test-secret";
-
     pub fn new() -> Self {
         TestHarness {
-            shell: OrchestratorShell::new(51820, false, vec![], Self::TEST_SECRET.to_string()),
-            workers: HashMap::new(),
-            next_client_id: 1,
+            shell: SyncShell::new(test_timer_config()),
+            pending_events: RefCell::new(Vec::new()),
         }
     }
 
-    /// Add a mock worker with default config, perform handshake, return worker ID.
-    pub async fn add_worker(&mut self) -> WorkerId {
-        self.add_worker_with(MockWorkerConfig::default()).await
+    // =========================================================================
+    // Worker lifecycle
+    // =========================================================================
+
+    pub fn add_worker(&mut self) -> GlobalWorkerId {
+        self.add_worker_with(MockWorkerConfig::default())
     }
 
-    /// Add a mock worker with custom config.
-    pub async fn add_worker_with(&mut self, config: MockWorkerConfig) -> WorkerId {
-        let (orch_half, handle) = spawn_mock_worker(config);
-
-        let orch_conn = OrchestratorConnection::connect(orch_half)
-            .await
-            .expect("orchestrator connect failed");
-
-        let worker_id = self
-            .shell
-            .add_worker(orch_conn)
-            .await
-            .expect("add_worker failed");
-
-        self.workers.insert(worker_id.clone(), handle);
-        worker_id
+    pub fn add_worker_with(&mut self, config: MockWorkerConfig) -> GlobalWorkerId {
+        let wid = self.shell.add_worker(config);
+        self.shell.drain();
+        wid
     }
 
-    /// Disconnect a worker (drops transport, aborts task).
-    pub fn disconnect_worker(&mut self, worker_id: &WorkerId) {
-        if let Some(handle) = self.workers.remove(worker_id) {
-            handle.disconnect();
+    pub fn disconnect_worker(&mut self, worker_id: &GlobalWorkerId) {
+        self.shell.disconnect_worker(*worker_id);
+    }
+
+    /// Access a worker handle proxy for event injection and command inspection.
+    pub fn worker(&self, worker_id: &GlobalWorkerId) -> WorkerProxy<'_> {
+        assert!(
+            self.shell.has_worker(worker_id),
+            "worker {:?} not found",
+            worker_id
+        );
+        WorkerProxy {
+            shell: &self.shell,
+            worker_id: *worker_id,
+            pending_events: &self.pending_events,
         }
     }
 
-    /// Access a worker handle for event injection.
-    pub fn worker(&self, worker_id: &WorkerId) -> &MockWorkerHandle {
-        self.workers
-            .get(worker_id)
-            .expect("worker not found")
-    }
+    // =========================================================================
+    // Namespace lifecycle
+    // =========================================================================
 
-    /// Send a CreateNamespace client command.
-    pub async fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
+    pub fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
+        let namespace_id = NamespaceId::from(ns_id);
         self.shell
-            .client_command(
-                client_id,
-                ClientCommand::CreateNamespace {
-                    namespace_id: NamespaceId::from(ns_id),
-                    spec,
-                },
-            )
-            .await;
-    }
-
-    /// Send an UpdateNamespace client command (spec change).
-    pub async fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
+            .create_namespace(namespace_id.clone(), spec.network.clone());
         self.shell
-            .client_command(
-                client_id,
-                ClientCommand::UpdateNamespace {
-                    namespace_id: NamespaceId::from(ns_id),
-                    spec,
-                },
-            )
-            .await;
+            .client_command(&namespace_id, ClientCommand::UpdateSpec(spec));
+        self.shell.drain();
     }
 
-    /// Send a DeleteNamespace client command.
-    pub async fn delete_namespace(&mut self, ns_id: &str) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
+    pub fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
+        let namespace_id = NamespaceId::from(ns_id);
         self.shell
-            .client_command(
-                client_id,
-                ClientCommand::DeleteNamespace {
-                    namespace_id: NamespaceId::from(ns_id),
-                },
-            )
-            .await;
+            .client_command(&namespace_id, ClientCommand::UpdateSpec(spec));
+        self.shell.drain();
     }
 
-    /// Converge: drain + step in a loop until quiescent. Panics after 5s.
-    pub async fn converge(&mut self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            self.shell.drain().await;
-            // Yield to let background tasks (mock workers) process and send events.
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            // Drain again after yield to pick up new messages.
-            let had_messages = self.shell.step().await;
-            if had_messages {
-                // More messages arrived, keep going.
-                self.shell.drain().await;
-                continue;
-            }
-            // One more yield + check cycle to confirm quiescence.
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            if !self.shell.step().await {
-                break;
-            }
-            self.shell.drain().await;
-            if tokio::time::Instant::now() > deadline {
-                panic!("converge() timed out after 5 seconds");
-            }
+    pub fn delete_namespace(&mut self, ns_id: &str) {
+        let namespace_id = NamespaceId::from(ns_id);
+        self.shell.destroy_namespace(&namespace_id);
+    }
+
+    // =========================================================================
+    // Converge / time
+    // =========================================================================
+
+    pub fn converge(&mut self) {
+        // Drain any events queued through WorkerProxy (shared-ref path).
+        for (wid, event) in self.pending_events.borrow_mut().drain(..) {
+            self.shell.queue_worker_event(wid, event);
         }
+        self.shell.drain();
     }
 
-    /// Advance time by `duration` then converge. Use with `#[tokio::test(start_paused = true)]`.
-    pub async fn advance_time(&mut self, duration: Duration) {
-        tokio::time::advance(duration).await;
-        self.converge().await;
+    pub fn advance_time(&mut self, duration: Duration) {
+        self.shell.advance_time(duration);
+        self.converge();
     }
 
-    /// Access the orchestrator state.
-    pub fn orchestrator(&self) -> &distvirt_orchestrator::orchestrator::Orchestrator {
-        self.shell.orchestrator()
-    }
+    // =========================================================================
+    // State access
+    // =========================================================================
 
-    /// Mutable access to the orchestrator state (for test setup, e.g. injecting pressure).
-    pub fn orchestrator_mut(&mut self) -> &mut distvirt_orchestrator::orchestrator::Orchestrator {
-        self.shell.orchestrator_mut()
-    }
-
-    /// Get namespace state machine.
-    pub fn namespace(
-        &self,
-        ns_id: &str,
-    ) -> &distvirt_orchestrator::namespace::NamespaceStateMachine {
+    pub fn namespace(&self, ns_id: &str) -> &NamespaceCore {
         self.shell
-            .orchestrator()
-            .namespaces
-            .get(&NamespaceId::from(ns_id))
+            .namespace(&NamespaceId::from(ns_id))
             .unwrap_or_else(|| panic!("namespace '{}' not found", ns_id))
     }
 
-    /// Get workload state.
-    pub fn workload_state(&self, ns_id: &str, wl_id: &str) -> &WorkloadState {
+    pub fn workload_state(&self, ns_id: &str, wl_name: &str) -> &WorkloadSm {
         let ns = self.namespace(ns_id);
-        let wl = ns
-            .workloads
-            .get(&WorkloadId(wl_id.to_string()))
-            .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
-        &wl.state
+        let wl_id = ns
+            .management()
+            .lookup_workload(wl_name)
+            .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_name, ns_id));
+        ns.router()
+            .get_workload(&wl_id)
+            .unwrap_or_else(|| panic!("workload SM '{}' not found in router", wl_name))
     }
 
-    /// Get service state.
-    pub fn service_state(&self, ns_id: &str, svc_id: &str) -> &ServiceState {
+    pub fn service_state_sm(&self, ns_id: &str, svc_name: &str) -> &ServiceSm {
         let ns = self.namespace(ns_id);
-        let svc = ns
-            .services
-            .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
-        &svc.state
+        let svc_id = ns
+            .management()
+            .lookup_service(svc_name)
+            .unwrap_or_else(|| {
+                panic!("service '{}' not found in namespace '{}'", svc_name, ns_id)
+            });
+        ns.router()
+            .get_service(&svc_id)
+            .unwrap_or_else(|| panic!("service SM '{}' not found in router", svc_name))
     }
 
-    /// Get service conditions.
-    pub fn service_conditions(&self, ns_id: &str, svc_id: &str) -> &std::collections::BTreeMap<String, String> {
+    /// Get the protocol PodId for a workload (maps from router-internal PodId).
+    pub fn workload_proto_pod_id(&self, ns_id: &str, wl_name: &str) -> Option<distvirt_worker_protocol::PodId> {
+        let wl = self.workload_state(ns_id, wl_name);
         let ns = self.namespace(ns_id);
-        let svc = ns
-            .services
-            .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
-        &svc.conditions
+        wl.pod_id.and_then(|pid| ns.router_pod_to_proto(&pid).cloned())
     }
 
-    /// Get workload conditions.
-    pub fn workload_conditions(&self, ns_id: &str, wl_id: &str) -> &std::collections::BTreeMap<String, String> {
+    /// Get the GlobalWorkerId for the worker hosting a workload.
+    pub fn workload_global_worker_id(&self, ns_id: &str, wl_name: &str) -> Option<GlobalWorkerId> {
+        let wl = self.workload_state(ns_id, wl_name);
         let ns = self.namespace(ns_id);
-        let wl = ns
-            .workloads
-            .get(&WorkloadId(wl_id.to_string()))
-            .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
-        &wl.conditions
+        wl.pod_worker_id.and_then(|wid| ns.router_worker_to_global(&wid))
     }
 
-    /// Activate a service, deactivate it, advance past idle timeout, assert suspended.
-    /// For activation specs with suspend_on_idle=true.
-    pub async fn run_activation_suspend_cycle(&mut self, ns_id: &str, svc_id: &str, wl_id: &str) {
-        self.activate_service(ns_id, svc_id).await;
-        self.deactivate_service(ns_id, svc_id).await;
-        self.advance_past_idle_timeout(ns_id, svc_id).await;
-        self.assert_workload_suspended(ns_id, wl_id);
+    pub fn workload_status(&self, ns_id: &str, wl_name: &str) -> WlStatus {
+        let wl = self.workload_state(ns_id, wl_name);
+        let is_failed = wl.consecutive_failures >= wl.max_retries
+            && (wl.has_demand || wl.committed_to_boot);
+        if is_failed {
+            WlStatus::Failed
+        } else if wl.in_backoff {
+            WlStatus::RetryBackoff
+        } else if wl.awaiting_suspend {
+            WlStatus::Suspending
+        } else if wl.suspended_artifact.is_some() && wl.pod_id.is_none() {
+            WlStatus::Suspended
+        } else if wl.pod_running {
+            WlStatus::Running
+        } else if wl.pod_id.is_some() {
+            WlStatus::Launching
+        } else if !wl.has_spec && (wl.has_demand || wl.committed_to_boot) {
+            WlStatus::WaitingForSpec
+        } else {
+            WlStatus::Dormant
+        }
     }
 
-    /// Same as run_activation_suspend_cycle but asserts dormant (for suspend_on_idle=false specs).
-    pub async fn run_activation_stop_cycle(&mut self, ns_id: &str, svc_id: &str, wl_id: &str) {
-        self.activate_service(ns_id, svc_id).await;
-        self.deactivate_service(ns_id, svc_id).await;
-        self.advance_past_idle_timeout(ns_id, svc_id).await;
-        self.assert_workload_dormant(ns_id, wl_id);
+    pub fn service_status(&self, ns_id: &str, svc_name: &str) -> SvcStatus {
+        let svc = self.service_state_sm(ns_id, svc_name);
+        match &svc.state {
+            ServiceState::Idle => SvcStatus::Idle,
+            ServiceState::NeedBackend => SvcStatus::NeedBackend,
+            ServiceState::Active { .. } => SvcStatus::Active,
+        }
     }
 
-    /// Get the service IP from the namespace spec.
+    /// Stub: workload conditions not tracked in the new system.
+    pub fn workload_conditions(&self, _ns_id: &str, _wl_id: &str) -> std::collections::BTreeMap<String, String> {
+        // New system doesn't have workload conditions. Return empty.
+        // Tests depending on this will fail their assertions.
+        std::collections::BTreeMap::new()
+    }
+
+    /// Stub: service conditions not tracked in the new system.
+    pub fn service_conditions(&self, _ns_id: &str, _svc_id: &str) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::new()
+    }
+
+    // =========================================================================
+    // Service helpers
+    // =========================================================================
+
     pub fn service_ip(&self, ns_id: &str, svc_id: &str) -> std::net::Ipv4Addr {
         let ns = self.namespace(ns_id);
-        ns.spec
-            .services
+        let spec = ns.current_spec().unwrap_or_else(|| {
+            panic!("namespace '{}' has no spec", ns_id)
+        });
+        spec.services
             .get(&ServiceId::from(svc_id))
             .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}' spec", svc_id, ns_id))
             .ip
     }
 
-    /// Send an event to the worker hosting a workload. Panics if workload has no worker.
-    pub fn send_event_to_workload(&self, ns_id: &str, wl_id: &str, event: WorkerEvent) {
-        let worker_id = self
-            .workload_state(ns_id, wl_id)
-            .worker_id()
-            .unwrap_or_else(|| {
-                panic!(
-                    "workload '{}/{}' has no worker (state: {:?})",
-                    ns_id,
-                    wl_id,
-                    self.workload_state(ns_id, wl_id)
-                )
-            })
-            .clone();
-        self.worker(&worker_id).send_event(event);
-    }
-
-    /// Send an event to the worker hosting a service's workload.
-    pub fn send_event_to_service_worker(&self, ns_id: &str, svc_id: &str, event: WorkerEvent) {
+    fn workload_for_service(&self, ns_id: &str, svc_id: &str) -> String {
         let ns = self.namespace(ns_id);
-        let svc = ns
+        let spec = ns.current_spec().unwrap();
+        let svc_spec = spec
             .services
             .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
-        let wl_id = svc.workload_id.0.clone();
-        self.send_event_to_workload(ns_id, &wl_id, event);
+            .unwrap();
+        svc_spec.workload_id.0.clone()
     }
 
-    /// Send a DrainWorker client command for the given worker.
-    pub async fn drain_worker(&mut self, worker_id: &WorkerId) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
-        self.shell
-            .client_command(
-                client_id,
-                ClientCommand::DrainWorker {
-                    worker_id: worker_id.clone(),
-                },
-            )
-            .await;
-    }
-
-    /// Send an UndrainWorker client command for the given worker.
-    pub async fn undrain_worker(&mut self, worker_id: &WorkerId) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
-        self.shell
-            .client_command(
-                client_id,
-                ClientCommand::UndrainWorker {
-                    worker_id: worker_id.clone(),
-                },
-            )
-            .await;
-    }
-
-    /// Send a PressureUpdate event from a worker with the given memory PSI some_avg10 value,
-    /// then converge. CPU and IO PSI default to 0.
-    pub async fn send_pressure_update(&mut self, worker_id: &WorkerId, memory_psi_pct: f64) {
-        self.worker(worker_id).send_event(WorkerEvent::PressureUpdate {
-            cpu: PsiMetrics::default(),
-            memory: PsiMetrics {
-                some_avg10: memory_psi_pct,
-                ..Default::default()
-            },
-            io: PsiMetrics::default(),
-        });
-        self.converge().await;
-    }
-
-    /// Activate a service: send EndpointActivation with the correct IP, converge,
-    /// assert workload running and service active.
-    pub async fn activate_service(&mut self, ns_id: &str, svc_id: &str) {
+    pub fn activate_service(&mut self, ns_id: &str, svc_id: &str) {
+        let namespace_id = NamespaceId::from(ns_id);
         let svc_ip = self.service_ip(ns_id, svc_id);
-        let ns = self.namespace(ns_id);
-        let svc = ns
-            .services
-            .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
-        let wl_id = svc.workload_id.0.clone();
+        let wl_name = self.workload_for_service(ns_id, svc_id);
 
-        // Find target worker: workload's worker if assigned, otherwise first worker
-        // with FabricStatus::Active for this namespace.
-        let worker_id = if let Some(wid) = self.workload_state(ns_id, &wl_id).worker_id() {
-            wid.clone()
-        } else {
-            let ns = self.namespace(ns_id);
-            ns.workers
-                .iter()
-                .find(|(_, ws)| ws.fabric_status == FabricStatus::Active)
-                .map(|(wid, _)| wid.clone())
-                .unwrap_or_else(|| {
-                    // Fall back to first worker in harness
-                    self.workers
-                        .keys()
-                        .next()
-                        .expect("no workers in harness")
-                        .clone()
-                })
-        };
+        let worker_id = *self
+            .shell
+            .worker_ids()
+            .next()
+            .expect("no workers in harness");
 
-        self.worker(&worker_id).send_event(WorkerEvent::EndpointActivation {
-            namespace_id: ns_id.into(),
-            ip: svc_ip,
-            service_id: Some(ServiceId::from(svc_id)),
-        });
-        self.converge().await;
-        self.assert_workload_running(ns_id, &wl_id);
+        self.shell.queue_worker_event(
+            worker_id,
+            WorkerEvent::EndpointActivation {
+                namespace_id,
+                ip: svc_ip,
+                service_id: Some(distvirt_worker_protocol::ServiceId::from(svc_id)),
+            },
+        );
+        self.converge();
+        self.assert_workload_running(ns_id, &wl_name);
         self.assert_service_active(ns_id, svc_id);
     }
 
-    /// Deactivate a service: send ServiceBackendNeed::None to workload's worker, converge.
-    /// Does NOT advance time (caller handles idle timeout if needed).
-    pub async fn deactivate_service(&mut self, ns_id: &str, svc_id: &str) {
-        self.send_event_to_service_worker(
-            ns_id,
-            svc_id,
+    pub fn deactivate_service(&mut self, ns_id: &str, svc_id: &str) {
+        let namespace_id = NamespaceId::from(ns_id);
+
+        let worker_id = *self
+            .shell
+            .worker_ids()
+            .next()
+            .expect("no workers in harness");
+
+        self.shell.queue_worker_event(
+            worker_id,
             WorkerEvent::ServiceBackendNeed {
-                namespace_id: ns_id.into(),
-                service_id: ServiceId::from(svc_id),
-                need: BackendNeed::None,
+                namespace_id,
+                service_id: distvirt_worker_protocol::ServiceId::from(svc_id),
+                need: distvirt_worker_protocol::BackendNeed::None,
             },
         );
-        self.converge().await;
+        self.converge();
     }
 
-    /// Advance time past the service's configured idle timeout, then converge.
-    /// Panics if service has no activation spec.
-    pub async fn advance_past_idle_timeout(&mut self, ns_id: &str, svc_id: &str) {
+    pub fn advance_past_idle_timeout(&mut self, ns_id: &str, svc_id: &str) {
         let ns = self.namespace(ns_id);
-        let svc_spec = ns
-            .spec
+        let spec = ns.current_spec().unwrap();
+        let svc_spec = spec
             .services
             .get(&ServiceId::from(svc_id))
             .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}' spec", svc_id, ns_id));
         let timeout = svc_spec
             .activation
             .as_ref()
-            .unwrap_or_else(|| {
-                panic!(
-                    "service '{}/{}' has no activation spec (needed for idle timeout)",
-                    ns_id, svc_id
-                )
-            })
+            .unwrap_or_else(|| panic!("service '{}/{}' has no activation spec", ns_id, svc_id))
             .idle_timeout;
-        self.advance_time(timeout + Duration::from_secs(1)).await;
+        self.advance_time(timeout + Duration::from_secs(1));
     }
+
+    pub fn run_activation_suspend_cycle(&mut self, ns_id: &str, svc_id: &str, wl_id: &str) {
+        self.activate_service(ns_id, svc_id);
+        self.deactivate_service(ns_id, svc_id);
+        self.advance_past_idle_timeout(ns_id, svc_id);
+        self.assert_workload_suspended(ns_id, wl_id);
+    }
+
+    pub fn run_activation_stop_cycle(&mut self, ns_id: &str, svc_id: &str, wl_id: &str) {
+        self.activate_service(ns_id, svc_id);
+        self.deactivate_service(ns_id, svc_id);
+        self.advance_past_idle_timeout(ns_id, svc_id);
+        self.assert_workload_dormant(ns_id, wl_id);
+    }
+
+    // =========================================================================
+    // Event injection
+    // =========================================================================
+
+    pub fn send_event_to_workload(&self, _ns_id: &str, _wl_id: &str, _event: WorkerEvent) {
+        panic!("send_event_to_workload not implemented for SyncShell harness");
+    }
+
+    pub fn send_event_to_service_worker(&self, _ns_id: &str, _svc_id: &str, _event: WorkerEvent) {
+        panic!("send_event_to_service_worker not implemented for SyncShell harness");
+    }
+
+    pub fn send_pressure_update(&mut self, worker_id: &GlobalWorkerId, memory_psi_pct: f64) {
+        self.shell.inject_pressure_update(
+            *worker_id,
+            PsiMetrics::default(),
+            PsiMetrics {
+                some_avg10: memory_psi_pct,
+                ..Default::default()
+            },
+            PsiMetrics::default(),
+        );
+        self.converge();
+    }
+
+    // =========================================================================
+    // Worker drain (not implemented in new system)
+    // =========================================================================
+
+    pub fn drain_worker(&mut self, _worker_id: &GlobalWorkerId) {
+        panic!("drain_worker not implemented in SyncShell harness");
+    }
+
+    pub fn undrain_worker(&mut self, _worker_id: &GlobalWorkerId) {
+        panic!("undrain_worker not implemented in SyncShell harness");
+    }
+
+    // =========================================================================
+    // Legacy accessors (stubs for compilation)
+    // =========================================================================
+
+    /// Stub returning a dummy struct so scenario code accessing
+    /// `h.orchestrator().workers` etc. compiles (will panic at runtime).
+    pub fn orchestrator(&self) -> OrchestratorStub {
+        OrchestratorStub
+    }
+
+    pub fn orchestrator_mut(&mut self) -> OrchestratorStub {
+        OrchestratorStub
+    }
+
+    // =========================================================================
+    // Worker command inspection
+    // =========================================================================
+
+    pub fn worker_command_count(
+        &self,
+        worker_id: &GlobalWorkerId,
+        predicate: impl Fn(&WorkerCommand) -> bool,
+    ) -> usize {
+        self.shell
+            .worker_commands(worker_id)
+            .iter()
+            .filter(|cmd| predicate(cmd))
+            .count()
+    }
+}
+
+// =============================================================================
+// WorkerProxy — enables h.worker(&wid).send_event(...) and .commands()
+// =============================================================================
+
+pub struct WorkerProxy<'a> {
+    shell: &'a SyncShell,
+    worker_id: GlobalWorkerId,
+    pending_events: &'a RefCell<Vec<(GlobalWorkerId, WorkerEvent)>>,
+}
+
+impl<'a> WorkerProxy<'a> {
+    pub fn send_event(&self, event: WorkerEvent) {
+        self.pending_events.borrow_mut().push((self.worker_id, event));
+    }
+
+    pub fn commands(&self) -> Vec<WorkerCommand> {
+        self.shell.worker_commands(&self.worker_id).to_vec()
+    }
+}
+
+// =============================================================================
+// OrchestratorStub — enables h.orchestrator().workers etc. to compile
+// =============================================================================
+
+pub struct OrchestratorStub;
+
+impl OrchestratorStub {
+    /// Stub: panics at runtime. Scenarios accessing .workers will fail.
+    pub fn __stub_field(&self) -> ! {
+        panic!("orchestrator() stub: direct field access not available in SyncShell harness")
+    }
+}
+
+// Allow `h.orchestrator().workers` to compile via Deref to a type with a workers field.
+// Actually, that's too complex. Instead, we'll provide a `workers` field directly.
+impl OrchestratorStub {
+    // This won't work for field access like `.workers[&w1]`. Instead, tests
+    // that access `h.orchestrator().workers` will fail to compile — which is
+    // acceptable per our policy (failing tests are expected).
 }

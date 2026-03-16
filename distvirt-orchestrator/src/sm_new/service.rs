@@ -4,7 +4,7 @@ use super::*;
 // ---- Service SM ----
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ServiceState {
+pub enum ServiceState {
     /// Has activation, currently idle (no demand signal).
     Idle,
     /// Wants a backend — demand signal is true.
@@ -14,11 +14,11 @@ pub(crate) enum ServiceState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ServiceSm {
-    pub(crate) state: ServiceState,
-    pub(crate) has_activation: bool,
-    pub(crate) idle_generation: u64,
-    pub(crate) idle_timer_active: bool,
+pub struct ServiceSm {
+    pub state: ServiceState,
+    pub has_activation: bool,
+    pub idle_generation: u64,
+    pub idle_timer_active: bool,
 }
 
 impl ServiceSm {

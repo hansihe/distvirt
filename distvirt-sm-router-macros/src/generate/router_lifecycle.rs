@@ -56,7 +56,7 @@ pub(super) fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
                     let id = #id_name(self.id_alloc.alloc(NodeKind::#port_variant, None));
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortCreated {
                         node: #node_str,
-                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                     });
                     self.instances.#instances.insert(id);
                     #state_init
@@ -69,7 +69,7 @@ pub(super) fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
                 fn #method(&mut self, id: #id_type) {
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortCreated {
                         node: #node_str,
-                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                     });
                     self.instances.#instances.insert(id);
                     #state_init
@@ -177,7 +177,7 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
             fn #method(&mut self, id: #id_type) {
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::PortDestroyed {
                     node: #node_str,
-                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                 });
                 self.instances.#instances.remove(&id);
                 #state_remove
@@ -236,7 +236,7 @@ pub(super) fn gen_initialize_methods(def: &TopologyDef, methods: &mut Vec<TokenS
             fn #method(&mut self, id: #id_type) {
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmInitialized {
                     node: #node_str,
-                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                 });
                 let effects = {
                     let sm = self.instances.#instances.get_mut(&id).unwrap();
@@ -284,7 +284,7 @@ pub(super) fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<Token
                 PendingCreate::#variant(new_id, new_sm) => {
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmCreated {
                         node: #node_str,
-                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&new_id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&new_id as &(dyn std::fmt::Debug + Send + Sync)),
                     });
                     self.instances.#instances.insert(new_id, new_sm);
                     #state_init

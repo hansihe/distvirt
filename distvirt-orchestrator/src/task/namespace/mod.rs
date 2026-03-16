@@ -11,7 +11,7 @@ use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig, TimerIdentity};
 use crate::sm_new::{
-    AdminCmd, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
+    AdminCmd, DRouter, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
     SCHEDULE_REQUEST, TIMER,
 };
 use crate::types::{NamespaceId, NamespaceSpec};
@@ -131,6 +131,24 @@ impl IdMaps {
             .get(router)
             .expect("router ArtifactId has no protocol mapping — artifact was never registered at the namespace boundary")
     }
+
+    /// Allocate a new artifact ID pair (proto + router) for a suspend operation.
+    fn create_artifact_id(
+        &mut self,
+    ) -> (
+        distvirt_worker_protocol::ArtifactId,
+        crate::sm_new::ArtifactId,
+    ) {
+        let router_id = crate::sm_new::ArtifactId(self.next_artifact_counter);
+        self.next_artifact_counter += 1;
+        let proto_id =
+            distvirt_worker_protocol::ArtifactId::from(format!("artifact-{}", router_id.0));
+        self.proto_to_router_artifact
+            .insert(proto_id.clone(), router_id);
+        self.router_to_proto_artifact
+            .insert(router_id, proto_id.clone());
+        (proto_id, router_id)
+    }
 }
 
 // =============================================================================
@@ -159,7 +177,7 @@ struct PendingWorker {
 
 struct NamespaceTask {
     namespace_id: NamespaceId,
-    router: Router,
+    router: DRouter,
     adapters: Adapters,
     ids: IdMaps,
 
@@ -661,6 +679,23 @@ impl NamespaceTask {
                     }
                     pods_to_clean.push(pod_id);
                 }
+                PodAssignmentAction::Suspend { worker_id, pod_id } => {
+                    if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
+                        let proto_pod_id =
+                            self.ids.router_to_proto_pod.get(&pod_id).cloned();
+                        if let Some(proto_pod_id) = proto_pod_id {
+                            let (proto_artifact_id, _router_artifact_id) =
+                                self.ids.create_artifact_id();
+                            let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
+                                namespace_id: self.namespace_id.clone(),
+                                pod_id: proto_pod_id,
+                                artifact_id: proto_artifact_id,
+                                pool_id: distvirt_worker_protocol::PoolId::from("default"),
+                            };
+                            commands.push((global_id, cmd));
+                        }
+                    }
+                }
             }
         }
 
@@ -888,7 +923,7 @@ pub(crate) fn spawn(
         reply_tx: scheduler_reply_tx,
     });
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_endpoint(ENDPOINT);

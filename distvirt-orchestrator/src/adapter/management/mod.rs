@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::sm_new::{
-    AdminCmd, ManagementId, Router, ServiceSm, ServiceSpec as SmServiceSpec, WorkloadId,
+    AdminCmd, DRouter, ManagementId, ServiceSm, ServiceSpec as SmServiceSpec, WorkloadId,
     WorkloadSm, WorkloadSpec as SmWorkloadSpec,
 };
 
@@ -48,7 +48,7 @@ impl ManagementAdapter {
     /// Creates/updates/removes workloads and services in the router.
     pub(crate) fn apply_namespace_spec(
         &mut self,
-        router: &mut Router,
+        router: &mut DRouter,
         old: Option<&crate::types::NamespaceSpec>,
         new: &crate::types::NamespaceSpec,
     ) {
@@ -167,7 +167,7 @@ impl ManagementAdapter {
     /// Send an admin command to a workload by protocol name.
     pub(crate) fn send_admin_command(
         &self,
-        router: &mut Router,
+        router: &mut DRouter,
         workload_name: &str,
         cmd: AdminCmd,
     ) {
@@ -181,7 +181,7 @@ impl ManagementAdapter {
     /// Send an activate/deactivate command to a service by protocol name.
     pub(crate) fn send_activate_service(
         &self,
-        router: &mut Router,
+        router: &mut DRouter,
         service_name: &str,
         active: bool,
     ) {
@@ -199,6 +199,7 @@ impl ManagementAdapter {
                 .first()
                 .map(|c| c.image_ref.clone())
                 .unwrap_or_default(),
+            suspend_on_idle: spec.suspend_on_idle,
         }
     }
 

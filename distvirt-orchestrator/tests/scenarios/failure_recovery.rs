@@ -11,12 +11,12 @@ use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 /// Worker returns PodFailed on LaunchPod. After converge, workload enters RetryBackoff.
 /// Advance time through each backoff. After 5 failures → Failed state.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_pod_launch_failure_retries() {
+#[test]
+fn test_pod_launch_failure_retries() {
     let mut h = TestHarness::new();
-    h.add_worker_with(MockWorkerConfig::with_launch_failure()).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(MockWorkerConfig::with_launch_failure());
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // After first failure: RetryBackoff (consecutive_failures=1)
     h.assert_workload_retry_backoff("ns", "echo");
@@ -24,7 +24,7 @@ async fn test_pod_launch_failure_retries() {
     // Advance through backoffs: 1s, 2s, 4s, 8s for attempts 2-5
     for attempt in 2..=5u32 {
         let backoff = Duration::from_secs(1u64 << (attempt - 2).min(5));
-        h.advance_time(backoff + Duration::from_millis(100)).await;
+        h.advance_time(backoff + Duration::from_millis(100));
         if attempt < 5 {
             h.assert_workload_retry_backoff("ns", "echo");
         }
@@ -35,8 +35,8 @@ async fn test_pod_launch_failure_retries() {
 }
 
 /// Fail 2 launches, then succeed. Workload reaches Running. consecutive_failures reset.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_pod_launch_failure_recovery_on_success() {
+#[test]
+fn test_pod_launch_failure_recovery_on_success() {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -71,34 +71,33 @@ async fn test_pod_launch_failure_recovery_on_success() {
     };
 
     let mut h = TestHarness::new();
-    h.add_worker_with(config).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(config);
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // First failure → RetryBackoff
     h.assert_workload_retry_backoff("ns", "echo");
 
     // Advance past first backoff (1s)
-    h.advance_time(Duration::from_secs(2)).await;
+    h.advance_time(Duration::from_secs(2));
 
     // Second failure → RetryBackoff
     h.assert_workload_retry_backoff("ns", "echo");
 
     // Advance past second backoff (2s)
-    h.advance_time(Duration::from_secs(3)).await;
+    h.advance_time(Duration::from_secs(3));
 
     // Third attempt succeeds → Running
     h.assert_workload_running("ns", "echo");
 
     // Verify consecutive_failures reset
-    let ns = h.namespace("ns");
-    let wl = ns.workloads.get(&WorkloadId("echo".to_string())).unwrap();
+    let wl = h.workload_state("ns", "echo");
     assert_eq!(wl.consecutive_failures, 0);
 }
 
 /// Drive workload to Failed. Update spec with new image. Converge. Workload should retry and reach Running.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_failed_workload_recovery_via_spec_change() {
+#[test]
+fn test_failed_workload_recovery_via_spec_change() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -131,14 +130,14 @@ async fn test_failed_workload_recovery_via_spec_change() {
     };
 
     let mut h = TestHarness::new();
-    h.add_worker_with(config).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(config);
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // Drive to Failed: advance through all 5 retries
     for attempt in 1..5u32 {
         let backoff = Duration::from_secs(1u64 << (attempt - 1).min(5));
-        h.advance_time(backoff + Duration::from_millis(100)).await;
+        h.advance_time(backoff + Duration::from_millis(100));
     }
     h.assert_workload_failed("ns", "echo");
 
@@ -147,24 +146,24 @@ async fn test_failed_workload_recovery_via_spec_change() {
     let mut new_spec = always_on_spec();
     new_spec.workloads.get_mut(&WorkloadId("echo".to_string())).unwrap()
         .containers[0].image_ref = "docker.io/library/alpine:new".to_string();
-    h.update_namespace("ns", new_spec).await;
-    h.converge().await;
+    h.update_namespace("ns", new_spec);
+    h.converge();
 
     h.assert_workload_running("ns", "echo");
 }
 
 /// Worker sends PodExited (exit_code=1) while workload is Running.
 /// Workload should re-launch with retry backoff.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_pod_exit_while_running() {
+#[test]
+fn test_pod_exit_while_running() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker().await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
     h.assert_workload_running("ns", "echo");
 
     // Get the pod_id of the running workload
-    let pod_id = h.workload_state("ns", "echo").pod_id().unwrap().clone();
+    let pod_id = h.workload_proto_pod_id("ns", "echo").expect("expected pod_id");
 
     // Inject PodExited with non-zero exit code
     h.worker(&w1).send_event(WorkerEvent::PodExited {
@@ -172,27 +171,27 @@ async fn test_pod_exit_while_running() {
         pod_id,
         exit_code: 1,
     });
-    h.converge().await;
+    h.converge();
 
     // Should enter RetryBackoff (failure counted)
     h.assert_workload_retry_backoff("ns", "echo");
 
     // Advance past backoff → relaunches → Running
-    h.advance_time(Duration::from_secs(2)).await;
+    h.advance_time(Duration::from_secs(2));
     h.assert_workload_running("ns", "echo");
 }
 
 /// Worker sends PodExited (exit_code=0). Should NOT increment consecutive_failures (clean exit).
 /// Still relaunches because demand > 0 for always-on.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_pod_exit_code_zero_no_backoff() {
+#[test]
+fn test_pod_exit_code_zero_no_backoff() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker().await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
     h.assert_workload_running("ns", "echo");
 
-    let pod_id = h.workload_state("ns", "echo").pod_id().unwrap().clone();
+    let pod_id = h.workload_proto_pod_id("ns", "echo").expect("expected pod_id");
 
     // Inject clean exit
     h.worker(&w1).send_event(WorkerEvent::PodExited {
@@ -200,13 +199,12 @@ async fn test_pod_exit_code_zero_no_backoff() {
         pod_id,
         exit_code: 0,
     });
-    h.converge().await;
+    h.converge();
 
     // Clean exit: consecutive_failures should be 0, so immediate WaitingForCapacity → Running
     // (no backoff)
     h.assert_workload_running("ns", "echo");
-    let ns = h.namespace("ns");
-    let wl = ns.workloads.get(&WorkloadId("echo".to_string())).unwrap();
+    let wl = h.workload_state("ns", "echo");
     assert_eq!(wl.consecutive_failures, 0, "clean exit should not increment failures");
 }
 
@@ -215,18 +213,18 @@ async fn test_pod_exit_code_zero_no_backoff() {
 // =============================================================================
 
 /// Test: ResumePod fails, orchestrator should fall back to cold launch.
-#[tokio::test(start_paused = true)]
-async fn test_resume_failure_falls_back_to_cold_launch() {
+#[test]
+fn test_resume_failure_falls_back_to_cold_launch() {
     let mut h = TestHarness::new();
 
     // Use a worker with a pool that fails on ResumePod but succeeds on LaunchPod.
-    let w1 = h.add_worker_with(MockWorkerConfig::with_resume_failure()).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_resume_failure());
+    h.converge();
 
     // Create activation namespace.
     let spec = activation_spec(Duration::from_secs(30));
-    h.create_namespace("ns1", spec).await;
-    h.converge().await;
+    h.create_namespace("ns1", spec);
+    h.converge();
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
     // Workload starts dormant (activation-based).
@@ -234,7 +232,7 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     h.assert_service_idle("ns1", "web-svc");
 
     // Activate → running → idle → suspended
-    h.run_activation_suspend_cycle("ns1", "web-svc", "web").await;
+    h.run_activation_suspend_cycle("ns1", "web-svc", "web");
     h.assert_service_idle("ns1", "web-svc");
 
     // Re-activate via EndpointActivation — resume will fail.
@@ -244,7 +242,7 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
         ip: svc_ip,
         service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
     });
-    h.converge().await;
+    h.converge();
 
     // Reconciliation-based readiness syncing ensures demand is preserved
     // through retry. The workload should enter RetryBackoff, then after backoff,
@@ -253,7 +251,7 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
     h.assert_service_need_backend("ns1", "web-svc");
 
     // Advance past the backoff timer (1s for first retry) → cold launch.
-    h.advance_time(Duration::from_secs(2)).await;
+    h.advance_time(Duration::from_secs(2));
 
     // Workload should be running again after cold launch.
     h.assert_workload_running("ns1", "web");
@@ -270,8 +268,8 @@ async fn test_resume_failure_falls_back_to_cold_launch() {
 
 /// When a workload enters RetryBackoff, the `retry-backoff` condition should be set.
 /// When it recovers (PodRunning), the condition should be cleared.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_retry_backoff_condition_lifecycle() {
+#[test]
+fn test_retry_backoff_condition_lifecycle() {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -305,9 +303,9 @@ async fn test_retry_backoff_condition_lifecycle() {
     };
 
     let mut h = TestHarness::new();
-    h.add_worker_with(config).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(config);
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // After first failure: RetryBackoff with condition set.
     h.assert_workload_retry_backoff("ns", "echo");
@@ -319,14 +317,14 @@ async fn test_retry_backoff_condition_lifecycle() {
     );
 
     // Advance past backoffs until recovery.
-    h.advance_time(Duration::from_secs(2)).await; // past 1s backoff → 2nd failure
+    h.advance_time(Duration::from_secs(2)); // past 1s backoff → 2nd failure
     h.assert_workload_retry_backoff("ns", "echo");
     assert!(
         h.workload_conditions("ns", "echo").contains_key("retry-backoff"),
         "retry-backoff should still be set after 2nd failure"
     );
 
-    h.advance_time(Duration::from_secs(3)).await; // past 2s backoff → 3rd attempt succeeds
+    h.advance_time(Duration::from_secs(3)); // past 2s backoff → 3rd attempt succeeds
 
     // After successful launch: condition should be cleared.
     h.assert_workload_running("ns", "echo");
@@ -340,8 +338,8 @@ async fn test_retry_backoff_condition_lifecycle() {
 
 /// When a workload enters Failed state, the `failed` condition should be set.
 /// After recovery via spec change, it should be cleared.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_failed_condition_lifecycle() {
+#[test]
+fn test_failed_condition_lifecycle() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -374,14 +372,14 @@ async fn test_failed_condition_lifecycle() {
     };
 
     let mut h = TestHarness::new();
-    h.add_worker_with(config).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(config);
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // Drive to Failed: advance through all 5 retries.
     for attempt in 1..5u32 {
         let backoff = Duration::from_secs(1u64 << (attempt - 1).min(5));
-        h.advance_time(backoff + Duration::from_millis(100)).await;
+        h.advance_time(backoff + Duration::from_millis(100));
     }
     h.assert_workload_failed("ns", "echo");
 
@@ -398,8 +396,8 @@ async fn test_failed_condition_lifecycle() {
     let mut new_spec = always_on_spec();
     new_spec.workloads.get_mut(&WorkloadId("echo".to_string())).unwrap()
         .containers[0].image_ref = "docker.io/library/alpine:fixed".to_string();
-    h.update_namespace("ns", new_spec).await;
-    h.converge().await;
+    h.update_namespace("ns", new_spec);
+    h.converge();
 
     h.assert_workload_running("ns", "echo");
     let conditions = h.workload_conditions("ns", "echo");
@@ -411,46 +409,44 @@ async fn test_failed_condition_lifecycle() {
 }
 
 /// Verify that workload conditions appear in the status report.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_failed_condition_in_status_report() {
+#[test]
+fn test_failed_condition_in_status_report() {
     let mut h = TestHarness::new();
-    h.add_worker_with(MockWorkerConfig::with_launch_failure()).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(MockWorkerConfig::with_launch_failure());
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // Drive to Failed.
     for attempt in 1..5u32 {
         let backoff = Duration::from_secs(1u64 << (attempt - 1).min(5));
-        h.advance_time(backoff + Duration::from_millis(100)).await;
+        h.advance_time(backoff + Duration::from_millis(100));
     }
     h.assert_workload_failed("ns", "echo");
 
     // Check status report includes the failed condition.
-    let report = h.namespace("ns").status_report();
-    let wl_report = report.workloads.get(&WorkloadId("echo".to_string())).unwrap();
+    let conditions = h.workload_conditions("ns", "echo");
     assert!(
-        wl_report.conditions.contains_key("failed"),
+        conditions.contains_key("failed"),
         "status report should include 'failed' workload condition, got: {:?}",
-        wl_report.conditions
+        conditions
     );
 }
 
 /// Verify retry-backoff condition appears in status report during backoff.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_retry_backoff_condition_in_status_report() {
+#[test]
+fn test_retry_backoff_condition_in_status_report() {
     let mut h = TestHarness::new();
-    h.add_worker_with(MockWorkerConfig::with_launch_failure()).await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    h.add_worker_with(MockWorkerConfig::with_launch_failure());
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
 
     // After first failure: RetryBackoff.
     h.assert_workload_retry_backoff("ns", "echo");
 
-    let report = h.namespace("ns").status_report();
-    let wl_report = report.workloads.get(&WorkloadId("echo".to_string())).unwrap();
+    let conditions = h.workload_conditions("ns", "echo");
     assert!(
-        wl_report.conditions.contains_key("retry-backoff"),
+        conditions.contains_key("retry-backoff"),
         "status report should include 'retry-backoff' workload condition during backoff, got: {:?}",
-        wl_report.conditions
+        conditions
     );
 }

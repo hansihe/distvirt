@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{BackendNeedId, Router, ServiceId, WorkerId};
+use crate::sm_new::{BackendNeedId, DRouter, ServiceId, WorkerId};
 
 #[cfg(test)]
 mod tests;
@@ -29,7 +29,7 @@ impl BackendNeedAdapter {
     /// doesn't exist, then sets the level signal.
     pub(crate) fn push_need(
         &mut self,
-        router: &mut Router,
+        router: &mut DRouter,
         worker_id: WorkerId,
         service_id: ServiceId,
         need: crate::sm_new::BackendNeed,
@@ -45,7 +45,7 @@ impl BackendNeedAdapter {
 
     /// Remove all BackendNeed ports for a disconnected worker.
     /// The signal naturally falls away on the services.
-    pub(crate) fn remove_worker(&mut self, router: &mut Router, worker_id: &WorkerId) {
+    pub(crate) fn remove_worker(&mut self, router: &mut DRouter, worker_id: &WorkerId) {
         let to_remove: Vec<(WorkerId, ServiceId)> = self
             .ports
             .keys()

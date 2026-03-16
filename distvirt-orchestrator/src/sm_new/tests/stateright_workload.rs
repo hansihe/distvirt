@@ -64,7 +64,9 @@ struct WlNewModel {
     num_services: usize,
     /// Whether to inject pod failures.
     enable_pod_failure: bool,
-    /// Whether to enable suspend-on-idle behavior.
+    /// Whether to enable suspend-on-idle spec toggling.
+    /// When true, the model can deliver specs with suspend_on_idle=true and
+    /// toggle it at runtime via ToggleSuspendOnIdle action.
     enable_suspend: bool,
 }
 
@@ -102,8 +104,10 @@ enum WlNewAction {
     SetDemand { count: u32 },
     /// Deliver initial spec (delivers SpecInput(Some)).
     DeliverSpec,
-    /// Change spec (delivers SpecInput(Some) with new image, bumps version).
-    ChangeSpec,
+    /// Change image in spec (delivers SpecInput(Some) with new image, bumps version).
+    ChangeImage,
+    /// Toggle suspend_on_idle in spec (delivers SpecInput(Some) with same image).
+    ToggleSuspendOnIdle,
     /// Remove spec (delivers SpecInput(None)) — triggers self-destruct.
     RemoveSpec,
     /// Pod transitions to Running (delivers PodStatusInput([Running])).
@@ -213,6 +217,14 @@ fn make_demand(count: u32) -> DemandInfo {
     }
 }
 
+/// Build a WorkloadSpec with the given image and the current SM's suspend_on_idle.
+fn make_spec(image: &str, suspend_on_idle: bool) -> WorkloadSpec {
+    WorkloadSpec {
+        image: image.into(),
+        suspend_on_idle,
+    }
+}
+
 // ============================================================================
 // Model implementation
 // ============================================================================
@@ -222,14 +234,8 @@ impl Model for WlNewModel {
     type Action = WlNewAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        
-        let sm = if self.enable_suspend {
-            WorkloadSm::new_suspendable()
-        } else {
-            WorkloadSm::new()
-        };
         vec![WlNewModelState {
-            sm,
+            sm: WorkloadSm::new(),
             pod_env: PodEnvState::None,
             demand_count: 0,
             spec_present: false,
@@ -261,10 +267,15 @@ impl Model for WlNewModel {
             actions.push(WlNewAction::RemoveSpec);
 
             if state.sm.has_demand || state.sm.pod_id.is_some() || state.sm.committed_to_boot {
-                // Only explore spec changes when the SM has something active.
-                // Changing spec while fully dormant has no behavioral effect
+                // Only explore image changes when the SM has something active.
+                // Changing image while fully dormant has no behavioral effect
                 // beyond bumping spec_version, which Representative normalizes.
-                actions.push(WlNewAction::ChangeSpec);
+                actions.push(WlNewAction::ChangeImage);
+            }
+
+            // Toggle suspend_on_idle via spec change.
+            if self.enable_suspend {
+                actions.push(WlNewAction::ToggleSuspendOnIdle);
             }
         }
 
@@ -320,25 +331,44 @@ impl Model for WlNewModel {
                 s
             }
             WlNewAction::DeliverSpec => {
+                // Initial spec delivery. When enable_suspend, start with
+                // suspend_on_idle=true to exercise suspend paths from the start.
+                let suspend = self.enable_suspend;
                 let mut s = apply_input(
                     state,
                     WorkloadInput::SpecInput(Some((
                         ManagementId(0),
-                        WorkloadSpec { image: "app:v1".into() },
+                        make_spec("app:v1", suspend),
                     ))),
                 );
                 s.spec_present = true;
                 s
             }
-            WlNewAction::ChangeSpec => {
-                let s = apply_input(
+            WlNewAction::ChangeImage => {
+                // Toggle between v1 and v2 to always produce a different image.
+                let new_image = if state.sm.current_image.as_deref() == Some("app:v1") {
+                    "app:v2"
+                } else {
+                    "app:v1"
+                };
+                apply_input(
                     state,
                     WorkloadInput::SpecInput(Some((
                         ManagementId(0),
-                        WorkloadSpec { image: "app:v2".into() },
+                        make_spec(new_image, state.sm.suspend_on_idle),
                     ))),
-                );
-                s
+                )
+            }
+            WlNewAction::ToggleSuspendOnIdle => {
+                // Same image, flipped suspend_on_idle.
+                let current_image = state.sm.current_image.clone().unwrap_or_default();
+                apply_input(
+                    state,
+                    WorkloadInput::SpecInput(Some((
+                        ManagementId(0),
+                        make_spec(&current_image, !state.sm.suspend_on_idle),
+                    ))),
+                )
             }
             WlNewAction::RemoveSpec => {
                 let mut s = apply_input(
@@ -526,6 +556,19 @@ impl Model for WlNewModel {
                     true
                 }
             }),
+            // Safety: suspend_on_idle=false implies no artifact and no awaiting_suspend.
+            // When suspend is disabled, there should never be suspend-related state.
+            Property::<Self>::always("no suspend state when disabled", |_model, state| {
+                if state.self_destructed { return true; }
+                if !state.sm.suspend_on_idle {
+                    // awaiting_suspend could briefly be true if we just toggled
+                    // suspend_on_idle off — but destroy_current_pod clears it.
+                    // suspended_artifact is cleared on true→false transition.
+                    state.sm.suspended_artifact.is_none() && !state.sm.awaiting_suspend
+                } else {
+                    true
+                }
+            }),
             // Liveness: every path to a terminal state ends in self-destruct.
             // Verifies no other stuck states exist.
             Property::<Self>::eventually("eventually self-destructs", |_model, state| {
@@ -551,6 +594,13 @@ impl Model for WlNewModel {
         if self.enable_pod_failure {
             props.push(Property::<Self>::sometimes("can recover from failed", |_model, state| {
                 state.was_ever_max_retries && state.sm.pod_running
+            }));
+        }
+
+        // Reachability: can reach suspended state (only with suspend enabled).
+        if self.enable_suspend {
+            props.push(Property::<Self>::sometimes("can reach suspended", |_model, state| {
+                state.sm.suspended_artifact.is_some()
             }));
         }
 
@@ -624,6 +674,13 @@ impl Representative for WlNewModelState {
         // value doesn't affect SM decision-making.
         if let Some(_) = s.sm.pod_worker_id {
             s.sm.pod_worker_id = Some(WorkerId(0));
+        }
+
+        // current_image: the SM only checks whether the delivered image differs
+        // from current_image. The model's ChangeImage action always toggles, so
+        // the actual string value doesn't matter — only Some vs None.
+        if let Some(_) = s.sm.current_image {
+            s.sm.current_image = Some(String::new());
         }
 
         s

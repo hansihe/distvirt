@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+#[allow(unused_imports)]
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
 
@@ -13,12 +14,12 @@ use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEven
 /// wasn't synced when demand went from 1→2 while Running.
 /// Fixed: reconcile_readiness sends WorkloadReady to services in NeedBackend
 /// when the workload is already Running.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_two_services_one_workload_shared_demand() {
+#[test]
+fn test_two_services_one_workload_shared_demand() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", multi_service_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", multi_service_spec());
+    h.converge();
     h.assert_workload_dormant("ns", "shared");
     h.assert_service_idle("ns", "svc-a");
     h.assert_service_idle("ns", "svc-b");
@@ -29,7 +30,7 @@ async fn test_two_services_one_workload_shared_demand() {
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(ServiceId::from("svc-a")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
@@ -39,7 +40,7 @@ async fn test_two_services_one_workload_shared_demand() {
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(ServiceId::from("svc-b")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
@@ -53,21 +54,21 @@ async fn test_two_services_one_workload_shared_demand() {
         service_id: ServiceId::from("svc-a"),
         need: BackendNeed::None,
     });
-    h.converge().await;
+    h.converge();
     let timeout = Duration::from_secs(30);
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    h.advance_time(timeout + Duration::from_secs(1));
     // Workload should still be running (demand_count=1 from svc-b's DemandUp)
     h.assert_workload_running("ns", "shared");
 }
 
 /// Workload already running via svc-a. svc-b activates. No state change in workload.
 /// svc-b receives late-joiner WorkloadReady and transitions to Active.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_service_activation_while_already_running() {
+#[test]
+fn test_service_activation_while_already_running() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", multi_service_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", multi_service_spec());
+    h.converge();
 
     // Activate svc-a
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
@@ -75,12 +76,12 @@ async fn test_service_activation_while_already_running() {
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(ServiceId::from("svc-a")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
     // Capture pod_id
-    let pod_id_before = h.workload_state("ns", "shared").pod_id().unwrap().clone();
+    let pod_id_before = h.workload_state("ns", "shared").pod_id;
 
     // Activate svc-b while already running
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
@@ -88,11 +89,11 @@ async fn test_service_activation_while_already_running() {
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(ServiceId::from("svc-b")),
     });
-    h.converge().await;
+    h.converge();
 
     // Still running with same pod
     h.assert_workload_running("ns", "shared");
-    let pod_id_after = h.workload_state("ns", "shared").pod_id().unwrap().clone();
+    let pod_id_after = h.workload_state("ns", "shared").pod_id;
     assert_eq!(pod_id_before, pod_id_after, "pod should not have changed");
 
     // svc-a is still Active
@@ -107,12 +108,12 @@ async fn test_service_activation_while_already_running() {
 
 /// Issue 1+4: Two always-on services on one workload.
 /// Both services should get CreateService on the worker, not just the first one found.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_always_on_multi_service_both_get_create_service() {
+#[test]
+fn test_always_on_multi_service_both_get_create_service() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker().await;
-    h.create_namespace("ns", always_on_multi_service_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.create_namespace("ns", always_on_multi_service_spec());
+    h.converge();
 
     // Workload should be running (always-on).
     h.assert_workload_running("ns", "shared");
@@ -137,12 +138,12 @@ async fn test_always_on_multi_service_both_get_create_service() {
 
 /// Issue 3: Add a new service to a workload that is already Running via spec update.
 /// The new service should transition through to Active (workload is already up).
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_add_service_to_running_workload() {
+#[test]
+fn test_add_service_to_running_workload() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker().await;
-    h.create_namespace("ns", always_on_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
     h.assert_workload_running("ns", "echo");
     h.assert_service_active("ns", "echo-svc");
 
@@ -161,8 +162,8 @@ async fn test_add_service_to_running_workload() {
             activation: None,
         },
     );
-    h.update_namespace("ns", new_spec).await;
-    h.converge().await;
+    h.update_namespace("ns", new_spec);
+    h.converge();
 
     // Workload should still be running (no restart).
     h.assert_workload_running("ns", "echo");
@@ -188,13 +189,13 @@ async fn test_add_service_to_running_workload() {
 
 /// Issue 3: Add a new activation service to a workload that is Suspended.
 /// The new service should become Idle and CreateService should be sent to workers.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_add_service_to_suspended_workload() {
+#[test]
+fn test_add_service_to_suspended_workload() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout)).await;
-    h.converge().await;
+    h.create_namespace("ns", activation_spec(timeout));
+    h.converge();
 
     // Activate → running → idle → suspended
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
@@ -202,7 +203,7 @@ async fn test_add_service_to_suspended_workload() {
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(ServiceId::from("web-svc")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "web");
 
     h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
@@ -210,8 +211,8 @@ async fn test_add_service_to_suspended_workload() {
         service_id: ServiceId::from("web-svc"),
         need: BackendNeed::None,
     });
-    h.converge().await;
-    h.advance_time(timeout + Duration::from_secs(1)).await;
+    h.converge();
+    h.advance_time(timeout + Duration::from_secs(1));
     h.assert_workload_suspended("ns", "web");
     h.assert_service_idle("ns", "web-svc");
 
@@ -236,8 +237,8 @@ async fn test_add_service_to_suspended_workload() {
             }),
         },
     );
-    h.update_namespace("ns", new_spec).await;
-    h.converge().await;
+    h.update_namespace("ns", new_spec);
+    h.converge();
 
     // New service should be Idle (activation service, workload is Suspended).
     h.assert_service_idle("ns", "web-svc-2");
@@ -261,24 +262,24 @@ async fn test_add_service_to_suspended_workload() {
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(ServiceId::from("web-svc-2")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "web");
     h.assert_service_active("ns", "web-svc-2");
 }
 
 /// Issue 5: A second worker joins an active namespace.
 /// It should receive CreateService for all services that are already past Pending.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_late_joining_worker_receives_create_service() {
+#[test]
+fn test_late_joining_worker_receives_create_service() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker().await;
-    h.create_namespace("ns", always_on_multi_service_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.create_namespace("ns", always_on_multi_service_spec());
+    h.converge();
     h.assert_workload_running("ns", "shared");
 
     // Add a second worker.
-    let w2 = h.add_worker().await;
-    h.converge().await;
+    let w2 = h.add_worker();
+    h.converge();
 
     // The second worker should have received EndpointSync with all endpoints.
     h.assert_worker_received_command_matching(
@@ -296,12 +297,12 @@ async fn test_late_joining_worker_receives_create_service() {
 
 /// Issue 6: Remove one service from a workload that has two activation services.
 /// The remaining service should still function and demand should be correct.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_remove_service_updates_demand() {
+#[test]
+fn test_remove_service_updates_demand() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", multi_service_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", multi_service_spec());
+    h.converge();
 
     // Activate both services.
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
@@ -309,13 +310,13 @@ async fn test_remove_service_updates_demand() {
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(ServiceId::from("svc-a")),
     });
-    h.converge().await;
+    h.converge();
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(ServiceId::from("svc-b")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
     h.assert_service_active("ns", "svc-b");
@@ -323,8 +324,8 @@ async fn test_remove_service_updates_demand() {
     // Remove svc-b via spec update.
     let mut new_spec = multi_service_spec();
     new_spec.services.remove(&ServiceId::from("svc-b"));
-    h.update_namespace("ns", new_spec).await;
-    h.converge().await;
+    h.update_namespace("ns", new_spec);
+    h.converge();
 
     // Workload should still be running (svc-a still has demand).
     h.assert_workload_running("ns", "shared");
@@ -342,20 +343,21 @@ async fn test_remove_service_updates_demand() {
 
     // svc-b should no longer exist in the namespace.
     let ns = h.namespace("ns");
+    let spec = ns.current_spec().unwrap();
     assert!(
-        !ns.services.contains_key(&ServiceId::from("svc-b")),
+        !spec.services.contains_key(&ServiceId::from("svc-b")),
         "removed service 'svc-b' should not exist"
     );
 }
 
 /// Issue 6 edge case: Remove the ONLY remaining demanding service.
 /// Workload should eventually go idle/dormant.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_remove_only_active_service_drops_demand() {
+#[test]
+fn test_remove_only_active_service_drops_demand() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", multi_service_spec()).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", multi_service_spec());
+    h.converge();
 
     // Activate svc-a only.
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
@@ -363,7 +365,7 @@ async fn test_remove_only_active_service_drops_demand() {
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(ServiceId::from("svc-a")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
     h.assert_service_idle("ns", "svc-b");
@@ -371,15 +373,15 @@ async fn test_remove_only_active_service_drops_demand() {
     // Remove svc-a (the only service with demand) via spec update.
     let mut new_spec = multi_service_spec();
     new_spec.services.remove(&ServiceId::from("svc-a"));
-    h.update_namespace("ns", new_spec).await;
-    h.converge().await;
+    h.update_namespace("ns", new_spec);
+    h.converge();
 
     // Service removal should immediately drop demand to 0 via reconciliation
     // (no idle timer involved — the service is gone, not idling).
     // suspend_on_idle=true → workload should begin suspending/suspended immediately.
     let state = h.workload_state("ns", "shared");
     assert!(
-        matches!(state, WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. } | WorkloadState::Suspended { .. }),
+        state.awaiting_suspend || state.suspended_artifact.is_some() || (!state.has_demand && !state.pod_running),
         "workload should begin deactivation immediately after service removal, got {:?}",
         state,
     );

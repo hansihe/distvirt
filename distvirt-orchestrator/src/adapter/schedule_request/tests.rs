@@ -1,6 +1,6 @@
 use super::*;
 use crate::sm_new::{
-    Router, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
     SCHEDULE_REQUEST, TIMER,
 };
 
@@ -9,7 +9,7 @@ const S1: crate::sm_new::ServiceId = crate::sm_new::ServiceId(1);
 
 /// Set up a router with a workload (always-on service), propagate initial state.
 /// Returns (worker, pod_id).
-fn setup_workload(router: &mut Router) -> (crate::sm_new::WorkerId, PodId) {
+fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -18,7 +18,7 @@ fn setup_workload(router: &mut Router) -> (crate::sm_new::WorkerId, PodId) {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -41,7 +41,7 @@ fn setup_workload(router: &mut Router) -> (crate::sm_new::WorkerId, PodId) {
 
 #[test]
 fn no_requests_no_deltas() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_schedule_request(SCHEDULE_REQUEST);
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
@@ -56,7 +56,7 @@ fn no_requests_no_deltas() {
 
 #[test]
 fn new_pod_request_delta() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let (_worker, pod_id) = setup_workload(&mut router);
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
@@ -83,7 +83,7 @@ fn new_pod_request_delta() {
 
 #[test]
 fn pod_removed_drop_delta() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let (worker, pod_id) = setup_workload(&mut router);
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
@@ -123,7 +123,7 @@ fn pod_removed_drop_delta() {
 
 #[test]
 fn stable_state_no_deltas() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let (_worker, _pod_id) = setup_workload(&mut router);
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
@@ -146,7 +146,7 @@ fn stable_state_no_deltas() {
 
 #[test]
 fn multiple_pods_change() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -159,7 +159,7 @@ fn multiple_pods_change() {
     let mgmt1 = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt1, vec![W1]);
-    router.set_management_wl_spec(mgmt1, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt1, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
@@ -173,7 +173,7 @@ fn multiple_pods_change() {
     let mgmt2 = router.create_management();
     router.create_workload(w2_id, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt2, vec![w2_id]);
-    router.set_management_wl_spec(mgmt2, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(mgmt2, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
     router.create_service(s2_id, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(

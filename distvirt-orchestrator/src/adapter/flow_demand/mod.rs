@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{BackendNeedId, Router, ServiceId, WorkerId};
+use crate::sm_new::{BackendNeedId, DRouter, ServiceId, WorkerId};
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +30,7 @@ impl FlowDemandAdapter {
     /// port if it doesn't exist, then sets the level to Traffic.
     pub(crate) fn set_active(
         &mut self,
-        router: &mut Router,
+        router: &mut DRouter,
         worker_id: WorkerId,
         service_id: ServiceId,
     ) {
@@ -47,7 +47,7 @@ impl FlowDemandAdapter {
     /// but keeps the port (it will be removed on worker disconnect).
     pub(crate) fn set_inactive(
         &mut self,
-        router: &mut Router,
+        router: &mut DRouter,
         worker_id: WorkerId,
         service_id: ServiceId,
     ) {
@@ -58,7 +58,7 @@ impl FlowDemandAdapter {
     }
 
     /// Remove all flow demand ports for a disconnected worker.
-    pub(crate) fn remove_worker(&mut self, router: &mut Router, worker_id: &WorkerId) {
+    pub(crate) fn remove_worker(&mut self, router: &mut DRouter, worker_id: &WorkerId) {
         let to_remove: Vec<(WorkerId, ServiceId)> = self
             .ports
             .keys()

@@ -23,7 +23,7 @@
 //!   Implements `Display` for human-readable indented tree output.
 //! - [`RingTracer`]: Bounded rolling buffer. Always recording, oldest events
 //!   evicted. Use `.snapshot()` to grab current contents on error.
-//! - [`PanicTracer`]: Wraps any tracer and auto-dumps the trace on panic
+//! - [`PanicTracer`]: Recording tracer that auto-dumps the trace on panic
 //!   (via `Drop` + `std::thread::panicking()`).
 //!
 //! ## Utilities
@@ -122,8 +122,7 @@
 //!   formatting cost.
 //!
 //! - **Multiplexing**: A `TeeTracer<A, B>` that forwards each event to two
-//!   inner tracers. With a single `trace()` method this is straightforward —
-//!   clone the owned event or use `clone_as_event` to re-borrow.
+//!   inner tracers. With a single `trace()` method this is straightforward.
 
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Display, Write as FmtWrite};
@@ -137,7 +136,7 @@ use std::fmt::{self, Debug, Display, Write as FmtWrite};
 /// Used inside [`TraceEvent`] for all dynamic values (IDs, signal values).
 /// Formatting is deferred until [`DebugValue::into_owned`] or display.
 pub enum DebugValue<'a> {
-    Borrowed(&'a dyn Debug),
+    Borrowed(&'a (dyn Debug + Send + Sync)),
     Owned(String),
 }
 
@@ -793,197 +792,71 @@ impl fmt::Display for RingTracer {
 // PanicTracer — auto-dump on panic
 // ============================================================================
 
-/// Wraps any tracer and prints the trace to stderr if the thread is panicking
-/// when this tracer is dropped.
+/// Recording tracer that auto-dumps to stderr on panic.
 ///
 /// Usage in tests:
 /// ```rust,ignore
-/// let tracer = PanicTracer::new(RecordingTracer::new());
+/// let tracer = PanicTracer::new();
 /// let mut router = Router::new_traced(16, tracer);
 /// // ... if any assertion fails, the trace is printed automatically
 /// ```
-pub struct PanicTracer<T: Tracer> {
-    inner: T,
-    /// Shadow recording for display on panic. We always record so we have
-    /// something to print even if the inner tracer filters events.
-    shadow: Vec<TraceEvent<'static>>,
+pub struct PanicTracer {
+    entries: Vec<TraceEvent<'static>>,
 }
 
-impl<T: Tracer> PanicTracer<T> {
-    pub fn new(inner: T) -> Self {
+impl PanicTracer {
+    pub fn new() -> Self {
         PanicTracer {
-            inner,
-            shadow: Vec::new(),
+            entries: Vec::new(),
         }
     }
 
-    /// Access the inner tracer.
-    pub fn inner(&self) -> &T {
-        &self.inner
+    pub fn entries(&self) -> &[TraceEvent<'static>] {
+        &self.entries
     }
 
-    /// Mutably access the inner tracer.
-    pub fn inner_mut(&mut self) -> &mut T {
-        &mut self.inner
+    pub fn into_entries(self) -> Vec<TraceEvent<'static>> {
+        // Prevent Drop from firing when consuming.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        std::mem::take(&mut this.entries)
     }
 
-    /// Consume and return the inner tracer.
-    pub fn into_inner(self) -> T {
-        // Use ManuallyDrop to prevent Drop from running (which would
-        // try to print the trace). We're intentionally consuming.
-        let this = std::mem::ManuallyDrop::new(self);
-        // SAFETY: We're reading inner out of a ManuallyDrop wrapper.
-        // The shadow Vec will leak, but that's acceptable since this
-        // is a consume operation.
-        unsafe { std::ptr::read(&this.inner) }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn summary(&self) -> TraceSummary {
+        TraceSummary::from_events(&self.entries)
     }
 }
 
-impl<T: Tracer> Tracer for PanicTracer<T> {
+impl Default for PanicTracer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tracer for PanicTracer {
     fn trace(&mut self, event: TraceEvent<'_>) {
-        self.shadow.push(event.into_owned());
-        // Re-create a borrowed event from the just-stored owned one
-        // to pass to the inner tracer. The owned event in shadow has
-        // DebugValue::Owned(String) values, so we pass those through.
-        let last = self.shadow.last().unwrap();
-        // We need to pass the event to inner too. Since we already consumed
-        // the original event with into_owned(), construct a new owned event
-        // from the shadow copy for the inner tracer.
-        self.inner.trace(clone_as_event(last));
+        self.entries.push(event.into_owned());
     }
 }
 
-/// Helper: create a TraceEvent<'_> that borrows from a TraceEvent<'static>.
-/// Since all DebugValues in a 'static event are Owned(String), we can
-/// re-wrap them as Borrowed(&String) since String: Debug.
-fn clone_as_event<'a>(event: &'a TraceEvent<'static>) -> TraceEvent<'a> {
-    match event {
-        TraceEvent::PropagateStart => TraceEvent::PropagateStart,
-        TraceEvent::PropagateEnd { rounds } => TraceEvent::PropagateEnd { rounds: *rounds },
-        TraceEvent::RoundStart { depth } => TraceEvent::RoundStart { depth: *depth },
-        TraceEvent::RoundEnd { depth } => TraceEvent::RoundEnd { depth: *depth },
-        TraceEvent::InputDelivered {
-            node,
-            id,
-            input,
-            value,
-        } => TraceEvent::InputDelivered {
-            node,
-            id: borrow_debug_value(id),
-            input,
-            value: borrow_debug_value(value),
-        },
-        TraceEvent::InputSuppressed { node, id, input } => TraceEvent::InputSuppressed {
-            node,
-            id: borrow_debug_value(id),
-            input,
-        },
-        TraceEvent::EffectsStart { node, id } => TraceEvent::EffectsStart {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::EffectsEnd { node, id } => TraceEvent::EffectsEnd {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::SignalChanged {
-            node,
-            id,
-            signal,
-            old,
-            new,
-        } => TraceEvent::SignalChanged {
-            node,
-            id: borrow_debug_value(id),
-            signal,
-            old: borrow_debug_value(old),
-            new: borrow_debug_value(new),
-        },
-        TraceEvent::EdgeChanged {
-            edge,
-            source,
-            added,
-            removed,
-        } => TraceEvent::EdgeChanged {
-            edge,
-            source: borrow_debug_value(source),
-            added: borrow_debug_value(added),
-            removed: borrow_debug_value(removed),
-        },
-        TraceEvent::EventQueued {
-            event,
-            sender,
-            receiver,
-            payload,
-        } => TraceEvent::EventQueued {
-            event,
-            sender: borrow_debug_value(sender),
-            receiver: borrow_debug_value(receiver),
-            payload: borrow_debug_value(payload),
-        },
-        TraceEvent::EventDelivered {
-            event,
-            sender,
-            receiver,
-            payload,
-        } => TraceEvent::EventDelivered {
-            event,
-            sender: borrow_debug_value(sender),
-            receiver: borrow_debug_value(receiver),
-            payload: borrow_debug_value(payload),
-        },
-        TraceEvent::SmCreated { node, id } => TraceEvent::SmCreated {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::SmInitialized { node, id } => TraceEvent::SmInitialized {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::SmDestroyed { node, id } => TraceEvent::SmDestroyed {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::PortCreated { node, id } => TraceEvent::PortCreated {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::PortDestroyed { node, id } => TraceEvent::PortDestroyed {
-            node,
-            id: borrow_debug_value(id),
-        },
-        TraceEvent::InvariantViolation {
-            node,
-            id,
-            signal,
-            value,
-            invariant_expr,
-        } => TraceEvent::InvariantViolation {
-            node,
-            id: borrow_debug_value(id),
-            signal,
-            value: borrow_debug_value(value),
-            invariant_expr,
-        },
+impl fmt::Display for PanicTracer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_trace_tree(&self.entries, f)
     }
 }
 
-fn borrow_debug_value<'a>(v: &'a DebugValue<'static>) -> DebugValue<'a> {
-    match v {
-        DebugValue::Owned(s) => DebugValue::Borrowed(s),
-        DebugValue::Borrowed(_) => unreachable!("'static DebugValue is always Owned"),
-    }
-}
-
-impl<T: Tracer> Drop for PanicTracer<T> {
+impl Drop for PanicTracer {
     fn drop(&mut self) {
-        if std::thread::panicking() && !self.shadow.is_empty() {
+        if std::thread::panicking() && !self.entries.is_empty() {
             let mut buf = String::new();
             let _ = writeln!(buf, "\n╔══ Signal Router Trace (PanicTracer auto-dump) ══");
-            let summary = TraceSummary::from_events(&self.shadow);
+            let summary = TraceSummary::from_events(&self.entries);
             let _ = writeln!(buf, "║ {}", summary);
             let _ = writeln!(buf, "╠══ Full trace ══");
-            let _ = write_trace_tree(&self.shadow, "║ ", &mut buf);
+            let _ = write_trace_tree(&self.entries, "║ ", &mut buf);
             let _ = writeln!(buf, "╚══════════════════════════════════════════════════");
             eprintln!("{}", buf);
         }

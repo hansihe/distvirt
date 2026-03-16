@@ -1,29 +1,29 @@
-use distvirt_sm_router::{trace, Aggregator, ListAggregator, SmHandler};
+use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
 
 mod service;
 mod workload;
 mod pod;
 
-pub(crate) use service::*;
-pub(crate) use workload::*;
-pub(crate) use pod::*;
+pub use service::*;
+pub use workload::*;
+pub use pod::*;
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct ServiceId(pub(crate) u64);
+pub struct ServiceId(pub u64);
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-pub(crate) struct WorkloadId(pub(crate) u64);
+pub struct WorkloadId(pub u64);
 
 /// Readiness info broadcast from workload to services.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ReadyInfo {
-    pub(crate) pod_id: PodId,
-    pub(crate) worker_id: WorkerId,
+pub struct ReadyInfo {
+    pub pod_id: PodId,
+    pub worker_id: WorkerId,
 }
 
 /// Pod status reported from pod SM back to workload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum PodStatus {
+pub enum PodStatus {
     #[default]
     Pending,
     Running,
@@ -48,7 +48,7 @@ impl PodStatus {
 
 /// Intent signal from workload to pod via ownership edge.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum PodIntent {
+pub enum PodIntent {
     #[default]
     None,
     /// Workload wants this pod running.
@@ -59,40 +59,42 @@ pub(crate) enum PodIntent {
 
 /// Identifier for a suspend/resume artifact (snapshot).
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct ArtifactId(pub(crate) u64);
+pub struct ArtifactId(pub u64);
 
 /// Manual ID for the singleton schedule-request port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct ScheduleRequestId(pub(crate) u64);
+pub struct ScheduleRequestId(pub u64);
 
 /// The singleton schedule-request port ID.
-pub(crate) const SCHEDULE_REQUEST: ScheduleRequestId = ScheduleRequestId(0);
+pub const SCHEDULE_REQUEST: ScheduleRequestId = ScheduleRequestId(0);
 
 /// Manual ID for the singleton endpoint port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct EndpointId(pub(crate) u64);
+pub struct EndpointId(pub u64);
 
 /// The singleton endpoint port ID.
-pub(crate) const ENDPOINT: EndpointId = EndpointId(0);
+pub const ENDPOINT: EndpointId = EndpointId(0);
 
 /// Manual ID for the singleton timer port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct TimerId(pub(crate) u64);
+pub struct TimerId(pub u64);
 
 /// The singleton timer port ID.
-pub(crate) const TIMER: TimerId = TimerId(0);
+pub const TIMER: TimerId = TimerId(0);
 
 /// Schedule request emitted by pod to the schedule-request port.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct PodScheduleRequest {
-    pub(crate) resume_artifact: Option<ArtifactId>,
+pub struct PodScheduleRequest {
+    pub resume_artifact: Option<ArtifactId>,
+    /// Set to true when the pod is in Suspending state and needs a SuspendPod command.
+    pub suspend: bool,
 }
 
 /// Lease info signaled from a per-pod ScheduleLease port.
 /// Carries the assigned worker ID.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LeaseInfo {
-    pub(crate) worker_id: WorkerId,
+pub struct LeaseInfo {
+    pub worker_id: WorkerId,
 }
 
 impl Default for LeaseInfo {
@@ -103,27 +105,30 @@ impl Default for LeaseInfo {
 
 /// Workload spec delivered by management port.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) struct WorkloadSpec {
-    pub(crate) image: String,
+pub struct WorkloadSpec {
+    pub image: String,
+    /// If true, suspend the pod instead of destroying it when demand drops.
+    /// Enables fast resume from snapshot on re-activation.
+    pub suspend_on_idle: bool,
 }
 
 /// Service spec delivered by management port.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct ServiceSpec {
-    pub(crate) workload: WorkloadId,
-    pub(crate) has_activation: bool,
+pub struct ServiceSpec {
+    pub workload: WorkloadId,
+    pub has_activation: bool,
 }
 
 /// Worker info produced by the worker port.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct WorkerInfo {
-    pub(crate) capacity: u32,
+pub struct WorkerInfo {
+    pub capacity: u32,
 }
 
 /// Admin command event payload.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
-pub(crate) enum AdminCmd {
+pub enum AdminCmd {
     Restart,
     /// Safe capacity reclamation: deactivate immediately if idle (no demand),
     /// noop if actively demanded. Can be sent broadly to many workloads.
@@ -135,7 +140,7 @@ pub(crate) enum AdminCmd {
 
 /// Observable workload lifecycle status.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum WlStatus {
+pub enum WlStatus {
     /// No demand, no pod, no spec — nothing happening.
     #[default]
     Dormant,
@@ -157,7 +162,7 @@ pub(crate) enum WlStatus {
 
 /// Observable service lifecycle status.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) enum SvcStatus {
+pub enum SvcStatus {
     /// Has activation, currently idle (no demand signal).
     #[default]
     Idle,
@@ -169,7 +174,7 @@ pub(crate) enum SvcStatus {
 
 /// Timer key enum for workload-specific timers.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum WorkloadTimerKey {
+pub enum WorkloadTimerKey {
     #[default]
     RetryBackoff,
 }
@@ -177,7 +182,7 @@ pub(crate) enum WorkloadTimerKey {
 /// Backend need level reported by workers to services.
 /// Priority: Active > Traffic > None.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum BackendNeed {
+pub enum BackendNeed {
     #[default]
     None,
     Traffic,
@@ -186,21 +191,21 @@ pub(crate) enum BackendNeed {
 
 /// Timer key enum for service-specific timers.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum ServiceTimerKey {
+pub enum ServiceTimerKey {
     #[default]
     IdleTimeout,
 }
 
 /// Timer request: service declares which timers it wants active.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct ServiceTimerRequest {
-    pub(crate) key: ServiceTimerKey,
-    pub(crate) generation: u64,
+pub struct ServiceTimerRequest {
+    pub key: ServiceTimerKey,
+    pub generation: u64,
 }
 
 /// Timer key enum for pod-specific timers.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) enum PodTimerKey {
+pub enum PodTimerKey {
     #[default]
     LaunchTimeout,
     SuspendTimeout,
@@ -208,9 +213,9 @@ pub(crate) enum PodTimerKey {
 
 /// Timer request: pod declares which timers it wants active.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct PodTimerRequest {
-    pub(crate) key: PodTimerKey,
-    pub(crate) generation: u64,
+pub struct PodTimerRequest {
+    pub key: PodTimerKey,
+    pub generation: u64,
 }
 
 // ============================================================================
@@ -219,19 +224,19 @@ pub(crate) struct PodTimerRequest {
 
 /// Timer request: workload declares which timers it wants active.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub(crate) struct TimerRequest {
-    pub(crate) key: WorkloadTimerKey,
-    pub(crate) generation: u64,
+pub struct TimerRequest {
+    pub key: WorkloadTimerKey,
+    pub generation: u64,
 }
 
 /// Counts services with demand=true, also collects all service IDs.
 #[derive(Default)]
-pub(crate) struct DemandAggregator;
+pub struct DemandAggregator;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DemandInfo {
-    pub(crate) demand_count: u32,
-    pub(crate) service_ids: Vec<ServiceId>,
+pub struct DemandInfo {
+    pub demand_count: u32,
+    pub service_ids: Vec<ServiceId>,
 }
 
 impl Aggregator for DemandAggregator {
@@ -257,7 +262,7 @@ impl Aggregator for DemandAggregator {
 /// Aggregates the workload spec, preserving the management port ID.
 /// Expects at most one spec source.
 #[derive(Default)]
-pub(crate) struct SpecAggregator;
+pub struct SpecAggregator;
 
 impl Aggregator for SpecAggregator {
     type Input = (ManagementId, WorkloadSpec);
@@ -271,7 +276,7 @@ impl Aggregator for SpecAggregator {
 /// Aggregates incoming WorkloadToPod edges to extract the owner workload ID
 /// and intent (Want/Suspend/None). Expects at most one owner.
 #[derive(Default)]
-pub(crate) struct OwnerAggregator;
+pub struct OwnerAggregator;
 
 impl Aggregator for OwnerAggregator {
     type Input = (WorkloadId, PodIntent);
@@ -285,7 +290,7 @@ impl Aggregator for OwnerAggregator {
 /// Aggregates BackendNeed from multiple workers. Returns the "hottest" need.
 /// Priority: Active > Traffic > None.
 #[derive(Default)]
-pub(crate) struct BackendNeedAggregator;
+pub struct BackendNeedAggregator;
 
 impl Aggregator for BackendNeedAggregator {
     type Input = (BackendNeedId, BackendNeed);
@@ -306,7 +311,7 @@ impl Aggregator for BackendNeedAggregator {
 
 /// Aggregates lease info for a pod. Expects 0 or 1 lease source.
 #[derive(Default)]
-pub(crate) struct LeaseAggregator;
+pub struct LeaseAggregator;
 
 impl Aggregator for LeaseAggregator {
     type Input = (ScheduleLeaseId, LeaseInfo);
@@ -320,7 +325,7 @@ impl Aggregator for LeaseAggregator {
 /// Aggregates worker assignment for a pod. A pod expects at most one worker.
 /// Preserves the WorkerId (unlike ListAggregator which drops IDs).
 #[derive(Default)]
-pub(crate) struct WorkerAssignmentAggregator;
+pub struct WorkerAssignmentAggregator;
 
 impl Aggregator for WorkerAssignmentAggregator {
     type Input = (WorkerId, WorkerInfo);
@@ -333,7 +338,7 @@ impl Aggregator for WorkerAssignmentAggregator {
 
 /// Aggregator that preserves source IDs. Like ListAggregator but keeps (Id, V) pairs.
 /// Used by timer inputs so the adapter can map requests back to their source SM.
-pub(crate) struct IdListAggregator<Id, V>(std::marker::PhantomData<(Id, V)>);
+pub struct IdListAggregator<Id, V>(std::marker::PhantomData<(Id, V)>);
 
 impl<Id, V> Default for IdListAggregator<Id, V> {
     fn default() -> Self {
@@ -353,7 +358,7 @@ impl<Id: Clone, V: Clone> Aggregator for IdListAggregator<Id, V> {
 /// Aggregates the service spec, preserving the management port ID.
 /// Expects at most one spec source.
 #[derive(Default)]
-pub(crate) struct SvcSpecAggregator;
+pub struct SvcSpecAggregator;
 
 impl Aggregator for SvcSpecAggregator {
     type Input = (ManagementId, ServiceSpec);
@@ -505,6 +510,9 @@ distvirt_sm_router::router! {
         },
     }
 }
+
+// TODO: temporary, switch back to plain Router when refactor stabilizes
+pub type DRouter = Router<distvirt_sm_router::trace::PanicTracer>;
 
 #[cfg(test)]
 impl PodId {

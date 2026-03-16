@@ -77,27 +77,27 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
 
 /// Basic preemption: wl-a is idle (BackendNeed::None), wl-b activates but no capacity
 /// → wl-a gets preempted → wl-b eventually runs.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_basic_preemption() {
+#[test]
+fn test_basic_preemption() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", two_activation_workloads_spec(timeout)).await;
-    h.converge().await;
+    h.create_namespace("ns", two_activation_workloads_spec(timeout));
+    h.converge();
 
     // Both workloads start dormant.
     h.assert_workload_dormant("ns", "wl-a");
     h.assert_workload_dormant("ns", "wl-b");
 
     // Activate wl-a via svc-a.
-    h.activate_service("ns", "svc-a").await;
+    h.activate_service("ns", "svc-a");
     h.assert_workload_running("ns", "wl-a");
 
     // Signal no more traffic on svc-a (idle, but still active with BackendNeed::None).
-    h.deactivate_service("ns", "svc-a").await;
+    h.deactivate_service("ns", "svc-a");
 
     // Now make the worker high-pressure so select_worker_for_pod returns None.
-    h.orchestrator_mut().workers.get_mut(&w1).unwrap().pressure_bands.memory = PressureBand::High;
+    h.send_pressure_update(&w1, 85.0);
 
     // Activate wl-b via svc-b — should trigger preemption of wl-a.
     let svc_b_ip = h.service_ip("ns", "svc-b");
@@ -106,13 +106,13 @@ async fn test_basic_preemption() {
         ip: svc_b_ip,
         service_id: Some(ServiceId::from("svc-b")),
     });
-    h.converge().await;
+    h.converge();
 
     // wl-a should be preempted (deactivating/dormant).
     // wl-b should be in WaitingForCapacity since worker is still high-pressure.
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
-        matches!(wl_a_state, WorkloadState::Dormant | WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. } | WorkloadState::Suspended { .. }),
+        wl_a_state.awaiting_suspend || wl_a_state.suspended_artifact.is_some() || (!wl_a_state.has_demand && !wl_a_state.pod_running),
         "wl-a should be deactivating/dormant after preemption, got {:?}", wl_a_state
     );
 
@@ -124,35 +124,35 @@ async fn test_basic_preemption() {
     );
 
     // Now relax pressure so wl-b can be scheduled.
-    h.orchestrator_mut().workers.get_mut(&w1).unwrap().pressure_bands.memory = PressureBand::Normal;
+    h.send_pressure_update(&w1, 0.0);
 
     // Need to trigger schedule_waiting_pods. Send a no-op event to converge.
-    h.converge().await;
+    h.converge();
 
     // wl-b may need another scheduling round. Let's trigger it by sending a
     // PressureUpdate which will cause recompute + scheduling.
-    h.send_pressure_update(&w1, 0.0).await;
+    h.send_pressure_update(&w1, 0.0);
 
     h.assert_workload_running("ns", "wl-b");
 }
 
 /// No preemption of active workloads: workload with BackendNeed::Active/Traffic is not preempted.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_no_preemption_of_active_traffic_workloads() {
+#[test]
+fn test_no_preemption_of_active_traffic_workloads() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", two_activation_workloads_spec(timeout)).await;
-    h.converge().await;
+    h.create_namespace("ns", two_activation_workloads_spec(timeout));
+    h.converge();
 
     // Activate wl-a via svc-a — it stays active with traffic (BackendNeed::Traffic).
-    h.activate_service("ns", "svc-a").await;
+    h.activate_service("ns", "svc-a");
     h.assert_workload_running("ns", "wl-a");
 
     // Keep svc-a with active traffic (don't deactivate).
 
     // Make worker high-pressure.
-    h.orchestrator_mut().workers.get_mut(&w1).unwrap().pressure_bands.memory = PressureBand::High;
+    h.send_pressure_update(&w1, 85.0);
 
     // Activate wl-b via svc-b.
     let svc_b_ip = h.service_ip("ns", "svc-b");
@@ -161,7 +161,7 @@ async fn test_no_preemption_of_active_traffic_workloads() {
         ip: svc_b_ip,
         service_id: Some(ServiceId::from("svc-b")),
     });
-    h.converge().await;
+    h.converge();
 
     // wl-a should still be running (not preempted, has active traffic).
     h.assert_workload_running("ns", "wl-a");
@@ -178,22 +178,22 @@ async fn test_no_preemption_of_active_traffic_workloads() {
 }
 
 /// No preemption when capacity exists: when a worker has capacity, no preemption occurs.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_no_preemption_when_capacity_exists() {
+#[test]
+fn test_no_preemption_when_capacity_exists() {
     let mut h = TestHarness::new();
-    let _w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let _w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", two_activation_workloads_spec(timeout)).await;
-    h.converge().await;
+    h.create_namespace("ns", two_activation_workloads_spec(timeout));
+    h.converge();
 
     // Activate wl-a.
-    h.activate_service("ns", "svc-a").await;
+    h.activate_service("ns", "svc-a");
     h.assert_workload_running("ns", "wl-a");
-    h.deactivate_service("ns", "svc-a").await;
+    h.deactivate_service("ns", "svc-a");
 
     // Worker is Normal pressure — plenty of capacity.
     // Activate wl-b — should just work, no preemption needed.
-    h.activate_service("ns", "svc-b").await;
+    h.activate_service("ns", "svc-b");
     h.assert_workload_running("ns", "wl-b");
 
     // Both workloads running, no preemption.
@@ -207,42 +207,42 @@ async fn test_no_preemption_when_capacity_exists() {
 
 /// Preempted workload can reactivate: after preemption, if traffic arrives for the
 /// preempted workload's service, it reactivates normally.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_preempted_workload_can_reactivate() {
+#[test]
+fn test_preempted_workload_can_reactivate() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", two_activation_workloads_spec(timeout)).await;
-    h.converge().await;
+    h.create_namespace("ns", two_activation_workloads_spec(timeout));
+    h.converge();
 
     // Activate wl-a, then make it idle.
-    h.activate_service("ns", "svc-a").await;
-    h.deactivate_service("ns", "svc-a").await;
+    h.activate_service("ns", "svc-a");
+    h.deactivate_service("ns", "svc-a");
 
     // High pressure, activate wl-b to trigger preemption of wl-a.
-    h.orchestrator_mut().workers.get_mut(&w1).unwrap().pressure_bands.memory = PressureBand::High;
+    h.send_pressure_update(&w1, 85.0);
     let svc_b_ip = h.service_ip("ns", "svc-b");
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
         service_id: Some(ServiceId::from("svc-b")),
     });
-    h.converge().await;
+    h.converge();
 
     // wl-a should be preempted.
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
-        !wl_a_state.is_running(),
+        !wl_a_state.pod_running,
         "wl-a should not be Running after preemption, got {:?}", wl_a_state
     );
 
     // Now restore pressure and let wl-b schedule.
-    h.orchestrator_mut().workers.get_mut(&w1).unwrap().pressure_bands.memory = PressureBand::Normal;
-    h.send_pressure_update(&w1, 0.0).await;
+    h.send_pressure_update(&w1, 0.0);
+    h.send_pressure_update(&w1, 0.0);
     h.assert_workload_running("ns", "wl-b");
 
     // Now deactivate wl-b and reactivate wl-a — it should come back.
-    h.deactivate_service("ns", "svc-b").await;
+    h.deactivate_service("ns", "svc-b");
 
     // Activate wl-a again.
     let svc_a_ip = h.service_ip("ns", "svc-a");
@@ -251,7 +251,7 @@ async fn test_preempted_workload_can_reactivate() {
         ip: svc_a_ip,
         service_id: Some(ServiceId::from("svc-a")),
     });
-    h.converge().await;
+    h.converge();
 
     h.assert_workload_running("ns", "wl-a");
     h.assert_service_active("ns", "svc-a");

@@ -193,10 +193,12 @@ pub struct DirectWorkerCommand {
 }
 
 /// Top-level output from OrchestratorCore.
+///
+/// Timer actions are **not** included here — they are absorbed internally
+/// by the core's `TimerWheel`. Shells drive time via `advance_to()` /
+/// `next_deadline()` instead.
 #[derive(Default)]
 pub struct OrchestratorEffects {
-    /// Timer actions scoped to a namespace.
-    pub timer_actions: Vec<(NamespaceId, Vec<TimerAction>)>,
     /// Commands targeted at specific workers (routed through namespace logic).
     pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
     /// Commands to broadcast to all workers in a specific namespace.
@@ -206,4 +208,15 @@ pub struct OrchestratorEffects {
     /// Direct wire commands the shell must send (e.g. CreateNamespace).
     /// These bypass namespace logic — the shell just sends them on the writer.
     pub direct_worker_commands: Vec<DirectWorkerCommand>,
+}
+
+impl OrchestratorEffects {
+    /// Merge another set of effects into this one.
+    pub fn merge(&mut self, other: OrchestratorEffects) {
+        self.worker_commands.extend(other.worker_commands);
+        self.broadcast_commands.extend(other.broadcast_commands);
+        self.global_broadcasts.extend(other.global_broadcasts);
+        self.direct_worker_commands
+            .extend(other.direct_worker_commands);
+    }
 }

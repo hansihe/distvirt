@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use crate::sm_new::{EndpointId, EndpointPortInput, ReadyInfo, Router, ServiceId};
+use crate::sm_new::{DRouter, EndpointId, EndpointPortInput, ReadyInfo, ServiceId};
 
 #[cfg(test)]
 mod tests;
@@ -58,7 +58,7 @@ impl EndpointAdapter {
 
     /// Drain endpoint inputs from the router, diff against cached state,
     /// and return Update/Remove actions. Updates internal cache.
-    pub(crate) fn reconcile(&mut self, router: &mut Router) -> Vec<EndpointAction> {
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<EndpointAction> {
         let inputs = router.drain_endpoint_inputs();
 
         // Process all queued inputs, keeping only the last state per endpoint.

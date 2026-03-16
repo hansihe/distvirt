@@ -166,9 +166,9 @@ pub(super) fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream
                     PendingEvent::#variant(sender_id, receiver_id, payload) => {
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EventQueued {
                             event: #event_str,
-                            sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(sender_id as &dyn std::fmt::Debug),
-                            receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(receiver_id as &dyn std::fmt::Debug),
-                            payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(payload as &dyn std::fmt::Debug),
+                            sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(sender_id as &(dyn std::fmt::Debug + Send + Sync)),
+                            receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(receiver_id as &(dyn std::fmt::Debug + Send + Sync)),
+                            payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(payload as &(dyn std::fmt::Debug + Send + Sync)),
                         });
                     }
                 }
@@ -206,7 +206,7 @@ pub(super) fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream
             fn #method(&mut self, id: #id_type, effects: #effects_name) -> bool {
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EffectsStart {
                     node: #node_str,
-                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                 });
                 #create_apply
                 #(#signal_applies)*
@@ -215,13 +215,13 @@ pub(super) fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream
                 if effects.pending_self_destruct {
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmDestroyed {
                         node: #node_str,
-                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                     });
                 }
                 #self_destruct_apply
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EffectsEnd {
                     node: #node_str,
-                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                 });
                 effects.pending_self_destruct
             }
@@ -271,7 +271,7 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                         if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
                             self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
-                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
                                 input: #input_str,
                             });
                             return;
@@ -280,9 +280,9 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
 
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
                             node: #node_str,
-                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
                             input: #input_str,
-                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
+                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
                         });
 
                         let effects = {
@@ -308,7 +308,7 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                         if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
                             self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
-                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
                                 input: #input_str,
                             });
                             return;
@@ -317,9 +317,9 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
 
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
                             node: #node_str,
-                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &dyn std::fmt::Debug),
+                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
                             input: #input_str,
-                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &dyn std::fmt::Debug),
+                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
                         });
 
                         self.#pending_field.push((target_id, #port_input_enum::#input_variant(result)));
@@ -360,9 +360,9 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                     if self.instances.#instances.contains_key(&receiver_id) {
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EventDelivered {
                             event: #event_str,
-                            sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
-                            receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
-                            payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                            sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(&sender_id as &(dyn std::fmt::Debug + Send + Sync)),
+                            receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &(dyn std::fmt::Debug + Send + Sync)),
+                            payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &(dyn std::fmt::Debug + Send + Sync)),
                         });
                         let effects = {
                             let sm = self.instances.#instances.get_mut(&receiver_id).unwrap();
@@ -393,9 +393,9 @@ pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, i
                     if !(#expr) {
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InvariantViolation {
                             node: #node_str,
-                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(id as &dyn std::fmt::Debug),
+                            id: ::distvirt_sm_router::trace::DebugValue::Borrowed(id as &(dyn std::fmt::Debug + Send + Sync)),
                             signal: #signal_str,
-                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(value as &dyn std::fmt::Debug),
+                            value: ::distvirt_sm_router::trace::DebugValue::Borrowed(value as &(dyn std::fmt::Debug + Send + Sync)),
                             invariant_expr: #expr_str,
                         });
                     }

@@ -5,81 +5,80 @@ use crate::harness::mock_worker::MockWorkerConfig;
 use distvirt_orchestrator::types::*;
 
 /// Basic drain: set draining condition, verify it's visible, undrain clears it.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_drain_undrain_condition() {
+#[test]
+fn test_drain_undrain_condition() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", activation_spec(Duration::from_secs(30))).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", activation_spec(Duration::from_secs(30)));
+    h.converge();
 
     // Drain the worker.
-    h.drain_worker(&w1).await;
+    h.drain_worker(&w1);
     h.assert_worker_draining(&w1);
 
     // Undrain the worker.
-    h.undrain_worker(&w1).await;
+    h.undrain_worker(&w1);
     h.assert_worker_not_draining(&w1);
 }
 
 /// Draining worker is excluded from scheduling: new activations go to a non-draining worker.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_drain_excludes_from_scheduling() {
+#[test]
+fn test_drain_excludes_from_scheduling() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    let w2 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", activation_spec(Duration::from_secs(30))).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    let w2 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", activation_spec(Duration::from_secs(30)));
+    h.converge();
 
     // Drain w1.
-    h.drain_worker(&w1).await;
+    h.drain_worker(&w1);
 
     // Activate the service — workload should be scheduled on w2 (not w1).
-    h.activate_service("ns", "web-svc").await;
+    h.activate_service("ns", "web-svc");
     h.assert_workload_running("ns", "web");
 
-    let wl_state = h.workload_state("ns", "web");
-    let worker_id = wl_state.worker_id().expect("workload should have a worker");
+    let worker_id = h.workload_global_worker_id("ns", "web").expect("workload should have a worker");
     assert_eq!(
-        *worker_id, w2,
+        worker_id, w2,
         "workload should be scheduled on non-draining worker w2, got {:?}", worker_id
     );
 }
 
 /// Existing pods on a draining worker continue running — drain doesn't force-stop them.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_drain_does_not_stop_existing_pods() {
+#[test]
+fn test_drain_does_not_stop_existing_pods() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", activation_spec(Duration::from_secs(30))).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", activation_spec(Duration::from_secs(30)));
+    h.converge();
 
     // Activate the workload on w1.
-    h.activate_service("ns", "web-svc").await;
+    h.activate_service("ns", "web-svc");
     h.assert_workload_running("ns", "web");
 
     // Drain w1 — pod should still be running.
-    h.drain_worker(&w1).await;
+    h.drain_worker(&w1);
     h.assert_workload_running("ns", "web");
 }
 
 /// After drain, pods deactivate on their normal idle timeout.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_drain_pods_deactivate_on_idle_timeout() {
+#[test]
+fn test_drain_pods_deactivate_on_idle_timeout() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", activation_spec(Duration::from_secs(30))).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", activation_spec(Duration::from_secs(30)));
+    h.converge();
 
     // Activate the workload.
-    h.activate_service("ns", "web-svc").await;
+    h.activate_service("ns", "web-svc");
     h.assert_workload_running("ns", "web");
 
     // Drain the worker.
-    h.drain_worker(&w1).await;
+    h.drain_worker(&w1);
 
     // Signal no more traffic, then advance past idle timeout.
-    h.deactivate_service("ns", "web-svc").await;
-    h.advance_past_idle_timeout("ns", "web-svc").await;
+    h.deactivate_service("ns", "web-svc");
+    h.advance_past_idle_timeout("ns", "web-svc");
 
     // Workload should have suspended (suspend_on_idle=true).
     h.assert_workload_suspended("ns", "web");
@@ -87,15 +86,15 @@ async fn test_drain_pods_deactivate_on_idle_timeout() {
 
 /// When a draining worker is the only one and all pods drain, scheduling fails gracefully
 /// (workload goes to WaitingForCapacity on re-activation).
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn test_drain_single_worker_no_scheduling() {
+#[test]
+fn test_drain_single_worker_no_scheduling() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool()).await;
-    h.create_namespace("ns", activation_spec(Duration::from_secs(30))).await;
-    h.converge().await;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    h.create_namespace("ns", activation_spec(Duration::from_secs(30)));
+    h.converge();
 
     // Drain the only worker.
-    h.drain_worker(&w1).await;
+    h.drain_worker(&w1);
 
     // Try to activate — workload should be stuck in WaitingForCapacity.
     let svc_ip = h.service_ip("ns", "web-svc");
@@ -104,12 +103,12 @@ async fn test_drain_single_worker_no_scheduling() {
         ip: svc_ip,
         service_id: Some(ServiceId::from("web-svc")),
     });
-    h.converge().await;
+    h.converge();
     h.assert_workload_waiting_for_capacity("ns", "web");
 
     // Undrain — workload should now be schedulable.
-    h.undrain_worker(&w1).await;
+    h.undrain_worker(&w1);
     // Trigger scheduling by sending a pressure update.
-    h.send_pressure_update(&w1, 0.0).await;
+    h.send_pressure_update(&w1, 0.0);
     h.assert_workload_running("ns", "web");
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::sm_new::{
-    PodTimerKey, Router, ServiceTimerKey, TimerPortInput,
+    DRouter, PodTimerKey, ServiceTimerKey, TimerPortInput,
     WorkloadTimerKey,
     PodId, ServiceId, WorkloadId,
     TIMER,
@@ -57,7 +57,7 @@ impl TimerAdapter {
 
     /// Drain timer port inputs from the router, diff against active state,
     /// and return Start/Cancel actions. Updates internal active state.
-    pub(crate) fn reconcile(&mut self, router: &mut Router) -> Vec<TimerAction> {
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<TimerAction> {
         let inputs = router.drain_timer_inputs();
 
         // Start from current active as the wanted set.
@@ -157,7 +157,7 @@ impl TimerAdapter {
     }
 
     /// Dispatch a timer fire event into the router.
-    pub(crate) fn fire(&self, router: &mut Router, identity: &TimerIdentity) {
+    pub(crate) fn fire(&self, router: &mut DRouter, identity: &TimerIdentity) {
         match identity {
             TimerIdentity::Workload(wl_id, key) => {
                 router.send_workload_timer_fired(TIMER, *wl_id, key.clone());

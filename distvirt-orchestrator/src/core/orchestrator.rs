@@ -5,13 +5,19 @@
 //! high-level lifecycle methods (worker connect/disconnect, namespace
 //! create/destroy) and a low-level `process()` for individual events.
 //!
+//! Timer actions from namespaces are absorbed internally by a `TimerWheel`.
+//! Shells drive time via `advance_to()` and query `next_deadline()` — they
+//! never see `TimerAction`s directly.
+//!
 //! No async, no channels — pure, deterministic logic.
 
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
 use super::namespace::NamespaceCore;
 use super::scheduler::SchedulerCore;
+use super::timer_wheel::TimerWheel;
 use super::types::{
     CreateNamespaceInfo, DirectWorkerCommand, NamespaceCoreEvent, OrchestratorEffects,
     OrchestratorInput, SchedulerCoreInput, SchedulerMessage, WorkerConnectedInfo,
@@ -22,11 +28,12 @@ use crate::sm_new::WorkerInfo;
 use crate::task::GlobalWorkerId;
 use crate::types::NamespaceId;
 
-pub(crate) struct OrchestratorCore {
+pub struct OrchestratorCore {
     namespaces: HashMap<NamespaceId, NamespaceCore>,
     scheduler: SchedulerCore,
     worker_state: WorkerStateCore,
     timer_config: TimerConfig,
+    timer_wheel: TimerWheel,
 
     /// Connected workers tracked at orchestrator level (for lifecycle fan-out).
     connected_workers: HashMap<GlobalWorkerId, ConnectedWorkerInfo>,
@@ -52,6 +59,7 @@ impl OrchestratorCore {
             scheduler: SchedulerCore::new(),
             worker_state: WorkerStateCore::new(),
             timer_config,
+            timer_wheel: TimerWheel::new(),
             connected_workers: HashMap::new(),
             next_segment_id: 1, // segment 0 is reserved
             active_segment_ids: BTreeSet::new(),
@@ -61,7 +69,10 @@ impl OrchestratorCore {
     }
 
     /// Process a single top-level input, routing effects between internal cores.
-    pub fn process(&mut self, input: OrchestratorInput) -> OrchestratorEffects {
+    ///
+    /// `now` is the current logical time — used to compute absolute deadlines
+    /// for any timers started as a result of processing this input.
+    pub fn process(&mut self, input: OrchestratorInput, now: Duration) -> OrchestratorEffects {
         let mut effects = OrchestratorEffects::default();
 
         match input {
@@ -71,16 +82,16 @@ impl OrchestratorCore {
             } => {
                 if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
                     let ns_effects = ns.process_event(event);
-                    self.route_namespace_effects(&namespace_id, ns_effects, &mut effects);
+                    self.route_namespace_effects(&namespace_id, ns_effects, &mut effects, now);
                 }
             }
             OrchestratorInput::WorkerStateEvent(event) => {
                 let ws_effects = self.worker_state.process(event);
-                self.route_worker_state_effects(ws_effects, &mut effects);
+                self.route_worker_state_effects(ws_effects, &mut effects, now);
             }
             OrchestratorInput::SchedulerEvent(input) => {
                 let decisions = self.scheduler.process(input);
-                self.route_scheduler_decisions(decisions, &mut effects);
+                self.route_scheduler_decisions(decisions, &mut effects, now);
             }
             OrchestratorInput::CreateNamespace { namespace_id } => {
                 if !self.namespaces.contains_key(&namespace_id) {
@@ -90,10 +101,51 @@ impl OrchestratorCore {
             }
             OrchestratorInput::DestroyNamespace { namespace_id } => {
                 self.namespaces.remove(&namespace_id);
+                self.timer_wheel.remove_namespace(&namespace_id);
             }
         }
 
         effects
+    }
+
+    // =========================================================================
+    // Timer interface
+    // =========================================================================
+
+    /// Fire all timers whose deadline ≤ `now`, processing their effects
+    /// internally. Loops until no more timers are expired (a timer fire
+    /// can start new timers, but those will have a future deadline).
+    ///
+    /// Returns the accumulated non-timer effects.
+    pub fn advance_to(&mut self, now: Duration) -> OrchestratorEffects {
+        let mut effects = OrchestratorEffects::default();
+
+        loop {
+            let expired = self.timer_wheel.fire_expired(now);
+            if expired.is_empty() {
+                break;
+            }
+
+            for fired in expired {
+                let input = OrchestratorInput::NamespaceEvent {
+                    namespace_id: fired.namespace_id,
+                    event: NamespaceCoreEvent::TimerFired {
+                        identity: fired.identity,
+                        generation: fired.generation,
+                    },
+                };
+                let new_effects = self.process(input, now);
+                effects.merge(new_effects);
+            }
+        }
+
+        effects
+    }
+
+    /// Returns the earliest deadline across all pending timers, or `None`
+    /// if no timers are active.
+    pub fn next_deadline(&self) -> Option<Duration> {
+        self.timer_wheel.next_deadline()
     }
 
     // =========================================================================
@@ -107,6 +159,7 @@ impl OrchestratorCore {
     pub fn worker_connected(
         &mut self,
         info: WorkerConnectedInfo,
+        now: Duration,
     ) -> OrchestratorEffects {
         let mut effects = OrchestratorEffects::default();
 
@@ -128,7 +181,7 @@ impl OrchestratorCore {
             tunnel_info: info.tunnel_info,
             proto_worker_id: proto_worker_id.clone(),
         });
-        self.route_worker_state_effects(ws_effects, &mut effects);
+        self.route_worker_state_effects(ws_effects, &mut effects, now);
 
         let ns_ids: Vec<_> = self.namespaces.keys().cloned().collect();
         for ns_id in ns_ids {
@@ -148,7 +201,7 @@ impl OrchestratorCore {
                     proto_worker_id: proto_worker_id.clone(),
                     info: WorkerInfo { capacity: max_pods },
                 });
-                self.route_namespace_effects(&ns_id, ns_effects, &mut effects);
+                self.route_namespace_effects(&ns_id, ns_effects, &mut effects, now);
             }
 
             let ws_effects =
@@ -157,7 +210,7 @@ impl OrchestratorCore {
                         worker_id,
                         namespace_id: ns_id,
                     });
-            self.route_worker_state_effects(ws_effects, &mut effects);
+            self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
         effects
@@ -170,6 +223,7 @@ impl OrchestratorCore {
     pub fn worker_disconnected(
         &mut self,
         worker_id: GlobalWorkerId,
+        now: Duration,
     ) -> OrchestratorEffects {
         let mut effects = OrchestratorEffects::default();
 
@@ -180,7 +234,7 @@ impl OrchestratorCore {
             if let Some(ns) = self.namespaces.get_mut(&ns_id) {
                 let ns_effects =
                     ns.process_event(NamespaceCoreEvent::WorkerDisconnected { worker_id });
-                self.route_namespace_effects(&ns_id, ns_effects, &mut effects);
+                self.route_namespace_effects(&ns_id, ns_effects, &mut effects, now);
             }
 
             let ws_effects =
@@ -189,13 +243,13 @@ impl OrchestratorCore {
                         worker_id,
                         namespace_id: ns_id,
                     });
-            self.route_worker_state_effects(ws_effects, &mut effects);
+            self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
         let ws_effects = self
             .worker_state
             .process(WorkerStateCoreEvent::Disconnected { worker_id });
-        self.route_worker_state_effects(ws_effects, &mut effects);
+        self.route_worker_state_effects(ws_effects, &mut effects, now);
 
         effects
     }
@@ -207,6 +261,7 @@ impl OrchestratorCore {
     pub fn create_namespace(
         &mut self,
         info: CreateNamespaceInfo,
+        now: Duration,
     ) -> OrchestratorEffects {
         if self.namespaces.contains_key(&info.namespace_id) {
             return OrchestratorEffects::default();
@@ -228,7 +283,7 @@ impl OrchestratorCore {
                     namespace_id: info.namespace_id.clone(),
                     segment_id,
                 });
-        self.route_worker_state_effects(ws_effects, &mut effects);
+        self.route_worker_state_effects(ws_effects, &mut effects, now);
 
         let ns = NamespaceCore::new(info.namespace_id.clone(), self.timer_config.clone());
         self.namespaces.insert(info.namespace_id.clone(), ns);
@@ -253,7 +308,7 @@ impl OrchestratorCore {
                     proto_worker_id: proto_wid,
                     info: WorkerInfo { capacity: max_pods },
                 });
-                self.route_namespace_effects(&info.namespace_id, ns_effects, &mut effects);
+                self.route_namespace_effects(&info.namespace_id, ns_effects, &mut effects, now);
             }
 
             let ws_effects =
@@ -262,7 +317,7 @@ impl OrchestratorCore {
                         worker_id,
                         namespace_id: info.namespace_id.clone(),
                     });
-            self.route_worker_state_effects(ws_effects, &mut effects);
+            self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
         effects
@@ -281,6 +336,8 @@ impl OrchestratorCore {
             return effects;
         }
 
+        self.timer_wheel.remove_namespace(namespace_id);
+
         if let Some(segment_id) = self.namespace_segments.remove(namespace_id) {
             self.free_segment_id(segment_id);
         }
@@ -294,7 +351,9 @@ impl OrchestratorCore {
                         worker_id,
                         namespace_id: namespace_id.clone(),
                     });
-            self.route_worker_state_effects(ws_effects, &mut effects);
+            // destroy_namespace doesn't need `now` since it can't produce new timers
+            // (the namespace is already removed).
+            self.route_worker_state_effects(ws_effects, &mut effects, Duration::ZERO);
         }
 
         let ws_effects =
@@ -302,7 +361,7 @@ impl OrchestratorCore {
                 .process(WorkerStateCoreEvent::UnregisterNamespaceSegment {
                     namespace_id: namespace_id.clone(),
                 });
-        self.route_worker_state_effects(ws_effects, &mut effects);
+        self.route_worker_state_effects(ws_effects, &mut effects, Duration::ZERO);
 
         effects
     }
@@ -316,11 +375,11 @@ impl OrchestratorCore {
         namespace_id: &NamespaceId,
         ns_effects: super::types::NamespaceEffects,
         effects: &mut OrchestratorEffects,
+        now: Duration,
     ) {
         if !ns_effects.timer_actions.is_empty() {
-            effects
-                .timer_actions
-                .push((namespace_id.clone(), ns_effects.timer_actions));
+            self.timer_wheel
+                .absorb(namespace_id, ns_effects.timer_actions, now);
         }
 
         effects.worker_commands.extend(ns_effects.worker_commands);
@@ -352,7 +411,7 @@ impl OrchestratorCore {
             };
 
             let decisions = self.scheduler.process(scheduler_input);
-            self.route_scheduler_decisions(decisions, effects);
+            self.route_scheduler_decisions(decisions, effects, now);
         }
     }
 
@@ -360,10 +419,11 @@ impl OrchestratorCore {
         &mut self,
         ws_effects: super::types::WorkerStateEffects,
         effects: &mut OrchestratorEffects,
+        now: Duration,
     ) {
         for update in ws_effects.scheduler_updates {
             let decisions = self.scheduler.process(update);
-            self.route_scheduler_decisions(decisions, effects);
+            self.route_scheduler_decisions(decisions, effects, now);
         }
 
         if let Some(cmd) = ws_effects.worker_registry_broadcast {
@@ -375,6 +435,7 @@ impl OrchestratorCore {
         &mut self,
         decisions: Vec<crate::task::SchedulerDecision>,
         effects: &mut OrchestratorEffects,
+        now: Duration,
     ) {
         for decision in decisions {
             let target_ns_id = match &decision {
@@ -390,9 +451,8 @@ impl OrchestratorCore {
                 let ns_effects =
                     ns.process_event(NamespaceCoreEvent::SchedulerDecision(decision));
                 if !ns_effects.timer_actions.is_empty() {
-                    effects
-                        .timer_actions
-                        .push((target_ns_id.clone(), ns_effects.timer_actions));
+                    self.timer_wheel
+                        .absorb(&target_ns_id, ns_effects.timer_actions, now);
                 }
                 effects.worker_commands.extend(ns_effects.worker_commands);
                 for cmd in ns_effects.broadcast_commands {
@@ -487,15 +547,21 @@ mod tests {
     fn create_and_destroy_namespace() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        let effects = orch.process(OrchestratorInput::CreateNamespace {
-            namespace_id: ns("test"),
-        });
+        let effects = orch.process(
+            OrchestratorInput::CreateNamespace {
+                namespace_id: ns("test"),
+            },
+            Duration::ZERO,
+        );
         assert!(orch.namespace(&ns("test")).is_some());
         let _ = effects;
 
-        let effects = orch.process(OrchestratorInput::DestroyNamespace {
-            namespace_id: ns("test"),
-        });
+        let effects = orch.process(
+            OrchestratorInput::DestroyNamespace {
+                namespace_id: ns("test"),
+            },
+            Duration::ZERO,
+        );
         assert!(orch.namespace(&ns("test")).is_none());
         let _ = effects;
     }
@@ -504,12 +570,15 @@ mod tests {
     fn worker_connected_lifecycle() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        let effects = orch.worker_connected(WorkerConnectedInfo {
-            worker_id: GlobalWorkerId::test(1),
-            capabilities: test_caps(),
-            tunnel_info: None,
-            proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
-        });
+        let effects = orch.worker_connected(
+            WorkerConnectedInfo {
+                worker_id: GlobalWorkerId::test(1),
+                capabilities: test_caps(),
+                tunnel_info: None,
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+            },
+            Duration::ZERO,
+        );
 
         assert!(!effects.global_broadcasts.is_empty());
     }
@@ -518,17 +587,23 @@ mod tests {
     fn worker_connected_fans_out_to_namespaces() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        orch.create_namespace(CreateNamespaceInfo {
-            namespace_id: ns("test"),
-            network: test_network(),
-        });
+        orch.create_namespace(
+            CreateNamespaceInfo {
+                namespace_id: ns("test"),
+                network: test_network(),
+            },
+            Duration::ZERO,
+        );
 
-        let effects = orch.worker_connected(WorkerConnectedInfo {
-            worker_id: GlobalWorkerId::test(1),
-            capabilities: test_caps(),
-            tunnel_info: None,
-            proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
-        });
+        let effects = orch.worker_connected(
+            WorkerConnectedInfo {
+                worker_id: GlobalWorkerId::test(1),
+                capabilities: test_caps(),
+                tunnel_info: None,
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+            },
+            Duration::ZERO,
+        );
 
         let has_create_ns = effects.direct_worker_commands.iter().any(|d| {
             matches!(
@@ -546,17 +621,23 @@ mod tests {
     fn create_namespace_fans_out_to_workers() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        orch.worker_connected(WorkerConnectedInfo {
-            worker_id: GlobalWorkerId::test(1),
-            capabilities: test_caps(),
-            tunnel_info: None,
-            proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
-        });
+        orch.worker_connected(
+            WorkerConnectedInfo {
+                worker_id: GlobalWorkerId::test(1),
+                capabilities: test_caps(),
+                tunnel_info: None,
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+            },
+            Duration::ZERO,
+        );
 
-        let effects = orch.create_namespace(CreateNamespaceInfo {
-            namespace_id: ns("test"),
-            network: test_network(),
-        });
+        let effects = orch.create_namespace(
+            CreateNamespaceInfo {
+                namespace_id: ns("test"),
+                network: test_network(),
+            },
+            Duration::ZERO,
+        );
 
         let has_create_ns = effects.direct_worker_commands.iter().any(|d| {
             d.worker_id == GlobalWorkerId::test(1)
@@ -572,28 +653,37 @@ mod tests {
     fn full_sync_flow() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        orch.create_namespace(CreateNamespaceInfo {
-            namespace_id: ns("test"),
-            network: test_network(),
-        });
+        orch.create_namespace(
+            CreateNamespaceInfo {
+                namespace_id: ns("test"),
+                network: test_network(),
+            },
+            Duration::ZERO,
+        );
 
-        orch.worker_connected(WorkerConnectedInfo {
-            worker_id: GlobalWorkerId::test(1),
-            capabilities: test_caps(),
-            tunnel_info: None,
-            proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
-        });
-
-        let effects = orch.process(OrchestratorInput::NamespaceEvent {
-            namespace_id: ns("test"),
-            event: NamespaceCoreEvent::WorkerEvent(crate::task::WorkerNamespaceEvent {
+        orch.worker_connected(
+            WorkerConnectedInfo {
                 worker_id: GlobalWorkerId::test(1),
-                event: crate::task::WorkerNamespaceEventKind::NamespaceCreated,
-            }),
-        });
+                capabilities: test_caps(),
+                tunnel_info: None,
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+            },
+            Duration::ZERO,
+        );
+
+        let effects = orch.process(
+            OrchestratorInput::NamespaceEvent {
+                namespace_id: ns("test"),
+                event: NamespaceCoreEvent::WorkerEvent(crate::task::WorkerNamespaceEvent {
+                    worker_id: GlobalWorkerId::test(1),
+                    event: crate::task::WorkerNamespaceEventKind::NamespaceCreated,
+                }),
+            },
+            Duration::ZERO,
+        );
         let _ = effects;
 
-        let effects = orch.worker_disconnected(GlobalWorkerId::test(1));
+        let effects = orch.worker_disconnected(GlobalWorkerId::test(1), Duration::ZERO);
         let _ = effects;
 
         let effects = orch.destroy_namespace(&ns("test"));

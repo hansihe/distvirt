@@ -1,6 +1,6 @@
 use super::*;
 use crate::sm_new::{
-    BackendNeed, Router, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
+    BackendNeed, DRouter, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
     SCHEDULE_REQUEST, TIMER,
 };
 
@@ -9,7 +9,7 @@ const S1: ServiceId = ServiceId(1);
 const S2: ServiceId = ServiceId(2);
 
 /// Set up a router with one service (activation mode) and one worker.
-fn setup_activation_service(router: &mut Router) -> WorkerId {
+fn setup_activation_service(router: &mut DRouter) -> WorkerId {
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -18,7 +18,7 @@ fn setup_activation_service(router: &mut Router) -> WorkerId {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true)); // activation mode
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -40,7 +40,7 @@ fn setup_activation_service(router: &mut Router) -> WorkerId {
 
 #[test]
 fn push_need_creates_port() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup_activation_service(&mut router);
 
     let mut adapter = BackendNeedAdapter::new();
@@ -59,7 +59,7 @@ fn push_need_creates_port() {
 
 #[test]
 fn push_need_reuses_port() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup_activation_service(&mut router);
 
     let mut adapter = BackendNeedAdapter::new();
@@ -79,7 +79,7 @@ fn push_need_reuses_port() {
 
 #[test]
 fn multiple_workers_separate_ports() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker1 = setup_activation_service(&mut router);
     let worker2 = router.create_worker();
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
@@ -101,7 +101,7 @@ fn multiple_workers_separate_ports() {
 
 #[test]
 fn remove_worker_cleans_up() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let worker1 = router.create_worker();
     router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
@@ -112,7 +112,7 @@ fn remove_worker_cleans_up() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true));
     router.create_service(S2, ServiceSm::new(true));
@@ -146,7 +146,7 @@ fn remove_worker_cleans_up() {
 
 #[test]
 fn need_none_keeps_port() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup_activation_service(&mut router);
 
     let mut adapter = BackendNeedAdapter::new();

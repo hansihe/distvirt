@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::sm_new::{
-    Router, ServiceSm, ServiceSpec, WorkloadSm, WorkloadSpec, WorkerInfo, WorkloadId, ServiceId,
+    DRouter, ServiceSm, ServiceSpec, WorkloadSm, WorkloadSpec, WorkerInfo, WorkloadId, ServiceId,
     SCHEDULE_REQUEST,
 };
 
@@ -21,7 +21,7 @@ fn test_config() -> TimerConfig {
 /// Set up a router with a workload (always-on service), propagate initial state.
 /// Returns (router, adapter, mgmt, worker).
 fn setup_workload(
-    router: &mut Router,
+    router: &mut DRouter,
     adapter: &mut TimerAdapter,
 ) -> (crate::sm_new::ManagementId, crate::sm_new::WorkerId) {
     let worker = router.create_worker();
@@ -31,7 +31,7 @@ fn setup_workload(
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -56,7 +56,7 @@ fn setup_workload(
 
 #[test]
 fn no_timers_no_actions() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let mut adapter = TimerAdapter::new(test_config());
 
@@ -72,7 +72,7 @@ fn no_timers_no_actions() {
 
 #[test]
 fn new_timer_produces_start() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let mut adapter = TimerAdapter::new(test_config());
     let (_, worker) = setup_workload(&mut router, &mut adapter);
@@ -118,7 +118,7 @@ fn new_timer_produces_start() {
 
 #[test]
 fn timer_removed_produces_cancel() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let mut adapter = TimerAdapter::new(test_config());
     let (_, worker) = setup_workload(&mut router, &mut adapter);
@@ -169,7 +169,7 @@ fn timer_removed_produces_cancel() {
 
 #[test]
 fn same_generation_no_action() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let mut adapter = TimerAdapter::new(test_config());
     let (_, worker) = setup_workload(&mut router, &mut adapter);
@@ -206,7 +206,7 @@ fn same_generation_no_action() {
 
 #[test]
 fn generation_change_restarts_timer() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let mut adapter = TimerAdapter::new(test_config());
 
@@ -218,7 +218,7 @@ fn generation_change_restarts_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -294,7 +294,7 @@ fn generation_change_restarts_timer() {
 
 #[test]
 fn multiple_sm_kinds_in_one_cycle() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let mut adapter = TimerAdapter::new(test_config());
 
@@ -306,7 +306,7 @@ fn multiple_sm_kinds_in_one_cycle() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -380,7 +380,7 @@ fn multiple_sm_kinds_in_one_cycle() {
 
 #[test]
 fn fire_dispatches_workload_timer() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let adapter = TimerAdapter::new(test_config());
     let worker = router.create_worker();
@@ -390,7 +390,7 @@ fn fire_dispatches_workload_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -434,7 +434,7 @@ fn fire_dispatches_workload_timer() {
 
 #[test]
 fn fire_dispatches_service_timer() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let adapter = TimerAdapter::new(test_config());
     let worker = router.create_worker();
@@ -444,7 +444,7 @@ fn fire_dispatches_service_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);

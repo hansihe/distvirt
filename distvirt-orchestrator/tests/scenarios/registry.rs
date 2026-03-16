@@ -7,17 +7,17 @@ use crate::harness::*;
 
 /// Test: Creating a namespace with a service sends RegistrySync to the worker
 /// with the service's name->IP mapping.
-#[tokio::test(start_paused = true)]
-async fn test_registry_sync_on_namespace_create() {
+#[test]
+fn test_registry_sync_on_namespace_create() {
     let mut h = TestHarness::new();
 
-    let w1 = h.add_worker().await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.converge();
 
     // Create namespace with always-on service.
     let spec = always_on_spec();
-    h.create_namespace("ns1", spec).await;
-    h.converge().await;
+    h.create_namespace("ns1", spec);
+    h.converge();
 
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
@@ -35,21 +35,21 @@ async fn test_registry_sync_on_namespace_create() {
 }
 
 /// Test: Adding a second worker to an active namespace sends RegistrySync to the new worker.
-#[tokio::test(start_paused = true)]
-async fn test_registry_sync_sent_to_new_worker() {
+#[test]
+fn test_registry_sync_sent_to_new_worker() {
     let mut h = TestHarness::new();
 
-    let _w1 = h.add_worker().await;
-    h.converge().await;
+    let _w1 = h.add_worker();
+    h.converge();
 
     let spec = always_on_spec();
-    h.create_namespace("ns1", spec).await;
-    h.converge().await;
+    h.create_namespace("ns1", spec);
+    h.converge();
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
     // Add a second worker.
-    let w2 = h.add_worker().await;
-    h.converge().await;
+    let w2 = h.add_worker();
+    h.converge();
 
     // Second worker should have received RegistrySync with service entries.
     h.assert_worker_received_command_matching(
@@ -66,19 +66,19 @@ async fn test_registry_sync_sent_to_new_worker() {
 
 /// Test: Adding a service via spec update sends RegistrySync with the new entry.
 /// Removing a service via spec update sends updated RegistrySync without the removed entry.
-#[tokio::test(start_paused = true)]
-async fn test_registry_update_on_service_change() {
+#[test]
+fn test_registry_update_on_service_change() {
     use distvirt_orchestrator::types::*;
 
     let mut h = TestHarness::new();
 
-    let w1 = h.add_worker().await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.converge();
 
     // Start with always_on_two_workloads_spec (has svc-a and svc-b).
     let spec = always_on_two_workloads_spec();
-    h.create_namespace("ns1", spec.clone()).await;
-    h.converge().await;
+    h.create_namespace("ns1", spec.clone());
+    h.converge();
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
     // Worker should have received RegistrySync with both services.
@@ -100,8 +100,8 @@ async fn test_registry_update_on_service_change() {
     updated_spec.services.remove(&ServiceId::from("svc-b"));
     // Also remove the workload for svc-b since it's no longer needed.
     updated_spec.workloads.remove(&WorkloadId("echo-b".to_string()));
-    h.update_namespace("ns1", updated_spec).await;
-    h.converge().await;
+    h.update_namespace("ns1", updated_spec);
+    h.converge();
 
     // After removing svc-b, the orchestrator should send a RegistrySync with only svc-a.
     // Get the last RegistrySync command sent to w1.
@@ -136,16 +136,16 @@ async fn test_registry_update_on_service_change() {
 ///
 /// When one worker disconnects, an updated WorkerRegistrySync should be sent
 /// to remaining workers.
-#[tokio::test(start_paused = true)]
-async fn test_worker_registry_sync_with_tunnel_workers() {
+#[test]
+fn test_worker_registry_sync_with_tunnel_workers() {
     let mut h = TestHarness::new();
 
     // Add first tunnel-capable worker.
     let key1 = [1u8; 32];
     let w1 = h
         .add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.1", key1))
-        .await;
-    h.converge().await;
+        ;
+    h.converge();
 
     // With only one worker, WorkerRegistrySync should still be sent (containing that worker).
     // The orchestrator pushes the full registry on every worker connect.
@@ -176,8 +176,8 @@ async fn test_worker_registry_sync_with_tunnel_workers() {
     let key2 = [2u8; 32];
     let w2 = h
         .add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.2", key2))
-        .await;
-    h.converge().await;
+        ;
+    h.converge();
 
     // Both workers should have received updated WorkerRegistrySync containing 2 entries.
     let check_two_entries = |cmd: &WorkerCommand| -> bool {
@@ -223,7 +223,7 @@ async fn test_worker_registry_sync_with_tunnel_workers() {
 
     // Disconnect w2 → remaining worker should get updated registry with only 1 entry.
     h.disconnect_worker(&w2);
-    h.converge().await;
+    h.converge();
 
     let w1_commands = h.worker(&w1).commands();
     let syncs_after_disconnect: Vec<_> = w1_commands
@@ -247,20 +247,20 @@ async fn test_worker_registry_sync_with_tunnel_workers() {
 
 /// Test: Workers without tunnel capabilities (no public_endpoint) do not appear
 /// in the WorkerRegistrySync entries, but still receive the sync command.
-#[tokio::test(start_paused = true)]
-async fn test_non_tunnel_workers_excluded_from_registry_entries() {
+#[test]
+fn test_non_tunnel_workers_excluded_from_registry_entries() {
     let mut h = TestHarness::new();
 
     // Add a non-tunnel worker (default, no public_endpoint).
-    let w1 = h.add_worker().await;
-    h.converge().await;
+    let w1 = h.add_worker();
+    h.converge();
 
     // Add a tunnel-capable worker.
     let key2 = [2u8; 32];
     let _w2 = h
         .add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.2", key2))
-        .await;
-    h.converge().await;
+        ;
+    h.converge();
 
     // w1 (non-tunnel) should still receive WorkerRegistrySync.
     h.assert_worker_received_command_matching(

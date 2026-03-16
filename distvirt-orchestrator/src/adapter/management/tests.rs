@@ -1,12 +1,12 @@
 use std::net::Ipv4Addr;
 
-use crate::sm_new::{AdminCmd, Router, SCHEDULE_REQUEST, TIMER};
+use crate::sm_new::{AdminCmd, DRouter, SCHEDULE_REQUEST, TIMER};
 use crate::types::{NamespaceSpec, WorkloadSpec, ServiceSpec, ActivationSpec};
 
 use super::ManagementAdapter;
 
-fn make_router() -> Router {
-    let mut router = Router::new(16);
+fn make_router() -> DRouter {
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router

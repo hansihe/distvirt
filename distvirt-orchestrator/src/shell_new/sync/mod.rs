@@ -3,6 +3,10 @@
 //! Provides a step/drain API for driving the orchestrator with fake time,
 //! timer management, and mock worker command handling.
 //!
+//! Time is driven via a logical clock (`Duration` from zero). Call
+//! `advance_time()` to move the clock forward and fire any expired timers.
+//! No tokio dependency — tests are fully synchronous.
+//!
 //! # Mock workers
 //!
 //! Each worker has a `CommandHandler` that maps outgoing `WorkerCommand`s to
@@ -15,10 +19,9 @@
 mod tests;
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
-use tokio::time::Instant;
-
-use crate::adapter::timer::{TimerAction, TimerConfig, TimerIdentity};
+use crate::adapter::timer::TimerConfig;
 use crate::core::namespace::NamespaceCore;
 use crate::core::orchestrator::OrchestratorCore;
 use crate::core::types::{
@@ -256,6 +259,48 @@ impl MockWorkerConfig {
             ..MockWorkerConfig::with_pool()
         }
     }
+
+    /// Config with a local storage pool and limited memory.
+    pub fn with_pool_and_memory(available_memory_mb: u64) -> Self {
+        MockWorkerConfig {
+            capabilities: distvirt_worker_protocol::WorkerCapabilities {
+                has_kvm: true,
+                has_containerd: true,
+                available_adapters: vec![],
+                max_pods: 10,
+                available_memory_mb,
+                public_endpoint: String::new(),
+                pools: vec![distvirt_worker_protocol::PoolInfo {
+                    pool_id: distvirt_worker_protocol::PoolId::from("local"),
+                    path: "/tmp/pool".to_string(),
+                    capacity_bytes: 1024 * 1024 * 1024,
+                    available_bytes: 1024 * 1024 * 1024,
+                }],
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Config with tunnel capabilities.
+    pub fn with_tunnel(endpoint: &str, _public_key: [u8; 32]) -> Self {
+        MockWorkerConfig {
+            capabilities: distvirt_worker_protocol::WorkerCapabilities {
+                has_kvm: true,
+                has_containerd: true,
+                available_adapters: vec![],
+                max_pods: 10,
+                available_memory_mb: 1024,
+                public_endpoint: endpoint.to_string(),
+                pools: vec![distvirt_worker_protocol::PoolInfo {
+                    pool_id: distvirt_worker_protocol::PoolId::from("local"),
+                    path: "/tmp/pool".to_string(),
+                    capacity_bytes: 1024 * 1024 * 1024,
+                    available_bytes: 1024 * 1024 * 1024,
+                }],
+            },
+            ..Default::default()
+        }
+    }
 }
 
 // =============================================================================
@@ -274,8 +319,8 @@ struct WorkerState {
 
 pub struct SyncShell {
     core: OrchestratorCore,
-    /// Active timers: (namespace_id, identity) -> (generation, fire_at_instant)
-    timers: HashMap<(NamespaceId, TimerIdentity), (u64, Instant)>,
+    /// Logical clock — starts at zero, advanced explicitly by the caller.
+    now: Duration,
     /// Connected workers and their buffered commands.
     workers: HashMap<GlobalWorkerId, WorkerState>,
     /// Worker ID allocator.
@@ -289,7 +334,7 @@ impl SyncShell {
     pub fn new(timer_config: TimerConfig) -> Self {
         SyncShell {
             core: OrchestratorCore::new(timer_config),
-            timers: HashMap::new(),
+            now: Duration::ZERO,
             workers: HashMap::new(),
             next_worker_id: 1,
             pending: VecDeque::new(),
@@ -324,12 +369,15 @@ impl SyncShell {
             },
         );
 
-        let effects = self.core.worker_connected(WorkerConnectedInfo {
-            worker_id,
-            capabilities: config.capabilities,
-            tunnel_info: None,
-            proto_worker_id,
-        });
+        let effects = self.core.worker_connected(
+            WorkerConnectedInfo {
+                worker_id,
+                capabilities: config.capabilities,
+                tunnel_info: None,
+                proto_worker_id,
+            },
+            self.now,
+        );
         self.execute_effects(effects);
 
         // Process any CreateNamespace commands that were just sent to this worker.
@@ -342,7 +390,7 @@ impl SyncShell {
     /// Remove/disconnect a worker.
     pub fn disconnect_worker(&mut self, worker_id: GlobalWorkerId) {
         self.workers.remove(&worker_id);
-        let effects = self.core.worker_disconnected(worker_id);
+        let effects = self.core.worker_disconnected(worker_id, self.now);
         self.execute_effects(effects);
     }
 
@@ -354,10 +402,13 @@ impl SyncShell {
         namespace_id: NamespaceId,
         network: distvirt_worker_protocol::NetworkConfig,
     ) {
-        let effects = self.core.create_namespace(CreateNamespaceInfo {
-            namespace_id,
-            network,
-        });
+        let effects = self.core.create_namespace(
+            CreateNamespaceInfo {
+                namespace_id,
+                network,
+            },
+            self.now,
+        );
         self.execute_effects(effects);
 
         // Process CreateNamespace commands sent to workers → NamespaceCreated responses.
@@ -368,10 +419,6 @@ impl SyncShell {
     pub fn destroy_namespace(&mut self, namespace_id: &NamespaceId) {
         let effects = self.core.destroy_namespace(namespace_id);
         self.execute_effects(effects);
-
-        // Remove any timers belonging to this namespace.
-        self.timers
-            .retain(|(ns_id, _), _| ns_id != namespace_id);
 
         // Process DestroyNamespace commands → NamespaceDestroyed responses.
         self.process_new_worker_commands();
@@ -422,12 +469,19 @@ impl SyncShell {
             ));
     }
 
+    /// Advance the logical clock by `delta` and fire any expired timers.
+    /// This processes all timer-triggered effects (which may cascade).
+    pub fn advance_time(&mut self, delta: Duration) {
+        self.now += delta;
+        let effects = self.core.advance_to(self.now);
+        self.execute_effects(effects);
+        self.process_new_worker_commands();
+    }
+
     /// Process one pending event. Returns true if there was work to do.
     pub fn step(&mut self) -> bool {
-        self.check_timers();
-
         if let Some(input) = self.pending.pop_front() {
-            let effects = self.core.process(input);
+            let effects = self.core.process(input, self.now);
             self.execute_effects(effects);
             // After executing effects, process any new worker commands through handlers.
             self.process_new_worker_commands();
@@ -438,7 +492,6 @@ impl SyncShell {
     }
 
     /// Process all pending events until quiescent.
-    /// This includes firing expired timers and processing mock worker responses.
     pub fn drain(&mut self) {
         loop {
             if !self.step() {
@@ -447,55 +500,9 @@ impl SyncShell {
         }
     }
 
-    /// Check timers and fire any that have expired. Queues TimerFired events.
-    fn check_timers(&mut self) {
-        let now = Instant::now();
-        let expired: Vec<_> = self
-            .timers
-            .iter()
-            .filter(|(_, (_, fire_at))| now >= *fire_at)
-            .map(|((ns_id, identity), (generation, _))| {
-                (ns_id.clone(), identity.clone(), *generation)
-            })
-            .collect();
-
-        for (namespace_id, identity, generation) in expired {
-            self.timers.remove(&(namespace_id.clone(), identity.clone()));
-            self.pending
-                .push_back(OrchestratorInput::NamespaceEvent {
-                    namespace_id,
-                    event: NamespaceCoreEvent::TimerFired {
-                        identity,
-                        generation,
-                    },
-                });
-        }
-    }
-
     /// Execute effects from OrchestratorCore, converting them to pending events
     /// or buffered commands.
     fn execute_effects(&mut self, effects: OrchestratorEffects) {
-        // Timer actions.
-        for (namespace_id, actions) in effects.timer_actions {
-            for action in actions {
-                match action {
-                    TimerAction::Start {
-                        identity,
-                        generation,
-                        duration,
-                    } => {
-                        self.timers.insert(
-                            (namespace_id.clone(), identity),
-                            (generation, Instant::now() + duration),
-                        );
-                    }
-                    TimerAction::Cancel { identity } => {
-                        self.timers.remove(&(namespace_id.clone(), identity));
-                    }
-                }
-            }
-        }
-
         // Targeted worker commands.
         for (worker_id, cmd) in effects.worker_commands {
             if let Some(state) = self.workers.get_mut(&worker_id) {
@@ -569,7 +576,7 @@ impl SyncShell {
 
     /// Classify a raw WorkerEvent and queue it as the appropriate OrchestratorInput.
     /// Delegates to `core::worker_event::classify` so both shells share the same mapping.
-    fn queue_worker_event(&mut self, worker_id: GlobalWorkerId, event: WorkerEvent) {
+    pub fn queue_worker_event(&mut self, worker_id: GlobalWorkerId, event: WorkerEvent) {
         let input = match classify(worker_id, event) {
             ClassifiedWorkerEvent::Namespace {
                 namespace_id,

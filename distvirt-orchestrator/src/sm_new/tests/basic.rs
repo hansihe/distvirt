@@ -67,7 +67,7 @@ fn reactive_readiness_edges() {
 
     // Deliver workload spec.
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into(), ..Default::default() });
 
     // Deliver service specs — always-on services auto-set demand + edges.
     router.set_management_to_service_edges(mgmt, vec![S1, S2]);
@@ -126,7 +126,7 @@ fn pod_lifecycle() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into(), ..Default::default() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -181,7 +181,7 @@ fn worker_loss_via_port_removal() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -238,14 +238,14 @@ fn spec_via_management_port() {
 
     let mgmt = router.create_management();
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "v1".into(), ..Default::default() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.has_spec);
 
     // Update spec.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "v2".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "v2".into(), ..Default::default() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -302,7 +302,7 @@ fn admin_restart_event() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -357,7 +357,7 @@ fn full_end_to_end() {
 
     // Wire management → SMs.
     router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
-    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
     router.set_management_to_service_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
@@ -456,7 +456,7 @@ fn handler_driven_pod_creation() {
 
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     // Always-on service
     router.create_service(S1, ServiceSm::new(false));
@@ -510,7 +510,7 @@ fn handler_and_router_share_id_counter() {
     // Create workload and wire it.
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test".into(), ..Default::default() });
 
     // Create service to give workload demand → workload creates pod in handler.
     router.create_service(S1, ServiceSm::new(false));

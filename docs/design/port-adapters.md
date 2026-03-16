@@ -1434,3 +1434,98 @@ provides that the new code does not yet cover.
 
 - [ ] **Unhandled protocol events** — `ShuttingDown`, `TunnelStatus`,
   `PodLogStreamError` are silently dropped in `worker_reader.rs`.
+
+## Scenario Test Harness — Transplant Progress
+
+**Date:** 2026-03-16
+
+The old scenario test harness (`tests/harness/`) has been transplanted from
+`OrchestratorShell` to `SyncShell`. The scenario tests now exercise the new
+`core/` + `sm_new/` + `adapter/` layer through the synchronous test shell.
+
+### Results
+
+- **272 lib tests:** all pass (no regressions)
+- **84 scenario tests:** 18 pass, 66 fail
+
+The 66 failing tests serve as a precise TODO list of behavioral differences
+and missing features. No tests were skipped, ignored, or weakened.
+
+### Passing tests (18)
+
+These tests exercise the new internals end-to-end and confirm correct behavior:
+
+| Category | Test |
+|----------|------|
+| fabric_routing | `test_route_miss_ignored_for_unknown_ip` |
+| fabric_routing | `test_route_miss_ignored_when_already_running` |
+| failure_recovery | `test_pod_exit_code_zero_no_backoff` |
+| failure_recovery | `test_pod_exit_while_running` |
+| failure_recovery | `test_pod_launch_failure_retries` |
+| failure_recovery | `test_pod_launch_failure_recovery_on_success` |
+| failure_recovery | `test_failed_workload_recovery_via_spec_change` |
+| multi_service | `test_add_service_to_running_workload` |
+| multi_service | `test_remove_only_active_service_drops_demand` |
+| multi_service | `test_always_on_multi_service_both_get_create_service` |
+| preemption | `test_no_preemption_of_active_traffic_workloads` |
+| preemption | `test_no_preemption_when_capacity_exists` |
+| spec_reconciliation | `test_image_change_restarts_running_workload` |
+| spec_reconciliation | `test_add_workload_to_existing_namespace` |
+| spec_reconciliation | `test_remove_workload_from_namespace` |
+| transition_intents | `test_force_deactivate_during_launch` |
+| transition_intents | `test_spec_change_during_launch` |
+| worker | `test_worker_disconnect_during_launch` |
+
+### Failure categories
+
+The 66 failing tests break down into these categories:
+
+1. **Harness stubs (panics at runtime)** — Tests that call unimplemented
+   harness methods: `drain_worker`/`undrain_worker` (all 5 drain tests),
+   `orchestrator()` field access (worker conditions, placement table),
+   `send_event_to_workload`/`send_event_to_service_worker` (pressure tests),
+   `assert_namespace_status`, `assert_service_condition_*`,
+   `status_report()`, `workload_conditions()`.
+
+2. **Timer/time interaction** — Tests without `start_paused = true` that call
+   `converge()` hit "time is not frozen" panic. Tests with timer-dependent
+   flows (activation idle cycle, suspend/resume) may not converge within the
+   loop limit.
+
+3. **Missing behavioral features** — The new SM layer doesn't yet implement:
+   worker drain/undrain, condition tracking (worker/workload/service),
+   namespace status tracking, status reports, preemption triggering,
+   pressure-based idle timeout adjustment.
+
+4. **API shape differences** — Tests that pattern-match on old types
+   (`WorkloadState::Active`, `PodSlot`, `PodState`) were mechanically
+   ported but may have subtle semantic mismatches.
+
+### Visibility changes
+
+To make `SyncShell`, `NamespaceCore`, and SM types accessible from integration
+tests (`tests/e2e.rs`), the following modules were made `pub`:
+
+- `lib.rs`: `sm_new`, `adapter`, `task`, `core`, `shell_new`
+- `core/mod.rs`: `types`, `namespace`, `orchestrator`, `worker_event`, `worker_state`
+- `adapter/mod.rs`: `management`, `timer`
+- All key types in `sm_new/` (struct fields, enums, constants)
+- `OrchestratorCore`, `NamespaceCore` structs
+
+### Harness architecture
+
+The new `TestHarness` wraps `SyncShell` and uses `RefCell`-based interior
+mutability for the `WorkerProxy` pattern (`h.worker(&w1).send_event(...)` works
+through shared references). `converge()` drains pending events, runs
+`shell.drain()`, then loops with 1ms time advances until quiescent.
+
+Key helper methods on `TestHarness`:
+- `workload_proto_pod_id(ns, wl)` — maps router PodId → protocol PodId
+- `workload_global_worker_id(ns, wl)` — maps router WorkerId → GlobalWorkerId
+- `workload_status(ns, wl)` — derives `WlStatus` from `WorkloadSm` fields
+- `service_status(ns, svc)` — derives `SvcStatus` from `ServiceSm` state
+
+New accessors on `NamespaceCore`:
+- `current_spec()` — access the stored `NamespaceSpec`
+- `router_worker_to_global()` — map router WorkerId → GlobalWorkerId
+- `router_pod_to_proto()` — map router PodId → protocol PodId

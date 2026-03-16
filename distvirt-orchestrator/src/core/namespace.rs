@@ -14,8 +14,10 @@ use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
+use distvirt_sm_router::trace::PanicTracer;
+
 use crate::sm_new::{
-    AdminCmd, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
+    AdminCmd, DRouter, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
     SCHEDULE_REQUEST, TIMER,
 };
 use crate::task::GlobalWorkerId;
@@ -137,6 +139,24 @@ impl IdMaps {
             "router ArtifactId has no protocol mapping — artifact was never registered at the namespace boundary",
         )
     }
+
+    /// Allocate a new artifact ID pair (proto + router) for a suspend operation.
+    fn create_artifact_id(
+        &mut self,
+    ) -> (
+        distvirt_worker_protocol::ArtifactId,
+        crate::sm_new::ArtifactId,
+    ) {
+        let router_id = crate::sm_new::ArtifactId(self.next_artifact_counter);
+        self.next_artifact_counter += 1;
+        let proto_id =
+            distvirt_worker_protocol::ArtifactId::from(format!("artifact-{}", router_id.0));
+        self.proto_to_router_artifact
+            .insert(proto_id.clone(), router_id);
+        self.router_to_proto_artifact
+            .insert(router_id, proto_id.clone());
+        (proto_id, router_id)
+    }
 }
 
 // =============================================================================
@@ -163,9 +183,9 @@ struct PendingWorkerCore {
 // NamespaceCore
 // =============================================================================
 
-pub(crate) struct NamespaceCore {
+pub struct NamespaceCore {
     namespace_id: NamespaceId,
-    router: Router,
+    router: DRouter,
     adapters: Adapters,
     ids: IdMaps,
 
@@ -185,7 +205,7 @@ pub(crate) struct NamespaceCore {
 
 impl NamespaceCore {
     pub fn new(namespace_id: NamespaceId, timer_config: TimerConfig) -> Self {
-        let mut router = Router::new(16);
+        let mut router = Router::new_traced(16, PanicTracer::new());
         router.create_timer(TIMER);
         router.create_schedule_request(SCHEDULE_REQUEST);
         router.create_endpoint(ENDPOINT);
@@ -640,6 +660,23 @@ impl NamespaceCore {
                     }
                     pods_to_clean.push(pod_id);
                 }
+                PodAssignmentAction::Suspend { worker_id, pod_id } => {
+                    if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
+                        let proto_pod_id =
+                            self.ids.router_to_proto_pod.get(&pod_id).cloned();
+                        if let Some(proto_pod_id) = proto_pod_id {
+                            let (proto_artifact_id, _router_artifact_id) =
+                                self.ids.create_artifact_id();
+                            let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
+                                namespace_id: self.namespace_id.clone(),
+                                pod_id: proto_pod_id,
+                                artifact_id: proto_artifact_id,
+                                pool_id: distvirt_worker_protocol::PoolId::from("default"),
+                            };
+                            effects.worker_commands.push((global_id, cmd));
+                        }
+                    }
+                }
             }
         }
 
@@ -828,13 +865,28 @@ impl NamespaceCore {
     }
 
     /// Access the router (for inspecting workload/service/pod state in tests).
-    pub fn router(&self) -> &Router {
+    pub fn router(&self) -> &DRouter {
         &self.router
     }
 
     /// Access the management adapter (for looking up workloads/services by name).
     pub fn management(&self) -> &ManagementAdapter {
         &self.adapters.management
+    }
+
+    /// Access the current namespace spec (for reading service/workload specs in tests).
+    pub fn current_spec(&self) -> Option<&NamespaceSpec> {
+        self.current_spec.as_ref()
+    }
+
+    /// Map a router-internal WorkerId to a GlobalWorkerId (for test use).
+    pub fn router_worker_to_global(&self, router_wid: &crate::sm_new::WorkerId) -> Option<GlobalWorkerId> {
+        self.ids.router_to_global_worker.get(router_wid).copied()
+    }
+
+    /// Map a router-internal PodId to a protocol PodId (for test use).
+    pub fn router_pod_to_proto(&self, router_pid: &crate::sm_new::PodId) -> Option<&distvirt_worker_protocol::PodId> {
+        self.ids.router_to_proto_pod.get(router_pid)
     }
 }
 

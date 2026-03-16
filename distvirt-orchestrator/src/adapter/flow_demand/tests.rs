@@ -1,6 +1,6 @@
 use super::*;
 use crate::sm_new::{
-    BackendNeed, Router, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
+    BackendNeed, DRouter, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
     SCHEDULE_REQUEST, TIMER,
 };
 
@@ -8,7 +8,7 @@ const W1: WorkloadId = WorkloadId(1);
 const S1: ServiceId = ServiceId(1);
 
 /// Set up a router with one activation-mode service and one worker.
-fn setup(router: &mut Router) -> WorkerId {
+fn setup(router: &mut DRouter) -> WorkerId {
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -17,7 +17,7 @@ fn setup(router: &mut Router) -> WorkerId {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -35,7 +35,7 @@ fn setup(router: &mut Router) -> WorkerId {
 
 #[test]
 fn set_active_creates_port() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup(&mut router);
 
     let mut adapter = FlowDemandAdapter::new();
@@ -48,7 +48,7 @@ fn set_active_creates_port() {
 
 #[test]
 fn set_active_twice_reuses_port() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup(&mut router);
 
     let mut adapter = FlowDemandAdapter::new();
@@ -63,7 +63,7 @@ fn set_active_twice_reuses_port() {
 
 #[test]
 fn set_inactive_keeps_port() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup(&mut router);
 
     let mut adapter = FlowDemandAdapter::new();
@@ -75,7 +75,7 @@ fn set_inactive_keeps_port() {
 
 #[test]
 fn remove_worker_cleans_up() {
-    let mut router = Router::new(16);
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup(&mut router);
 
     let mut adapter = FlowDemandAdapter::new();

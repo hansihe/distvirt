@@ -150,7 +150,7 @@ fn failed_recovery_via_spec_change() {
     assert!(wl.pod_id.is_none());
 
     // Spec change resets failures.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -195,7 +195,7 @@ fn failed_recovery_via_demand_cycle() {
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::with_max_retries(1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     // Activation-based service so we can toggle demand.
     router.create_service(S1, ServiceSm::new(true));
@@ -284,7 +284,7 @@ fn backoff_cleared_on_demand_drop() {
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::with_max_retries(5));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -351,7 +351,7 @@ fn backoff_cleared_on_spec_change() {
     }]);
 
     // Spec change clears backoff + failures → immediate retry.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -405,7 +405,7 @@ fn scavenge_during_failed() {
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::with_max_retries(1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);

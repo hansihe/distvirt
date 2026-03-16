@@ -21,18 +21,18 @@ use super::*;
 //             (owner loss while live = failure) → pod self-destructs.
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PodSm {
-    pub(crate) status: PodStatus,
-    pub(crate) workload_id: Option<WorkloadId>,
-    pub(crate) worker_id: Option<WorkerId>,
-    pub(crate) intent: PodIntent,
+pub struct PodSm {
+    pub status: PodStatus,
+    pub workload_id: Option<WorkloadId>,
+    pub worker_id: Option<WorkerId>,
+    pub intent: PodIntent,
     /// Artifact to resume from (set at creation for resumed pods).
     /// The worker port can read this to know whether to cold-boot or resume.
-    pub(crate) resume_artifact: Option<ArtifactId>,
+    pub resume_artifact: Option<ArtifactId>,
     /// Generation counter for timer requests.
-    pub(crate) timer_generation: u64,
+    pub timer_generation: u64,
     /// Worker assigned via lease signal.
-    pub(crate) assigned_worker: Option<WorkerId>,
+    pub assigned_worker: Option<WorkerId>,
 }
 
 impl PodSm {
@@ -97,6 +97,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
         ctx.set_pod_to_schedule_request_edges(vec![SCHEDULE_REQUEST]);
         ctx.set_schedule_request(PodScheduleRequest {
             resume_artifact: self.resume_artifact,
+            ..Default::default()
         });
         self.update_timer_signal(ctx);
     }
@@ -139,6 +140,10 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     self.timer_generation += 1;
                     self.status = PodStatus::Suspending;
                     ctx.set_status(PodStatus::Suspending);
+                    ctx.set_schedule_request(PodScheduleRequest {
+                        resume_artifact: self.resume_artifact,
+                        suspend: true,
+                    });
                     self.update_timer_signal(ctx);
                 }
 

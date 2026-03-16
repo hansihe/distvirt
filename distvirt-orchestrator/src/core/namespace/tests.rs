@@ -39,7 +39,7 @@ fn create_configured_core() -> (NamespaceCore, GlobalWorkerId, PodId) {
     core.router.create_workload(W1, WorkloadSm::new());
     core.router.set_management_to_workload_edges(mgmt, vec![W1]);
     core.router
-        .set_management_wl_spec(mgmt, crate::sm_new::WorkloadSpec { image: "app:v1".into() });
+        .set_management_wl_spec(mgmt, crate::sm_new::WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     core.router.create_service(S1, ServiceSm::new(false));
     core.router.set_management_to_service_edges(mgmt, vec![S1]);

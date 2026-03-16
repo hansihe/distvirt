@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::sm_new::{
-    ArtifactId, PodId, PodScheduleRequest, Router, WorkerId, WorkerPortInput,
+    ArtifactId, DRouter, PodId, PodScheduleRequest, WorkerId, WorkerPortInput,
 };
 
 #[cfg(test)]
@@ -24,6 +24,10 @@ pub(crate) enum PodAssignmentAction {
         worker_id: WorkerId,
         pod_id: PodId,
     },
+    Suspend {
+        worker_id: WorkerId,
+        pod_id: PodId,
+    },
 }
 
 pub(crate) struct PodAssignmentAdapter {
@@ -40,7 +44,7 @@ impl PodAssignmentAdapter {
 
     /// Drain worker inputs from the router, diff against cached state,
     /// and return Launch/Resume/Stop actions. Updates internal cache.
-    pub(crate) fn reconcile(&mut self, router: &mut Router) -> Vec<PodAssignmentAction> {
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<PodAssignmentAction> {
         let inputs = router.drain_worker_inputs();
 
         let mut actions = Vec::new();
@@ -69,6 +73,12 @@ impl PodAssignmentAdapter {
                                     request: request.clone(),
                                 });
                             }
+                        } else if request.suspend && !cached[pod_id].suspend {
+                            // Pod transitioned to suspend state → Suspend
+                            actions.push(PodAssignmentAction::Suspend {
+                                worker_id,
+                                pod_id: *pod_id,
+                            });
                         }
                     }
 

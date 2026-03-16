@@ -103,8 +103,8 @@ fn always_on_spec() -> NamespaceSpec {
 // Tests
 // =============================================================================
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn basic_pod_lifecycle() {
+#[test]
+fn basic_pod_lifecycle() {
     let mut shell = SyncShell::new(test_timer_config());
     let w1 = shell.add_worker_default();
 
@@ -135,8 +135,8 @@ async fn basic_pod_lifecycle() {
     assert!(has_launch, "worker should have received a LaunchPod command");
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn namespace_create_destroy() {
+#[test]
+fn namespace_create_destroy() {
     let mut shell = SyncShell::new(test_timer_config());
     let _w1 = shell.add_worker_default();
 
@@ -147,8 +147,8 @@ async fn namespace_create_destroy() {
     assert!(shell.namespace(&ns("test")).is_none());
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn worker_disconnect_and_recovery() {
+#[test]
+fn worker_disconnect_and_recovery() {
     let mut shell = SyncShell::new(test_timer_config());
     let w1 = shell.add_worker_default();
 
@@ -178,8 +178,8 @@ async fn worker_disconnect_and_recovery() {
     assert!(wl.pod_running, "workload should recover after new worker added");
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn launch_hang_triggers_timeout() {
+#[test]
+fn launch_hang_triggers_timeout() {
     let mut shell = SyncShell::new(test_timer_config());
     let _w1 = shell.add_worker(MockWorkerConfig::with_launch_hang());
 
@@ -199,7 +199,7 @@ async fn launch_hang_triggers_timeout() {
     assert_eq!(pod.status, PodStatus::Pending, "pod should still be Pending");
 
     // Advance past launch timeout.
-    tokio::time::advance(Duration::from_secs(31)).await;
+    shell.advance_time(Duration::from_secs(31));
     shell.drain();
 
     // After timeout, the pod should have failed and the workload should be in backoff.
@@ -210,8 +210,8 @@ async fn launch_hang_triggers_timeout() {
         wl.in_backoff, wl.consecutive_failures);
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn launch_failure_retries() {
+#[test]
+fn launch_failure_retries() {
     let mut shell = SyncShell::new(test_timer_config());
     let _w1 = shell.add_worker(MockWorkerConfig::with_launch_failure());
 

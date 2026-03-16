@@ -53,7 +53,7 @@ fn spawn_configured_task() -> (TestHarness, GlobalWorkerId, PodId) {
     let (event_tx, event_rx) = mpsc::channel(256);
     let (scheduler_reply_tx, scheduler_reply_rx) = mpsc::channel(64);
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_endpoint(ENDPOINT);
@@ -62,7 +62,7 @@ fn spawn_configured_task() -> (TestHarness, GlobalWorkerId, PodId) {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
 
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -128,7 +128,7 @@ fn spawn_empty_task() -> TestHarness {
     let (event_tx, event_rx) = mpsc::channel(256);
     let (scheduler_reply_tx, scheduler_reply_rx) = mpsc::channel(64);
 
-    let mut router = Router::new(16);
+    let mut router = Router::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_endpoint(ENDPOINT);

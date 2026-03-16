@@ -56,18 +56,18 @@ pub(super) fn gen_signal_setters(
                     }
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SignalChanged {
                         node: #node_str,
-                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                         signal: #signal_str,
-                        old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&state.#out_field as &dyn std::fmt::Debug),
-                        new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
+                        old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&state.#out_field as &(dyn std::fmt::Debug + Send + Sync)),
+                        new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &(dyn std::fmt::Debug + Send + Sync)),
                     });
                 } else {
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SignalChanged {
                         node: #node_str,
-                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &dyn std::fmt::Debug),
+                        id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&id as &(dyn std::fmt::Debug + Send + Sync)),
                         signal: #signal_str,
-                        old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&None::<()> as &dyn std::fmt::Debug),
-                        new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &dyn std::fmt::Debug),
+                        old: ::distvirt_sm_router::trace::DebugValue::Borrowed(&None::<()> as &(dyn std::fmt::Debug + Send + Sync)),
+                        new: ::distvirt_sm_router::trace::DebugValue::Borrowed(&value as &(dyn std::fmt::Debug + Send + Sync)),
                     });
                 }
                 self.#node_state.entry(id).or_insert_with(#state_struct::default).#out_field = value;
@@ -121,9 +121,9 @@ pub(super) fn gen_edge_setters(
                         }
                         self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
                             edge: #edge_str,
-                            source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &dyn std::fmt::Debug),
-                            added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&Vec::<#tgt_id>::new() as &dyn std::fmt::Debug),
-                            removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&old_targets as &dyn std::fmt::Debug),
+                            source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &(dyn std::fmt::Debug + Send + Sync)),
+                            added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&Vec::<#tgt_id>::new() as &(dyn std::fmt::Debug + Send + Sync)),
+                            removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&old_targets as &(dyn std::fmt::Debug + Send + Sync)),
                         });
                         for tgt in &old_targets {
                             if let Some(sources) = self.#rev.get_mut(tgt) {
@@ -154,9 +154,9 @@ pub(super) fn gen_edge_setters(
 
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
                     edge: #edge_str,
-                    source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &dyn std::fmt::Debug),
-                    added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&added as &dyn std::fmt::Debug),
-                    removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&removed as &dyn std::fmt::Debug),
+                    source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &(dyn std::fmt::Debug + Send + Sync)),
+                    added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&added as &(dyn std::fmt::Debug + Send + Sync)),
+                    removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&removed as &(dyn std::fmt::Debug + Send + Sync)),
                 });
 
                 self.#fwd.insert(source, new_targets);
@@ -208,9 +208,9 @@ pub(super) fn gen_event_send_methods(def: &TopologyDef, methods: &mut Vec<TokenS
             fn #method(&mut self, sender_id: #sender_id, receiver_id: #receiver_id, payload: #payload) {
                 self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EventQueued {
                     event: #event_str,
-                    sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(&sender_id as &dyn std::fmt::Debug),
-                    receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &dyn std::fmt::Debug),
-                    payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &dyn std::fmt::Debug),
+                    sender: ::distvirt_sm_router::trace::DebugValue::Borrowed(&sender_id as &(dyn std::fmt::Debug + Send + Sync)),
+                    receiver: ::distvirt_sm_router::trace::DebugValue::Borrowed(&receiver_id as &(dyn std::fmt::Debug + Send + Sync)),
+                    payload: ::distvirt_sm_router::trace::DebugValue::Borrowed(&payload as &(dyn std::fmt::Debug + Send + Sync)),
                 });
                 self.pending_events.push_back(PendingEvent::#variant(sender_id, receiver_id, payload));
             }

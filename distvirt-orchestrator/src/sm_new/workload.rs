@@ -3,52 +3,58 @@ use super::*;
 
 // ---- Workload SM ----
 
-pub(crate) const MAX_RETRIES: u32 = 5;
+pub const MAX_RETRIES: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct WorkloadSm {
-    pub(crate) has_spec: bool,
-    pub(crate) has_demand: bool,
-    pub(crate) pod_running: bool,
-    pub(crate) wants_pod: bool,
-    pub(crate) pod_id: Option<PodId>,
+pub struct WorkloadSm {
+    pub has_spec: bool,
+    pub has_demand: bool,
+    pub pod_running: bool,
+    pub wants_pod: bool,
+    pub pod_id: Option<PodId>,
 
     /// Set when demand transitions 0→non-zero. Prevents demand fluctuations
     /// from aborting an in-progress pod launch. Cleared when:
     /// - Pod reaches Running (commitment fulfilled)
     /// - Scavenge arrives (explicit override)
     /// - Pod is destroyed with no demand (nothing to commit to)
-    pub(crate) committed_to_boot: bool,
+    pub committed_to_boot: bool,
 
     /// Incremented each time the spec signal changes value (Some→Some).
     /// Compared against `launched_with_spec_version` to detect spec changes
     /// during pod launch — replaces PendingIntent::Restart.
-    pub(crate) spec_version: u64,
+    pub spec_version: u64,
     /// The spec_version when the current pod was created.
-    pub(crate) launched_with_spec_version: u64,
+    pub launched_with_spec_version: u64,
 
     /// Number of consecutive pod failures without a successful Running transition.
-    pub(crate) consecutive_failures: u32,
+    pub consecutive_failures: u32,
     /// Maximum retries before entering terminal Failed state.
-    pub(crate) max_retries: u32,
+    pub max_retries: u32,
     /// True while waiting for a retry backoff timer to fire.
-    pub(crate) in_backoff: bool,
+    pub in_backoff: bool,
     /// Incremented each time we enter backoff, used for timer identity.
-    pub(crate) backoff_generation: u64,
+    pub backoff_generation: u64,
 
     /// Worker ID of the current pod, learned from PodWorkerInput.
-    pub(crate) pod_worker_id: Option<WorkerId>,
+    pub pod_worker_id: Option<WorkerId>,
 
     /// Whether to suspend the pod instead of destroying it when demand drops.
-    pub(crate) suspend_on_idle: bool,
+    /// Updated from WorkloadSpec on each spec delivery.
+    pub suspend_on_idle: bool,
     /// Artifact from a successfully suspended pod. Used to resume on next
     /// demand cycle instead of cold-booting.
-    pub(crate) suspended_artifact: Option<ArtifactId>,
+    pub suspended_artifact: Option<ArtifactId>,
     /// True while the pod is in the process of suspending. Prevents reconcile
     /// from touching the pod until it reaches a terminal state.
-    pub(crate) awaiting_suspend: bool,
+    pub awaiting_suspend: bool,
     /// Counter for generating unique artifact IDs.
-    pub(crate) artifact_counter: u64,
+    pub artifact_counter: u64,
+
+    /// The image from the last delivered spec. Used to detect pod-affecting
+    /// spec changes (only image changes bump spec_version and trigger restarts;
+    /// behavioral flags like suspend_on_idle do not).
+    pub current_image: Option<String>,
 }
 
 impl WorkloadSm {
@@ -76,22 +82,7 @@ impl WorkloadSm {
             suspended_artifact: None,
             awaiting_suspend: false,
             artifact_counter: 0,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn new_suspendable() -> Self {
-        WorkloadSm {
-            suspend_on_idle: true,
-            ..Self::new()
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn new_suspendable_with_max_retries(max_retries: u32) -> Self {
-        WorkloadSm {
-            suspend_on_idle: true,
-            ..Self::with_max_retries(max_retries)
+            current_image: None,
         }
     }
 
@@ -134,22 +125,45 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
             WorkloadInput::SpecInput(spec_opt) => {
                 let new_has_spec = spec_opt.is_some();
 
-                if self.has_spec && new_has_spec {
-                    // Spec value changed (Some→Some). Increment version so we
-                    // detect stale launches via on_pod_running.
-                    self.spec_version += 1;
-                    self.consecutive_failures = 0;
-                    self.in_backoff = false;
+                if let Some((_, ref spec)) = spec_opt {
+                    // --- Update suspend_on_idle from spec ---
+                    let old_suspend_on_idle = self.suspend_on_idle;
+                    self.suspend_on_idle = spec.suspend_on_idle;
 
-                    // If pod is already Running, restart immediately.
-                    if self.pod_running {
-                        self.destroy_current_pod(ctx);
+                    // --- Detect pod-affecting spec changes (image) ---
+                    let image_changed =
+                        self.current_image.as_deref() != Some(spec.image.as_str());
+                    self.current_image = Some(spec.image.clone());
+
+                    if self.has_spec && image_changed {
+                        // Image changed (Some→Some). Increment version so we
+                        // detect stale launches via on_pod_running.
+                        self.spec_version += 1;
+                        self.consecutive_failures = 0;
+                        self.in_backoff = false;
+
+                        // If pod is already Running, restart immediately.
+                        if self.pod_running {
+                            self.destroy_current_pod(ctx);
+                        }
+                    }
+
+                    // --- Handle suspend_on_idle true→false transitions ---
+                    if old_suspend_on_idle && !self.suspend_on_idle {
+                        // Abandon any in-progress suspend (pod can handle
+                        // edge removal at any lifecycle point).
+                        if self.awaiting_suspend {
+                            self.destroy_current_pod(ctx);
+                        }
+                        // Discard stale artifact — cold boot next time.
+                        self.suspended_artifact = None;
                     }
                 }
 
                 if self.has_spec && !new_has_spec {
                     // Spec removed — clean up and self-destruct.
                     self.destroy_current_pod(ctx);
+                    self.current_image = None;
                     ctx.self_destruct();
                     return;
                 }

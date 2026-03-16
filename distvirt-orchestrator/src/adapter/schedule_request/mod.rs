@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::sm_new::{
-    PodId, PodScheduleRequest, Router, ScheduleRequestId, ScheduleRequestPortInput,
+    DRouter, PodId, PodScheduleRequest, ScheduleRequestId, ScheduleRequestPortInput,
 };
 
 #[cfg(test)]
@@ -35,7 +35,7 @@ impl ScheduleRequestAdapter {
 
     /// Drain schedule request inputs from the router, diff against sent state,
     /// and return Request/Drop deltas. Updates internal cache.
-    pub(crate) fn reconcile(&mut self, router: &mut Router) -> Vec<ScheduleRequestDelta> {
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<ScheduleRequestDelta> {
         let inputs = router.drain_schedule_request_inputs();
 
         for (sr_id, input) in inputs {
