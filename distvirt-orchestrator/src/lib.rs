@@ -4,6 +4,8 @@ pub mod sm;
 pub(crate) mod sm_new;
 pub(crate) mod adapter;
 pub(crate) mod task;
+pub(crate) mod core;
+pub(crate) mod shell_new;
 pub mod wg_peers;
 pub mod pod_map;
 pub mod broadcast;

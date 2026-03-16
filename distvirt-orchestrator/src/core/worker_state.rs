@@ -1,0 +1,283 @@
+//! Pure worker state core — no async, no channels.
+//!
+//! Extracted from `task/worker_state.rs`. Tracks per-worker state and
+//! produces scheduler updates and worker registry broadcasts as effects.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::task::scheduler::WorkerCandidate;
+use crate::task::worker_state::WorkerTunnelInfo;
+use crate::task::GlobalWorkerId;
+use crate::types::{NamespaceId, PressureBands, WorkerPressure, WorkerPsi};
+
+use super::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects};
+
+// =============================================================================
+// Tracked per-worker state (pure — no writer handle)
+// =============================================================================
+
+struct TrackedWorkerStateCore {
+    pressure_bands: PressureBands,
+    pressure: WorkerPressure,
+    psi: Option<WorkerPsi>,
+    capabilities: distvirt_worker_protocol::WorkerCapabilities,
+    conditions: HashMap<String, bool>,
+    pod_count: usize,
+    tunnel_info: Option<WorkerTunnelInfo>,
+    proto_worker_id: distvirt_worker_protocol::WorkerId,
+    segments: HashSet<u16>,
+}
+
+impl TrackedWorkerStateCore {
+    fn new(
+        capabilities: distvirt_worker_protocol::WorkerCapabilities,
+        tunnel_info: Option<WorkerTunnelInfo>,
+        proto_worker_id: distvirt_worker_protocol::WorkerId,
+    ) -> Self {
+        TrackedWorkerStateCore {
+            pressure_bands: PressureBands::default(),
+            pressure: WorkerPressure {
+                compute: 0.0,
+                memory: 0.0,
+                storage: 0.0,
+                network: 0.0,
+            },
+            psi: None,
+            capabilities,
+            conditions: HashMap::new(),
+            pod_count: 0,
+            tunnel_info,
+            proto_worker_id,
+            segments: HashSet::new(),
+        }
+    }
+
+    fn to_candidate(&self, worker_id: GlobalWorkerId) -> WorkerCandidate {
+        WorkerCandidate {
+            worker_id,
+            max_pressure_band: self.pressure_bands.max_band(),
+            pod_count: self.pod_count,
+            draining: self.conditions.get("draining").copied().unwrap_or(false),
+            active: true,
+        }
+    }
+
+    fn recompute_pressure_from_psi(&mut self) {
+        if let Some(ref psi) = self.psi {
+            let compute = (psi.cpu.some_avg10 as f32 / 100.0).clamp(0.0, 1.0);
+            let memory = (psi.memory.some_avg10 as f32 / 100.0).clamp(0.0, 1.0);
+            let storage = (psi.io.some_avg10 as f32 / 100.0).clamp(0.0, 1.0);
+
+            self.pressure = WorkerPressure {
+                compute,
+                memory,
+                storage,
+                network: 0.0,
+            };
+            self.pressure_bands = self.pressure.update_bands(&self.pressure_bands);
+        }
+    }
+
+    fn to_peer_info(&self) -> Option<distvirt_worker_protocol::WorkerPeerInfo> {
+        let tunnel = self.tunnel_info.as_ref()?;
+        if self.capabilities.public_endpoint.is_empty() {
+            return None;
+        }
+        let endpoint = format!(
+            "{}:{}",
+            self.capabilities.public_endpoint, tunnel.listen_port
+        );
+        let segments: Vec<u16> = self.segments.iter().copied().collect();
+        Some(distvirt_worker_protocol::WorkerPeerInfo {
+            worker_id: self.proto_worker_id.clone(),
+            endpoint,
+            public_key: tunnel.public_key,
+            segments,
+        })
+    }
+}
+
+// =============================================================================
+// WorkerStateCore
+// =============================================================================
+
+pub(crate) struct WorkerStateCore {
+    workers: HashMap<GlobalWorkerId, TrackedWorkerStateCore>,
+    namespace_segments: HashMap<NamespaceId, u16>,
+}
+
+impl WorkerStateCore {
+    pub(crate) fn new() -> Self {
+        WorkerStateCore {
+            workers: HashMap::new(),
+            namespace_segments: HashMap::new(),
+        }
+    }
+
+    /// Process a single event, returning effects (scheduler updates + optional broadcast).
+    pub(crate) fn process(&mut self, event: WorkerStateCoreEvent) -> WorkerStateEffects {
+        let mut effects = WorkerStateEffects::default();
+
+        match event {
+            WorkerStateCoreEvent::PressureUpdate {
+                worker_id,
+                cpu,
+                memory,
+                io,
+            } => {
+                if let Some(state) = self.workers.get_mut(&worker_id) {
+                    state.psi = Some(WorkerPsi { cpu, memory, io });
+                    state.recompute_pressure_from_psi();
+                    let candidate = state.to_candidate(worker_id);
+                    effects
+                        .scheduler_updates
+                        .push(SchedulerCoreInput::WorkerUpdate(worker_id, candidate));
+                }
+            }
+            WorkerStateCoreEvent::PoolCapacityUpdate { worker_id, pools } => {
+                if let Some(state) = self.workers.get_mut(&worker_id) {
+                    state.capabilities.pools = pools;
+                }
+            }
+            WorkerStateCoreEvent::ConditionUpdate {
+                worker_id,
+                key,
+                active,
+                ..
+            } => {
+                if let Some(state) = self.workers.get_mut(&worker_id) {
+                    state.conditions.insert(key, active);
+                    let candidate = state.to_candidate(worker_id);
+                    effects
+                        .scheduler_updates
+                        .push(SchedulerCoreInput::WorkerUpdate(worker_id, candidate));
+                }
+            }
+            WorkerStateCoreEvent::Connected {
+                worker_id,
+                capabilities,
+                tunnel_info,
+                proto_worker_id,
+            } => {
+                let state =
+                    TrackedWorkerStateCore::new(capabilities, tunnel_info, proto_worker_id);
+                let candidate = state.to_candidate(worker_id);
+                self.workers.insert(worker_id, state);
+                effects
+                    .scheduler_updates
+                    .push(SchedulerCoreInput::WorkerUpdate(worker_id, candidate));
+                effects.worker_registry_broadcast = Some(self.build_worker_registry_command());
+            }
+            WorkerStateCoreEvent::Disconnected { worker_id } => {
+                self.workers.remove(&worker_id);
+                effects
+                    .scheduler_updates
+                    .push(SchedulerCoreInput::WorkerRemoved(worker_id));
+                effects.worker_registry_broadcast = Some(self.build_worker_registry_command());
+            }
+            WorkerStateCoreEvent::NamespaceAssigned {
+                worker_id,
+                namespace_id,
+            } => {
+                if let Some(state) = self.workers.get_mut(&worker_id) {
+                    if let Some(&segment) = self.namespace_segments.get(&namespace_id) {
+                        if state.segments.insert(segment) {
+                            effects.worker_registry_broadcast =
+                                Some(self.build_worker_registry_command());
+                        }
+                    }
+                }
+            }
+            WorkerStateCoreEvent::NamespaceUnassigned {
+                worker_id,
+                namespace_id,
+            } => {
+                if let Some(state) = self.workers.get_mut(&worker_id) {
+                    if let Some(&segment) = self.namespace_segments.get(&namespace_id) {
+                        if state.segments.remove(&segment) {
+                            effects.worker_registry_broadcast =
+                                Some(self.build_worker_registry_command());
+                        }
+                    }
+                }
+            }
+            WorkerStateCoreEvent::RegisterNamespaceSegment {
+                namespace_id,
+                segment_id,
+            } => {
+                self.namespace_segments.insert(namespace_id, segment_id);
+            }
+            WorkerStateCoreEvent::UnregisterNamespaceSegment { namespace_id } => {
+                self.namespace_segments.remove(&namespace_id);
+            }
+        }
+
+        effects
+    }
+
+    fn build_worker_registry(&self) -> Vec<distvirt_worker_protocol::WorkerPeerInfo> {
+        self.workers
+            .values()
+            .filter_map(|state| state.to_peer_info())
+            .collect()
+    }
+
+    fn build_worker_registry_command(&self) -> distvirt_worker_protocol::WorkerCommand {
+        let registry = self.build_worker_registry();
+        distvirt_worker_protocol::WorkerCommand::WorkerRegistrySync { workers: registry }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws_connected(id: u64) -> WorkerStateCoreEvent {
+        WorkerStateCoreEvent::Connected {
+            worker_id: GlobalWorkerId::test(id),
+            capabilities: distvirt_worker_protocol::WorkerCapabilities {
+                has_kvm: false,
+                has_containerd: false,
+                available_adapters: vec![],
+                max_pods: 10,
+                available_memory_mb: 1024,
+                public_endpoint: String::new(),
+                pools: vec![],
+            },
+            tunnel_info: None,
+            proto_worker_id: distvirt_worker_protocol::WorkerId::from(format!("w-{}", id)),
+        }
+    }
+
+    #[test]
+    fn connected_produces_scheduler_update() {
+        let mut ws = WorkerStateCore::new();
+        let effects = ws.process(ws_connected(1));
+        assert_eq!(effects.scheduler_updates.len(), 1);
+        assert!(matches!(
+            &effects.scheduler_updates[0],
+            SchedulerCoreInput::WorkerUpdate(id, _) if *id == GlobalWorkerId::test(1)
+        ));
+    }
+
+    #[test]
+    fn disconnected_produces_scheduler_removed() {
+        let mut ws = WorkerStateCore::new();
+        ws.process(ws_connected(1));
+        let effects = ws.process(WorkerStateCoreEvent::Disconnected {
+            worker_id: GlobalWorkerId::test(1),
+        });
+        assert_eq!(effects.scheduler_updates.len(), 1);
+        assert!(matches!(
+            &effects.scheduler_updates[0],
+            SchedulerCoreInput::WorkerRemoved(id) if *id == GlobalWorkerId::test(1)
+        ));
+    }
+
+    #[test]
+    fn connected_broadcasts_worker_registry() {
+        let mut ws = WorkerStateCore::new();
+        let effects = ws.process(ws_connected(1));
+        assert!(effects.worker_registry_broadcast.is_some());
+    }
+}
