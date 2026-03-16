@@ -25,8 +25,7 @@ fn traffic_triggered_activation() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -81,8 +80,7 @@ fn idle_timeout_deactivation() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -146,8 +144,7 @@ fn traffic_cancels_idle_timer() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -205,8 +202,7 @@ fn idle_timeout_suspend_integration() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -283,8 +279,7 @@ fn worker_loss_removes_backend_need() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -343,8 +338,7 @@ fn multiple_workers_one_loses_traffic() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 

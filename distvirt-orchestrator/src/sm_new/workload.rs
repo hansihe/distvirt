@@ -407,6 +407,7 @@ impl WorkloadSm {
             ctx.set_wanted_timers(vec![TimerRequest {
                 key: WorkloadTimerKey::RetryBackoff,
                 generation: self.backoff_generation,
+                duration: std::time::Duration::from_secs(5),
             }]);
         } else {
             ctx.set_wanted_timers(vec![]);

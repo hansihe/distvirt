@@ -33,8 +33,7 @@ fn shared_worker_death_independent_failure() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
 
     let mgmt_s2 = router.create_management();
@@ -43,8 +42,7 @@ fn shared_worker_death_independent_failure() {
         mgmt_s2,
         ServiceSpec {
             workload: W2,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -160,8 +158,7 @@ fn service_retarget_workload() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -185,8 +182,7 @@ fn service_retarget_workload() {
         mgmt_s1,
         ServiceSpec {
             workload: W2,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -237,8 +233,7 @@ fn independent_workload_subgraphs() {
         mgmt1,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
 
     // W2 + S2 subgraph.
@@ -253,8 +248,7 @@ fn independent_workload_subgraphs() {
         mgmt2,
         ServiceSpec {
             workload: W2,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -342,8 +336,7 @@ fn service_fan_in_with_retarget() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
 
     let mgmt_s2 = router.create_management();
@@ -352,8 +345,7 @@ fn service_fan_in_with_retarget() {
         mgmt_s2,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -380,8 +372,7 @@ fn service_fan_in_with_retarget() {
         mgmt_s2,
         ServiceSpec {
             workload: W2,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -440,8 +431,7 @@ fn service_self_destructs_on_spec_removal() {
         mgmt_svc,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -518,8 +508,7 @@ fn full_teardown_cascade() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
 
     let mgmt_s2 = router.create_management();
@@ -529,8 +518,7 @@ fn full_teardown_cascade() {
         mgmt_s2,
         ServiceSpec {
             workload: W2,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 

@@ -19,6 +19,7 @@ pub struct ServiceSm {
     pub has_activation: bool,
     pub idle_generation: u64,
     pub idle_timer_active: bool,
+    pub idle_timeout: std::time::Duration,
 }
 
 impl ServiceSm {
@@ -32,6 +33,7 @@ impl ServiceSm {
             has_activation,
             idle_generation: 0,
             idle_timer_active: false,
+            idle_timeout: std::time::Duration::ZERO,
         }
     }
 
@@ -40,6 +42,7 @@ impl ServiceSm {
             ctx.set_svc_wanted_timers(vec![ServiceTimerRequest {
                 key: ServiceTimerKey::IdleTimeout,
                 generation: self.idle_generation,
+                duration: self.idle_timeout,
             }]);
         } else {
             ctx.set_svc_wanted_timers(vec![]);
@@ -96,6 +99,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
             ServiceInput::SvcSpecInput(spec_opt) => {
                 if let Some((_, spec)) = spec_opt {
                     self.has_activation = spec.has_activation;
+                    self.idle_timeout = spec.idle_timeout;
                     if !self.has_activation {
                         // Always-on: set demand immediately.
                         ctx.set_demand(true);

@@ -100,8 +100,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -161,8 +160,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -193,8 +191,7 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 

@@ -42,15 +42,13 @@ pub struct TimerConfig {
 }
 
 pub(crate) struct TimerAdapter {
-    config: TimerConfig,
     /// Active timers: identity → generation.
     active: HashMap<TimerIdentity, u64>,
 }
 
 impl TimerAdapter {
-    pub(crate) fn new(config: TimerConfig) -> Self {
+    pub(crate) fn new(_config: TimerConfig) -> Self {
         TimerAdapter {
-            config,
             active: HashMap::new(),
         }
     }
@@ -60,9 +58,13 @@ impl TimerAdapter {
     pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<TimerAction> {
         let inputs = router.drain_timer_inputs();
 
-        // Start from current active as the wanted set.
-        // Only update portions that had new deliveries.
-        let mut wanted = self.active.clone();
+        // Wanted set: identity → (generation, duration).
+        // Start from current active (with dummy durations — only generation matters for diff).
+        let mut wanted: HashMap<TimerIdentity, (u64, Duration)> = self
+            .active
+            .iter()
+            .map(|(k, &gen)| (k.clone(), (gen, Duration::ZERO)))
+            .collect();
         let mut had_workload = false;
         let mut had_service = false;
         let mut had_pod = false;
@@ -79,7 +81,7 @@ impl TimerAdapter {
                         for req in requests {
                             wanted.insert(
                                 TimerIdentity::Workload(wl_id, req.key.clone()),
-                                req.generation,
+                                (req.generation, req.duration),
                             );
                         }
                     }
@@ -91,7 +93,7 @@ impl TimerAdapter {
                         for req in requests {
                             wanted.insert(
                                 TimerIdentity::Service(svc_id, req.key.clone()),
-                                req.generation,
+                                (req.generation, req.duration),
                             );
                         }
                     }
@@ -103,7 +105,7 @@ impl TimerAdapter {
                         for req in requests {
                             wanted.insert(
                                 TimerIdentity::Pod(pod_id, req.key.clone()),
-                                req.generation,
+                                (req.generation, req.duration),
                             );
                         }
                     }
@@ -124,7 +126,7 @@ impl TimerAdapter {
                 None => actions.push(TimerAction::Cancel {
                     identity: identity.clone(),
                 }),
-                Some(new_gen) if *new_gen != *generation => {
+                Some((new_gen, _)) if *new_gen != *generation => {
                     actions.push(TimerAction::Cancel {
                         identity: identity.clone(),
                     });
@@ -134,25 +136,25 @@ impl TimerAdapter {
         }
 
         // Start new timers or restart with new generation.
-        for (identity, generation) in &wanted {
+        for (identity, (generation, duration)) in &wanted {
             match self.active.get(identity) {
                 None => actions.push(TimerAction::Start {
                     identity: identity.clone(),
                     generation: *generation,
-                    duration: self.duration_for(identity),
+                    duration: *duration,
                 }),
                 Some(old_gen) if *old_gen != *generation => {
                     actions.push(TimerAction::Start {
                         identity: identity.clone(),
                         generation: *generation,
-                        duration: self.duration_for(identity),
+                        duration: *duration,
                     });
                 }
                 _ => {}
             }
         }
 
-        self.active = wanted;
+        self.active = wanted.into_iter().map(|(k, (gen, _))| (k, gen)).collect();
         actions
     }
 
@@ -171,13 +173,4 @@ impl TimerAdapter {
         }
     }
 
-    /// Map a timer identity to its configured duration.
-    fn duration_for(&self, identity: &TimerIdentity) -> Duration {
-        match identity {
-            TimerIdentity::Workload(_, WorkloadTimerKey::RetryBackoff) => self.config.retry_backoff,
-            TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout) => self.config.idle_timeout,
-            TimerIdentity::Pod(_, PodTimerKey::LaunchTimeout) => self.config.launch_timeout,
-            TimerIdentity::Pod(_, PodTimerKey::SuspendTimeout) => self.config.suspend_timeout,
-        }
-    }
 }

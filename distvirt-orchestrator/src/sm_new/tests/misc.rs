@@ -148,8 +148,7 @@ fn worker_identity_in_readiness() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 

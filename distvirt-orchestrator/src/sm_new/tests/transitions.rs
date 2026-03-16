@@ -141,8 +141,7 @@ fn scavenge_idle_workload() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -170,8 +169,7 @@ fn scavenge_idle_workload() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 

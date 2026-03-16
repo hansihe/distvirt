@@ -117,6 +117,8 @@ pub struct WorkloadSpec {
 pub struct ServiceSpec {
     pub workload: WorkloadId,
     pub has_activation: bool,
+    /// Per-service idle timeout. Only meaningful when `has_activation` is true.
+    pub idle_timeout: std::time::Duration,
 }
 
 /// Worker info produced by the worker port.
@@ -201,6 +203,7 @@ pub enum ServiceTimerKey {
 pub struct ServiceTimerRequest {
     pub key: ServiceTimerKey,
     pub generation: u64,
+    pub duration: std::time::Duration,
 }
 
 /// Timer key enum for pod-specific timers.
@@ -216,6 +219,7 @@ pub enum PodTimerKey {
 pub struct PodTimerRequest {
     pub key: PodTimerKey,
     pub generation: u64,
+    pub duration: std::time::Duration,
 }
 
 // ============================================================================
@@ -227,6 +231,7 @@ pub struct PodTimerRequest {
 pub struct TimerRequest {
     pub key: WorkloadTimerKey,
     pub generation: u64,
+    pub duration: std::time::Duration,
 }
 
 /// Counts services with demand=true, also collects all service IDs.

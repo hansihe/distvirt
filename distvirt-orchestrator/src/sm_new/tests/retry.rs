@@ -204,8 +204,7 @@ fn failed_recovery_via_demand_cycle() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -261,8 +260,7 @@ fn failed_ignores_new_demand() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -292,8 +290,7 @@ fn backoff_cleared_on_demand_drop() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -413,8 +410,7 @@ fn scavenge_during_failed() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 

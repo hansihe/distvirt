@@ -69,17 +69,20 @@ impl PodSm {
 
     /// Update the timer signal based on current pod status.
     pub(crate) fn update_timer_signal(&self, ctx: &mut impl PodCtx) {
+        use std::time::Duration;
         match &self.status {
             PodStatus::Pending => {
                 ctx.set_wanted_pod_timers(vec![PodTimerRequest {
                     key: PodTimerKey::LaunchTimeout,
                     generation: self.timer_generation,
+                    duration: Duration::from_secs(30),
                 }]);
             }
             PodStatus::Suspending => {
                 ctx.set_wanted_pod_timers(vec![PodTimerRequest {
                     key: PodTimerKey::SuspendTimeout,
                     generation: self.timer_generation,
+                    duration: Duration::from_secs(60),
                 }]);
             }
             _ => {

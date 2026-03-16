@@ -18,8 +18,7 @@ fn demand_aggregation() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -75,8 +74,7 @@ fn reactive_readiness_edges() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -140,8 +138,7 @@ fn pod_lifecycle() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -189,8 +186,7 @@ fn worker_loss_via_port_removal() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -275,8 +271,7 @@ fn service_spec_creates_edges_reactively() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -310,8 +305,7 @@ fn admin_restart_event() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -363,16 +357,14 @@ fn full_end_to_end() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.set_management_to_service_edges(mgmt_s2, vec![S2]);
     router.set_management_svc_spec(
         mgmt_s2,
         ServiceSpec {
             workload: W1,
-            has_activation: true,
-        },
+            has_activation: true, ..Default::default() },
     );
     router.propagate();
 
@@ -465,8 +457,7 @@ fn handler_driven_pod_creation() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
@@ -519,8 +510,7 @@ fn handler_and_router_share_id_counter() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false,
-        },
+            has_activation: false, ..Default::default() },
     );
     router.propagate();
 
