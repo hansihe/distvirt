@@ -193,8 +193,17 @@ pub struct NamespaceCore {
 
     leases: HashMap<PodId, ScheduleLeaseId>,
 
+    /// Tracks which pods are assigned to each worker (for WorkerToPod edge management).
+    worker_pod_edges: HashMap<WorkerId, HashSet<PodId>>,
+    /// Reverse lookup: pod → assigned worker.
+    pod_worker: HashMap<PodId, WorkerId>,
+
     /// Active workers (pure set — writer handles live in the async shell).
     active_workers: HashSet<GlobalWorkerId>,
+
+    /// Grants received before the target worker was registered in the namespace.
+    /// Applied once NamespaceCreated confirms the worker.
+    deferred_grants: Vec<(PodId, GlobalWorkerId)>,
 
     proto_worker_ids: HashMap<GlobalWorkerId, distvirt_worker_protocol::WorkerId>,
 
@@ -225,7 +234,10 @@ impl NamespaceCore {
             ids: IdMaps::new(),
             pending_workers: HashMap::new(),
             leases: HashMap::new(),
+            worker_pod_edges: HashMap::new(),
+            pod_worker: HashMap::new(),
             active_workers: HashSet::new(),
+            deferred_grants: Vec::new(),
             proto_worker_ids: HashMap::new(),
             current_spec: None,
             workload_specs: HashMap::new(),
@@ -279,6 +291,20 @@ impl NamespaceCore {
                             if let Some(cmd) = self.build_registry_command(&sync_action) {
                                 effects.worker_commands.push((wne.worker_id, cmd));
                             }
+
+                            // Apply any scheduler grants that arrived before this
+                            // worker was registered. See SchedulerDecision::Grant.
+                            let deferred: Vec<PodId> = self
+                                .deferred_grants
+                                .iter()
+                                .filter(|(_, w)| *w == wne.worker_id)
+                                .map(|(p, _)| *p)
+                                .collect();
+                            self.deferred_grants
+                                .retain(|(_, w)| *w != wne.worker_id);
+                            for pod_id in deferred {
+                                self.apply_grant(router_worker_id, pod_id);
+                            }
                         }
                         return;
                     }
@@ -289,6 +315,9 @@ impl NamespaceCore {
                                 self.namespace_id, wne.worker_id, error
                             );
                         }
+                        // Discard any deferred grants for this worker.
+                        self.deferred_grants
+                            .retain(|(_, w)| *w != wne.worker_id);
                         return;
                     }
                     _ => {}
@@ -445,35 +474,26 @@ impl NamespaceCore {
                     pod_id,
                     worker_id,
                 } => {
-                    let router_worker_id =
-                        match self.ids.global_to_router_worker.get(&worker_id) {
-                            Some(&id) => id,
-                            None => {
-                                eprintln!(
-                                    "warning: scheduler grant for unknown worker {:?}, ignoring",
-                                    worker_id
-                                );
-                                return;
-                            }
-                        };
-                    let lease_id = self.router.create_schedule_lease();
-                    self.router.set_schedule_lease_lease(
-                        lease_id,
-                        LeaseInfo {
-                            worker_id: router_worker_id,
-                        },
-                    );
-                    self.router
-                        .set_schedule_lease_to_pod_edges(lease_id, vec![pod_id]);
-                    self.leases.insert(pod_id, lease_id);
+                    match self.ids.global_to_router_worker.get(&worker_id) {
+                        Some(&router_worker_id) => {
+                            self.apply_grant(router_worker_id, pod_id);
+                        }
+                        None => {
+                            // Worker not registered yet (NamespaceCreated pending).
+                            // Defer until the worker completes registration.
+                            self.deferred_grants.push((pod_id, worker_id));
+                        }
+                    }
                 }
                 SchedulerDecision::Revoke {
                     namespace_id: _,
                     pod_id,
+                    ..
                 } => {
                     if let Some(lease_id) = self.leases.remove(&pod_id) {
                         self.router.destroy_schedule_lease(lease_id);
                     }
+                    self.remove_pod_from_worker(pod_id);
                 }
             },
             NamespaceCoreEvent::TimerFired {
@@ -500,7 +520,16 @@ impl NamespaceCore {
             NamespaceCoreEvent::WorkerDisconnected { worker_id } => {
                 self.active_workers.remove(&worker_id);
                 self.proto_worker_ids.remove(&worker_id);
+                // Discard any deferred grants for this worker.
+                self.deferred_grants.retain(|(_, w)| *w != worker_id);
                 if let Some(router_worker_id) = self.ids.remove_worker_by_global(&worker_id) {
+                    // Clean up WorkerToPod edge tracking for this worker.
+                    if let Some(pods) = self.worker_pod_edges.remove(&router_worker_id) {
+                        for pod_id in pods {
+                            self.pod_worker.remove(&pod_id);
+                        }
+                    }
+
                     self.adapters
                         .pod_assignment
                         .remove_worker(&router_worker_id);
@@ -576,6 +605,50 @@ impl NamespaceCore {
                     &service_name,
                     active,
                 );
+            }
+        }
+    }
+
+    // =========================================================================
+    // WorkerToPod edge management
+    // =========================================================================
+
+    /// Apply a scheduler grant: create a lease for the pod on the given worker.
+    /// Returns false if the pod no longer exists in the router (stale grant).
+    fn apply_grant(&mut self, router_worker_id: WorkerId, pod_id: PodId) -> bool {
+        if self.router.get_pod(&pod_id).is_none() {
+            return false;
+        }
+        let lease_id = self.router.create_schedule_lease();
+        self.router.set_schedule_lease_lease(
+            lease_id,
+            LeaseInfo {
+                worker_id: router_worker_id,
+            },
+        );
+        self.router
+            .set_schedule_lease_to_pod_edges(lease_id, vec![pod_id]);
+        self.leases.insert(pod_id, lease_id);
+        self.add_pod_to_worker(router_worker_id, pod_id);
+        true
+    }
+
+    /// Add a pod to a worker's WorkerToPod edge set and update the router.
+    fn add_pod_to_worker(&mut self, worker_id: WorkerId, pod_id: PodId) {
+        self.pod_worker.insert(pod_id, worker_id);
+        let pods = self.worker_pod_edges.entry(worker_id).or_default();
+        pods.insert(pod_id);
+        self.router
+            .set_worker_to_pod_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
+    }
+
+    /// Remove a pod from its assigned worker's WorkerToPod edge set and update the router.
+    fn remove_pod_from_worker(&mut self, pod_id: PodId) {
+        if let Some(worker_id) = self.pod_worker.remove(&pod_id) {
+            if let Some(pods) = self.worker_pod_edges.get_mut(&worker_id) {
+                pods.remove(&pod_id);
+                self.router
+                    .set_worker_to_pod_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
             }
         }
     }
@@ -658,6 +731,7 @@ impl NamespaceCore {
                             effects.worker_commands.push((global_id, cmd));
                         }
                     }
+                    self.remove_pod_from_worker(pod_id);
                     pods_to_clean.push(pod_id);
                 }
                 PodAssignmentAction::Suspend { worker_id, pod_id } => {

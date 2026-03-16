@@ -212,7 +212,11 @@ impl ManagementAdapter {
         SmServiceSpec {
             workload: workload_router_id,
             has_activation: spec.activation.is_some(),
-            ..Default::default()
+            idle_timeout: spec
+                .activation
+                .as_ref()
+                .map(|a| a.idle_timeout)
+                .unwrap_or_default(),
         }
     }
 }

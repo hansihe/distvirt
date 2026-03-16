@@ -100,6 +100,8 @@ fn spawn_configured_task() -> (TestHarness, GlobalWorkerId, PodId) {
         ids: IdMaps::new(),
         pending_workers: HashMap::new(),
         leases: HashMap::new(),
+        worker_pod_edges: HashMap::new(),
+        pod_worker: HashMap::new(),
         workers: HashMap::new(),
         proto_worker_ids: HashMap::new(),
         current_spec: None,
@@ -151,6 +153,8 @@ fn spawn_empty_task() -> TestHarness {
         ids: IdMaps::new(),
         pending_workers: HashMap::new(),
         leases: HashMap::new(),
+        worker_pod_edges: HashMap::new(),
+        pod_worker: HashMap::new(),
         workers: HashMap::new(),
         proto_worker_ids: HashMap::new(),
         current_spec: None,
@@ -326,7 +330,7 @@ async fn scheduler_revoke_destroys_lease() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     harness.scheduler_reply_tx
-        .send(SchedulerDecision::Revoke { namespace_id: ns("test"), pod_id })
+        .send(SchedulerDecision::Revoke { namespace_id: ns("test"), pod_id, worker_id: GlobalWorkerId::test(1) })
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

@@ -90,7 +90,7 @@ pub enum ArtifactPlacementEvent {
 #[derive(Clone, Debug)]
 pub enum SchedulerDecision {
     Grant { namespace_id: NamespaceId, pod_id: PodId, worker_id: GlobalWorkerId },
-    Revoke { namespace_id: NamespaceId, pod_id: PodId },
+    Revoke { namespace_id: NamespaceId, pod_id: PodId, worker_id: GlobalWorkerId },
 }
 
 // =============================================================================

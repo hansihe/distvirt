@@ -392,6 +392,7 @@ impl SyncShell {
         self.workers.remove(&worker_id);
         let effects = self.core.worker_disconnected(worker_id, self.now);
         self.execute_effects(effects);
+        self.process_new_worker_commands();
     }
 
     /// Create a namespace. Immediately creates it in the core and fans out

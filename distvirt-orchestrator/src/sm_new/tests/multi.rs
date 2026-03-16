@@ -77,17 +77,15 @@ fn shared_worker_death_independent_failure() {
     router.destroy_worker(worker);
     router.propagate();
 
-    // Both workloads should have failed independently.
+    // Both workloads should have been displaced (infrastructure loss, no backoff).
     let wl1 = router.get_workload(&W1).unwrap();
     let wl2 = router.get_workload(&W2).unwrap();
     assert!(!wl1.pod_running);
     assert!(!wl2.pod_running);
-    assert!(wl1.in_backoff);
-    assert!(wl2.in_backoff);
-    assert_eq!(wl1.consecutive_failures, 1);
-    assert_eq!(wl2.consecutive_failures, 1);
-    assert!(wl1.pod_id.is_none());
-    assert!(wl2.pod_id.is_none());
+    assert!(!wl1.in_backoff);
+    assert!(!wl2.in_backoff);
+    assert_eq!(wl1.consecutive_failures, 0);
+    assert_eq!(wl2.consecutive_failures, 0);
 
     // Both services should be back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
@@ -95,12 +93,7 @@ fn shared_worker_death_independent_failure() {
     assert_eq!(s1.state, ServiceState::NeedBackend);
     assert_eq!(s2.state, ServiceState::NeedBackend);
 
-    // Fire both backoff timers.
-    router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
-    router.send_workload_timer_fired(TIMER, W2, WorkloadTimerKey::RetryBackoff);
-    router.propagate();
-
-    // Both should have created new pods.
+    // Both should have immediately created new pods (no backoff timer needed).
     let wl1 = router.get_workload(&W1).unwrap();
     let wl2 = router.get_workload(&W2).unwrap();
     assert!(wl1.pod_id.is_some());

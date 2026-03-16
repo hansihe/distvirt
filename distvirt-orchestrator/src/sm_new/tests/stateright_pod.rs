@@ -383,7 +383,7 @@ impl Model for PodNewModel {
                 if state.sm.status.is_terminal() {
                     matches!(
                         state.sm.status,
-                        PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished
+                        PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished | PodStatus::Displaced
                     )
                 } else {
                     true

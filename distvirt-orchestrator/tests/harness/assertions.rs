@@ -5,12 +5,29 @@ use distvirt_orchestrator::types::NamespaceId;
 use super::test_harness::TestHarness;
 
 impl TestHarness {
-    pub fn assert_namespace_status(&self, ns_id: &str, _expected: distvirt_orchestrator::types::NamespaceStatus) {
-        // The new system doesn't track NamespaceStatus the same way.
-        // Check namespace exists.
-        let _ns = self.namespace(ns_id);
-        // This assertion will likely not match — that's expected per policy.
-        panic!("assert_namespace_status not implemented for SyncShell harness (namespace status not tracked in new system)");
+    pub fn assert_namespace_status(&self, ns_id: &str, expected: distvirt_orchestrator::types::NamespaceStatus) {
+        use distvirt_orchestrator::types::NamespaceStatus;
+        let ns_id_typed = distvirt_orchestrator::types::NamespaceId::from(ns_id);
+        let actual = match self.shell.namespace(&ns_id_typed) {
+            None => {
+                panic!(
+                    "namespace '{}': expected {:?} but namespace does not exist",
+                    ns_id, expected
+                );
+            }
+            Some(ns) => {
+                if ns.active_workers().is_empty() {
+                    NamespaceStatus::Creating
+                } else {
+                    NamespaceStatus::Active
+                }
+            }
+        };
+        assert_eq!(
+            actual, expected,
+            "namespace '{}': expected {:?}, got {:?}",
+            ns_id, expected, actual
+        );
     }
 
     pub fn assert_namespace_absent(&self, ns_id: &str) {

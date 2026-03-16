@@ -153,6 +153,7 @@ fn scheduler_revoke_destroys_lease() {
         SchedulerDecision::Revoke {
             namespace_id: ns("test"),
             pod_id,
+            worker_id: global_worker_id,
         },
     ));
 

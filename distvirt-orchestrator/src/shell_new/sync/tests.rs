@@ -164,13 +164,15 @@ fn worker_disconnect_and_recovery() {
     shell.disconnect_worker(w1);
     shell.drain();
 
-    // Pod should be gone or failed — workload should want a new pod but have no worker.
+    // Pod displaced (infrastructure loss) — workload immediately reschedules
+    // without backoff, but no worker is available so pod stays Pending.
     let wl = shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap();
-    // Worker disconnect removes the worker from the router, causing pods to fail.
-    // The workload should want a pod but it won't be running (no available workers).
-    assert!(wl.wants_pod, "workload should still want a pod");
+    assert!(!wl.pod_running, "pod should not be running after worker disconnect");
+    assert!(!wl.in_backoff, "workload should not be in backoff for infrastructure loss");
+    assert_eq!(wl.consecutive_failures, 0, "infrastructure loss should not count as failure");
+    assert!(wl.pod_id.is_some(), "workload should have created a new pod immediately");
 
-    // Add new worker — workload should recover.
+    // Add new worker — should pick up the pending pod.
     let _w2 = shell.add_worker_default();
     shell.drain();
 

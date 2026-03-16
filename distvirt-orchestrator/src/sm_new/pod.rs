@@ -82,7 +82,7 @@ impl PodSm {
                 ctx.set_wanted_pod_timers(vec![PodTimerRequest {
                     key: PodTimerKey::SuspendTimeout,
                     generation: self.timer_generation,
-                    duration: Duration::from_secs(60),
+                    duration: Duration::from_secs(30),
                 }]);
             }
             _ => {
@@ -116,9 +116,9 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                 }
 
                 if worker.is_none() && !self.status.is_terminal() {
-                    // Worker lost — pod is dead.
-                    self.status = PodStatus::Failed;
-                    ctx.set_status(PodStatus::Failed);
+                    // Worker lost — pod displaced by infrastructure.
+                    self.status = PodStatus::Displaced;
+                    ctx.set_status(PodStatus::Displaced);
                     self.update_timer_signal(ctx);
                     self.maybe_reap(ctx);
                 }
@@ -203,10 +203,10 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                         ctx.set_pod_to_worker_edges(vec![info.worker_id]);
                     }
                     None if had_lease && !self.status.is_terminal() => {
-                        // Lease revoked — preemption.
+                        // Lease revoked — preemption (infrastructure event).
                         self.assigned_worker = None;
-                        self.status = PodStatus::Failed;
-                        ctx.set_status(PodStatus::Failed);
+                        self.status = PodStatus::Displaced;
+                        ctx.set_status(PodStatus::Displaced);
                         ctx.set_pod_to_worker_edges(vec![]);
                         self.update_timer_signal(ctx);
                         self.maybe_reap(ctx);

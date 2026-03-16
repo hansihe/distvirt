@@ -138,6 +138,10 @@ pub enum WorkerStateCoreEvent {
     UnregisterNamespaceSegment {
         namespace_id: NamespaceId,
     },
+    PodCountChange {
+        worker_id: GlobalWorkerId,
+        delta: i32,
+    },
 }
 
 /// Output effects from WorkerStateCore.

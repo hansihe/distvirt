@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc;
@@ -186,6 +186,11 @@ struct NamespaceTask {
 
     // Lease tracking: pod_id → lease_id
     leases: HashMap<PodId, ScheduleLeaseId>,
+
+    // WorkerToPod edge tracking: which pods are assigned to each worker.
+    worker_pod_edges: HashMap<WorkerId, HashSet<PodId>>,
+    // Reverse lookup: pod → assigned worker.
+    pod_worker: HashMap<PodId, WorkerId>,
 
     // Worker handles: global_worker_id → writer
     workers: HashMap<GlobalWorkerId, WorkerWriterHandle>,
@@ -451,11 +456,15 @@ impl NamespaceTask {
                     self.router
                         .set_schedule_lease_to_pod_edges(lease_id, vec![pod_id]);
                     self.leases.insert(pod_id, lease_id);
+
+                    // Establish WorkerToPod edge so the pod receives Worker::Info.
+                    self.add_pod_to_worker(router_worker_id, pod_id);
                 }
-                SchedulerDecision::Revoke { namespace_id: _, pod_id } => {
+                SchedulerDecision::Revoke { namespace_id: _, pod_id, .. } => {
                     if let Some(lease_id) = self.leases.remove(&pod_id) {
                         self.router.destroy_schedule_lease(lease_id);
                     }
+                    self.remove_pod_from_worker(pod_id);
                 }
             },
             NamespaceEvent::TimerFired {
@@ -487,6 +496,13 @@ impl NamespaceTask {
                 self.workers.remove(&worker_id);
                 self.proto_worker_ids.remove(&worker_id);
                 if let Some(router_worker_id) = self.ids.remove_worker_by_global(&worker_id) {
+                    // Clean up WorkerToPod edge tracking for this worker.
+                    if let Some(pods) = self.worker_pod_edges.remove(&router_worker_id) {
+                        for pod_id in pods {
+                            self.pod_worker.remove(&pod_id);
+                        }
+                    }
+
                     self.adapters.pod_assignment.remove_worker(&router_worker_id);
                     self.adapters.backend_need.remove_worker(&mut self.router, &router_worker_id);
                     self.adapters.flow_demand.remove_worker(&mut self.router, &router_worker_id);
@@ -558,6 +574,28 @@ impl NamespaceTask {
                     &service_name,
                     active,
                 );
+            }
+        }
+    }
+
+    // =========================================================================
+    // WorkerToPod edge management
+    // =========================================================================
+
+    fn add_pod_to_worker(&mut self, worker_id: WorkerId, pod_id: PodId) {
+        self.pod_worker.insert(pod_id, worker_id);
+        let pods = self.worker_pod_edges.entry(worker_id).or_default();
+        pods.insert(pod_id);
+        self.router
+            .set_worker_to_pod_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
+    }
+
+    fn remove_pod_from_worker(&mut self, pod_id: PodId) {
+        if let Some(worker_id) = self.pod_worker.remove(&pod_id) {
+            if let Some(pods) = self.worker_pod_edges.get_mut(&worker_id) {
+                pods.remove(&pod_id);
+                self.router
+                    .set_worker_to_pod_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
             }
         }
     }
@@ -677,6 +715,7 @@ impl NamespaceTask {
                             commands.push((global_id, cmd));
                         }
                     }
+                    self.remove_pod_from_worker(pod_id);
                     pods_to_clean.push(pod_id);
                 }
                 PodAssignmentAction::Suspend { worker_id, pod_id } => {
@@ -943,6 +982,8 @@ pub(crate) fn spawn(
         ids: IdMaps::new(),
         pending_workers: HashMap::new(),
         leases: HashMap::new(),
+        worker_pod_edges: HashMap::new(),
+        pod_worker: HashMap::new(),
         workers: HashMap::new(),
         proto_worker_ids: HashMap::new(),
         current_spec: None,

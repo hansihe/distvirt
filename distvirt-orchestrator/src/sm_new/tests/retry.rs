@@ -9,10 +9,11 @@ use std::time::Duration;
 #[test]
 fn pod_failure_backoff_and_retry() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
 
-    // Kill worker → pod fails.
-    router.destroy_worker(worker);
+    // Pod fails via worker notification (application failure).
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -25,7 +26,7 @@ fn pod_failure_backoff_and_retry() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Timer fires — backoff cleared, reconcile creates new pod.
@@ -40,10 +41,8 @@ fn pod_failure_backoff_and_retry() {
     // Timer signal should now be empty (backoff cleared).
     assert_no_timers_wanted(&mut router);
 
-    // New worker + make pod running.
-    let worker2 = router.create_worker();
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
-    make_pod_running(&mut router, worker2, new_pod);
+    // Make pod running on the same worker.
+    make_pod_running(&mut router, worker, new_pod);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
@@ -57,10 +56,11 @@ fn pod_failure_backoff_and_retry() {
 #[test]
 fn consecutive_failures_increment() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // First failure.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -71,7 +71,7 @@ fn consecutive_failures_increment() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Timer fires → retry.
@@ -80,10 +80,8 @@ fn consecutive_failures_increment() {
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // Second failure (via direct status, not worker loss).
-    let worker2 = router.create_worker();
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
-    make_pod_failed(&mut router, worker2, pod2);
+    // Second failure (via direct status).
+    make_pod_failed(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 2);
@@ -93,7 +91,7 @@ fn consecutive_failures_increment() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 2,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 }
 
@@ -101,10 +99,11 @@ fn consecutive_failures_increment() {
 #[test]
 fn max_retries_enters_failed() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_workload(&mut router, 2);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 2);
 
     // First failure.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -115,7 +114,7 @@ fn max_retries_enters_failed() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Timer fires → retry.
@@ -125,9 +124,7 @@ fn max_retries_enters_failed() {
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Second failure — hits max_retries (2).
-    let worker2 = router.create_worker();
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
-    make_pod_failed(&mut router, worker2, pod2);
+    make_pod_failed(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 2);
@@ -146,7 +143,8 @@ fn failed_recovery_via_spec_change() {
     let (mgmt, worker) = setup_running_workload(&mut router, 1);
 
     // One failure → hits max_retries (1) → terminal.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -171,7 +169,8 @@ fn failed_recovery_via_restart() {
     let (mgmt, worker) = setup_running_workload(&mut router, 1);
 
     // One failure → terminal.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -221,7 +220,7 @@ fn failed_recovery_via_demand_cycle() {
     make_pod_running(&mut router, worker, pod_id);
 
     // Fail → terminal (max_retries=1).
-    router.destroy_worker(worker);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -251,7 +250,8 @@ fn failed_ignores_new_demand() {
     let (mgmt, worker) = setup_running_workload(&mut router, 1);
 
     // Fail → terminal.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -307,7 +307,7 @@ fn backoff_cleared_on_demand_drop() {
     make_pod_running(&mut router, worker, pod_id);
 
     // Fail → enters backoff.
-    router.destroy_worker(worker);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -318,7 +318,7 @@ fn backoff_cleared_on_demand_drop() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Drop demand → clears everything.
@@ -341,7 +341,8 @@ fn backoff_cleared_on_spec_change() {
     let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // Fail → enters backoff.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -351,7 +352,7 @@ fn backoff_cleared_on_spec_change() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Spec change clears backoff + failures → immediate retry.
@@ -374,7 +375,8 @@ fn scavenge_during_backoff() {
     let (mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // Fail → enters backoff.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -384,7 +386,7 @@ fn scavenge_during_backoff() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Scavenge is noop when demand is present (always-on service).
@@ -430,7 +432,7 @@ fn scavenge_during_failed() {
     make_pod_running(&mut router, worker, pod_id);
 
     // Fail → terminal (max_retries=1).
-    router.destroy_worker(worker);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -454,10 +456,11 @@ fn scavenge_during_failed() {
 #[test]
 fn success_resets_failure_counter() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
 
     // First failure.
-    router.destroy_worker(worker);
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -467,7 +470,7 @@ fn success_resets_failure_counter() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 
     // Timer fires → retry.
@@ -477,16 +480,14 @@ fn success_resets_failure_counter() {
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Succeed — counter resets.
-    let worker2 = router.create_worker();
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
-    make_pod_running(&mut router, worker2, pod2);
+    make_pod_running(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 0);
     assert!(wl.pod_running);
 
     // Fail again — counter should be 1, not 2.
-    router.destroy_worker(worker2);
+    router.send_notify_pod_status(worker, pod2, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -497,6 +498,6 @@ fn success_resets_failure_counter() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 2,
-        ..Default::default()
+        duration: Duration::from_millis(500)
     }]);
 }

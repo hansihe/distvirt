@@ -71,10 +71,11 @@ impl SchedulerCore {
                 pod_id,
             } => {
                 let key = (namespace_id.clone(), pod_id);
-                if let Some(_entry) = self.granted.remove(&key) {
+                if let Some(entry) = self.granted.remove(&key) {
                     vec![SchedulerDecision::Revoke {
                         namespace_id,
                         pod_id,
+                        worker_id: entry.worker_id,
                     }]
                 } else {
                     self.pending.remove(&key);

@@ -39,8 +39,9 @@ fn graceful_exit_after_failures_preserves_count() {
     let mut router = Router::new(16);
     let (_mgmt, worker) = setup_running_workload(&mut router, 5);
 
-    // First failure via worker loss.
-    router.destroy_worker(worker);
+    // First failure via application failure.
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -53,17 +54,15 @@ fn graceful_exit_after_failures_preserves_count() {
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // New worker, make pod running.
-    let worker2 = router.create_worker();
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
-    make_pod_running(&mut router, worker2, pod2);
+    // Make pod running on same worker.
+    make_pod_running(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
     assert_eq!(wl.consecutive_failures, 0); // reset on Running
 
     // Pod finishes gracefully.
-    router.send_notify_pod_status(worker2, pod2, PodStatus::Finished);
+    router.send_notify_pod_status(worker, pod2, PodStatus::Finished);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -186,8 +185,9 @@ fn worker_identity_updates_on_new_worker() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.pod_worker_id, Some(worker1));
 
-    // Worker1 dies → pod fails → backoff.
-    router.destroy_worker(worker1);
+    // Pod fails via application failure → backoff.
+    let pod_id = wl.pod_id.unwrap();
+    router.send_notify_pod_status(worker1, pod_id, PodStatus::Failed);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();

@@ -20,6 +20,11 @@ pub struct ServiceSm {
     pub idle_generation: u64,
     pub idle_timer_active: bool,
     pub idle_timeout: std::time::Duration,
+    /// Cached readiness from the workload. Stored regardless of service state
+    /// so that an Idle→NeedBackend transition can skip straight to Active when
+    /// readiness was delivered while the service was idle (the router suppresses
+    /// re-delivery of unchanged signals).
+    pub last_readiness: Option<ReadyInfo>,
 }
 
 impl ServiceSm {
@@ -34,6 +39,7 @@ impl ServiceSm {
             idle_generation: 0,
             idle_timer_active: false,
             idle_timeout: std::time::Duration::ZERO,
+            last_readiness: None,
         }
     }
 
@@ -46,6 +52,18 @@ impl ServiceSm {
             }]);
         } else {
             ctx.set_svc_wanted_timers(vec![]);
+        }
+    }
+
+    /// Transition from Idle to NeedBackend (or directly to Active if readiness
+    /// is already cached). Call this instead of setting `self.state = NeedBackend`
+    /// directly from Idle.
+    fn activate(&mut self) {
+        debug_assert!(matches!(self.state, ServiceState::Idle));
+        if let Some(info) = self.last_readiness.clone() {
+            self.state = ServiceState::Active { ready: info };
+        } else {
+            self.state = ServiceState::NeedBackend;
         }
     }
 
@@ -79,6 +97,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
         match input {
             ServiceInput::ReadinessInput(readiness_list) => {
                 let ready = readiness_list.into_iter().next().flatten();
+                self.last_readiness = ready.clone();
                 match (&self.state, ready) {
                     (ServiceState::NeedBackend, Some(info)) => {
                         self.state = ServiceState::Active { ready: info };
@@ -104,7 +123,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                         // Always-on: set demand immediately.
                         ctx.set_demand(true);
                         if matches!(self.state, ServiceState::Idle) {
-                            self.state = ServiceState::NeedBackend;
+                            self.activate();
                         }
                     }
                     // The idle timer is only meaningful with has_activation.
@@ -123,7 +142,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                 if self.has_activation {
                     ctx.set_demand(active);
                     if active && matches!(self.state, ServiceState::Idle) {
-                        self.state = ServiceState::NeedBackend;
+                        self.activate();
                     } else if !active {
                         self.state = ServiceState::Idle;
                         ctx.set_demand(false);
@@ -151,7 +170,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                     }
                     (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
                         ctx.set_demand(true);
-                        self.state = ServiceState::NeedBackend;
+                        self.activate();
                     }
                     _ => {}
                 }

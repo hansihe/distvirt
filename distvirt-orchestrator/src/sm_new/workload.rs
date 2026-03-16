@@ -176,6 +176,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 let was_running = self.pod_running;
                 self.pod_running = statuses.iter().any(|s| *s == PodStatus::Running);
                 let has_failed = statuses.iter().any(|s| *s == PodStatus::Failed);
+                let has_displaced = statuses.iter().any(|s| *s == PodStatus::Displaced);
                 let has_finished = statuses.iter().any(|s| *s == PodStatus::Finished);
 
                 // Pod reached Suspended terminal state — save artifact and reap.
@@ -218,6 +219,8 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.on_pod_running(ctx);
                 } else if has_failed && self.pod_id.is_some() {
                     self.on_pod_failed(ctx);
+                } else if has_displaced && self.pod_id.is_some() {
+                    self.on_pod_displaced(ctx);
                 } else if has_finished && self.pod_id.is_some() {
                     self.on_pod_finished(ctx);
                 } else if !self.pod_running && was_running {
@@ -385,6 +388,34 @@ impl WorkloadSm {
         self.update_timer_signal(ctx);
     }
 
+    /// Called when a pod reports Displaced status (infrastructure loss — worker
+    /// disconnect or lease revocation). Not counted as a failure. Cleans up and
+    /// immediately reconciles for rescheduling.
+    pub(crate) fn on_pod_displaced(&mut self, ctx: &mut impl WorkloadCtx) {
+        self.awaiting_suspend = false;
+        ctx.set_readiness(None);
+
+        // Remove ownership edge — pod is terminal (Displaced),
+        // so removing the edge triggers self-destruct.
+        ctx.set_workload_to_pod_edges(vec![]);
+        ctx.set_pod_intent(PodIntent::None);
+        self.pod_id = None;
+
+        // Discard any suspended artifact — it was on the lost worker.
+        self.suspended_artifact = None;
+
+        // Do NOT increment consecutive_failures — this is infrastructure, not app failure.
+        // Do NOT enter in_backoff — allow immediate rescheduling.
+
+        // Re-evaluate commitment.
+        if !self.has_demand {
+            self.committed_to_boot = false;
+        }
+
+        self.reconcile(ctx);
+        self.update_timer_signal(ctx);
+    }
+
     /// Abandon the current pod by removing the ownership edge.
     /// The pod will drive itself to a terminal state and self-destruct.
     /// Any suspended artifact is discarded (this is a hard kill).
@@ -407,7 +438,7 @@ impl WorkloadSm {
             ctx.set_wanted_timers(vec![TimerRequest {
                 key: WorkloadTimerKey::RetryBackoff,
                 generation: self.backoff_generation,
-                duration: std::time::Duration::from_secs(5),
+                duration: std::time::Duration::from_millis(500),
             }]);
         } else {
             ctx.set_wanted_timers(vec![]);

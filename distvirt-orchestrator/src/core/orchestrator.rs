@@ -229,6 +229,14 @@ impl OrchestratorCore {
 
         self.connected_workers.remove(&worker_id);
 
+        // Remove the worker from the scheduler FIRST, before processing namespace
+        // events. Namespace processing may create new pods that emit schedule
+        // requests; those must not be granted to the disconnecting worker.
+        let ws_effects = self
+            .worker_state
+            .process(WorkerStateCoreEvent::Disconnected { worker_id });
+        self.route_worker_state_effects(ws_effects, &mut effects, now);
+
         let ns_ids: Vec<_> = self.namespaces.keys().cloned().collect();
         for ns_id in ns_ids {
             if let Some(ns) = self.namespaces.get_mut(&ns_id) {
@@ -245,11 +253,6 @@ impl OrchestratorCore {
                     });
             self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
-
-        let ws_effects = self
-            .worker_state
-            .process(WorkerStateCoreEvent::Disconnected { worker_id });
-        self.route_worker_state_effects(ws_effects, &mut effects, now);
 
         effects
     }
@@ -439,10 +442,33 @@ impl OrchestratorCore {
     ) {
         for decision in decisions {
             let target_ns_id = match &decision {
-                crate::task::SchedulerDecision::Grant { namespace_id, .. } => {
+                crate::task::SchedulerDecision::Grant {
+                    namespace_id,
+                    worker_id,
+                    ..
+                } => {
+                    // Track pod count so the scheduler can tiebreak by load.
+                    let ws_effects =
+                        self.worker_state
+                            .process(WorkerStateCoreEvent::PodCountChange {
+                                worker_id: *worker_id,
+                                delta: 1,
+                            });
+                    self.route_worker_state_effects(ws_effects, effects, now);
                     namespace_id.clone()
                 }
-                crate::task::SchedulerDecision::Revoke { namespace_id, .. } => {
+                crate::task::SchedulerDecision::Revoke {
+                    namespace_id,
+                    worker_id,
+                    ..
+                } => {
+                    let ws_effects =
+                        self.worker_state
+                            .process(WorkerStateCoreEvent::PodCountChange {
+                                worker_id: *worker_id,
+                                delta: -1,
+                            });
+                    self.route_worker_state_effects(ws_effects, effects, now);
                     namespace_id.clone()
                 }
             };

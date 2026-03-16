@@ -210,6 +210,16 @@ impl WorkerStateCore {
             WorkerStateCoreEvent::UnregisterNamespaceSegment { namespace_id } => {
                 self.namespace_segments.remove(&namespace_id);
             }
+            WorkerStateCoreEvent::PodCountChange { worker_id, delta } => {
+                if let Some(state) = self.workers.get_mut(&worker_id) {
+                    state.pod_count = (state.pod_count as i32 + delta).max(0) as usize;
+                    state.recompute_pressure_from_psi();
+                    let candidate = state.to_candidate(worker_id);
+                    effects
+                        .scheduler_updates
+                        .push(SchedulerCoreInput::WorkerUpdate(worker_id, candidate));
+                }
+            }
         }
 
         effects

@@ -114,6 +114,8 @@ enum WlNewAction {
     PodRunning,
     /// Pod fails (delivers PodStatusInput([Failed])).
     PodFailed,
+    /// Pod displaced by infrastructure (delivers PodStatusInput([Displaced])).
+    PodDisplaced,
     /// Pod finishes gracefully (delivers PodStatusInput([Finished])).
     PodFinished,
     /// Pod suspended successfully (delivers PodStatusInput([Suspended{..}])).
@@ -285,11 +287,13 @@ impl Model for WlNewModel {
                 actions.push(WlNewAction::PodRunning);
                 if self.enable_pod_failure {
                     actions.push(WlNewAction::PodFailed);
+                    actions.push(WlNewAction::PodDisplaced);
                 }
             }
             PodEnvState::Running { .. } => {
                 if self.enable_pod_failure {
                     actions.push(WlNewAction::PodFailed);
+                    actions.push(WlNewAction::PodDisplaced);
                 }
                 actions.push(WlNewAction::PodFinished);
             }
@@ -297,6 +301,7 @@ impl Model for WlNewModel {
                 actions.push(WlNewAction::PodSuspended);
                 if self.enable_pod_failure {
                     actions.push(WlNewAction::PodFailed);
+                    actions.push(WlNewAction::PodDisplaced);
                 }
             }
             PodEnvState::None => {}
@@ -395,6 +400,12 @@ impl Model for WlNewModel {
                 apply_input(
                     state,
                     WorkloadInput::PodStatusInput(vec![PodStatus::Failed]),
+                )
+            }
+            WlNewAction::PodDisplaced => {
+                apply_input(
+                    state,
+                    WorkloadInput::PodStatusInput(vec![PodStatus::Displaced]),
                 )
             }
             WlNewAction::PodFinished => {

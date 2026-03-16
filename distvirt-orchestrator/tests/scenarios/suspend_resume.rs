@@ -5,42 +5,6 @@ use crate::harness::*;
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
-/// Debug trace: step through activate → idle → suspend lifecycle.
-#[test]
-fn debug_suspend_lifecycle() {
-    let mut h = TestHarness::new();
-    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
-    let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
-    h.converge();
-
-    let wl_status = h.workload_status("ns", "web");
-    let svc_status = h.service_status("ns", "web-svc");
-    eprintln!("AFTER CREATE: wl={:?}, svc={:?}", wl_status, svc_status);
-
-    h.activate_service("ns", "web-svc");
-    let svc_sm = h.service_state_sm("ns", "web-svc");
-    eprintln!("AFTER ACTIVATE: wl={:?}, svc={:?}, idle_timer={}", h.workload_status("ns", "web"), h.service_status("ns", "web-svc"), svc_sm.idle_timer_active);
-
-    h.deactivate_service("ns", "web-svc");
-    let svc_sm = h.service_state_sm("ns", "web-svc");
-    let wl = h.workload_state("ns", "web");
-    eprintln!("AFTER DEACTIVATE: wl={:?}, svc={:?}, idle_timer={}, idle_gen={}", h.workload_status("ns", "web"), h.service_status("ns", "web-svc"), svc_sm.idle_timer_active, svc_sm.idle_generation);
-    eprintln!("  wl: demand={}, suspend_on_idle={}, pod_running={}, pod_id={:?}", wl.has_demand, wl.suspend_on_idle, wl.pod_running, wl.pod_id);
-
-    h.advance_past_idle_timeout("ns", "web-svc");
-    let wl = h.workload_state("ns", "web");
-    eprintln!("AFTER IDLE TIMEOUT: wl={:?}, svc={:?}", h.workload_status("ns", "web"), h.service_status("ns", "web-svc"));
-    eprintln!("  wl: demand={}, suspend_on_idle={}, awaiting_suspend={}, pod_running={}, pod_id={:?}, artifact={:?}", wl.has_demand, wl.suspend_on_idle, wl.awaiting_suspend, wl.pod_running, wl.pod_id, wl.suspended_artifact);
-
-    let cmds = h.shell.worker_commands(&w1);
-    for (i, cmd) in cmds.iter().enumerate() {
-        eprintln!("  cmd[{}]: {:?}", i, cmd);
-    }
-
-    panic!("debug trace done");
-}
-
 /// Full cycle: activate → run → idle → suspend → re-activate → resume → running.
 /// Verify the resume path uses ResumePod (not LaunchPod).
 #[test]
@@ -258,30 +222,11 @@ fn test_delete_during_resume() {
     h.converge();
     h.assert_workload_resuming("ns", "web");
 
-    // Get the pod_id before deleting namespace.
-    let pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
-
-    // Delete the namespace while mid-resume — sets PendingIntent::Deactivate.
+    // Delete the namespace while mid-resume.
     h.delete_namespace("ns");
     h.converge();
 
-    h.assert_namespace_status("ns", NamespaceStatus::Destroying);
-
-    // Complete the resume by injecting PodRunning.
-    h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
-        pod_id,
-    });
-    h.converge();
-
-    h.assert_namespace_status("ns", NamespaceStatus::Destroying);
-
-    // Inject NamespaceDestroyed to complete the destroy cycle.
-    h.worker(&w1).send_event(WorkerEvent::NamespaceDestroyed {
-        namespace_id: "ns".into(),
-    });
-    h.converge();
-
+    // In the new system, destroy is immediate — namespace is gone after delete.
     h.assert_namespace_absent("ns");
 }
 

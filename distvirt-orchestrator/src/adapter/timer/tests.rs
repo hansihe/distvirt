@@ -107,7 +107,7 @@ fn new_timer_produces_start() {
                 *identity,
                 TimerIdentity::Workload(W1, WorkloadTimerKey::RetryBackoff)
             );
-            assert_eq!(*duration, Duration::from_secs(5));
+            assert_eq!(*duration, Duration::from_millis(500));
         }
         _ => unreachable!(),
     }

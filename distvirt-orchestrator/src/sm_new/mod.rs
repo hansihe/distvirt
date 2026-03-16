@@ -32,15 +32,17 @@ pub enum PodStatus {
     Suspended { artifact_id: ArtifactId },
     /// Terminal: pod exited gracefully (exit code 0). Not counted as failure.
     Finished,
-    /// Terminal: pod failed (non-zero exit, error, worker loss, timeout, abandoned).
+    /// Terminal: pod failed (non-zero exit, error, timeout, abandoned).
     Failed,
+    /// Terminal: pod displaced by infrastructure — worker disconnect or lease revocation.
+    Displaced,
 }
 
 impl PodStatus {
     fn is_terminal(&self) -> bool {
         matches!(
             self,
-            PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished
+            PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished | PodStatus::Displaced
         )
     }
 

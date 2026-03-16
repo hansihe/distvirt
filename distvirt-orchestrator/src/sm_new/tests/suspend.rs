@@ -196,9 +196,10 @@ fn worker_loss_on_suspendable_workload() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.pod_running);
-    assert!(wl.in_backoff); // failure, not suspend
-    assert_eq!(wl.consecutive_failures, 1);
+    assert!(!wl.in_backoff); // displaced, not failure — no backoff
+    assert_eq!(wl.consecutive_failures, 0); // not counted as failure
     assert_eq!(wl.suspended_artifact, None); // no artifact from a crash
+    assert!(wl.wants_pod); // immediately reschedules
 
     // Service should be back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();

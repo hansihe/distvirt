@@ -363,6 +363,22 @@ impl Model for SvcNewModel {
                     true
                 }
             }),
+            // Safety: last_readiness cache tracks environment readiness.
+            Property::<Self>::always("last_readiness consistent with env", |_model, state| {
+                if state.self_destructed { return true; }
+                state.sm.last_readiness.is_some() == (state.readiness_env == ReadinessEnv::Ready)
+            }),
+            // Safety: NeedBackend implies readiness is absent. With the
+            // last_readiness cache, activate() skips straight to Active when
+            // readiness is available, so NeedBackend is unreachable with ready env.
+            Property::<Self>::always("NeedBackend implies no readiness", |_model, state| {
+                if state.self_destructed { return true; }
+                if matches!(state.sm.state, ServiceState::NeedBackend) {
+                    state.readiness_env == ReadinessEnv::None
+                } else {
+                    true
+                }
+            }),
             // Safety: self-destruct only on spec removal.
             Property::<Self>::always("self-destruct only on spec removal", |_model, state| {
                 if state.self_destructed {
@@ -417,6 +433,10 @@ impl Representative for SvcNewModelState {
         if let ServiceState::Active { ref mut ready } = s.sm.state {
             ready.pod_id = PodId(0);
             ready.worker_id = WorkerId(0);
+        }
+        if let Some(ref mut info) = s.sm.last_readiness {
+            info.pod_id = PodId(0);
+            info.worker_id = WorkerId(0);
         }
 
         s

@@ -207,18 +207,15 @@ fn worker_loss_via_port_removal() {
     router.destroy_worker(worker);
     router.propagate();
 
-    // Pod was failed and workload released it (on_pod_failed → self-destruct).
-    // Workload should have lost readiness and entered backoff for retry.
+    // Pod was displaced (infrastructure loss) — workload immediately reschedules.
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.pod_running);
-    assert!(wl.in_backoff);
+    assert!(!wl.in_backoff); // no backoff for infrastructure loss
+    assert_eq!(wl.consecutive_failures, 0); // not counted as failure
+    assert!(wl.wants_pod); // immediately wants a new pod
 
-    // Timer signal should show a retry backoff request.
-    assert_timer_requested(&mut router, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-        ..Default::default()
-    }]);
+    // No retry timer needed — immediate rescheduling.
+    assert_no_timers_wanted(&mut router);
 
     // Service should be back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
@@ -415,26 +412,20 @@ fn full_end_to_end() {
     router.destroy_worker(worker);
     router.propagate();
 
-    // Pod failed — workload released it and entered backoff.
+    // Pod displaced — workload immediately reschedules (no backoff).
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.pod_running);
-    assert!(wl.in_backoff);
+    assert!(!wl.in_backoff); // no backoff for infrastructure loss
+    assert_eq!(wl.consecutive_failures, 0);
+    assert!(wl.wants_pod); // immediately wants a new pod
+    assert!(wl.has_demand); // demand is still there
 
-    // Timer signal: workload wants a retry backoff timer.
-    assert_timer_requested(&mut router, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-        ..Default::default()
-    }]);
+    // No retry timer needed.
+    assert_no_timers_wanted(&mut router);
 
     // S1 goes back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
     assert_eq!(s1.state, ServiceState::NeedBackend);
-
-    // Workload wants a pod but is in backoff — not creating one yet.
-    let wl = router.get_workload(&W1).unwrap();
-    assert!(!wl.wants_pod); // backoff suppresses want_pod
-    assert!(wl.has_demand); // demand is still there
 }
 
 /// 9. Workload creates pod directly from handler when it has spec + demand.
