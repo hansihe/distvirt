@@ -184,7 +184,7 @@ pub(crate) struct NamespaceCore {
 }
 
 impl NamespaceCore {
-    pub(crate) fn new(namespace_id: NamespaceId, timer_config: TimerConfig) -> Self {
+    pub fn new(namespace_id: NamespaceId, timer_config: TimerConfig) -> Self {
         let mut router = Router::new(16);
         router.create_timer(TIMER);
         router.create_schedule_request(SCHEDULE_REQUEST);
@@ -214,7 +214,7 @@ impl NamespaceCore {
 
     /// Top-level event processing: push event, propagate, reconcile loop.
     /// Returns all effects to be executed by the async shell.
-    pub(crate) fn process_event(&mut self, event: NamespaceCoreEvent) -> NamespaceEffects {
+    pub fn process_event(&mut self, event: NamespaceCoreEvent) -> NamespaceEffects {
         let mut effects = NamespaceEffects::default();
 
         // Phase 1: Push external event into router
@@ -823,8 +823,18 @@ impl NamespaceCore {
     }
 
     /// Get the set of active worker IDs (for the async shell to know whom to broadcast to).
-    pub(crate) fn active_workers(&self) -> &HashSet<GlobalWorkerId> {
+    pub fn active_workers(&self) -> &HashSet<GlobalWorkerId> {
         &self.active_workers
+    }
+
+    /// Access the router (for inspecting workload/service/pod state in tests).
+    pub fn router(&self) -> &Router {
+        &self.router
+    }
+
+    /// Access the management adapter (for looking up workloads/services by name).
+    pub fn management(&self) -> &ManagementAdapter {
+        &self.adapters.management
     }
 }
 

@@ -46,7 +46,7 @@ struct ConnectedWorkerInfo {
 }
 
 impl OrchestratorCore {
-    pub(crate) fn new(timer_config: TimerConfig) -> Self {
+    pub fn new(timer_config: TimerConfig) -> Self {
         OrchestratorCore {
             namespaces: HashMap::new(),
             scheduler: SchedulerCore::new(),
@@ -61,7 +61,7 @@ impl OrchestratorCore {
     }
 
     /// Process a single top-level input, routing effects between internal cores.
-    pub(crate) fn process(&mut self, input: OrchestratorInput) -> OrchestratorEffects {
+    pub fn process(&mut self, input: OrchestratorInput) -> OrchestratorEffects {
         let mut effects = OrchestratorEffects::default();
 
         match input {
@@ -104,7 +104,7 @@ impl OrchestratorCore {
     ///
     /// Handles: worker state registration, plus for each namespace:
     /// CreateNamespace wire command + WorkerConnected + NamespaceAssigned.
-    pub(crate) fn worker_connected(
+    pub fn worker_connected(
         &mut self,
         info: WorkerConnectedInfo,
     ) -> OrchestratorEffects {
@@ -167,7 +167,7 @@ impl OrchestratorCore {
     ///
     /// Handles: for each namespace WorkerDisconnected + NamespaceUnassigned,
     /// then worker state Disconnected.
-    pub(crate) fn worker_disconnected(
+    pub fn worker_disconnected(
         &mut self,
         worker_id: GlobalWorkerId,
     ) -> OrchestratorEffects {
@@ -204,7 +204,7 @@ impl OrchestratorCore {
     ///
     /// Allocates segment, registers with worker state, creates namespace core,
     /// fans out to all connected workers.
-    pub(crate) fn create_namespace(
+    pub fn create_namespace(
         &mut self,
         info: CreateNamespaceInfo,
     ) -> OrchestratorEffects {
@@ -271,7 +271,7 @@ impl OrchestratorCore {
     /// Destroy a namespace.
     ///
     /// Fans out NamespaceUnassigned, unregisters segment, removes namespace core.
-    pub(crate) fn destroy_namespace(
+    pub fn destroy_namespace(
         &mut self,
         namespace_id: &NamespaceId,
     ) -> OrchestratorEffects {
@@ -434,11 +434,11 @@ impl OrchestratorCore {
     // Accessors
     // =========================================================================
 
-    pub(crate) fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceCore> {
+    pub fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceCore> {
         self.namespaces.get(id)
     }
 
-    pub(crate) fn namespace_ids(&self) -> impl Iterator<Item = &NamespaceId> {
+    pub fn namespace_ids(&self) -> impl Iterator<Item = &NamespaceId> {
         self.namespaces.keys()
     }
 }

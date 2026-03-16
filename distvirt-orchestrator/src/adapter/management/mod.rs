@@ -10,7 +10,7 @@ mod tests;
 
 /// Pure adapter: processes client-provided namespace specs and mutates the router.
 /// Maintains bidirectional maps between protocol string names and router numeric IDs.
-pub(crate) struct ManagementAdapter {
+pub struct ManagementAdapter {
     next_workload_id: u64,
     next_service_id: u64,
 
@@ -144,12 +144,12 @@ impl ManagementAdapter {
     }
 
     /// Look up a workload's router ID by protocol name.
-    pub(crate) fn lookup_workload(&self, proto_name: &str) -> Option<WorkloadId> {
+    pub fn lookup_workload(&self, proto_name: &str) -> Option<WorkloadId> {
         self.proto_to_router_wl.get(proto_name).copied()
     }
 
     /// Look up a service's router ID by protocol name.
-    pub(crate) fn lookup_service(&self, proto_name: &str) -> Option<crate::sm_new::ServiceId> {
+    pub fn lookup_service(&self, proto_name: &str) -> Option<crate::sm_new::ServiceId> {
         self.proto_to_router_svc.get(proto_name).copied()
     }
 

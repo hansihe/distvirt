@@ -13,7 +13,7 @@ mod tests;
 
 /// Identifies a specific timer instance across all SM kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum TimerIdentity {
+pub enum TimerIdentity {
     Workload(WorkloadId, WorkloadTimerKey),
     Service(ServiceId, ServiceTimerKey),
     Pod(PodId, PodTimerKey),
@@ -21,7 +21,7 @@ pub(crate) enum TimerIdentity {
 
 /// Action returned by reconcile — caller (shell) executes these.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum TimerAction {
+pub enum TimerAction {
     Start {
         identity: TimerIdentity,
         generation: u64,
@@ -34,7 +34,7 @@ pub(crate) enum TimerAction {
 
 /// Configuration for timer durations.
 #[derive(Clone, Debug)]
-pub(crate) struct TimerConfig {
+pub struct TimerConfig {
     pub retry_backoff: Duration,
     pub launch_timeout: Duration,
     pub suspend_timeout: Duration,

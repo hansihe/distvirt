@@ -9,7 +9,7 @@ use crate::task::GlobalWorkerId;
 use crate::types::NamespaceId;
 
 // Re-export types that are shared between task/ and core/.
-pub(crate) use crate::task::{
+pub use crate::task::{
     ArtifactPlacementEvent, ClientCommand, SchedulerDecision, WorkerNamespaceEvent,
     WorkerNamespaceEventKind,
 };
@@ -19,7 +19,7 @@ pub(crate) use crate::task::{
 // =============================================================================
 
 /// Input events for NamespaceCore (no channel handles).
-pub(crate) enum NamespaceCoreEvent {
+pub enum NamespaceCoreEvent {
     WorkerEvent(WorkerNamespaceEvent),
     SchedulerDecision(SchedulerDecision),
     TimerFired {
@@ -39,7 +39,7 @@ pub(crate) enum NamespaceCoreEvent {
 
 /// Output effects from NamespaceCore after processing an event.
 #[derive(Default)]
-pub(crate) struct NamespaceEffects {
+pub struct NamespaceEffects {
     pub timer_actions: Vec<TimerAction>,
     pub scheduler_messages: Vec<SchedulerMessage>,
     pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
@@ -57,7 +57,7 @@ impl NamespaceEffects {
 }
 
 /// Messages from namespace core to the scheduler.
-pub(crate) enum SchedulerMessage {
+pub enum SchedulerMessage {
     RequestLease {
         namespace_id: NamespaceId,
         pod_id: PodId,
@@ -74,7 +74,7 @@ pub(crate) enum SchedulerMessage {
 // =============================================================================
 
 /// Input events for SchedulerCore (no channel handles).
-pub(crate) enum SchedulerCoreInput {
+pub enum SchedulerCoreInput {
     RequestLease {
         namespace_id: NamespaceId,
         pod_id: PodId,
@@ -97,7 +97,7 @@ pub(crate) enum SchedulerCoreInput {
 // =============================================================================
 
 /// Input events for WorkerStateCore (no channel handles, no writer).
-pub(crate) enum WorkerStateCoreEvent {
+pub enum WorkerStateCoreEvent {
     PressureUpdate {
         worker_id: GlobalWorkerId,
         cpu: distvirt_worker_protocol::PsiMetrics,
@@ -142,7 +142,7 @@ pub(crate) enum WorkerStateCoreEvent {
 
 /// Output effects from WorkerStateCore.
 #[derive(Default)]
-pub(crate) struct WorkerStateEffects {
+pub struct WorkerStateEffects {
     /// Updates to forward to the scheduler.
     pub scheduler_updates: Vec<SchedulerCoreInput>,
     /// If the worker registry changed, broadcast this command to all workers.
@@ -154,7 +154,7 @@ pub(crate) struct WorkerStateEffects {
 // =============================================================================
 
 /// Top-level input to OrchestratorCore.
-pub(crate) enum OrchestratorInput {
+pub enum OrchestratorInput {
     NamespaceEvent {
         namespace_id: NamespaceId,
         event: NamespaceCoreEvent,
@@ -172,7 +172,7 @@ pub(crate) enum OrchestratorInput {
 
 /// Information needed to register a new worker with the orchestrator.
 /// Produced by the async shell after handshake, consumed by OrchestratorCore.
-pub(crate) struct WorkerConnectedInfo {
+pub struct WorkerConnectedInfo {
     pub worker_id: GlobalWorkerId,
     pub capabilities: distvirt_worker_protocol::WorkerCapabilities,
     pub tunnel_info: Option<crate::task::worker_state::WorkerTunnelInfo>,
@@ -180,21 +180,21 @@ pub(crate) struct WorkerConnectedInfo {
 }
 
 /// Information needed to create a namespace in the orchestrator.
-pub(crate) struct CreateNamespaceInfo {
+pub struct CreateNamespaceInfo {
     pub namespace_id: NamespaceId,
     pub network: distvirt_worker_protocol::NetworkConfig,
 }
 
 /// Worker command that the shell must send directly on the wire
 /// (not routed through a namespace, e.g. CreateNamespace wire command).
-pub(crate) struct DirectWorkerCommand {
+pub struct DirectWorkerCommand {
     pub worker_id: GlobalWorkerId,
     pub command: distvirt_worker_protocol::WorkerCommand,
 }
 
 /// Top-level output from OrchestratorCore.
 #[derive(Default)]
-pub(crate) struct OrchestratorEffects {
+pub struct OrchestratorEffects {
     /// Timer actions scoped to a namespace.
     pub timer_actions: Vec<(NamespaceId, Vec<TimerAction>)>,
     /// Commands targeted at specific workers (routed through namespace logic).

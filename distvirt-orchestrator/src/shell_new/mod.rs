@@ -4,3 +4,4 @@
 //! with tokio I/O (channels, timers, worker connections).
 
 pub(crate) mod r#async;
+pub mod sync;

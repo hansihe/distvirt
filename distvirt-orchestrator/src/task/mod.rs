@@ -19,7 +19,7 @@ pub(crate) mod worker_writer;
 /// Used by scheduler, state tracker, and inter-task messages.
 /// Distinct from protocol `WorkerId(String)` and router `sm_new::WorkerId(u64)`.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct GlobalWorkerId(pub(crate) u64);
+pub struct GlobalWorkerId(pub u64);
 
 #[cfg(test)]
 impl GlobalWorkerId {
@@ -66,7 +66,7 @@ pub(crate) enum SchedulerInput {
 }
 
 /// Artifact placement events reported by workers.
-pub(crate) enum ArtifactPlacementEvent {
+pub enum ArtifactPlacementEvent {
     WriteStarted {
         artifact_id: distvirt_worker_protocol::ArtifactId,
         pool_id: distvirt_worker_protocol::PoolId,
@@ -88,7 +88,7 @@ pub(crate) enum ArtifactPlacementEvent {
 
 /// Sent by the global scheduler back to a namespace task.
 #[derive(Clone, Debug)]
-pub(crate) enum SchedulerDecision {
+pub enum SchedulerDecision {
     Grant { namespace_id: NamespaceId, pod_id: PodId, worker_id: GlobalWorkerId },
     Revoke { namespace_id: NamespaceId, pod_id: PodId },
 }
@@ -98,7 +98,7 @@ pub(crate) enum SchedulerDecision {
 // =============================================================================
 
 /// Commands from external clients (management API) to a namespace task.
-pub(crate) enum ClientCommand {
+pub enum ClientCommand {
     /// Apply a new namespace spec (creates/updates/removes workloads and services).
     UpdateSpec(NamespaceSpec),
     /// Restart a workload by protocol name.
@@ -137,7 +137,7 @@ pub(crate) enum NamespaceEvent {
     ClientCommand(ClientCommand),
 }
 
-pub(crate) struct WorkerNamespaceEvent {
+pub struct WorkerNamespaceEvent {
     pub worker_id: GlobalWorkerId,
     pub event: WorkerNamespaceEventKind,
 }
@@ -145,7 +145,7 @@ pub(crate) struct WorkerNamespaceEvent {
 /// Worker-reported namespace-scoped events. Uses **protocol string IDs** so the
 /// reader can fill these directly from wire data without ID translation.
 /// The namespace task translates protocol IDs → router IDs.
-pub(crate) enum WorkerNamespaceEventKind {
+pub enum WorkerNamespaceEventKind {
     PodRunning { pod_id: distvirt_worker_protocol::PodId },
     PodExited { pod_id: distvirt_worker_protocol::PodId, exit_code: i32 },
     PodFailed { pod_id: distvirt_worker_protocol::PodId },
