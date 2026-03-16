@@ -212,6 +212,7 @@ impl ManagementAdapter {
         SmServiceSpec {
             workload: workload_router_id,
             has_activation: spec.activation.is_some(),
+            ..Default::default()
         }
     }
 }

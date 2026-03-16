@@ -26,6 +26,7 @@ fn setup(router: &mut DRouter) -> WorkerId {
         ServiceSpec {
             workload: W1,
             has_activation: true,
+            ..Default::default()
         },
     );
     router.propagate();

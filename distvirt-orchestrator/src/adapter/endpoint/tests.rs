@@ -28,6 +28,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
         ServiceSpec {
             workload: W1,
             has_activation: false,
+            ..Default::default()
         },
     );
     router.propagate();
@@ -187,6 +188,7 @@ fn multiple_services_change() {
         ServiceSpec {
             workload: W1,
             has_activation: false,
+            ..Default::default()
         },
     );
 
@@ -201,6 +203,7 @@ fn multiple_services_change() {
         ServiceSpec {
             workload: w2_id,
             has_activation: false,
+            ..Default::default()
         },
     );
 

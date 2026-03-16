@@ -48,6 +48,7 @@ fn create_configured_core() -> (NamespaceCore, GlobalWorkerId, PodId) {
         ServiceSpec {
             workload: W1,
             has_activation: false,
+            ..Default::default()
         },
     );
 

@@ -217,6 +217,7 @@ fn worker_loss_via_port_removal() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Service should be back to NeedBackend.
@@ -423,6 +424,7 @@ fn full_end_to_end() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // S1 goes back to NeedBackend.

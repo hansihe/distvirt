@@ -40,6 +40,7 @@ fn setup_workload(
         ServiceSpec {
             workload: W1,
             has_activation: false,
+            ..Default::default()
         },
     );
     router.propagate();
@@ -227,6 +228,7 @@ fn generation_change_restarts_timer() {
         ServiceSpec {
             workload: W1,
             has_activation: true,
+            ..Default::default()
         },
     );
     router.propagate();
@@ -315,6 +317,7 @@ fn multiple_sm_kinds_in_one_cycle() {
         ServiceSpec {
             workload: W1,
             has_activation: true,
+            ..Default::default()
         },
     );
     router.propagate();
@@ -399,6 +402,7 @@ fn fire_dispatches_workload_timer() {
         ServiceSpec {
             workload: W1,
             has_activation: false,
+            ..Default::default()
         },
     );
     router.propagate();
@@ -453,6 +457,7 @@ fn fire_dispatches_service_timer() {
         ServiceSpec {
             workload: W1,
             has_activation: true,
+            ..Default::default()
         },
     );
     router.propagate();

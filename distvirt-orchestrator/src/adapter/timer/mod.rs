@@ -63,7 +63,7 @@ impl TimerAdapter {
         let mut wanted: HashMap<TimerIdentity, (u64, Duration)> = self
             .active
             .iter()
-            .map(|(k, &gen)| (k.clone(), (gen, Duration::ZERO)))
+            .map(|(k, &g)| (k.clone(), (g, Duration::ZERO)))
             .collect();
         let mut had_workload = false;
         let mut had_service = false;
@@ -154,7 +154,7 @@ impl TimerAdapter {
             }
         }
 
-        self.active = wanted.into_iter().map(|(k, (gen, _))| (k, gen)).collect();
+        self.active = wanted.into_iter().map(|(k, (g, _))| (k, g)).collect();
         actions
     }
 

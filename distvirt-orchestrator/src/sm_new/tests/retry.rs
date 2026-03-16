@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 // ============================================================================
 // Retry backoff + Failed terminal state tests
@@ -24,6 +25,7 @@ fn pod_failure_backoff_and_retry() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Timer fires — backoff cleared, reconcile creates new pod.
@@ -69,6 +71,7 @@ fn consecutive_failures_increment() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Timer fires → retry.
@@ -90,6 +93,7 @@ fn consecutive_failures_increment() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 2,
+        ..Default::default()
     }]);
 }
 
@@ -111,6 +115,7 @@ fn max_retries_enters_failed() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Timer fires → retry.
@@ -313,6 +318,7 @@ fn backoff_cleared_on_demand_drop() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Drop demand → clears everything.
@@ -345,6 +351,7 @@ fn backoff_cleared_on_spec_change() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Spec change clears backoff + failures → immediate retry.
@@ -377,6 +384,7 @@ fn scavenge_during_backoff() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Scavenge is noop when demand is present (always-on service).
@@ -459,6 +467,7 @@ fn success_resets_failure_counter() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 1,
+        ..Default::default()
     }]);
 
     // Timer fires → retry.
@@ -488,5 +497,6 @@ fn success_resets_failure_counter() {
     assert_timer_requested(&mut router, &[TimerRequest {
         key: WorkloadTimerKey::RetryBackoff,
         generation: 2,
+        ..Default::default()
     }]);
 }

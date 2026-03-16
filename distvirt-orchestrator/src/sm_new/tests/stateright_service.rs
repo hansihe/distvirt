@@ -304,6 +304,7 @@ impl Model for SvcNewModel {
                         ServiceSpec {
                             workload: WorkloadId(0),
                             has_activation: new_has_activation,
+                            ..Default::default()
                         },
                     ))),
                 )

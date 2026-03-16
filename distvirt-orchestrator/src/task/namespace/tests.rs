@@ -71,6 +71,7 @@ fn spawn_configured_task() -> (TestHarness, GlobalWorkerId, PodId) {
         ServiceSpec {
             workload: W1,
             has_activation: false,
+            ..Default::default()
         },
     );
 
