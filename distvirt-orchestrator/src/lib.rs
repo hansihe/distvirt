@@ -3,7 +3,6 @@ pub mod types;
 pub mod sm;
 pub mod sm_new;
 pub mod adapter;
-pub mod task;
 pub mod core;
 pub mod shell_new;
 pub mod wg_peers;

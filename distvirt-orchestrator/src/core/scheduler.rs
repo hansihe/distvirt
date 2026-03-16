@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 
+use crate::core::GlobalWorkerId;
 use crate::sm_new::PodId;
 use crate::task::scheduler::{select_worker, PlacementTable, WorkerCandidate};
-use crate::task::{GlobalWorkerId, SchedulerDecision};
 use crate::types::NamespaceId;
 
 use super::types::SchedulerCoreInput;

@@ -15,6 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
+use crate::core::{GlobalWorkerId, SchedulerDecision};
 use super::namespace::NamespaceCore;
 use super::scheduler::SchedulerCore;
 use super::timer_wheel::TimerWheel;
@@ -25,7 +26,6 @@ use super::types::{
 };
 use super::worker_state::WorkerStateCore;
 use crate::sm_new::WorkerInfo;
-use crate::task::GlobalWorkerId;
 use crate::types::NamespaceId;
 
 pub struct OrchestratorCore {
@@ -436,13 +436,13 @@ impl OrchestratorCore {
 
     fn route_scheduler_decisions(
         &mut self,
-        decisions: Vec<crate::task::SchedulerDecision>,
+        decisions: Vec<SchedulerDecision>,
         effects: &mut OrchestratorEffects,
         now: Duration,
     ) {
         for decision in decisions {
             let target_ns_id = match &decision {
-                crate::task::SchedulerDecision::Grant {
+                SchedulerDecision::Grant {
                     namespace_id,
                     worker_id,
                     ..
@@ -457,7 +457,7 @@ impl OrchestratorCore {
                     self.route_worker_state_effects(ws_effects, effects, now);
                     namespace_id.clone()
                 }
-                crate::task::SchedulerDecision::Revoke {
+                SchedulerDecision::Revoke {
                     namespace_id,
                     worker_id,
                     ..
@@ -700,9 +700,9 @@ mod tests {
         let effects = orch.process(
             OrchestratorInput::NamespaceEvent {
                 namespace_id: ns("test"),
-                event: NamespaceCoreEvent::WorkerEvent(crate::task::WorkerNamespaceEvent {
+                event: NamespaceCoreEvent::WorkerEvent(WorkerNamespaceEvent {
                     worker_id: GlobalWorkerId::test(1),
-                    event: crate::task::WorkerNamespaceEventKind::NamespaceCreated,
+                    event: WorkerNamespaceEventKind::NamespaceCreated,
                 }),
             },
             Duration::ZERO,

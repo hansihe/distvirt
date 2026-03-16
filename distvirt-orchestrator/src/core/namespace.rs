@@ -14,13 +14,13 @@ use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
+use crate::core::GlobalWorkerId;
 use distvirt_sm_router::trace::PanicTracer;
 
 use crate::sm_new::{
     AdminCmd, DRouter, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
     SCHEDULE_REQUEST, TIMER,
 };
-use crate::task::GlobalWorkerId;
 use crate::types::{NamespaceId, NamespaceSpec};
 
 use super::types::{
