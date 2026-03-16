@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::sm_new::PodId;
 use crate::task::scheduler::{select_worker, PlacementTable, WorkerCandidate};
-use crate::task::{ArtifactPlacementEvent, GlobalWorkerId, SchedulerDecision};
+use crate::task::{GlobalWorkerId, SchedulerDecision};
 use crate::types::NamespaceId;
 
 use super::types::SchedulerCoreInput;

@@ -153,13 +153,15 @@ pub(crate) struct WorkerStateEffects {
 // Orchestrator-level input/output
 // =============================================================================
 
-/// Top-level input to SyncOrchestrator.
+/// Top-level input to OrchestratorCore.
 pub(crate) enum OrchestratorInput {
     NamespaceEvent {
         namespace_id: NamespaceId,
         event: NamespaceCoreEvent,
     },
     WorkerStateEvent(WorkerStateCoreEvent),
+    /// Direct scheduler input (e.g. artifact placement events from workers).
+    SchedulerEvent(SchedulerCoreInput),
     CreateNamespace {
         namespace_id: NamespaceId,
     },
@@ -168,15 +170,40 @@ pub(crate) enum OrchestratorInput {
     },
 }
 
-/// Top-level output from SyncOrchestrator.
+/// Information needed to register a new worker with the orchestrator.
+/// Produced by the async shell after handshake, consumed by OrchestratorCore.
+pub(crate) struct WorkerConnectedInfo {
+    pub worker_id: GlobalWorkerId,
+    pub capabilities: distvirt_worker_protocol::WorkerCapabilities,
+    pub tunnel_info: Option<crate::task::worker_state::WorkerTunnelInfo>,
+    pub proto_worker_id: distvirt_worker_protocol::WorkerId,
+}
+
+/// Information needed to create a namespace in the orchestrator.
+pub(crate) struct CreateNamespaceInfo {
+    pub namespace_id: NamespaceId,
+    pub network: distvirt_worker_protocol::NetworkConfig,
+}
+
+/// Worker command that the shell must send directly on the wire
+/// (not routed through a namespace, e.g. CreateNamespace wire command).
+pub(crate) struct DirectWorkerCommand {
+    pub worker_id: GlobalWorkerId,
+    pub command: distvirt_worker_protocol::WorkerCommand,
+}
+
+/// Top-level output from OrchestratorCore.
 #[derive(Default)]
 pub(crate) struct OrchestratorEffects {
     /// Timer actions scoped to a namespace.
     pub timer_actions: Vec<(NamespaceId, Vec<TimerAction>)>,
-    /// Commands targeted at specific workers.
+    /// Commands targeted at specific workers (routed through namespace logic).
     pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
     /// Commands to broadcast to all workers in a specific namespace.
     pub broadcast_commands: Vec<(NamespaceId, distvirt_worker_protocol::WorkerCommand)>,
     /// Commands to broadcast to all connected workers globally (e.g. worker registry sync).
     pub global_broadcasts: Vec<distvirt_worker_protocol::WorkerCommand>,
+    /// Direct wire commands the shell must send (e.g. CreateNamespace).
+    /// These bypass namespace logic — the shell just sends them on the writer.
+    pub direct_worker_commands: Vec<DirectWorkerCommand>,
 }

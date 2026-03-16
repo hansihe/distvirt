@@ -13,7 +13,7 @@ use crate::adapter::flow_demand::FlowDemandAdapter;
 use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
-use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig, TimerIdentity};
+use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
 use crate::sm_new::{
     AdminCmd, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
     SCHEDULE_REQUEST, TIMER,

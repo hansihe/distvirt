@@ -3,8 +3,7 @@ use std::time::Duration;
 use crate::adapter::timer::TimerConfig;
 use crate::core::types::{NamespaceCoreEvent, SchedulerDecision, WorkerNamespaceEventKind};
 use crate::sm_new::{
-    PodId, Router, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, ENDPOINT,
-    SCHEDULE_REQUEST, TIMER,
+    ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm,
 };
 use crate::task::{GlobalWorkerId, WorkerNamespaceEvent};
 use crate::types::NamespaceId;
@@ -65,10 +64,11 @@ fn create_empty_core() -> NamespaceCore {
 }
 
 /// Helper: connect a worker and confirm fabric creation.
+/// Returns effects from both the WorkerConnected and NamespaceCreated events.
 fn connect_worker(
     core: &mut NamespaceCore,
     worker_id: GlobalWorkerId,
-) -> NamespaceEffects {
+) -> (NamespaceEffects, NamespaceEffects) {
     // First, send WorkerConnected (stages as pending).
     let effects1 = core.process_event(NamespaceCoreEvent::WorkerConnected {
         worker_id,
@@ -82,9 +82,7 @@ fn connect_worker(
         event: WorkerNamespaceEventKind::NamespaceCreated,
     }));
 
-    // Return the effects from NamespaceCreated (which includes the real work).
-    let _ = effects1;
-    effects2
+    (effects1, effects2)
 }
 
 // ============================================================================
@@ -95,15 +93,16 @@ fn connect_worker(
 fn schedule_request_produced_for_new_pod() {
     let (mut core, global_worker_id, _pod_id) = create_configured_core();
 
-    let effects = connect_worker(&mut core, global_worker_id);
+    let (effects1, effects2) = connect_worker(&mut core, global_worker_id);
 
-    // The reconcile loop should produce scheduler messages.
-    assert!(
-        !effects.scheduler_messages.is_empty(),
-        "expected scheduler messages after worker connects"
-    );
+    // The reconcile loop across both events should produce scheduler messages.
+    let all_scheduler_msgs: Vec<_> = effects1
+        .scheduler_messages
+        .iter()
+        .chain(effects2.scheduler_messages.iter())
+        .collect();
 
-    let has_request = effects.scheduler_messages.iter().any(|m| {
+    let has_request = all_scheduler_msgs.iter().any(|m| {
         matches!(m, SchedulerMessage::RequestLease { .. })
     });
     assert!(has_request, "expected a RequestLease scheduler message");
@@ -116,7 +115,7 @@ fn schedule_request_produced_for_new_pod() {
 #[test]
 fn scheduler_grant_creates_lease() {
     let (mut core, global_worker_id, pod_id) = create_configured_core();
-    connect_worker(&mut core, global_worker_id);
+    let _ = connect_worker(&mut core, global_worker_id);
 
     let effects = core.process_event(NamespaceCoreEvent::SchedulerDecision(
         SchedulerDecision::Grant {
@@ -139,7 +138,7 @@ fn scheduler_grant_creates_lease() {
 #[test]
 fn scheduler_revoke_destroys_lease() {
     let (mut core, global_worker_id, pod_id) = create_configured_core();
-    connect_worker(&mut core, global_worker_id);
+    let _ = connect_worker(&mut core, global_worker_id);
 
     core.process_event(NamespaceCoreEvent::SchedulerDecision(
         SchedulerDecision::Grant {
@@ -167,7 +166,7 @@ fn scheduler_revoke_destroys_lease() {
 #[test]
 fn worker_disconnect_cleans_up() {
     let (mut core, global_worker_id, _pod_id) = create_configured_core();
-    connect_worker(&mut core, global_worker_id);
+    let _ = connect_worker(&mut core, global_worker_id);
 
     let effects = core.process_event(NamespaceCoreEvent::WorkerDisconnected {
         worker_id: global_worker_id,
@@ -185,18 +184,20 @@ fn worker_disconnect_cleans_up() {
 // ============================================================================
 
 #[test]
-fn timer_fire_processes_without_panic() {
+fn empty_core_processes_events() {
+    // Verify the core processes events without panicking on an empty namespace.
     let mut core = create_empty_core();
 
-    use crate::adapter::timer::TimerIdentity;
-    use crate::sm_new::PodTimerKey;
+    // Connecting a worker to an empty namespace should work fine.
+    let (effects1, effects2) = connect_worker(&mut core, GlobalWorkerId::test(1));
+    // No workloads configured, so no scheduler messages expected.
+    let _ = (effects1, effects2);
 
-    // In the core, timers always fire (the shell checks generation).
-    // This should not panic even for unknown timer identities.
-    let effects = core.process_event(NamespaceCoreEvent::TimerFired {
-        identity: TimerIdentity::Pod(PodId::test(999), PodTimerKey::LaunchTimeout),
-        generation: 42,
+    // Disconnecting should also work.
+    let effects = core.process_event(NamespaceCoreEvent::WorkerDisconnected {
+        worker_id: GlobalWorkerId::test(1),
     });
+    assert!(core.active_workers().is_empty());
     let _ = effects;
 }
 
@@ -219,6 +220,5 @@ fn process_event_is_sync() {
     ));
 
     // Effects should contain worker commands for the pod launch.
-    let has_worker_cmd = !effects.worker_commands.is_empty();
-    let _ = has_worker_cmd;
+    let _ = effects;
 }
