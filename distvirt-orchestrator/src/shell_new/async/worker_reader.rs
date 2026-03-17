@@ -8,8 +8,10 @@ use distvirt_worker_protocol::OrchestratorReader;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::core::worker_event::{ClassifiedWorkerEvent, classify};
-use crate::task::GlobalWorkerId;
+use crate::core::{
+    GlobalWorkerId,
+    worker_event::{ClassifiedWorkerEvent, classify},
+};
 
 use super::ShellEvent;
 

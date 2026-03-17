@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
+use crate::core::ClientCommand;
 use crate::sm_new::PodStatus;
-use crate::task::{ClientCommand, GlobalWorkerId};
-use crate::types::{ActivationSpec, NamespaceId, NamespaceSpec, ServiceSpec, WorkloadSpec};
+use crate::types::{NamespaceId, NamespaceSpec, ServiceSpec, WorkloadSpec};
 
 use super::{MockWorkerConfig, SyncShell};
 

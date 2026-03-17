@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::core::namespace::NamespaceCore;
+use distvirt_orchestrator::core::{ClientCommand, GlobalWorkerId};
 use distvirt_orchestrator::shell_new::sync::{MockWorkerConfig, SyncShell};
 use distvirt_orchestrator::sm_new::{ServiceSm, ServiceState, SvcStatus, WlStatus, WorkloadSm};
-use distvirt_orchestrator::task::{ClientCommand, GlobalWorkerId};
-use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{PsiMetrics, WorkerCommand, WorkerEvent};
+use distvirt_orchestrator::types::NamespaceSpec;
+use distvirt_worker_protocol::{NamespaceId, PsiMetrics, ServiceId, WorkerCommand, WorkerEvent};
 
 fn test_timer_config() -> TimerConfig {
     TimerConfig {

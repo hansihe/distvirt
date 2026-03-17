@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
-use crate::core::types::{NamespaceCoreEvent, SchedulerDecision, WorkerNamespaceEventKind};
+use crate::core::WorkerNamespaceEvent;
+use crate::core::types::NamespaceCoreEvent;
 use crate::sm_new::{ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm};
-use crate::task::{GlobalWorkerId, WorkerNamespaceEvent};
 use crate::types::NamespaceId;
 
 use super::*;

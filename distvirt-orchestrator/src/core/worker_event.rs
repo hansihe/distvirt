@@ -5,13 +5,14 @@
 
 use distvirt_worker_protocol::WorkerEvent;
 
-use crate::task::{GlobalWorkerId, WorkerNamespaceEvent};
-use crate::types::NamespaceId;
-
-use super::types::{
-    ArtifactPlacementEvent, NamespaceCoreEvent, SchedulerCoreInput, WorkerNamespaceEventKind,
-    WorkerStateCoreEvent,
+use crate::{
+    core::{
+        ArtifactPlacementEvent, GlobalWorkerId, WorkerNamespaceEvent, WorkerNamespaceEventKind,
+    },
+    types::NamespaceId,
 };
+
+use super::types::{NamespaceCoreEvent, SchedulerCoreInput, WorkerStateCoreEvent};
 
 /// Where a wire-level WorkerEvent should be routed.
 pub(crate) enum ClassifiedWorkerEvent {

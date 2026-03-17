@@ -14,7 +14,7 @@ use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
-use crate::core::GlobalWorkerId;
+use crate::core::{ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
 use distvirt_sm_router::trace::PanicTracer;
 
 use crate::sm_new::{
@@ -23,10 +23,7 @@ use crate::sm_new::{
 };
 use crate::types::{NamespaceId, NamespaceSpec};
 
-use super::types::{
-    ClientCommand, NamespaceCoreEvent, NamespaceEffects, SchedulerDecision, SchedulerMessage,
-    WorkerNamespaceEventKind,
-};
+use super::types::{NamespaceCoreEvent, NamespaceEffects, SchedulerMessage};
 
 #[cfg(test)]
 mod tests;

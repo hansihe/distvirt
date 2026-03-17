@@ -24,7 +24,8 @@ use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
     SchedulerCoreInput, WorkerConnectedInfo, WorkerStateCoreEvent,
 };
-use crate::task::{GlobalWorkerId, WorkerWriterHandle};
+use crate::core::worker_state::WorkerTunnelInfo;
+use crate::core::{GlobalWorkerId, WorkerWriterHandle};
 use crate::types::NamespaceId;
 
 // =============================================================================
@@ -255,7 +256,7 @@ impl Shell {
         let ready = conn.recv_ready().await?;
 
         let tunnel_info = match (ready.tunnel_listen_port, ready.tunnel_public_key) {
-            (Some(port), Some(key)) => Some(crate::task::worker_state::WorkerTunnelInfo {
+            (Some(port), Some(key)) => Some(WorkerTunnelInfo {
                 listen_port: port,
                 public_key: key,
             }),

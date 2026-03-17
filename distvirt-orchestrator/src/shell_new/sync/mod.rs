@@ -22,7 +22,6 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
-use crate::core::GlobalWorkerId;
 use crate::core::namespace::NamespaceCore;
 use crate::core::orchestrator::OrchestratorCore;
 use crate::core::types::{
@@ -30,7 +29,7 @@ use crate::core::types::{
     WorkerConnectedInfo, WorkerStateCoreEvent,
 };
 use crate::core::worker_event::{ClassifiedWorkerEvent, classify};
-//use crate::task::{ClientCommand, GlobalWorkerId, WorkerNamespaceEvent, WorkerNamespaceEventKind};
+use crate::core::{ClientCommand, GlobalWorkerId, WorkerNamespaceEvent, WorkerNamespaceEventKind};
 use crate::types::NamespaceId;
 
 use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};

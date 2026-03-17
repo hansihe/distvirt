@@ -5,12 +5,34 @@
 
 use std::collections::HashMap;
 
-use crate::core::GlobalWorkerId;
+use crate::core::scheduler::placement_table::PlacementTable;
+use crate::core::{GlobalWorkerId, SchedulerDecision};
 use crate::sm_new::PodId;
-use crate::task::scheduler::{PlacementTable, WorkerCandidate, select_worker};
-use crate::types::NamespaceId;
+use crate::types::{NamespaceId, PressureBand};
 
 use super::types::SchedulerCoreInput;
+
+mod placement_table;
+
+/// Snapshot of a single worker's scheduling-relevant state.
+/// Passed in by the shell — not owned by the adapter.
+pub(crate) struct WorkerCandidate {
+    pub worker_id: GlobalWorkerId,
+    pub max_pressure_band: PressureBand,
+    pub pod_count: usize,
+    pub draining: bool,
+    pub active: bool,
+}
+
+/// Status of an artifact on a specific worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ArtifactStatus {
+    Writing,
+    Ready {
+        pool_id: distvirt_worker_protocol::PoolId,
+        size_bytes: u64,
+    },
+}
 
 /// Composite key — PodId is per-Router, not globally unique.
 type PodKey = (NamespaceId, PodId);
@@ -139,110 +161,40 @@ impl SchedulerCore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::task::scheduler::WorkerCandidate;
-    use crate::types::PressureBand;
+/// Select the best worker from candidates for a pod.
+/// Hard filter: active, not draining, pressure below High.
+/// Soft preference: artifact affinity (if resume), then lowest pressure band,
+/// then lowest pod count, then lowest worker ID.
+///
+/// `resume_artifact` is the protocol-level artifact ID, already resolved at the
+/// namespace boundary. No type conversion happens here.
+pub(crate) fn select_worker<'a>(
+    candidates: impl IntoIterator<Item = &'a WorkerCandidate>,
+    resume_artifact: Option<&distvirt_worker_protocol::ArtifactId>,
+    placements: &PlacementTable,
+) -> Option<GlobalWorkerId> {
+    let affinity_workers = resume_artifact.and_then(|art_id| {
+        let workers = placements.workers_with_artifact(art_id);
+        if workers.is_empty() {
+            None
+        } else {
+            Some(workers)
+        }
+    });
 
-    fn ns(name: &str) -> NamespaceId {
-        NamespaceId::from(name)
-    }
-
-    #[test]
-    fn grant_immediate_when_worker_available() {
-        let mut sched = SchedulerCore::new();
-
-        // Add a worker.
-        let decisions = sched.process(SchedulerCoreInput::WorkerUpdate(
-            GlobalWorkerId::test(1),
-            WorkerCandidate {
-                worker_id: GlobalWorkerId::test(1),
-                max_pressure_band: PressureBand::Normal,
-                pod_count: 0,
-                draining: false,
-                active: true,
-            },
-        ));
-        assert!(decisions.is_empty());
-
-        // Request lease — should be granted immediately.
-        let decisions = sched.process(SchedulerCoreInput::RequestLease {
-            namespace_id: ns("test"),
-            pod_id: PodId::test(1),
-            proto_resume_artifact: None,
-        });
-        assert_eq!(decisions.len(), 1);
-        assert!(matches!(
-            &decisions[0],
-            SchedulerDecision::Grant { worker_id, .. } if *worker_id == GlobalWorkerId::test(1)
-        ));
-    }
-
-    #[test]
-    fn pend_when_no_workers() {
-        let mut sched = SchedulerCore::new();
-
-        let decisions = sched.process(SchedulerCoreInput::RequestLease {
-            namespace_id: ns("test"),
-            pod_id: PodId::test(1),
-            proto_resume_artifact: None,
-        });
-        assert!(decisions.is_empty(), "should pend when no workers");
-    }
-
-    #[test]
-    fn retry_pending_on_worker_update() {
-        let mut sched = SchedulerCore::new();
-
-        // Request lease with no workers — pends.
-        sched.process(SchedulerCoreInput::RequestLease {
-            namespace_id: ns("test"),
-            pod_id: PodId::test(1),
-            proto_resume_artifact: None,
-        });
-
-        // Add worker — should grant the pending request.
-        let decisions = sched.process(SchedulerCoreInput::WorkerUpdate(
-            GlobalWorkerId::test(1),
-            WorkerCandidate {
-                worker_id: GlobalWorkerId::test(1),
-                max_pressure_band: PressureBand::Normal,
-                pod_count: 0,
-                draining: false,
-                active: true,
-            },
-        ));
-        assert_eq!(decisions.len(), 1);
-        assert!(matches!(&decisions[0], SchedulerDecision::Grant { .. }));
-    }
-
-    #[test]
-    fn drop_request_revokes_granted() {
-        let mut sched = SchedulerCore::new();
-
-        sched.process(SchedulerCoreInput::WorkerUpdate(
-            GlobalWorkerId::test(1),
-            WorkerCandidate {
-                worker_id: GlobalWorkerId::test(1),
-                max_pressure_band: PressureBand::Normal,
-                pod_count: 0,
-                draining: false,
-                active: true,
-            },
-        ));
-
-        sched.process(SchedulerCoreInput::RequestLease {
-            namespace_id: ns("test"),
-            pod_id: PodId::test(1),
-            proto_resume_artifact: None,
-        });
-
-        let decisions = sched.process(SchedulerCoreInput::DropRequest {
-            namespace_id: ns("test"),
-            pod_id: PodId::test(1),
-        });
-        assert_eq!(decisions.len(), 1);
-        assert!(matches!(&decisions[0], SchedulerDecision::Revoke { .. }));
-    }
+    candidates
+        .into_iter()
+        .filter(|c| c.active && !c.draining && c.max_pressure_band < PressureBand::High)
+        .min_by_key(|c| {
+            // no_affinity = false (0) sorts before true (1), so workers WITH the artifact sort first.
+            let no_affinity = affinity_workers
+                .as_ref()
+                .map(|ws| !ws.contains(&c.worker_id))
+                .unwrap_or(false);
+            (no_affinity, c.max_pressure_band, c.pod_count, c.worker_id)
+        })
+        .map(|c| c.worker_id)
 }
+
+#[cfg(test)]
+mod tests;

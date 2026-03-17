@@ -5,12 +5,22 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::task::GlobalWorkerId;
-use crate::task::scheduler::WorkerCandidate;
-use crate::task::worker_state::WorkerTunnelInfo;
+use crate::core::GlobalWorkerId;
+use crate::core::scheduler::WorkerCandidate;
 use crate::types::{NamespaceId, PressureBands, WorkerPressure, WorkerPsi};
 
 use super::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects};
+
+// =============================================================================
+// Tunnel config (from WorkerReady handshake)
+// =============================================================================
+
+/// Tunnel configuration reported by a worker during handshake.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkerTunnelInfo {
+    pub listen_port: u16,
+    pub public_key: [u8; 32],
+}
 
 // =============================================================================
 // Tracked per-worker state (pure — no writer handle)

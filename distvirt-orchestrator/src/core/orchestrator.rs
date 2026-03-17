@@ -524,7 +524,10 @@ impl OrchestratorCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::timer::TimerConfig;
+    use crate::{
+        adapter::timer::TimerConfig,
+        core::{WorkerNamespaceEvent, WorkerNamespaceEventKind},
+    };
     use std::time::Duration;
 
     fn test_caps() -> distvirt_worker_protocol::WorkerCapabilities {

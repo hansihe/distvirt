@@ -4,15 +4,13 @@
 //! free of any async or channel dependencies.
 
 use crate::adapter::timer::{TimerAction, TimerIdentity};
-use crate::sm_new::PodId;
-use crate::task::GlobalWorkerId;
-use crate::types::NamespaceId;
-
-// Re-export types that are shared between task/ and core/.
-pub use crate::task::{
-    ArtifactPlacementEvent, ClientCommand, SchedulerDecision, WorkerNamespaceEvent,
-    WorkerNamespaceEventKind,
+use crate::core::scheduler::WorkerCandidate;
+use crate::core::worker_state::WorkerTunnelInfo;
+use crate::core::{
+    ArtifactPlacementEvent, ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent,
 };
+use crate::sm_new::PodId;
+use crate::types::NamespaceId;
 
 // =============================================================================
 // Namespace core input/output
@@ -84,7 +82,7 @@ pub enum SchedulerCoreInput {
         namespace_id: NamespaceId,
         pod_id: PodId,
     },
-    WorkerUpdate(GlobalWorkerId, crate::task::scheduler::WorkerCandidate),
+    WorkerUpdate(GlobalWorkerId, WorkerCandidate),
     WorkerRemoved(GlobalWorkerId),
     ArtifactEvent {
         worker_id: GlobalWorkerId,
@@ -117,7 +115,7 @@ pub enum WorkerStateCoreEvent {
     Connected {
         worker_id: GlobalWorkerId,
         capabilities: distvirt_worker_protocol::WorkerCapabilities,
-        tunnel_info: Option<crate::task::worker_state::WorkerTunnelInfo>,
+        tunnel_info: Option<WorkerTunnelInfo>,
         proto_worker_id: distvirt_worker_protocol::WorkerId,
     },
     Disconnected {
@@ -179,7 +177,7 @@ pub enum OrchestratorInput {
 pub struct WorkerConnectedInfo {
     pub worker_id: GlobalWorkerId,
     pub capabilities: distvirt_worker_protocol::WorkerCapabilities,
-    pub tunnel_info: Option<crate::task::worker_state::WorkerTunnelInfo>,
+    pub tunnel_info: Option<WorkerTunnelInfo>,
     pub proto_worker_id: distvirt_worker_protocol::WorkerId,
 }
 

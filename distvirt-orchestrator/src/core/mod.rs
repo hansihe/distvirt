@@ -6,7 +6,11 @@
 use distvirt_worker_protocol::NamespaceId;
 use tokio::sync::mpsc;
 
-use crate::{sm_new::PodId, types::NamespaceSpec};
+use crate::{
+    adapter::timer::TimerIdentity,
+    sm_new::{PodId, WorkerInfo},
+    types::NamespaceSpec,
+};
 
 pub mod namespace;
 pub mod orchestrator;
@@ -191,4 +195,25 @@ pub enum ClientCommand {
     Scavenge { workload_name: String },
     /// Activate or deactivate a service by protocol name.
     ActivateService { service_name: String, active: bool },
+}
+
+// =============================================================================
+// Worker writer
+// =============================================================================
+
+/// Handle for sending commands to a specific worker.
+/// Sends fully-formed protocol commands (built by the namespace task).
+#[derive(Clone)]
+pub(crate) struct WorkerWriterHandle {
+    tx: mpsc::Sender<distvirt_worker_protocol::WorkerCommand>,
+}
+
+impl WorkerWriterHandle {
+    pub fn new(tx: mpsc::Sender<distvirt_worker_protocol::WorkerCommand>) -> Self {
+        Self { tx }
+    }
+
+    pub async fn send(&self, cmd: distvirt_worker_protocol::WorkerCommand) {
+        let _ = self.tx.send(cmd).await;
+    }
 }
