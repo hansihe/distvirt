@@ -287,6 +287,12 @@ pub(super) fn gen_materialize_methods(def: &TopologyDef, methods: &mut Vec<Token
 
             quote! {
                 PendingCreate::#variant(new_id, new_sm) => {
+                    if self.instances.#instances.contains_key(&new_id) {
+                        panic!(
+                            "duplicate {} ID {:?}: SM already exists",
+                            #node_str, new_id
+                        );
+                    }
                     self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::SmCreated {
                         node: #node_str,
                         id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&new_id as &(dyn std::fmt::Debug + Send + Sync)),

@@ -137,6 +137,17 @@ pub(super) fn node_group_index(def: &TopologyDef, node_name: &Ident) -> usize {
     panic!("unknown node for group_index: {}", node_name)
 }
 
+/// Generate the field name for tracking previous values in incremental aggregation.
+/// E.g. `prev_demand_input_alpha_demand` for input "DemandInput", source pair (Alpha, Demand).
+pub(super) fn prev_field_name(inp: &InputDef, sp: &SourcePair) -> Ident {
+    format_ident!(
+        "prev_{}_{}_{}",
+        to_snake_case(&inp.input_name.to_string()),
+        to_snake_case(&sp.node.to_string()),
+        to_snake_case(&sp.signal.to_string())
+    )
+}
+
 /// Total count of auto-ID nodes (SMs + ports).
 pub(super) fn auto_id_count(def: &TopologyDef) -> usize {
     let sm_count = def

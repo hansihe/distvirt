@@ -9,7 +9,7 @@ const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
 
 /// Set up a router with a workload (always-on service), propagate initial state.
 /// Returns (worker, pod_id).
-fn setup_workload(router: &mut DRouter) -> (WorkerId, PodId) {
+fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, crate::sm::PodId) {
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -43,7 +43,7 @@ fn setup_workload(router: &mut DRouter) -> (WorkerId, PodId) {
 }
 
 /// Schedule a pod to a worker by creating a lease, then propagate.
-fn schedule_pod(router: &mut DRouter, worker: WorkerId, pod_id: PodId) {
+fn schedule_pod(router: &mut DRouter, worker: crate::sm::WorkerId, pod_id: crate::sm::PodId) {
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, LeaseInfo { worker_id: worker });
@@ -118,7 +118,7 @@ fn pod_disappears_stop() {
     schedule_pod(&mut router, worker, pod_id);
 
     let mut adapter = PodAssignmentAdapter::new();
-    // Populate cache with the pod.
+    // Consume the initial Launch delta.
     let actions = adapter.reconcile(&mut router);
     assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], PodAssignmentAction::Launch { .. }));
@@ -154,7 +154,7 @@ fn stable_state_no_actions() {
     let mut adapter = PodAssignmentAdapter::new();
     let _ = adapter.reconcile(&mut router);
 
-    // Propagate again — signal dedup means no new delivery.
+    // Propagate again — no new deltas since nothing changed.
     router.propagate();
     let actions = adapter.reconcile(&mut router);
     assert!(
@@ -254,8 +254,4 @@ fn multiple_workers() {
         "expected at least 2 Launch actions, got {:?}",
         actions
     );
-
-    // Both workers should be in the cache.
-    assert!(adapter.assigned().contains_key(&worker1));
-    assert!(adapter.assigned().contains_key(&worker2));
 }

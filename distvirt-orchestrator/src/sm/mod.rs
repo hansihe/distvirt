@@ -1,4 +1,12 @@
-use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
+use distvirt_sm_router::{Aggregator, IncrementalAggregator, ListAggregator, SmHandler};
+
+use crate::adapter::pod_assignment::PodAssignmentIncrementalAggregator;
+use crate::adapter::schedule_request::ScheduleRequestIncrementalAggregator;
+use crate::adapter::endpoint::EndpointIncrementalAggregator;
+use crate::adapter::timer::{
+    PodTimerIncrementalAggregator, ServiceTimerIncrementalAggregator,
+    WorkloadTimerIncrementalAggregator,
+};
 
 mod pod;
 mod service;
@@ -87,6 +95,18 @@ pub struct TimerId(pub u64);
 
 /// The singleton timer port ID.
 pub const TIMER: TimerId = TimerId(0);
+
+/// Delta produced by the incremental schedule-request aggregator.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScheduleRequestDelta {
+    Request {
+        pod_id: PodId,
+        request: PodScheduleRequest,
+    },
+    Drop {
+        pod_id: PodId,
+    },
+}
 
 /// Schedule request emitted by pod to the schedule-request port.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -502,27 +522,27 @@ distvirt_sm_router::router! {
         },
         Worker::AssignedPodsInput {
             sources: [(PodToWorker, Pod::ScheduleRequest)],
-            aggregator: IdListAggregator<PodId, PodScheduleRequest>,
+            incremental_aggregator: PodAssignmentIncrementalAggregator,
         },
         ScheduleRequest::PodRequestsInput {
             sources: [(PodToScheduleRequest, Pod::ScheduleRequest)],
-            aggregator: IdListAggregator<PodId, PodScheduleRequest>,
+            incremental_aggregator: ScheduleRequestIncrementalAggregator,
         },
         Timer::WorkloadTimersInput {
             sources: [(WorkloadToTimer, Workload::WantedTimers)],
-            aggregator: IdListAggregator<WorkloadId, Vec<TimerRequest>>,
+            incremental_aggregator: WorkloadTimerIncrementalAggregator,
         },
         Timer::ServiceTimersInput {
             sources: [(ServiceToTimer, Service::SvcWantedTimers)],
-            aggregator: IdListAggregator<ServiceId, Vec<ServiceTimerRequest>>,
+            incremental_aggregator: ServiceTimerIncrementalAggregator,
         },
         Timer::PodTimersInput {
             sources: [(PodToTimer, Pod::WantedPodTimers)],
-            aggregator: IdListAggregator<PodId, Vec<PodTimerRequest>>,
+            incremental_aggregator: PodTimerIncrementalAggregator,
         },
         Endpoint::ServiceEndpointsInput {
             sources: [(ServiceToEndpoint, Service::EndpointInfo)],
-            aggregator: IdListAggregator<ServiceId, Option<ReadyInfo>>,
+            incremental_aggregator: EndpointIncrementalAggregator,
         },
     }
 }

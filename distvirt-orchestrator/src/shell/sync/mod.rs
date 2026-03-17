@@ -22,7 +22,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
-use crate::core::namespace::NamespaceCore;
+use crate::core::namespace_boundary::NamespaceWithBoundary;
 use crate::core::orchestrator::OrchestratorCore;
 use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
@@ -592,7 +592,7 @@ impl SyncShell {
     // =========================================================================
 
     /// Access a namespace's core (for reading router state).
-    pub fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceCore> {
+    pub fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceWithBoundary> {
         self.core.namespace(id)
     }
 

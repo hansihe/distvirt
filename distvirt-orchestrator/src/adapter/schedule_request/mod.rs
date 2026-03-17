@@ -1,80 +1,68 @@
-use std::collections::HashMap;
+use distvirt_sm_router::IncrementalAggregator;
 
 use crate::sm::{DRouter, PodId, PodScheduleRequest, ScheduleRequestId, ScheduleRequestPortInput};
 
 #[cfg(test)]
 mod tests;
 
-/// Delta returned by reconcile.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ScheduleRequestDelta {
-    Request {
-        pod_id: PodId,
-        request: PodScheduleRequest,
-    },
-    Drop {
-        pod_id: PodId,
-    },
-}
+pub(crate) use crate::sm::ScheduleRequestDelta;
 
 pub(crate) struct ScheduleRequestAdapter {
     schedule_request_id: ScheduleRequestId,
-    /// What we've told the scheduler: pod_id → request
-    sent_requests: HashMap<PodId, PodScheduleRequest>,
 }
 
 impl ScheduleRequestAdapter {
     pub(crate) fn new(schedule_request_id: ScheduleRequestId) -> Self {
         ScheduleRequestAdapter {
             schedule_request_id,
-            sent_requests: HashMap::new(),
         }
     }
 
-    /// Drain schedule request inputs from the router, diff against sent state,
-    /// and return Request/Drop deltas. Updates internal cache.
+    /// Drain schedule request inputs from the router.
+    /// With incremental aggregation the router already produces per-pod deltas,
+    /// so no adapter-side diffing or caching is needed.
     pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<ScheduleRequestDelta> {
         let inputs = router.drain_schedule_request_inputs();
 
-        for (sr_id, input) in inputs {
-            if sr_id != self.schedule_request_id {
-                continue;
-            }
-            match input {
-                ScheduleRequestPortInput::PodRequestsInput(requests) => {
-                    let new_requests: HashMap<PodId, PodScheduleRequest> =
-                        requests.into_iter().collect();
+        inputs
+            .into_iter()
+            .filter(|(sr_id, _)| *sr_id == self.schedule_request_id)
+            .map(|(_, input)| match input {
+                ScheduleRequestPortInput::PodRequestsInput(delta) => delta,
+            })
+            .collect()
+    }
+}
 
-                    let mut deltas = Vec::new();
+/// Incremental aggregator for schedule request inputs.
+/// Produces `ScheduleRequestDelta` directly — no adapter-side diffing needed.
+#[derive(Default)]
+pub struct ScheduleRequestIncrementalAggregator;
 
-                    // Pods in new but not sent → Request
-                    for (pod_id, request) in &new_requests {
-                        if !self.sent_requests.contains_key(pod_id) {
-                            deltas.push(ScheduleRequestDelta::Request {
-                                pod_id: *pod_id,
-                                request: request.clone(),
-                            });
-                        }
-                    }
+impl IncrementalAggregator for ScheduleRequestIncrementalAggregator {
+    type Input = (PodId, PodScheduleRequest);
+    type Output = ScheduleRequestDelta;
 
-                    // Pods in sent but not new → Drop
-                    for pod_id in self.sent_requests.keys() {
-                        if !new_requests.contains_key(pod_id) {
-                            deltas.push(ScheduleRequestDelta::Drop { pod_id: *pod_id });
-                        }
-                    }
-
-                    self.sent_requests = new_requests;
-                    return deltas;
-                }
-            }
-        }
-
-        Vec::new()
+    fn added(
+        &self,
+        (pod_id, request): &(PodId, PodScheduleRequest),
+    ) -> Option<ScheduleRequestDelta> {
+        Some(ScheduleRequestDelta::Request {
+            pod_id: *pod_id,
+            request: request.clone(),
+        })
     }
 
-    /// Read-only access to sent requests.
-    pub(crate) fn sent_requests(&self) -> &HashMap<PodId, PodScheduleRequest> {
-        &self.sent_requests
+    fn removed(&self, (pod_id, _): &(PodId, PodScheduleRequest)) -> Option<ScheduleRequestDelta> {
+        Some(ScheduleRequestDelta::Drop { pod_id: *pod_id })
+    }
+
+    fn changed(
+        &self,
+        _old: &(PodId, PodScheduleRequest),
+        _new: &(PodId, PodScheduleRequest),
+    ) -> Option<ScheduleRequestDelta> {
+        // Pod schedule requests are one-and-done; changes are not expected.
+        None
     }
 }

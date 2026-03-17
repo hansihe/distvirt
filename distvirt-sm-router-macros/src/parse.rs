@@ -10,6 +10,7 @@ mod kw {
     syn::custom_keyword!(inputs);
     syn::custom_keyword!(sources);
     syn::custom_keyword!(aggregator);
+    syn::custom_keyword!(incremental_aggregator);
     syn::custom_keyword!(events);
     syn::custom_keyword!(expose_internals_for_testing);
     syn::custom_keyword!(invariants);
@@ -54,11 +55,29 @@ pub struct EdgeDef {
     pub target: Ident,
 }
 
+pub enum AggregatorKind {
+    Batch(Type),
+    Incremental(Type),
+}
+
+impl AggregatorKind {
+    pub fn ty(&self) -> &Type {
+        match self {
+            AggregatorKind::Batch(ty) => ty,
+            AggregatorKind::Incremental(ty) => ty,
+        }
+    }
+
+    pub fn is_incremental(&self) -> bool {
+        matches!(self, AggregatorKind::Incremental(_))
+    }
+}
+
 pub struct InputDef {
     pub node: Ident,
     pub input_name: Ident,
     pub sources: Vec<SourcePair>,
-    pub aggregator: Type,
+    pub aggregator: AggregatorKind,
 }
 
 // AdminCommand(AdminCommandPayload): ManagementPort -> WorkloadSm
@@ -265,10 +284,20 @@ impl Parse for InputDef {
                 .collect();
         content.parse::<Token![,]>()?;
 
-        // aggregator: Type
-        content.parse::<kw::aggregator>()?;
-        content.parse::<Token![:]>()?;
-        let aggregator: Type = content.parse()?;
+        // aggregator: Type  OR  incremental_aggregator: Type
+        let aggregator = if content.peek(kw::aggregator) {
+            content.parse::<kw::aggregator>()?;
+            content.parse::<Token![:]>()?;
+            let ty: Type = content.parse()?;
+            AggregatorKind::Batch(ty)
+        } else if content.peek(kw::incremental_aggregator) {
+            content.parse::<kw::incremental_aggregator>()?;
+            content.parse::<Token![:]>()?;
+            let ty: Type = content.parse()?;
+            AggregatorKind::Incremental(ty)
+        } else {
+            return Err(content.error("expected `aggregator` or `incremental_aggregator`"));
+        };
 
         // optional trailing comma
         let _ = content.parse::<Token![,]>();

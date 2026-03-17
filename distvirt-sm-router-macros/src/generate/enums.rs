@@ -114,9 +114,15 @@ pub(super) fn gen_input_enums(def: &TopologyDef) -> TokenStream {
                 .filter(|inp| inp.node == sm.name)
                 .map(|inp| {
                     let variant = &inp.input_name;
-                    let agg = &inp.aggregator;
-                    quote! {
-                        #variant(<#agg as ::distvirt_sm_router::Aggregator>::Output)
+                    let agg = inp.aggregator.ty();
+                    if inp.aggregator.is_incremental() {
+                        quote! {
+                            #variant(<#agg as ::distvirt_sm_router::IncrementalAggregator>::Output)
+                        }
+                    } else {
+                        quote! {
+                            #variant(<#agg as ::distvirt_sm_router::Aggregator>::Output)
+                        }
                     }
                 })
                 .collect();
@@ -162,9 +168,15 @@ pub(super) fn gen_port_input_enums(def: &TopologyDef) -> TokenStream {
                 .filter(|inp| inp.node == port.name)
                 .map(|inp| {
                     let variant = &inp.input_name;
-                    let agg = &inp.aggregator;
-                    quote! {
-                        #variant(<#agg as ::distvirt_sm_router::Aggregator>::Output)
+                    let agg = inp.aggregator.ty();
+                    if inp.aggregator.is_incremental() {
+                        quote! {
+                            #variant(<#agg as ::distvirt_sm_router::IncrementalAggregator>::Output)
+                        }
+                    } else {
+                        quote! {
+                            #variant(<#agg as ::distvirt_sm_router::Aggregator>::Output)
+                        }
                     }
                 })
                 .collect();

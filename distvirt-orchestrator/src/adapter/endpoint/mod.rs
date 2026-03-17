@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+use distvirt_sm_router::IncrementalAggregator;
+
 use crate::sm::{DRouter, EndpointId, EndpointPortInput, ReadyInfo, ServiceId};
 
 #[cfg(test)]
@@ -8,7 +10,7 @@ mod tests;
 
 /// Action returned by endpoint reconciliation.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum EndpointAction {
+pub enum EndpointAction {
     Update {
         service_id: ServiceId,
         ready: ReadyInfo,
@@ -39,9 +41,8 @@ pub(crate) struct RegistryEntry {
 
 pub(crate) struct EndpointAdapter {
     endpoint_id: EndpointId,
-    /// Cached state: service_id → ReadyInfo for services currently active.
-    cached: HashMap<ServiceId, ReadyInfo>,
     /// Cached service registry: name → IP.
+    /// This is spec-driven (not from router inputs), so it stays cached.
     registry: HashMap<String, Ipv4Addr>,
 }
 
@@ -49,70 +50,23 @@ impl EndpointAdapter {
     pub(crate) fn new(endpoint_id: EndpointId) -> Self {
         EndpointAdapter {
             endpoint_id,
-            cached: HashMap::new(),
             registry: HashMap::new(),
         }
     }
 
-    /// Drain endpoint inputs from the router, diff against cached state,
-    /// and return Update/Remove actions. Updates internal cache.
+    /// Drain endpoint inputs from the router.
+    /// With incremental aggregation the router already produces per-service deltas,
+    /// so no adapter-side diffing or caching is needed.
     pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<EndpointAction> {
         let inputs = router.drain_endpoint_inputs();
 
-        // Process all queued inputs, keeping only the last state per endpoint.
-        // Multiple propagate() calls may queue multiple inputs.
-        let mut latest_entries: Option<Vec<(ServiceId, Option<ReadyInfo>)>> = None;
-
-        for (ep_id, input) in inputs {
-            if ep_id != self.endpoint_id {
-                continue;
-            }
-            match input {
-                EndpointPortInput::ServiceEndpointsInput(entries) => {
-                    latest_entries = Some(entries);
-                }
-            }
-        }
-
-        let entries = match latest_entries {
-            Some(e) => e,
-            None => return Vec::new(),
-        };
-
-        // Build new state from the latest aggregated input.
-        let mut new_state: HashMap<ServiceId, ReadyInfo> = HashMap::new();
-        for (service_id, info_opt) in entries {
-            if let Some(info) = info_opt {
-                new_state.insert(service_id, info);
-            }
-        }
-
-        let mut actions = Vec::new();
-
-        // Services in new state but not cached, or with changed ReadyInfo → Update.
-        for (service_id, ready) in &new_state {
-            match self.cached.get(service_id) {
-                Some(old) if old == ready => {}
-                _ => {
-                    actions.push(EndpointAction::Update {
-                        service_id: *service_id,
-                        ready: ready.clone(),
-                    });
-                }
-            }
-        }
-
-        // Services in cached but not in new state → Remove.
-        for service_id in self.cached.keys() {
-            if !new_state.contains_key(service_id) {
-                actions.push(EndpointAction::Remove {
-                    service_id: *service_id,
-                });
-            }
-        }
-
-        self.cached = new_state;
-        actions
+        inputs
+            .into_iter()
+            .filter(|(ep_id, _)| *ep_id == self.endpoint_id)
+            .flat_map(|(_, input)| match input {
+                EndpointPortInput::ServiceEndpointsInput(action) => action,
+            })
+            .collect()
     }
 
     /// Update the service registry from a new namespace spec.
@@ -176,5 +130,61 @@ impl EndpointAdapter {
             })
             .collect();
         RegistryAction::Sync { entries }
+    }
+}
+
+// =============================================================================
+// Incremental aggregator
+// =============================================================================
+
+/// Incremental aggregator for endpoint inputs.
+/// Produces `EndpointAction` directly — no adapter-side diffing needed.
+#[derive(Default)]
+pub struct EndpointIncrementalAggregator;
+
+impl IncrementalAggregator for EndpointIncrementalAggregator {
+    type Input = (ServiceId, Option<ReadyInfo>);
+    type Output = Vec<EndpointAction>;
+
+    fn added(
+        &self,
+        (service_id, info): &(ServiceId, Option<ReadyInfo>),
+    ) -> Option<Vec<EndpointAction>> {
+        match info {
+            Some(ready) => Some(vec![EndpointAction::Update {
+                service_id: *service_id,
+                ready: ready.clone(),
+            }]),
+            None => None,
+        }
+    }
+
+    fn removed(
+        &self,
+        (service_id, info): &(ServiceId, Option<ReadyInfo>),
+    ) -> Option<Vec<EndpointAction>> {
+        match info {
+            Some(_) => Some(vec![EndpointAction::Remove {
+                service_id: *service_id,
+            }]),
+            None => None,
+        }
+    }
+
+    fn changed(
+        &self,
+        (_service_id, old_info): &(ServiceId, Option<ReadyInfo>),
+        (service_id, new_info): &(ServiceId, Option<ReadyInfo>),
+    ) -> Option<Vec<EndpointAction>> {
+        match (old_info, new_info) {
+            (_, Some(ready)) => Some(vec![EndpointAction::Update {
+                service_id: *service_id,
+                ready: ready.clone(),
+            }]),
+            (Some(_), None) => Some(vec![EndpointAction::Remove {
+                service_id: *service_id,
+            }]),
+            (None, None) => None,
+        }
     }
 }

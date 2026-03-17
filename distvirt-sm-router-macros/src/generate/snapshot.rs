@@ -72,10 +72,12 @@ fn gen_snapshot_clone(def: &TopologyDef) -> TokenStream {
         where_bounds.push(quote! { #vt: Clone });
     }
 
-    // Aggregator output types
+    // Aggregator output types (batch only — incremental prev maps use signal value types)
     for inp in &def.inputs {
-        let agg = &inp.aggregator;
-        where_bounds.push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+        if !inp.aggregator.is_incremental() {
+            let agg = inp.aggregator.ty();
+            where_bounds.push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+        }
     }
 
     // Edges (forward only)

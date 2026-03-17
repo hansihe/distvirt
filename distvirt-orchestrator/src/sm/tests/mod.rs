@@ -21,62 +21,70 @@ const W2: WorkloadId = WorkloadId(2);
 // Test helpers
 // ============================================================================
 
-/// Extract workload timer requests from timer port inputs.
-/// Each delivery is a `Vec<(WorkloadId, Vec<TimerRequest>)>` — one entry per workload
-/// connected to the timer port.
-fn drain_timer_requests(router: &mut Router) -> Vec<Vec<(WorkloadId, Vec<TimerRequest>)>> {
+use crate::adapter::timer::{TimerAction, TimerIdentity};
+
+/// Drain workload timer actions from the timer port.
+/// Other timer types (service, pod) are consumed but not returned.
+fn drain_workload_timer_actions(router: &mut Router) -> Vec<TimerAction> {
     router
         .drain_timer_inputs()
         .into_iter()
         .filter(|(id, _)| *id == TIMER)
-        .filter_map(|(_, input)| match input {
-            TimerPortInput::WorkloadTimersInput(timers) => Some(timers),
-            _ => None,
+        .flat_map(|(_, input)| match input {
+            TimerPortInput::WorkloadTimersInput(actions) => actions,
+            TimerPortInput::ServiceTimersInput(_) => vec![],
+            TimerPortInput::PodTimersInput(_) => vec![],
         })
         .collect()
 }
 
-/// Assert that the timer port received a timer delivery where the workload
-/// declared exactly the expected timer requests.
+/// Assert that the timer port received Start actions matching the expected timer requests.
 fn assert_timer_requested(router: &mut Router, expected: &[TimerRequest]) {
-    let deliveries = drain_timer_requests(router);
+    let actions = drain_workload_timer_actions(router);
+    let starts: Vec<_> = actions
+        .iter()
+        .filter(|a| matches!(a, TimerAction::Start { .. }))
+        .collect();
     assert!(
-        !deliveries.is_empty(),
-        "expected timer delivery {:?}, got nothing",
-        expected
+        !starts.is_empty(),
+        "expected timer Start actions for {:?}, got {:?}",
+        expected,
+        actions
     );
-    // Last delivery should have one workload's timer list matching expected.
-    let last = deliveries.last().unwrap();
-    assert_eq!(
-        last.len(),
-        1,
-        "expected 1 workload's timers, got {:?}",
-        last
-    );
-    assert_eq!(last[0].1.as_slice(), expected, "timer requests mismatch");
+    for req in expected {
+        let found = starts.iter().any(|a| match a {
+            TimerAction::Start {
+                identity: TimerIdentity::Workload(_, key),
+                generation,
+                duration,
+            } => *key == req.key && *generation == req.generation && *duration == req.duration,
+            _ => false,
+        });
+        assert!(found, "expected Start for {:?}, got {:?}", req, starts);
+    }
 }
 
-/// Assert that timer output is either absent or empty (no active timers).
+/// Assert no Start actions are in the output (timers cleared or nothing changed).
 fn assert_no_timers_wanted(router: &mut Router) {
-    let deliveries = drain_timer_requests(router);
-    for delivery in &deliveries {
-        for (_, workload_timers) in delivery {
-            assert!(
-                workload_timers.is_empty(),
-                "expected no timers wanted, got {:?}",
-                workload_timers
-            );
-        }
-    }
+    let actions = drain_workload_timer_actions(router);
+    let starts: Vec<_> = actions
+        .iter()
+        .filter(|a| matches!(a, TimerAction::Start { .. }))
+        .collect();
+    assert!(
+        starts.is_empty(),
+        "expected no timer Start actions, got {:?}",
+        starts
+    );
 }
 
 /// Assert no timer-related port inputs were delivered at all (dedup suppressed).
 fn assert_no_timer_output(router: &mut Router) {
-    let deliveries = drain_timer_requests(router);
+    let actions = drain_workload_timer_actions(router);
     assert!(
-        deliveries.is_empty(),
+        actions.is_empty(),
         "expected no timer output, got {:?}",
-        deliveries
+        actions
     );
 }
 

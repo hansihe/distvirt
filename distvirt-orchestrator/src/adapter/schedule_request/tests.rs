@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm::{
-    DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId, WorkloadSm,
-    WorkloadSpec,
+    DRouter, PodId, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
+    WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -79,9 +79,6 @@ fn new_pod_request_delta() {
         }
         other => panic!("expected Request, got {:?}", other),
     }
-
-    // Should be tracked in sent_requests.
-    assert!(adapter.sent_requests().contains_key(&pod_id));
 }
 
 // ============================================================================
@@ -94,7 +91,7 @@ fn pod_removed_drop_delta() {
     let (worker, pod_id) = setup_workload(&mut router);
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
-    // Populate cache.
+    // Drain initial deltas.
     let deltas = adapter.reconcile(&mut router);
     assert_eq!(deltas.len(), 1);
 
@@ -118,7 +115,6 @@ fn pod_removed_drop_delta() {
         "expected Drop delta, got {:?}",
         deltas
     );
-    assert!(!adapter.sent_requests().contains_key(&pod_id));
 }
 
 // ============================================================================
@@ -216,5 +212,4 @@ fn multiple_pods_change() {
         "expected at least 2 Request deltas, got {:?}",
         deltas
     );
-    assert!(adapter.sent_requests().len() >= 2);
 }

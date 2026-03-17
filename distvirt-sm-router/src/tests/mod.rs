@@ -170,7 +170,9 @@ const B2: BetaId = BetaId(2);
 const G1: GammaId = GammaId(1);
 const G2: GammaId = GammaId(2);
 
-// ---- Tests ----
+// ============================================================================
+// Signal propagation and change detection
+// ============================================================================
 
 #[test]
 fn basic_signal_propagation() {
@@ -263,42 +265,9 @@ fn multi_edge_aggregation() {
     assert_eq!(*demand.last().unwrap(), 2);
 }
 
-#[test]
-fn cascading_signal_to_edge_to_signal() {
-    let mut router = Router::new(16);
-    router.create_alpha(A1, AlphaSm::new());
-
-    let mut b1 = BetaSm::new();
-    b1.on_handle = Some(Box::new(|input, ctx| {
-        let BetaInput::DemandInput(count) = input else {
-            return;
-        };
-        if *count > 0 {
-            ctx.set_beta_to_alpha_edges(vec![A1]);
-            ctx.set_status(42);
-        }
-    }));
-    router.create_beta(B1, b1);
-
-    router.set_alpha_to_beta_edges(A1, vec![B1]);
-
-    router.set_alpha_demand(A1, true);
-    router.propagate();
-
-    let b1 = router.get_beta(&B1).unwrap();
-    assert!(
-        b1.deliveries
-            .iter()
-            .any(|inp| *inp == BetaInput::DemandInput(1))
-    );
-
-    let a1 = router.get_alpha(&A1).unwrap();
-    assert!(
-        a1.deliveries
-            .iter()
-            .any(|inp| *inp == AlphaInput::StatusInput(vec![42]))
-    );
-}
+// ============================================================================
+// Cascading and depth limiting
+// ============================================================================
 
 #[test]
 #[should_panic(expected = "depth limit")]
@@ -327,6 +296,10 @@ fn depth_limiting_panics_on_cycle() {
     router.set_alpha_demand(A1, true);
     router.propagate();
 }
+
+// ============================================================================
+// Edge management
+// ============================================================================
 
 #[test]
 fn edge_removal_triggers_reaggregation() {
@@ -442,6 +415,10 @@ fn port_removal_cleans_edges_and_reaggregates() {
             .any(|inp| *inp == BetaInput::ConfigInput(vec![]))
     );
 }
+
+// ============================================================================
+// SM lifecycle (creation, self-destruct, dangling edges)
+// ============================================================================
 
 #[test]
 fn dangling_edges_target_dies_source_unaffected() {
@@ -672,7 +649,9 @@ fn port_removal_cleans_incoming_edges() {
     assert!(!router.beta_to_gamma_rev.contains_key(&G1));
 }
 
-// ---- Event tests ----
+// ============================================================================
+// Events
+// ============================================================================
 
 #[test]
 fn event_delivery_along_forward_edge() {
@@ -770,7 +749,9 @@ fn event_sent_from_sm_handler() {
     );
 }
 
-// ---- Edge-case tests ----
+// ============================================================================
+// Edge cases and advanced scenarios
+// ============================================================================
 
 #[test]
 fn aggregation_change_detection_suppresses_delivery() {
@@ -1086,34 +1067,6 @@ fn duplicate_edges_are_deduplicated() {
 }
 
 #[test]
-#[should_panic(expected = "depth limit")]
-fn depth_limit_at_three() {
-    let mut router = Router::new(3);
-
-    let mut a1 = AlphaSm::new();
-    let mut counter = 0u32;
-    a1.on_handle = Some(Box::new(move |_input, ctx| {
-        counter += 1;
-        ctx.set_demand(counter % 2 == 0);
-    }));
-    router.create_alpha(A1, a1);
-
-    let mut b1 = BetaSm::new();
-    let mut counter2 = 0u32;
-    b1.on_handle = Some(Box::new(move |_input, ctx| {
-        counter2 += 1;
-        ctx.set_status(counter2);
-    }));
-    router.create_beta(B1, b1);
-
-    router.set_alpha_to_beta_edges(A1, vec![B1]);
-    router.set_beta_to_alpha_edges(B1, vec![A1]);
-
-    router.set_alpha_demand(A1, true);
-    router.propagate();
-}
-
-#[test]
 #[should_panic(expected = "no edge")]
 fn event_rejected_after_edge_removed() {
     let mut router = Router::new(16);
@@ -1177,7 +1130,9 @@ fn sm_handler_sets_edges_and_signals_atomically() {
     assert!(router.beta_to_alpha_fwd.get(&B1).unwrap().contains(&A1));
 }
 
-// ---- Port input tests ----
+// ============================================================================
+// Port inputs
+// ============================================================================
 
 #[test]
 fn port_input_basic_flow() {
@@ -1280,10 +1235,9 @@ fn port_input_port_destroy_cleans_up() {
     assert_eq!(inputs[0].1, GammaPortInput::BetaStatusInput(vec![42]));
 }
 
-// ---- Auto-ID tests ----
-// Separate module so the router! macro generates a fresh set of types.
-
-// ---- Tracer tests ----
+// ============================================================================
+// Tracer
+// ============================================================================
 
 #[test]
 fn tracer_captures_basic_propagation() {
@@ -1506,6 +1460,158 @@ fn tracer_display_output() {
     assert!(output.contains("deliver"));
     assert!(output.contains("DemandInput"));
 }
+
+// ============================================================================
+// Coverage gap tests
+// ============================================================================
+
+/// Creating an SM with a duplicate ID panics during materialization.
+#[test]
+#[should_panic(expected = "duplicate")]
+fn duplicate_sm_id_panics() {
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+    router.create_alpha(A1, AlphaSm::new());
+    router.propagate();
+}
+
+/// Multi-source input where one source-type's edge is removed.
+/// Verifies the aggregated result updates to reflect only remaining sources.
+#[test]
+fn multi_source_input_edge_removal() {
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_gamma_to_beta_edges(G1, vec![B1]);
+
+    router.set_alpha_demand(A1, true);
+    router.set_gamma_value(G1, 42);
+    router.propagate();
+
+    let b1 = router.get_beta(&B1).unwrap();
+    let multi: Vec<_> = b1
+        .deliveries
+        .iter()
+        .filter_map(|inp| match inp {
+            BetaInput::MultiSourceInput(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(multi.len(), 1);
+    assert_eq!(multi[0].len(), 2);
+
+    // Remove the Gamma edge — only Alpha source should remain
+    router.set_gamma_to_beta_edges(G1, vec![]);
+    router.propagate();
+
+    let b1 = router.get_beta(&B1).unwrap();
+    let multi: Vec<_> = b1
+        .deliveries
+        .iter()
+        .filter_map(|inp| match inp {
+            BetaInput::MultiSourceInput(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(multi.len(), 2);
+    let last = multi.last().unwrap();
+    assert!(last.contains(&MultiSourceInputSource::AlphaDemand(A1, true)));
+    assert!(!last.iter().any(|s| matches!(s, MultiSourceInputSource::GammaValue(..))));
+    assert_eq!(last.len(), 1);
+}
+
+/// SM self-destructs while having edges to multiple different edge types.
+/// Verifies all outgoing edge types are cleaned up and downstream reaggregates.
+#[test]
+fn sm_self_destruct_cleans_multiple_edge_types() {
+    let mut router = Router::new(16);
+    router.create_alpha(A1, AlphaSm::new());
+    router.create_gamma(G1);
+
+    // Beta has outgoing edges to both Alpha (BetaToAlpha) and Gamma (BetaToGamma).
+    // It self-destructs on receiving demand.
+    let mut b1_sm = BetaSm::new();
+    b1_sm.on_handle = Some(Box::new(|input, ctx| {
+        if let BetaInput::DemandInput(count) = input {
+            if *count > 0 {
+                ctx.set_beta_to_alpha_edges(vec![A1]);
+                ctx.set_beta_to_gamma_edges(vec![G1]);
+                ctx.set_status(99);
+                ctx.self_destruct();
+            }
+        }
+    }));
+    router.create_beta(B1, b1_sm);
+
+    router.set_alpha_to_beta_edges(A1, vec![B1]);
+    router.set_alpha_demand(A1, true);
+    router.propagate();
+
+    // B1 should be gone
+    assert!(router.get_beta(&B1).is_none());
+
+    // BetaToAlpha forward edges should be cleaned up
+    assert!(
+        router
+            .beta_to_alpha_fwd
+            .get(&B1)
+            .map_or(true, |v| v.is_empty())
+    );
+
+    // BetaToGamma forward edges should be cleaned up
+    assert!(
+        router
+            .beta_to_gamma_fwd
+            .get(&B1)
+            .map_or(true, |v| v.is_empty())
+    );
+
+    // Alpha should have received empty StatusInput (B1's edges cleaned up)
+    let a1 = router.get_alpha(&A1).unwrap();
+    assert!(
+        a1.deliveries
+            .iter()
+            .any(|inp| *inp == AlphaInput::StatusInput(vec![]))
+    );
+}
+
+/// Multiple events delivered to the same target preserve order.
+#[test]
+fn event_ordering_preserved() {
+    let mut router = Router::new(16);
+    router.create_beta(B1, BetaSm::new());
+    router.create_gamma(G1);
+
+    router.set_gamma_to_beta_edges(G1, vec![B1]);
+    router.propagate();
+
+    // Send three events in a specific order
+    router.send_command(G1, B1, "first".to_string());
+    router.send_command(G1, B1, "second".to_string());
+    router.send_command(G1, B1, "third".to_string());
+    router.propagate();
+
+    let b1 = router.get_beta(&B1).unwrap();
+    let events: Vec<_> = b1
+        .deliveries
+        .iter()
+        .filter_map(|inp| match inp {
+            BetaInput::Command(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], "first");
+    assert_eq!(events[1], "second");
+    assert_eq!(events[2], "third");
+}
+
+// ============================================================================
+// Submodules (separate topologies)
+// ============================================================================
 
 mod auto_id {
     use crate::{Aggregator, ListAggregator, SmHandler};
@@ -2590,5 +2696,6 @@ mod initialize_tests {
     }
 }
 
+mod incremental;
 mod manual_propagate;
 mod model_checkable;

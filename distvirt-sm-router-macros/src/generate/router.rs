@@ -67,9 +67,15 @@ fn gen_clone_impls(
 
     // Aggregator output types
     for inp in &def.inputs {
-        let agg = &inp.aggregator;
-        router_where_bounds
-            .push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+        let agg = inp.aggregator.ty();
+        if inp.aggregator.is_incremental() {
+            // Incremental inputs store prev maps with signal value types,
+            // which are already covered by signal value Clone bounds above.
+            // No additional bound needed.
+        } else {
+            router_where_bounds
+                .push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+        }
     }
 
     // SignalState maps
@@ -295,12 +301,30 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         }
 
         for inp in def.inputs.iter().filter(|i| i.node == *node) {
-            let in_f = in_field_name(&inp.input_name);
-            let agg = &inp.aggregator;
-            ss_fields.push(
-                quote! { pub #in_f: Option<<#agg as ::distvirt_sm_router::Aggregator>::Output> },
-            );
-            ss_defaults.push(quote! { #in_f: None });
+            if inp.aggregator.is_incremental() {
+                // Incremental inputs: one BTreeMap per source pair to track previous values
+                for sp in &inp.sources {
+                    let prev_f = prev_field_name(inp, sp);
+                    let src_id = node_id_type(def, &sp.node);
+                    let sig = def
+                        .signals
+                        .iter()
+                        .find(|s| s.node == sp.node && s.signal == sp.signal)
+                        .unwrap();
+                    let vt = &sig.value_type;
+                    ss_fields.push(
+                        quote! { pub #prev_f: std::collections::BTreeMap<#src_id, #vt> },
+                    );
+                    ss_defaults.push(quote! { #prev_f: std::collections::BTreeMap::new() });
+                }
+            } else {
+                let in_f = in_field_name(&inp.input_name);
+                let agg = inp.aggregator.ty();
+                ss_fields.push(
+                    quote! { pub #in_f: Option<<#agg as ::distvirt_sm_router::Aggregator>::Output> },
+                );
+                ss_defaults.push(quote! { #in_f: None });
+            }
         }
 
         signal_state_structs.push(quote! {

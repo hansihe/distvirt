@@ -385,12 +385,14 @@ fn manual_propagate_empty() {
 fn manual_propagate_materializes_creates() {
     let mut router = Router::new(16);
 
-    // Alpha creates Beta in its handler
+    // Alpha creates Beta in its handler when it sees a non-default gamma value
     let mut a1 = AlphaSm::new();
     a1.on_handle = Some(Box::new(|input, ctx| {
-        if let AlphaInput::GammaValueInput(_) = input {
-            ctx.create_beta(B1, BetaSm::new());
-            ctx.set_alpha_to_beta_edges(vec![B1]);
+        if let AlphaInput::GammaValueInput(vals) = input {
+            if vals.iter().any(|v| *v > 0) {
+                ctx.create_beta(B1, BetaSm::new());
+                ctx.set_alpha_to_beta_edges(vec![B1]);
+            }
         }
     }));
     router.create_alpha(A1, a1);

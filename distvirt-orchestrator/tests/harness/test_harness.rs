@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use distvirt_orchestrator::adapter::timer::TimerConfig;
-use distvirt_orchestrator::core::namespace::NamespaceCore;
+use distvirt_orchestrator::core::namespace_boundary::NamespaceWithBoundary;
 use distvirt_orchestrator::core::{ClientCommand, GlobalWorkerId};
 use distvirt_orchestrator::shell::sync::{MockWorkerConfig, SyncShell};
 use distvirt_orchestrator::sm::{ServiceSm, ServiceState, SvcStatus, WlStatus, WorkloadSm};
@@ -109,7 +109,7 @@ impl TestHarness {
     // State access
     // =========================================================================
 
-    pub fn namespace(&self, ns_id: &str) -> &NamespaceCore {
+    pub fn namespace(&self, ns_id: &str) -> &NamespaceWithBoundary {
         self.shell
             .namespace(&NamespaceId::from(ns_id))
             .unwrap_or_else(|| panic!("namespace '{}' not found", ns_id))

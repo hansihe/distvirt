@@ -14,7 +14,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
-use super::namespace::NamespaceCore;
+use super::namespace_boundary::NamespaceWithBoundary;
 use super::scheduler::SchedulerCore;
 use super::timer_wheel::TimerWheel;
 use super::types::{
@@ -29,7 +29,7 @@ use crate::sm::WorkerInfo;
 use crate::types::NamespaceId;
 
 pub struct OrchestratorCore {
-    namespaces: HashMap<NamespaceId, NamespaceCore>,
+    namespaces: HashMap<NamespaceId, NamespaceWithBoundary>,
     scheduler: SchedulerCore,
     worker_state: WorkerStateCore,
     timer_config: TimerConfig,
@@ -95,7 +95,7 @@ impl OrchestratorCore {
             }
             OrchestratorInput::CreateNamespace { namespace_id } => {
                 if !self.namespaces.contains_key(&namespace_id) {
-                    let ns = NamespaceCore::new(namespace_id.clone(), self.timer_config.clone());
+                    let ns = NamespaceWithBoundary::new(namespace_id.clone(), self.timer_config.clone());
                     self.namespaces.insert(namespace_id, ns);
                 }
             }
@@ -288,7 +288,7 @@ impl OrchestratorCore {
                 });
         self.route_worker_state_effects(ws_effects, &mut effects, now);
 
-        let ns = NamespaceCore::new(info.namespace_id.clone(), self.timer_config.clone());
+        let ns = NamespaceWithBoundary::new(info.namespace_id.clone(), self.timer_config.clone());
         self.namespaces.insert(info.namespace_id.clone(), ns);
 
         let workers: Vec<_> = self
@@ -512,7 +512,7 @@ impl OrchestratorCore {
     // Accessors
     // =========================================================================
 
-    pub fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceCore> {
+    pub fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceWithBoundary> {
         self.namespaces.get(id)
     }
 

@@ -25,8 +25,15 @@
 //!   determined by aggregated input declarations.
 //!
 //! - **Aggregated Input:** A declared input on a consuming SM that specifies
-//!   `(EdgeType, Signal)` source pairs and an [`Aggregator`] to combine them.
-//!   The router re-aggregates whenever edges or source signals change.
+//!   `(EdgeType, Signal)` source pairs and either an [`Aggregator`] or
+//!   [`IncrementalAggregator`] to process them.
+//!   - **Batch** (`aggregator:`): All source values are collected and passed to
+//!     `aggregate()` as a slice. The result is diffed via `PartialEq` — delivery
+//!     is suppressed when the output hasn't changed.
+//!   - **Incremental** (`incremental_aggregator:`): The router tracks previous
+//!     source values and calls `added()`, `removed()`, or `changed()` for each
+//!     individual source diff. Each `Some(output)` is unconditionally delivered
+//!     as a separate handler call. No `PartialEq` suppression.
 //!
 //! - **Event:** A one-shot discrete message between instances that have an edge
 //!   relationship (checked in either direction). Not aggregated.
@@ -136,9 +143,12 @@
 //! called, all cascading effects resolve before it returns. The propagation loop
 //! alternates between two sub-round types:
 //!
-//! 1. **Input sub-round:** All dirty aggregated inputs are re-aggregated and
-//!    delivered to SM handlers (only if the aggregated value actually changed —
-//!    `PartialEq` comparison). Pending creates are materialized before delivery.
+//! 1. **Input sub-round:** All dirty aggregated inputs are processed. For batch
+//!    inputs, the aggregated value is compared via `PartialEq` and delivery is
+//!    suppressed if unchanged. For incremental inputs, per-source diffs produce
+//!    zero or more individual deliveries — each applied before the next (so the
+//!    SM can react incrementally). Pending creates are materialized before
+//!    delivery.
 //! 2. **Event sub-round:** All pending events are delivered to receiver handlers
 //!    (connectivity is verified — at least one edge must connect sender and
 //!    receiver in either direction).
@@ -200,7 +210,9 @@
 //!   and effects are applied, the SM instance is removed from the instances map.
 //!   All delivery paths (dirty input processing and event delivery) guard on
 //!   instance existence and silently skip destroyed SMs. No further `handle()`
-//!   calls will be made to the instance.
+//!   calls will be made to the instance. For incremental inputs, if the SM
+//!   self-destructs during one delivery, remaining deliveries in that batch
+//!   are skipped.
 
 /// Reduces N signal values (from N incoming edges) into one aggregated input value.
 ///
@@ -231,6 +243,56 @@ pub trait Aggregator {
     type Input;
     type Output;
     fn aggregate(&self, inputs: &[Self::Input]) -> Self::Output;
+}
+
+/// Reacts to individual source changes (added, removed, value changed) instead
+/// of reprocessing the entire input set each time.
+///
+/// Unlike [`Aggregator`], which receives all current source values as a batch
+/// and relies on `PartialEq` suppression, `IncrementalAggregator` receives
+/// per-item diffs and produces zero or more deliveries per change. Each
+/// `Some(output)` is unconditionally delivered to the SM handler — there is no
+/// `PartialEq` comparison on the output.
+///
+/// The `Input` type follows the same convention as [`Aggregator::Input`]:
+/// - **Single-source inputs:** `(SourceId, SignalValue)` tuple
+/// - **Multi-source inputs:** a generated enum with one variant per source pair
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Default)]
+/// struct MembershipAggregator;
+///
+/// impl IncrementalAggregator for MembershipAggregator {
+///     type Input = (ServiceId, bool);
+///     type Output = MembershipChange;
+///
+///     fn added(&self, input: &(ServiceId, bool)) -> Option<MembershipChange> {
+///         Some(MembershipChange::Added(input.0))
+///     }
+///
+///     fn removed(&self, input: &(ServiceId, bool)) -> Option<MembershipChange> {
+///         Some(MembershipChange::Removed(input.0))
+///     }
+///
+///     fn changed(&self, _old: &(ServiceId, bool), new: &(ServiceId, bool)) -> Option<MembershipChange> {
+///         Some(MembershipChange::Updated(new.0, new.1))
+///     }
+/// }
+/// ```
+pub trait IncrementalAggregator {
+    type Input;
+    type Output;
+
+    /// Called when a new source is connected (edge added or new source instance created).
+    fn added(&self, input: &Self::Input) -> Option<Self::Output>;
+
+    /// Called when a source is disconnected (edge removed or source instance destroyed).
+    fn removed(&self, input: &Self::Input) -> Option<Self::Output>;
+
+    /// Called when a connected source's signal value changes.
+    fn changed(&self, old: &Self::Input, new: &Self::Input) -> Option<Self::Output>;
 }
 
 /// Handler trait for state machines. Each SM type implements this on its struct.

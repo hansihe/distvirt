@@ -3,13 +3,15 @@
 //! These types define the inputs and outputs of the core state machines,
 //! free of any async or channel dependencies.
 
+use crate::adapter::endpoint::EndpointAction;
+use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::{TimerAction, TimerIdentity};
 use crate::core::scheduler::WorkerCandidate;
 use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::{
     ArtifactPlacementEvent, ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent,
 };
-use crate::sm::PodId;
+use crate::sm::{ArtifactId, PodId, ServiceId, WorkerId};
 use crate::types::NamespaceId;
 
 // =============================================================================
@@ -60,6 +62,100 @@ pub enum SchedulerMessage {
         namespace_id: NamespaceId,
         pod_id: PodId,
         proto_resume_artifact: Option<distvirt_worker_protocol::ArtifactId>,
+    },
+    DropRequest {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+    },
+}
+
+// =============================================================================
+// Internal (router-level) event/effect types for NamespaceCore
+// =============================================================================
+
+/// Input events for NamespaceCore — all IDs are router-internal.
+pub(crate) enum InternalNamespaceEvent {
+    WorkerEvent {
+        worker_id: WorkerId,
+        event: InternalWorkerEvent,
+    },
+    SchedulerGrant {
+        worker_id: WorkerId,
+        pod_id: PodId,
+    },
+    SchedulerRevoke {
+        pod_id: PodId,
+    },
+    TimerFired {
+        identity: TimerIdentity,
+    },
+    WorkerActivated {
+        worker_id: WorkerId,
+        info: crate::sm::WorkerInfo,
+    },
+    WorkerDeactivated {
+        worker_id: WorkerId,
+    },
+    ClientCommand(ClientCommand),
+}
+
+/// Worker-reported events using router-internal IDs.
+pub(crate) enum InternalWorkerEvent {
+    PodRunning {
+        pod_id: PodId,
+    },
+    PodExited {
+        pod_id: PodId,
+        exit_code: i32,
+    },
+    PodFailed {
+        pod_id: PodId,
+    },
+    PodSuspended {
+        pod_id: PodId,
+        artifact_id: ArtifactId,
+    },
+    PodSuspendFailed {
+        pod_id: PodId,
+    },
+    ServiceBackendNeed {
+        service_id: ServiceId,
+        need: crate::sm::BackendNeed,
+    },
+    EndpointActivation {
+        service_name: String,
+    },
+    EndpointFlowStatus {
+        worker_id: WorkerId,
+        service_id: ServiceId,
+        has_active_flows: bool,
+    },
+}
+
+/// Output effects from NamespaceCore — all IDs are router-internal.
+#[derive(Default)]
+pub(crate) struct InternalNamespaceEffects {
+    pub timer_actions: Vec<TimerAction>,
+    pub scheduler_messages: Vec<InternalSchedulerMessage>,
+    pub pod_actions: Vec<PodAssignmentAction>,
+    pub endpoint_actions: Vec<EndpointAction>,
+}
+
+impl InternalNamespaceEffects {
+    pub fn is_empty(&self) -> bool {
+        self.timer_actions.is_empty()
+            && self.scheduler_messages.is_empty()
+            && self.pod_actions.is_empty()
+            && self.endpoint_actions.is_empty()
+    }
+}
+
+/// Internal scheduler messages using router IDs.
+pub(crate) enum InternalSchedulerMessage {
+    RequestLease {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        resume_artifact: Option<ArtifactId>,
     },
     DropRequest {
         namespace_id: NamespaceId,
