@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, WorkerCommand, WorkerEvent,
-};
+use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, WorkerCommand, WorkerEvent};
 
 use super::common::*;
 
@@ -29,7 +27,13 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
     );
 
     // Register pod endpoint before launch
-    register_pod_endpoint(&mut conn, "ns-echo", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-echo",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     // Launch pod
     conn.send_command(&WorkerCommand::LaunchPod {
@@ -108,7 +112,13 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
 
     recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
 
-    register_pod_endpoint(&mut conn, "ns-exit", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-exit",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-exit".into(),
@@ -174,7 +184,13 @@ async fn test_stop_pod() -> anyhow::Result<()> {
 
     recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
 
-    register_pod_endpoint(&mut conn, "ns-stop", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-stop",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-stop".into(),
@@ -248,7 +264,13 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
 
     recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
 
-    register_pod_endpoint(&mut conn, "ns-force", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-force",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-force".into(),
@@ -309,7 +331,13 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
     recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
 
     // Launch a long-running pod inside the namespace
-    register_pod_endpoint(&mut conn, "ns-destroy", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-destroy",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-destroy".into(),
@@ -380,7 +408,13 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
     recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
 
     // Launch with a non-existent image — should trigger PodFailed
-    register_pod_endpoint(&mut conn, "ns-fail", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-fail",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-fail".into(),
@@ -439,7 +473,13 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
     recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
 
     // Launch a pod that prints an env var and the working directory
-    register_pod_endpoint(&mut conn, "ns-env", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-env",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-env".into(),
@@ -450,7 +490,12 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
                 entrypoint: vec!["/bin/test-containers".into()],
-                args: vec!["env-check".into(), "--var".into(), "MY_VAR".into(), "--pwd".into()],
+                args: vec![
+                    "env-check".into(),
+                    "--var".into(),
+                    "MY_VAR".into(),
+                    "--pwd".into(),
+                ],
                 env: vec!["MY_VAR=hello_from_env".into()],
                 working_dir: Some("/tmp".into()),
                 uid: None,

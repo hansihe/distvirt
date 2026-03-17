@@ -32,10 +32,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     }];
 
     // --- Start two workers, both with the shared pool ---
-    let (mut conn_a, handle_a) =
-        setup_with_pools("worker-a", pushed_pools.clone()).await?;
-    let (mut conn_b, handle_b) =
-        setup_with_pools("worker-b", pushed_pools).await?;
+    let (mut conn_a, handle_a) = setup_with_pools("worker-a", pushed_pools.clone()).await?;
+    let (mut conn_b, handle_b) = setup_with_pools("worker-b", pushed_pools).await?;
 
     let network = NetworkConfig {
         subnet: Ipv4Addr::new(10, 0, 0, 0),
@@ -91,9 +89,11 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-migrate")
-    })
+    recv_until(
+        &mut conn_a,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-migrate"),
+    )
     .await?;
     eprintln!("e2e: pod-migrate running on worker-a");
 
@@ -115,7 +115,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
             if namespace_id == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared"),
-        "unexpected ArtifactWriteStarted: {:?}", event
+        "unexpected ArtifactWriteStarted: {:?}",
+        event
     );
     eprintln!("e2e: received ArtifactWriteStarted on worker-a");
 
@@ -126,7 +127,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
             if namespace_id == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared" && *size_bytes > 0),
-        "unexpected ArtifactWriteCommitted: {:?}", event
+        "unexpected ArtifactWriteCommitted: {:?}",
+        event
     );
     eprintln!("e2e: received ArtifactWriteCommitted on worker-a");
 
@@ -144,7 +146,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
 
     match &event {
         WorkerEvent::PodSuspended {
-            artifact_size_bytes, ..
+            artifact_size_bytes,
+            ..
         } => {
             assert!(
                 *artifact_size_bytes > 0,
@@ -185,9 +188,11 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_b, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-migrated")
-    })
+    recv_until(
+        &mut conn_b,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-migrated"),
+    )
     .await?;
     eprintln!("e2e: pod-migrated running on worker-b after cross-worker resume");
 
@@ -200,9 +205,11 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_b, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-migrated")
-    })
+    recv_until(
+        &mut conn_b,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-migrated"),
+    )
     .await?;
     eprintln!("e2e: pod-migrated stopped on worker-b");
 

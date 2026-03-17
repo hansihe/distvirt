@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::sm_new::{
-    DRouter, PodTimerKey, ServiceTimerKey, TimerPortInput,
+    DRouter, PodId, PodTimerKey, ServiceId, ServiceTimerKey, TIMER, TimerPortInput, WorkloadId,
     WorkloadTimerKey,
-    PodId, ServiceId, WorkloadId,
-    TIMER,
 };
 
 #[cfg(test)]
@@ -172,5 +170,4 @@ impl TimerAdapter {
             }
         }
     }
-
 }

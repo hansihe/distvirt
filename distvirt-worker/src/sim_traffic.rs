@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use distvirt_worker_protocol::NamespaceId;
 use tokio::sync::mpsc;
 
-use crate::fabric::gateway::{GatewayProvider, ChannelEgress};
+use crate::fabric::gateway::{ChannelEgress, GatewayProvider};
 
 /// Channel-based gateway provider for tests (no TUN device, no root required).
 ///

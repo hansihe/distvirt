@@ -11,30 +11,39 @@ use std::sync::Arc;
 use anyhow::Context;
 use distvirt_activator::ActivatorRuntime;
 use distvirt_worker_protocol::{
-    ArtifactId, ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig,
-    PodId, PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, WorkerCapabilities,
-    WorkerCommand, WorkerConnection, WorkerEvent, WorkerHello, WorkerId, WorkerReady,
+    ArtifactId, ContainerSpec, LogStreamOpener, NamespaceId, NetworkConfig, PodId,
+    PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, WorkerCapabilities, WorkerCommand,
+    WorkerConnection, WorkerEvent, WorkerHello, WorkerId, WorkerReady,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::AdapterManager;
+use crate::fabric::gateway::GatewayProvider;
 use crate::fs::Fs;
 use crate::image_provider::ImageProvider;
-use crate::fabric::gateway::GatewayProvider;
-use crate::resource_monitor::{ResourceMonitor, HostResourceMonitor};
-use namespace::{FatalError, NamespaceState};
-use supervisor::{PodState, SuspendRequest, pod_supervisor, pod_resume_supervisor, send_event, STOP_POD_TIMEOUT, FORCE_STOP_TIMEOUT};
-use tunnel_manager::TunnelManager;
+use crate::resource_monitor::{HostResourceMonitor, ResourceMonitor};
 use crate::task_handle::TaskHandle;
 use crate::vmm::Vmm;
+use namespace::{FatalError, NamespaceState};
 use resources::*;
+use supervisor::{
+    FORCE_STOP_TIMEOUT, PodState, STOP_POD_TIMEOUT, SuspendRequest, pod_resume_supervisor,
+    pod_supervisor, send_event,
+};
+use tunnel_manager::TunnelManager;
 
 /// The worker: sits between the orchestrator and the raw VM/fabric primitives.
 ///
 /// Receives `WorkerCommand`s via a `WorkerConnection`, sends `WorkerEvent`s back,
 /// and opens yamux log streams for container output.
-pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static, F: Fs = crate::fs::TokioFs, R: ResourceMonitor = HostResourceMonitor> {
+pub struct Worker<
+    V: Vmm + 'static,
+    P: ImageProvider + 'static,
+    G: GatewayProvider + 'static,
+    F: Fs = crate::fs::TokioFs,
+    R: ResourceMonitor = HostResourceMonitor,
+> {
     kernel_path: PathBuf,
     rootfs_image_path: PathBuf,
     namespaces: HashMap<NamespaceId, NamespaceState>,
@@ -66,7 +75,14 @@ pub struct Worker<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvid
     gateway_provider: G,
 }
 
-impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static, F: Fs, R: ResourceMonitor> Worker<V, P, G, F, R> {
+impl<
+    V: Vmm + 'static,
+    P: ImageProvider + 'static,
+    G: GatewayProvider + 'static,
+    F: Fs,
+    R: ResourceMonitor,
+> Worker<V, P, G, F, R>
+{
     pub fn new(
         kernel_path: PathBuf,
         rootfs_image_path: PathBuf,
@@ -77,13 +93,14 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
         gateway_provider: G,
     ) -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel(256);
-        let activator_runtime = component_dir.and_then(|dir| {
-            match ActivatorRuntime::new(&dir) {
-                Ok(rt) => Some(rt),
-                Err(e) => {
-                    log::warn!("activator runtime init failed: {:#}, activators disabled", e);
-                    None
-                }
+        let activator_runtime = component_dir.and_then(|dir| match ActivatorRuntime::new(&dir) {
+            Ok(rt) => Some(rt),
+            Err(e) => {
+                log::warn!(
+                    "activator runtime init failed: {:#}, activators disabled",
+                    e
+                );
+                None
             }
         });
         // Include a per-instance counter so parallel tests in the same process
@@ -158,7 +175,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
 
     /// Run the worker main loop: receive commands, dispatch them,
     /// and forward background events to the orchestrator.
-    pub async fn run(mut self, mut conn: WorkerConnection, worker_secret: String) -> anyhow::Result<()> {
+    pub async fn run(
+        mut self,
+        mut conn: WorkerConnection,
+        worker_secret: String,
+    ) -> anyhow::Result<()> {
         // --- Handshake ---
         let capabilities = self.detect_capabilities();
         log::info!("worker: capabilities: {:?}", capabilities);
@@ -188,7 +209,11 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 );
                 continue;
             }
-            log::info!("worker: registering pushed pool '{}' at {}", pool.pool_id, pool.path);
+            log::info!(
+                "worker: registering pushed pool '{}' at {}",
+                pool.pool_id,
+                pool.path
+            );
             self.pools.insert(pool.pool_id.clone(), path);
         }
 
@@ -206,32 +231,39 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 self.tunnel_manager = Some(tm);
             }
             Err(e) => {
-                log::warn!("worker: failed to init tunnel manager: {}, tunnels disabled", e);
+                log::warn!(
+                    "worker: failed to init tunnel manager: {}, tunnels disabled",
+                    e
+                );
             }
         }
 
         // Start artifact transfer listener.
-        let transfer_listen_port = match artifact_transfer::start_transfer_listener("0.0.0.0:0").await {
-            Ok((listener, port)) => {
-                log::info!("worker: artifact transfer listener on port {}", port);
-                let pools = self.pools.clone();
-                let tx = self.bg_event_tx.clone();
-                tokio::spawn(artifact_transfer::transfer_accept_loop(listener, pools, tx));
-                Some(port)
-            }
-            Err(e) => {
-                log::warn!("worker: failed to start transfer listener: {}, transfers disabled", e);
-                None
-            }
-        };
+        let transfer_listen_port =
+            match artifact_transfer::start_transfer_listener("0.0.0.0:0").await {
+                Ok((listener, port)) => {
+                    log::info!("worker: artifact transfer listener on port {}", port);
+                    let pools = self.pools.clone();
+                    let tx = self.bg_event_tx.clone();
+                    tokio::spawn(artifact_transfer::transfer_accept_loop(listener, pools, tx));
+                    Some(port)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "worker: failed to start transfer listener: {}, transfers disabled",
+                        e
+                    );
+                    None
+                }
+            };
 
         conn.send_ready(&WorkerReady {
             tunnel_listen_port: self.tunnel_manager.as_ref().and_then(|tm| tm.listen_port()),
             tunnel_public_key: self.tunnel_manager.as_ref().and_then(|tm| tm.public_key()),
             transfer_listen_port,
         })
-            .await
-            .context("handshake: send WorkerReady")?;
+        .await
+        .context("handshake: send WorkerReady")?;
         log::info!("worker: handshake complete, entering command loop");
 
         // --- Command loop ---
@@ -414,10 +446,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                         );
                     }
                     Err(_) => {
-                        log::warn!(
-                            "worker: pod '{}' supervisor timed out, aborting",
-                            pod_id
-                        );
+                        log::warn!("worker: pod '{}' supervisor timed out, aborting", pod_id);
                         // pod.supervisor (TaskHandle) drops here, automatically aborting.
                     }
                 }
@@ -462,8 +491,15 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 containers,
                 resources,
             } => {
-                self.handle_launch_pod(&namespace_id, pod_id, network, containers, resources, log_opener)
-                    .await
+                self.handle_launch_pod(
+                    &namespace_id,
+                    pod_id,
+                    network,
+                    containers,
+                    resources,
+                    log_opener,
+                )
+                .await
             }
             WorkerCommand::StopPod {
                 namespace_id,
@@ -479,13 +515,20 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
             } => {
                 if let Some(wg) = self.adapter_manager.wireguard() {
                     if let Err(e) = wg
-                        .add_peer(namespace_id.as_ref(), peer_public_key, peer_ip, preshared_key)
+                        .add_peer(
+                            namespace_id.as_ref(),
+                            peer_public_key,
+                            peer_ip,
+                            preshared_key,
+                        )
                         .await
                     {
                         log::error!("wireguard: add_peer failed: {:#}", e);
                     }
                 } else {
-                    log::warn!("wireguard: AddWireGuardPeer command but no WireGuard adapter configured");
+                    log::warn!(
+                        "wireguard: AddWireGuardPeer command but no WireGuard adapter configured"
+                    );
                 }
                 Ok(())
             }
@@ -495,7 +538,9 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                         log::error!("wireguard: remove_peer failed: {:#}", e);
                     }
                 } else {
-                    log::warn!("wireguard: RemoveWireGuardPeer command but no WireGuard adapter configured");
+                    log::warn!(
+                        "wireguard: RemoveWireGuardPeer command but no WireGuard adapter configured"
+                    );
                 }
                 Ok(())
             }
@@ -518,9 +563,10 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 self.handle_resume_pod(&namespace_id, pod_id, artifact_id, network, pool_id)
                     .await
             }
-            WorkerCommand::DeleteArtifact { artifact_id, pool_id } => {
-                self.handle_delete_artifact(&artifact_id, &pool_id).await
-            }
+            WorkerCommand::DeleteArtifact {
+                artifact_id,
+                pool_id,
+            } => self.handle_delete_artifact(&artifact_id, &pool_id).await,
             WorkerCommand::TransferArtifact {
                 transfer_id,
                 source_artifact_id,
@@ -550,14 +596,18 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 namespace_id,
                 endpoints,
             } => {
-                let worker_id = self.worker_id.clone()
-                    .ok_or_else(|| FatalError::InternalInvariant("worker_id not set (handshake not completed)".into()))?;
+                let worker_id = self.worker_id.clone().ok_or_else(|| {
+                    FatalError::InternalInvariant(
+                        "worker_id not set (handshake not completed)".into(),
+                    )
+                })?;
                 // Borrow separate fields to avoid conflicting mutable/immutable borrows on self.
                 let activator_runtime = self.activator_runtime.as_ref();
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
-                let pending_events = ns.endpoint_sync(&namespace_id, endpoints, &worker_id, activator_runtime)?;
+                let pending_events =
+                    ns.endpoint_sync(&namespace_id, endpoints, &worker_id, activator_runtime)?;
                 for event in pending_events {
                     let _ = self.bg_event_tx.try_send(event);
                 }
@@ -568,13 +618,22 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 upserted,
                 removed_ips,
             } => {
-                let worker_id = self.worker_id.clone()
-                    .ok_or_else(|| FatalError::InternalInvariant("worker_id not set (handshake not completed)".into()))?;
+                let worker_id = self.worker_id.clone().ok_or_else(|| {
+                    FatalError::InternalInvariant(
+                        "worker_id not set (handshake not completed)".into(),
+                    )
+                })?;
                 let activator_runtime = self.activator_runtime.as_ref();
                 let ns = self.namespaces.get_mut(&namespace_id).ok_or_else(|| {
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
-                let pending_events = ns.endpoint_update(&namespace_id, upserted, removed_ips, &worker_id, activator_runtime)?;
+                let pending_events = ns.endpoint_update(
+                    &namespace_id,
+                    upserted,
+                    removed_ips,
+                    &worker_id,
+                    activator_runtime,
+                )?;
                 for event in pending_events {
                     let _ = self.bg_event_tx.try_send(event);
                 }
@@ -588,7 +647,10 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
     }
 
     /// Look up a namespace by ID, returning FatalError if not found.
-    fn get_namespace_mut(&mut self, namespace_id: &NamespaceId) -> Result<&mut NamespaceState, FatalError> {
+    fn get_namespace_mut(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Result<&mut NamespaceState, FatalError> {
         self.namespaces.get_mut(namespace_id).ok_or_else(|| {
             FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
         })
@@ -608,7 +670,8 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
             &self.gateway_provider,
             &namespace_id,
             network,
-        ).await?;
+        )
+        .await?;
 
         // Notify tunnel manager if this namespace has a segment_id.
         if let Some(seg) = segment_id {
@@ -624,7 +687,10 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
         Ok(())
     }
 
-    async fn handle_destroy_namespace(&mut self, namespace_id: &NamespaceId) -> Result<(), FatalError> {
+    async fn handle_destroy_namespace(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(), FatalError> {
         if let Some(ns) = self.namespaces.remove(namespace_id) {
             // Notify tunnel manager before dropping the namespace.
             if let Some(seg) = ns.segment_id {
@@ -734,10 +800,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                         );
                     }
                     Err(_) => {
-                        log::warn!(
-                            "worker: pod '{}' graceful stop timed out, aborting",
-                            pod_id
-                        );
+                        log::warn!("worker: pod '{}' graceful stop timed out, aborting", pod_id);
                         // pod.supervisor (TaskHandle) drops here, automatically aborting.
                     }
                 }
@@ -752,10 +815,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                     Ok(Ok(())) => {}
                     Ok(Err(_)) => {} // JoinError from abort — expected
                     Err(_) => {
-                        log::warn!(
-                            "worker: pod '{}' force stop cleanup timed out",
-                            pod_id
-                        );
+                        log::warn!("worker: pod '{}' force stop cleanup timed out", pod_id);
                         // TaskHandle drops here, ensuring abort.
                     }
                 }
@@ -902,8 +962,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
                 return Ok(());
             }
         };
-        let metadata: crate::vmm::SnapshotMetadata = match serde_json::from_slice(&metadata_bytes)
-        {
+        let metadata: crate::vmm::SnapshotMetadata = match serde_json::from_slice(&metadata_bytes) {
             Ok(m) => m,
             Err(e) => {
                 send_event(
@@ -1000,7 +1059,12 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
             tokio::spawn(async move {
                 log::info!(
                     "artifact transfer: sending transfer_id={} {}:{} -> {} ({}:{})",
-                    transfer_id, sp, sa, endpoint, dp, da,
+                    transfer_id,
+                    sp,
+                    sa,
+                    endpoint,
+                    dp,
+                    da,
                 );
                 if let Err(e) = artifact_transfer::send_artifact(
                     &endpoint,
@@ -1106,10 +1170,7 @@ impl<V: Vmm + 'static, P: ImageProvider + 'static, G: GatewayProvider + 'static,
         let pool_base = match self.pool_path(pool_id) {
             Some(p) => p,
             None => {
-                log::warn!(
-                    "delete_artifact: unknown pool '{}', ignoring",
-                    pool_id
-                );
+                log::warn!("delete_artifact: unknown pool '{}', ignoring", pool_id);
                 return Ok(());
             }
         };
@@ -1137,8 +1198,7 @@ mod tests {
     use std::sync::RwLock;
 
     use distvirt_worker_protocol::{
-        ContainerConfig, ContainerSpec, PodNetworkConfig,
-        RegistryEntry,
+        ContainerConfig, ContainerSpec, PodNetworkConfig, RegistryEntry,
     };
     use tokio::net::UnixStream;
 
@@ -1188,7 +1248,9 @@ mod tests {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn make_worker() -> Worker<StubVmm, StubImageProvider, crate::sim_traffic::SimGatewayProvider, crate::fs::SyncFs> {
+    fn make_worker()
+    -> Worker<StubVmm, StubImageProvider, crate::sim_traffic::SimGatewayProvider, crate::fs::SyncFs>
+    {
         Worker::<_, _, _, crate::fs::SyncFs>::new(
             PathBuf::from("/fake/kernel"),
             PathBuf::from("/fake/rootfs"),
@@ -1202,7 +1264,15 @@ mod tests {
 
     /// Inject a NamespaceState directly into the worker, bypassing
     /// handle_create_namespace (which requires root for TUN/gateway).
-    fn inject_namespace(worker: &mut Worker<StubVmm, StubImageProvider, crate::sim_traffic::SimGatewayProvider, crate::fs::SyncFs>, ns_id: &str) {
+    fn inject_namespace(
+        worker: &mut Worker<
+            StubVmm,
+            StubImageProvider,
+            crate::sim_traffic::SimGatewayProvider,
+            crate::fs::SyncFs,
+        >,
+        ns_id: &str,
+    ) {
         let fabric = Fabric::<FabricPort>::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let tables = fabric.tables();
 
@@ -1224,9 +1294,7 @@ mod tests {
             ns_token,
         );
 
-        worker
-            .namespaces
-            .insert(NamespaceId::from(ns_id), ns);
+        worker.namespaces.insert(NamespaceId::from(ns_id), ns);
     }
 
     fn make_log_opener() -> LogStreamOpener {

@@ -4,37 +4,91 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientCommand {
-    CreateNamespace { namespace_id: NamespaceId, spec: NamespaceSpec },
-    UpdateNamespace { namespace_id: NamespaceId, spec: NamespaceSpec },
-    DeleteNamespace { namespace_id: NamespaceId },
-    GetNamespaceStatus { namespace_id: NamespaceId },
+    CreateNamespace {
+        namespace_id: NamespaceId,
+        spec: NamespaceSpec,
+    },
+    UpdateNamespace {
+        namespace_id: NamespaceId,
+        spec: NamespaceSpec,
+    },
+    DeleteNamespace {
+        namespace_id: NamespaceId,
+    },
+    GetNamespaceStatus {
+        namespace_id: NamespaceId,
+    },
     ListNamespaces,
-    Splice { namespace_id: NamespaceId, workload_id: WorkloadId, worker_id: WorkerId },
-    Unsplice { namespace_id: NamespaceId, workload_id: WorkloadId },
+    Splice {
+        namespace_id: NamespaceId,
+        workload_id: WorkloadId,
+        worker_id: WorkerId,
+    },
+    Unsplice {
+        namespace_id: NamespaceId,
+        workload_id: WorkloadId,
+    },
     CloneNamespace {
         source_namespace_id: NamespaceId,
         target_namespace_id: NamespaceId,
     },
     ListWorkers,
-    GetWorker { worker_id: WorkerId },
-    ListPods { namespace_id: NamespaceId },
-    StreamLogs { namespace_id: NamespaceId, service_id: Option<ServiceId> },
-    Connect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
-    Disconnect { namespace_id: NamespaceId, client_public_key: [u8; 32] },
-    DeactivateWorkload { namespace_id: NamespaceId, workload_id: WorkloadId },
-    DrainWorker { worker_id: WorkerId },
-    UndrainWorker { worker_id: WorkerId },
+    GetWorker {
+        worker_id: WorkerId,
+    },
+    ListPods {
+        namespace_id: NamespaceId,
+    },
+    StreamLogs {
+        namespace_id: NamespaceId,
+        service_id: Option<ServiceId>,
+    },
+    Connect {
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+    },
+    Disconnect {
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+    },
+    DeactivateWorkload {
+        namespace_id: NamespaceId,
+        workload_id: WorkloadId,
+    },
+    DrainWorker {
+        worker_id: WorkerId,
+    },
+    UndrainWorker {
+        worker_id: WorkerId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
-    NamespaceStatus { namespace_id: NamespaceId, status: NamespaceStatusReport },
-    NamespaceList { namespaces: Vec<NamespaceStatusReport> },
-    WorkerList { workers: Vec<WorkerStatusReport> },
-    WorkerStatus { worker: WorkerStatusReport },
-    PodList { pods: Vec<PodStatusReport> },
-    LogChunk { namespace_id: NamespaceId, service_id: ServiceId, data: Vec<u8> },
-    Error { message: String },
+    NamespaceStatus {
+        namespace_id: NamespaceId,
+        status: NamespaceStatusReport,
+    },
+    NamespaceList {
+        namespaces: Vec<NamespaceStatusReport>,
+    },
+    WorkerList {
+        workers: Vec<WorkerStatusReport>,
+    },
+    WorkerStatus {
+        worker: WorkerStatusReport,
+    },
+    PodList {
+        pods: Vec<PodStatusReport>,
+    },
+    LogChunk {
+        namespace_id: NamespaceId,
+        service_id: ServiceId,
+        data: Vec<u8>,
+    },
+    Error {
+        message: String,
+    },
     Ok,
     ConnectResult {
         server_public_key: [u8; 32],
@@ -42,7 +96,10 @@ pub enum ClientEvent {
         client_ip: String,
         subnet: String,
     },
-    DeactivateWorkloadResult { deactivated: bool, reason: String },
+    DeactivateWorkloadResult {
+        deactivated: bool,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

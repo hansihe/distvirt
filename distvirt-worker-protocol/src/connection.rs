@@ -266,10 +266,7 @@ impl LogStreamOpener {
     }
 
     /// Open a new yamux stream for container log data.
-    pub async fn open_log_stream(
-        &self,
-        header: &LogStreamHeader,
-    ) -> anyhow::Result<YamuxStream> {
+    pub async fn open_log_stream(&self, header: &LogStreamHeader) -> anyhow::Result<YamuxStream> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.conn_tx
             .send(NewStreamRequest { reply: tx })
@@ -322,15 +319,17 @@ impl WorkerConnection {
             loop {
                 match conn.poll_next_inbound(cx) {
                     std::task::Poll::Ready(Some(Ok(_stream))) => {
-                        log::warn!("worker: unexpected inbound yamux stream during setup, ignoring");
+                        log::warn!(
+                            "worker: unexpected inbound yamux stream during setup, ignoring"
+                        );
                     }
                     std::task::Poll::Ready(Some(Err(e))) => {
-                        return std::task::Poll::Ready(Err(anyhow::Error::from(e)))
+                        return std::task::Poll::Ready(Err(anyhow::Error::from(e)));
                     }
                     std::task::Poll::Ready(None) => {
                         return std::task::Poll::Ready(Err(anyhow::anyhow!(
                             "yamux connection closed"
-                        )))
+                        )));
                     }
                     std::task::Poll::Pending => break,
                 }
@@ -386,7 +385,11 @@ impl WorkerConnection {
             }
         });
 
-        Ok(WorkerConnection { control, conn_tx, _driver: DriverHandle(Some(driver)) })
+        Ok(WorkerConnection {
+            control,
+            conn_tx,
+            _driver: DriverHandle(Some(driver)),
+        })
     }
 
     // --- Handshake methods (worker side) ---
@@ -439,10 +442,7 @@ impl WorkerConnection {
     ///
     /// Sends the LogStreamHeader as the first message, then returns
     /// the stream for writing raw output data.
-    pub async fn open_log_stream(
-        &self,
-        header: &LogStreamHeader,
-    ) -> anyhow::Result<YamuxStream> {
+    pub async fn open_log_stream(&self, header: &LogStreamHeader) -> anyhow::Result<YamuxStream> {
         self.log_stream_opener().open_log_stream(header).await
     }
 }

@@ -112,7 +112,9 @@ async fn test_flow_end_triggers_idle_timeout() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[should_panic(expected = "active_flows should be cleared after worker disconnect")]
 async fn test_flow_status_cleared_on_worker_disconnect() {
-    eprintln!("BROKEN: active_flows not cleared on worker disconnect — orchestrator needs to clear active_flows for workloads hosted on disconnected workers");
+    eprintln!(
+        "BROKEN: active_flows not cleared on worker disconnect — orchestrator needs to clear active_flows for workloads hosted on disconnected workers"
+    );
     let mut cluster = TestCluster::new();
     let _w1 = cluster.add_worker().await;
     let _w2 = cluster.add_worker().await;

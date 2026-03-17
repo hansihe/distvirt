@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use distvirt_guest_protocol::GuestEvent;
 
-use crate::cgroup;
 use super::monitor::VIRTIO_BALLOON_PAGES_PER_MIB;
+use crate::cgroup;
 
 const INITIAL_STEP_MIB: u32 = 32;
 const MAX_STEP_MIB: u32 = 256;
@@ -65,7 +65,8 @@ impl MemoryManager {
     /// Calculate the initial memory limits for containers:
     /// vm_mem - balloon - kernel buffer, returning (high_bytes, max_bytes).
     pub fn initial_limits(&mut self) -> (u64, u64) {
-        let available_mib = self.vm_mem_mib
+        let available_mib = self
+            .vm_mem_mib
             .saturating_sub(self.balloon_amount_mib)
             .saturating_sub(KERNEL_BUFFER_MIB);
         let max_bytes = available_mib as u64 * 1024 * 1024;
@@ -84,21 +85,29 @@ impl MemoryManager {
         self.inflation_suppressed_until = Some(Instant::now() + INFLATION_COOLDOWN);
 
         if self.balloon_amount_mib == 0 {
-            log::warn!("[balloon] pressure detected but balloon is already 0, cannot deflate further");
+            log::warn!(
+                "[balloon] pressure detected but balloon is already 0, cannot deflate further"
+            );
             return None;
         }
 
         // Adaptive step sizing based on pending deflation state.
         if self.pending_deflation_mib >= self.step_size_mib {
             // Previous deflation hasn't landed yet — host is still releasing.
-            log::debug!("[balloon] skipping: pending={} MiB >= step={} MiB",
-                self.pending_deflation_mib, self.step_size_mib);
+            log::debug!(
+                "[balloon] skipping: pending={} MiB >= step={} MiB",
+                self.pending_deflation_mib,
+                self.step_size_mib
+            );
             return None;
         } else if self.pending_deflation_mib > 0 {
             // Partial delivery but still under pressure — step was too small.
             self.step_size_mib = (self.step_size_mib * 2).min(MAX_STEP_MIB);
-            log::info!("[balloon] pressure with partial pending={} MiB, doubling step to {} MiB",
-                self.pending_deflation_mib, self.step_size_mib);
+            log::info!(
+                "[balloon] pressure with partial pending={} MiB, doubling step to {} MiB",
+                self.pending_deflation_mib,
+                self.step_size_mib
+            );
         } else {
             // pending == 0: previous deflation fully landed. Fresh pressure event.
             self.step_size_mib = INITIAL_STEP_MIB;
@@ -124,12 +133,7 @@ impl MemoryManager {
     /// Called when the sysfs monitor observes a change in balloon num_pages.
     /// On deflation (pages decreased): raises cgroup limits by the actual released amount.
     /// On inflation (pages increased): logs confirmation only.
-    pub fn on_balloon_pages_changed(
-        &mut self,
-        old_pages: u32,
-        new_pages: u32,
-        cgroup_path: &str,
-    ) {
+    pub fn on_balloon_pages_changed(&mut self, old_pages: u32, new_pages: u32, cgroup_path: &str) {
         let old_mib = old_pages / VIRTIO_BALLOON_PAGES_PER_MIB;
         let new_mib = new_pages / VIRTIO_BALLOON_PAGES_PER_MIB;
 
@@ -152,7 +156,10 @@ impl MemoryManager {
             };
 
             if let Err(e) = cgroup::set_memory_limits(cgroup_path, new_high, new_max) {
-                log::warn!("[balloon] failed to raise cgroup limits after deflation: {:#}", e);
+                log::warn!(
+                    "[balloon] failed to raise cgroup limits after deflation: {:#}",
+                    e
+                );
                 return;
             }
 
@@ -181,7 +188,11 @@ impl MemoryManager {
     /// Evaluate a PSI memory pressure event. Logs stats, resets inflation state.
     /// Deflates on `Full` as an emergency fallback (primary deflation is via
     /// `memory.events` high counter in balloon_task).
-    pub fn handle_psi_event(&mut self, level: cgroup::PsiLevel, cgroup_path: &str) -> Option<GuestEvent> {
+    pub fn handle_psi_event(
+        &mut self,
+        level: cgroup::PsiLevel,
+        cgroup_path: &str,
+    ) -> Option<GuestEvent> {
         let is_full = matches!(level, cgroup::PsiLevel::Full);
 
         // Log stats.
@@ -194,10 +205,16 @@ impl MemoryManager {
         };
         let stats = format!(
             "current={}, high={}, max={}, swap={}",
-            fmt_bytes(cgroup::read_cgroup_bytes(cgroup_path, "memory.current"), "?"),
+            fmt_bytes(
+                cgroup::read_cgroup_bytes(cgroup_path, "memory.current"),
+                "?"
+            ),
             fmt_bytes(cgroup::read_cgroup_bytes(cgroup_path, "memory.high"), "max"),
             fmt_bytes(cgroup::read_cgroup_bytes(cgroup_path, "memory.max"), "max"),
-            fmt_bytes(cgroup::read_cgroup_bytes(cgroup_path, "memory.swap.current"), "?"),
+            fmt_bytes(
+                cgroup::read_cgroup_bytes(cgroup_path, "memory.swap.current"),
+                "?"
+            ),
         );
         if is_full {
             log::error!("memory pressure FULL: {}", stats);
@@ -273,7 +290,11 @@ impl MemoryManager {
         let min_high = current.saturating_add(INFLATION_HEADROOM_BYTES);
         let new_high = high.saturating_sub(step_bytes);
         if new_high < min_high {
-            log::debug!("[inflate] skipping: new_high {} < min_high {}", new_high, min_high);
+            log::debug!(
+                "[inflate] skipping: new_high {} < min_high {}",
+                new_high,
+                min_high
+            );
             self.low_usage_streak = 0;
             return None;
         }
@@ -435,4 +456,3 @@ mod tests {
         assert_eq!(mm.current_cgroup_max, old_max + released_bytes);
     }
 }
-

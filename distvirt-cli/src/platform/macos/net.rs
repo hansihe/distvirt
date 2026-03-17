@@ -1,9 +1,16 @@
 use super::super::run_cmd;
 
 /// Assign IP address to interface and bring it up.
-pub fn configure_interface(device_name: &str, client_ip: &str, prefix_len: u8) -> anyhow::Result<()> {
+pub fn configure_interface(
+    device_name: &str,
+    client_ip: &str,
+    prefix_len: u8,
+) -> anyhow::Result<()> {
     let netmask = prefix_len_to_netmask_str(prefix_len);
-    run_cmd("ifconfig", &[device_name, client_ip, client_ip, "netmask", &netmask, "up"])
+    run_cmd(
+        "ifconfig",
+        &[device_name, client_ip, client_ip, "netmask", &netmask, "up"],
+    )
 }
 
 /// Convert a prefix length (0–32) to a dotted-decimal netmask string.

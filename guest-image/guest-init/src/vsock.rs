@@ -1,7 +1,7 @@
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_io::Async;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -70,7 +70,10 @@ impl VsockListener {
     /// Async accept — returns a raw File for the accepted connection.
     pub async fn accept(&self) -> anyhow::Result<std::fs::File> {
         loop {
-            self.fd.readable().await.context("wait for vsock readable")?;
+            self.fd
+                .readable()
+                .await
+                .context("wait for vsock readable")?;
             let fd = unsafe {
                 libc::accept4(
                     self.fd.as_raw_fd(),
@@ -112,7 +115,10 @@ pub async fn recv_msg<T: serde::de::DeserializeOwned>(
     reader: &mut (impl futures::io::AsyncRead + Unpin),
 ) -> anyhow::Result<T> {
     let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await.context("read length")?;
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .context("read length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > 1024 * 1024 {
         bail!("message too large: {} bytes", len);

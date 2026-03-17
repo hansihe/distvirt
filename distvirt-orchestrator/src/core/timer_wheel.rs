@@ -80,7 +80,6 @@ impl TimerWheel {
 
     /// Remove all timers belonging to a namespace (used on namespace destruction).
     pub fn remove_namespace(&mut self, namespace_id: &NamespaceId) {
-        self.active
-            .retain(|(ns_id, _), _| ns_id != namespace_id);
+        self.active.retain(|(ns_id, _), _| ns_id != namespace_id);
     }
 }

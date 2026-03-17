@@ -13,7 +13,12 @@ use super::common::*;
 /// the WorkerReady (containing tunnel_listen_port), and the worker task handle.
 async fn setup_worker(
     worker_id: &str,
-) -> anyhow::Result<(OrchestratorConnection, WorkerHello, WorkerReady, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+) -> anyhow::Result<(
+    OrchestratorConnection,
+    WorkerHello,
+    WorkerReady,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let kernel = manifest_dir.join("../guest-image/result-kernel/vmlinux");
     let rootfs = manifest_dir.join("../guest-image/result-rootfs");
@@ -26,24 +31,36 @@ async fn setup_worker(
 
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
-    let image_provider = distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
-        socket: containerd_socket,
-        namespace: "default".into(),
-        docker_config: None,
-    };
+    let image_provider =
+        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
+            socket: containerd_socket,
+            namespace: "default".into(),
+            docker_config: None,
+        };
 
     let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs>::new(kernel, rootfs, vmm, image_provider, None, String::new(), distvirt_worker::TunGatewayProvider);
+        let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs>::new(
+            kernel,
+            rootfs,
+            vmm,
+            image_provider,
+            None,
+            String::new(),
+            distvirt_worker::TunGatewayProvider,
+        );
         worker.run(conn, "test-secret".to_string()).await
     });
 
     let mut conn = OrchestratorConnection::connect(orch_half).await?;
 
     let hello = conn.recv_hello().await?;
-    eprintln!("e2e: worker '{}' capabilities: {:?}", worker_id, hello.capabilities);
+    eprintln!(
+        "e2e: worker '{}' capabilities: {:?}",
+        worker_id, hello.capabilities
+    );
 
     conn.send_accepted(&WorkerAccepted {
         worker_id: WorkerId::from(worker_id),
@@ -89,7 +106,10 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         .tunnel_public_key
         .expect("worker-b should have tunnel_public_key");
 
-    eprintln!("e2e: worker-a tunnel port={}, worker-b tunnel port={}", port_a, port_b);
+    eprintln!(
+        "e2e: worker-a tunnel port={}, worker-b tunnel port={}",
+        port_a, port_b
+    );
 
     let segment_id = 1u16;
 
@@ -221,9 +241,11 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_b, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-b")
-    })
+    recv_until(
+        &mut conn_b,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-b"),
+    )
     .await?;
     eprintln!("e2e: pod-b running on worker-b");
 
@@ -271,9 +293,11 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-a")
-    })
+    recv_until(
+        &mut conn_a,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-a"),
+    )
     .await?;
     eprintln!("e2e: pod-a running on worker-a, pinging pod-b");
 
@@ -282,9 +306,11 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     eprintln!("e2e: pod-a ping output:\n{}", log_str);
 
     // Wait for pod-a to exit
-    let event = recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-a")
-    })
+    let event = recv_until(
+        &mut conn_a,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-a"),
+    )
     .await?;
 
     // Assert ping succeeded (exit code 0)

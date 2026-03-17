@@ -1,5 +1,5 @@
-use distvirt_sm_router::SmHandler;
 use super::*;
+use distvirt_sm_router::SmHandler;
 
 // ---- Pod SM ----
 //
@@ -167,16 +167,17 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                 // initialization and OwnerInput respectively), so they are
                 // rejected here. This prevents inconsistent state from
                 // out-of-order or stale worker notifications.
-                let accept = !self.status.is_terminal() && match &new_status {
-                    // Worker reports pod is running. Only valid from Pending.
-                    PodStatus::Running => matches!(self.status, PodStatus::Pending),
-                    // Worker reports failure or graceful exit. Valid from any
-                    // non-terminal state.
-                    PodStatus::Failed | PodStatus::Finished => true,
-                    // All other statuses are SM-internal or use dedicated
-                    // inputs (NotifyPodSuspended).
-                    _ => false,
-                };
+                let accept = !self.status.is_terminal()
+                    && match &new_status {
+                        // Worker reports pod is running. Only valid from Pending.
+                        PodStatus::Running => matches!(self.status, PodStatus::Pending),
+                        // Worker reports failure or graceful exit. Valid from any
+                        // non-terminal state.
+                        PodStatus::Failed | PodStatus::Finished => true,
+                        // All other statuses are SM-internal or use dedicated
+                        // inputs (NotifyPodSuspended).
+                        _ => false,
+                    };
                 if accept {
                     self.status = new_status.clone();
                     ctx.set_status(new_status);
@@ -214,26 +215,24 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     _ => {}
                 }
             }
-            PodInput::PodTimerFired(key) => {
-                match key {
-                    PodTimerKey::LaunchTimeout => {
-                        if matches!(self.status, PodStatus::Pending) {
-                            self.status = PodStatus::Failed;
-                            ctx.set_status(PodStatus::Failed);
-                            self.update_timer_signal(ctx);
-                            self.maybe_reap(ctx);
-                        }
-                    }
-                    PodTimerKey::SuspendTimeout => {
-                        if matches!(self.status, PodStatus::Suspending) {
-                            self.status = PodStatus::Failed;
-                            ctx.set_status(PodStatus::Failed);
-                            self.update_timer_signal(ctx);
-                            self.maybe_reap(ctx);
-                        }
+            PodInput::PodTimerFired(key) => match key {
+                PodTimerKey::LaunchTimeout => {
+                    if matches!(self.status, PodStatus::Pending) {
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
                     }
                 }
-            }
+                PodTimerKey::SuspendTimeout => {
+                    if matches!(self.status, PodStatus::Suspending) {
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
+                    }
+                }
+            },
         }
     }
 }

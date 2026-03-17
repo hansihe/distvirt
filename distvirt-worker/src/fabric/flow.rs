@@ -98,11 +98,18 @@ impl FlowTracker {
             }
         } else if syn {
             // New connection: track on SYN.
-            self.flows.insert(key, FlowState {
-                first_seen: now,
-                last_seen: now,
-                tcp_state: if ack { TcpFlowState::Established } else { TcpFlowState::Opening },
-            });
+            self.flows.insert(
+                key,
+                FlowState {
+                    first_seen: now,
+                    last_seen: now,
+                    tcp_state: if ack {
+                        TcpFlowState::Established
+                    } else {
+                        TcpFlowState::Opening
+                    },
+                },
+            );
         }
     }
 
@@ -114,10 +121,12 @@ impl FlowTracker {
     /// (instantaneous demand). This method tracks sustained demand — keeping
     /// a workload alive while real connections are in progress.
     pub fn has_active_flows(&self) -> bool {
-        self.flows.values().any(|s| matches!(
-            s.tcp_state,
-            TcpFlowState::Established | TcpFlowState::HalfClosed
-        ))
+        self.flows.values().any(|s| {
+            matches!(
+                s.tcp_state,
+                TcpFlowState::Established | TcpFlowState::HalfClosed
+            )
+        })
     }
 
     /// Remove expired and closed flows using per-state timeouts.

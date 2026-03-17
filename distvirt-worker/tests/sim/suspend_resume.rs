@@ -1,7 +1,5 @@
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
-use distvirt_worker_protocol::{
-    ArtifactId, PoolId, WorkerCommand, WorkerEvent,
-};
+use distvirt_worker_protocol::{ArtifactId, PoolId, WorkerCommand, WorkerEvent};
 
 use super::common::*;
 
@@ -37,9 +35,11 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
     .await?;
 
     // Expect PodSuspended.
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodSuspended { pod_id, .. } if pod_id == "pod-sim")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodSuspended { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
 
     // Resume the pod.
@@ -53,9 +53,11 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
     .await?;
 
     // Expect PodRunning after resume.
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-sim")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
 
     // Stop the resumed pod.
@@ -66,9 +68,11 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-sim")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
 
     shutdown_worker(&mut conn, worker_handle).await?;
@@ -137,9 +141,11 @@ async fn test_sim_resume_unknown_artifact() -> anyhow::Result<()> {
     .await?;
 
     // Expect PodFailed because metadata.json won't be found.
-    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim")
-    })
+    let event = recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
     assert!(
         matches!(&event, WorkerEvent::PodFailed { error, .. } if error.contains("metadata.json")),
@@ -185,9 +191,11 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-sim")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
 
     // Second suspend.
@@ -199,9 +207,11 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodSuspended { artifact_id, .. } if artifact_id == "snap-b")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodSuspended { artifact_id, .. } if artifact_id == "snap-b"),
+    )
     .await?;
 
     // Second resume.
@@ -214,9 +224,11 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-sim")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
 
     // Clean stop.

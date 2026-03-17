@@ -9,8 +9,12 @@
 //!
 //! Gate with: `DISTVIRT_E2E=1 cargo test --package distvirt-worker --test e2e`
 
+#[path = "e2e/artifact_transfer.rs"]
+mod artifact_transfer;
 #[path = "e2e/common.rs"]
 mod common;
+#[path = "e2e/cross_worker_resume.rs"]
+mod cross_worker_resume;
 #[path = "e2e/pod_lifecycle.rs"]
 mod pod_lifecycle;
 #[path = "e2e/services.rs"]
@@ -19,7 +23,3 @@ mod services;
 mod suspend_resume;
 #[path = "e2e/tunnel.rs"]
 mod tunnel;
-#[path = "e2e/cross_worker_resume.rs"]
-mod cross_worker_resume;
-#[path = "e2e/artifact_transfer.rs"]
-mod artifact_transfer;

@@ -36,10 +36,7 @@ pub struct PlannedService {
 /// Services are ordered by dependency (best-effort topological sort).
 pub fn plan(deployment: &Deployment) -> anyhow::Result<ExecutionPlan> {
     if deployment.services.len() > 126 {
-        bail!(
-            "too many services ({}, max 126)",
-            deployment.services.len()
-        );
+        bail!("too many services ({}, max 126)", deployment.services.len());
     }
 
     let ordered = topo_sort(deployment);
@@ -108,7 +105,8 @@ fn topo_sort(deployment: &Deployment) -> Vec<String> {
         if let Some(deps) = dependents.get(name) {
             let mut next: Vec<&str> = Vec::new();
             for &dep in deps {
-                let deg = in_degree.get_mut(dep)
+                let deg = in_degree
+                    .get_mut(dep)
                     .expect("invariant: dependent must exist in in_degree map");
                 *deg -= 1;
                 if *deg == 0 {
@@ -182,7 +180,11 @@ mod tests {
 
     #[test]
     fn plan_ip_assignment_sequential() {
-        let d = make_deployment(vec![("charlie", vec![]), ("alpha", vec![]), ("bravo", vec![])]);
+        let d = make_deployment(vec![
+            ("charlie", vec![]),
+            ("alpha", vec![]),
+            ("bravo", vec![]),
+        ]);
         let p = plan(&d).unwrap();
         assert_eq!(p.services.len(), 3);
         // Alphabetical order for independent services.

@@ -6,7 +6,7 @@ use std::io;
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use tokio::io::unix::AsyncFd;
 
 use super::fd;
@@ -134,9 +134,7 @@ impl TunDevice {
 
             match guard.try_io(|inner| {
                 let raw = inner.as_raw_fd();
-                let n = unsafe {
-                    libc::write(raw, buf.as_ptr() as *const libc::c_void, buf.len())
-                };
+                let n = unsafe { libc::write(raw, buf.as_ptr() as *const libc::c_void, buf.len()) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -241,9 +239,8 @@ impl PacketSocket {
 
             match guard.try_io(|inner| {
                 let raw = inner.as_raw_fd();
-                let n = unsafe {
-                    libc::recv(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-                };
+                let n =
+                    unsafe { libc::recv(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -263,9 +260,8 @@ impl PacketSocket {
 
             match guard.try_io(|inner| {
                 let raw = inner.as_raw_fd();
-                let n = unsafe {
-                    libc::send(raw, buf.as_ptr() as *const libc::c_void, buf.len(), 0)
-                };
+                let n =
+                    unsafe { libc::send(raw, buf.as_ptr() as *const libc::c_void, buf.len(), 0) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -437,11 +433,7 @@ fn get_ifindex(name: &str) -> anyhow::Result<i32> {
     let name_c = std::ffi::CString::new(name)?;
     let idx = unsafe { libc::if_nametoindex(name_c.as_ptr()) };
     if idx == 0 {
-        bail!(
-            "if_nametoindex({}): {}",
-            name,
-            io::Error::last_os_error()
-        );
+        bail!("if_nametoindex({}): {}", name, io::Error::last_os_error());
     }
     Ok(idx as i32)
 }
@@ -541,9 +533,12 @@ fn open_packet_socket(ifindex: i32) -> anyhow::Result<OwnedFd> {
         .with_context(|| format!("setsockopt PACKET_VNET_HDR on ifindex {}", ifindex))?;
 
     // Ignore outgoing frames on recv path (non-fatal on older kernels).
-    if let Err(e) =
-        setsockopt_int(socket.as_raw_fd(), libc::SOL_PACKET, PACKET_IGNORE_OUTGOING, 1)
-    {
+    if let Err(e) = setsockopt_int(
+        socket.as_raw_fd(),
+        libc::SOL_PACKET,
+        PACKET_IGNORE_OUTGOING,
+        1,
+    ) {
         log::warn!(
             "setsockopt PACKET_IGNORE_OUTGOING on ifindex {}: {} (kernel may be too old)",
             ifindex,

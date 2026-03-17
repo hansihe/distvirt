@@ -139,7 +139,13 @@ fn worker_identity_in_readiness() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -147,7 +153,9 @@ fn worker_identity_in_readiness() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 

@@ -41,7 +41,7 @@
 //! - `Sysctl` — no sysctl configuration in guest
 //! - `Rlimits` — process resource limits not set
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 use distvirt_worker_protocol::ContainerConfig;
 
@@ -128,7 +128,10 @@ pub fn merge_config(
         entrypoint,
         args,
         env,
-        working_dir: overrides.working_dir.clone().or_else(|| image.working_dir.clone()),
+        working_dir: overrides
+            .working_dir
+            .clone()
+            .or_else(|| image.working_dir.clone()),
         uid: overrides.uid.or(img_uid),
         gid: overrides.gid.or(img_gid),
         hostname: overrides.hostname.clone(),

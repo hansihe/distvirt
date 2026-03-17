@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{ServiceId, WorkerCommand, WorkerEvent};
 
@@ -25,15 +25,19 @@ fn test_demand_during_suspend_immediate_resume() {
     h.assert_workload_suspending("ns", "web");
 
     // Capture the pod_id and artifact_id from suspending state
-    let pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "web")
+        .expect("expected pod_id");
     // The artifact_id is assigned by the namespace core's IdMaps when suspend begins.
     // We need to extract it from the worker commands (SuspendPod command has the artifact_id).
     let artifact_id = {
         let cmds = h.worker(&w1).commands();
-        cmds.iter().find_map(|cmd| match cmd {
-            WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
-            _ => None,
-        }).expect("expected SuspendPod command with artifact_id")
+        cmds.iter()
+            .find_map(|cmd| match cmd {
+                WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
+                _ => None,
+            })
+            .expect("expected SuspendPod command with artifact_id")
     };
 
     // Low-level: inject demand (EndpointActivation) while suspending
@@ -54,12 +58,13 @@ fn test_demand_during_suspend_immediate_resume() {
         artifact_id: artifact_id.clone(),
         pool_id: "local".into(),
     });
-    h.worker(&w1).send_event(WorkerEvent::ArtifactWriteCommitted {
-        namespace_id: "ns".into(),
-        artifact_id: artifact_id.clone(),
-        pool_id: "local".into(),
-        size_bytes: 1024,
-    });
+    h.worker(&w1)
+        .send_event(WorkerEvent::ArtifactWriteCommitted {
+            namespace_id: "ns".into(),
+            artifact_id: artifact_id.clone(),
+            pool_id: "local".into(),
+            size_bytes: 1024,
+        });
     h.worker(&w1).send_event(WorkerEvent::PodSuspended {
         namespace_id: "ns".into(),
         pod_id,
@@ -72,7 +77,11 @@ fn test_demand_during_suspend_immediate_resume() {
     // Fixed: Workload correctly transitions through Suspended → Resuming → Running.
     let status = h.workload_status("ns", "web");
     assert!(
-        matches!(status, distvirt_orchestrator::sm_new::WlStatus::Launching | distvirt_orchestrator::sm_new::WlStatus::Running),
+        matches!(
+            status,
+            distvirt_orchestrator::sm_new::WlStatus::Launching
+                | distvirt_orchestrator::sm_new::WlStatus::Running
+        ),
         "Expected Resuming/Launching or Running after demand-during-suspend, got {:?}",
         status
     );
@@ -92,7 +101,9 @@ fn test_force_deactivate_during_launch() {
     // Should be in Launching (handler doesn't auto-respond)
     h.assert_workload_launching("ns", "echo");
 
-    let pod_id = h.workload_proto_pod_id("ns", "echo").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "echo")
+        .expect("expected pod_id");
 
     // Delete namespace to force demand down
     h.delete_namespace("ns");
@@ -146,7 +157,9 @@ fn test_demand_up_during_resume() {
     h.converge();
     h.assert_workload_resuming("ns", "shared");
 
-    let pod_id = h.workload_proto_pod_id("ns", "shared").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "shared")
+        .expect("expected pod_id");
 
     // Low-level: activate svc-b too (second demand while resuming)
     let svc_b_ip = h.service_ip("ns", "svc-b");
@@ -182,12 +195,18 @@ fn test_spec_change_during_launch() {
     h.converge();
     h.assert_workload_launching("ns", "echo");
 
-    let pod_id = h.workload_proto_pod_id("ns", "echo").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "echo")
+        .expect("expected pod_id");
 
     // Update spec with new image
     let mut new_spec = always_on_spec();
-    new_spec.workloads.get_mut(&WorkloadId("echo".to_string())).unwrap()
-        .containers[0].image_ref = "docker.io/library/alpine:v2".to_string();
+    new_spec
+        .workloads
+        .get_mut(&WorkloadId("echo".to_string()))
+        .unwrap()
+        .containers[0]
+        .image_ref = "docker.io/library/alpine:v2".to_string();
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -205,7 +224,10 @@ fn test_spec_change_during_launch() {
 
     // Verify StopPod was issued for the old pod
     let stop_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::StopPod { .. }));
-    assert!(stop_count >= 1, "expected StopPod for old pod after PodRunning with Restart pending");
+    assert!(
+        stop_count >= 1,
+        "expected StopPod for old pod after PodRunning with Restart pending"
+    );
 }
 
 /// Workload is Suspending. Update spec with new image. PodSuspended arrives.
@@ -225,19 +247,27 @@ fn test_spec_change_during_suspend() {
     h.advance_past_idle_timeout("ns", "web-svc");
     h.assert_workload_suspending("ns", "web");
 
-    let pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "web")
+        .expect("expected pod_id");
     let artifact_id = {
         let cmds = h.worker(&w1).commands();
-        cmds.iter().find_map(|cmd| match cmd {
-            WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
-            _ => None,
-        }).expect("expected SuspendPod command with artifact_id")
+        cmds.iter()
+            .find_map(|cmd| match cmd {
+                WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
+                _ => None,
+            })
+            .expect("expected SuspendPod command with artifact_id")
     };
 
     // Update spec with new image while suspending
     let mut new_spec = activation_spec(timeout);
-    new_spec.workloads.get_mut(&WorkloadId("web".to_string())).unwrap()
-        .containers[0].image_ref = "docker.io/library/nginx:v2".to_string();
+    new_spec
+        .workloads
+        .get_mut(&WorkloadId("web".to_string()))
+        .unwrap()
+        .containers[0]
+        .image_ref = "docker.io/library/nginx:v2".to_string();
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -247,12 +277,13 @@ fn test_spec_change_during_suspend() {
         artifact_id: artifact_id.clone(),
         pool_id: "local".into(),
     });
-    h.worker(&w1).send_event(WorkerEvent::ArtifactWriteCommitted {
-        namespace_id: "ns".into(),
-        artifact_id: artifact_id.clone(),
-        pool_id: "local".into(),
-        size_bytes: 1024,
-    });
+    h.worker(&w1)
+        .send_event(WorkerEvent::ArtifactWriteCommitted {
+            namespace_id: "ns".into(),
+            artifact_id: artifact_id.clone(),
+            pool_id: "local".into(),
+            size_bytes: 1024,
+        });
     h.worker(&w1).send_event(WorkerEvent::PodSuspended {
         namespace_id: "ns".into(),
         pod_id,
@@ -265,6 +296,10 @@ fn test_spec_change_during_suspend() {
     h.assert_workload_dormant("ns", "web");
 
     // Verify DeleteArtifact was issued
-    let delete_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::DeleteArtifact { .. }));
-    assert!(delete_count >= 1, "expected DeleteArtifact for old snapshot after spec change");
+    let delete_count =
+        h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::DeleteArtifact { .. }));
+    assert!(
+        delete_count >= 1,
+        "expected DeleteArtifact for old snapshot after spec change"
+    );
 }

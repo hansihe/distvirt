@@ -80,14 +80,15 @@ impl AdapterManager {
                     );
                 }
                 AdapterConfig::OsRouting { .. } => {
-                    log::warn!(
-                        "adapter: OsRouting adapter not yet implemented, ignoring config"
-                    );
+                    log::warn!("adapter: OsRouting adapter not yet implemented, ignoring config");
                 }
             }
         }
 
-        AdapterManager { adapters, wireguard }
+        AdapterManager {
+            adapters,
+            wireguard,
+        }
     }
 
     /// Create virtual ports for a namespace from all configured adapters.

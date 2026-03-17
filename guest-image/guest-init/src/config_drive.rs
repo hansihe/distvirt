@@ -10,7 +10,10 @@ use crate::session::{self, CommandResult};
 /// The config device contains a 4-byte LE length prefix followed by JSON-encoded `Vec<HostMessage>`.
 /// Returns the corresponding `GuestMessage` responses for each successfully executed command.
 /// Errors are logged and treated as non-fatal — the guest will still boot and connect via vsock.
-pub fn execute_pre_config(containers: &mut ContainerManager, ex: &LocalExecutor<'_>) -> Vec<GuestMessage> {
+pub fn execute_pre_config(
+    containers: &mut ContainerManager,
+    ex: &LocalExecutor<'_>,
+) -> Vec<GuestMessage> {
     let mut responses = Vec::new();
 
     let device = match read_cmdline_param("distvirt.config_device") {
@@ -51,8 +54,8 @@ pub fn execute_pre_config(containers: &mut ContainerManager, ex: &LocalExecutor<
 fn read_config_device(device: &str) -> anyhow::Result<Vec<HostMessage>> {
     use std::io::Read;
 
-    let mut file = std::fs::File::open(device)
-        .map_err(|e| anyhow::anyhow!("open {}: {}", device, e))?;
+    let mut file =
+        std::fs::File::open(device).map_err(|e| anyhow::anyhow!("open {}: {}", device, e))?;
 
     let mut len_buf = [0u8; 4];
     file.read_exact(&mut len_buf)

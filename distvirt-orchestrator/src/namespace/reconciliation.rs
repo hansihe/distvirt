@@ -1,11 +1,15 @@
 use crate::sm::service::ServiceInput;
-use crate::types::*;
 use crate::sm::workload::WorkloadInput;
+use crate::types::*;
 
 use super::NamespaceStateMachine;
 
 impl NamespaceStateMachine {
-    pub(crate) fn reconcile_all_services(&mut self, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
+    pub(crate) fn reconcile_all_services(
+        &mut self,
+        placement_table: &mut PlacementTable,
+        out: &mut NamespaceOutput,
+    ) {
         if self.status == NamespaceStatus::Destroying {
             return;
         }
@@ -28,7 +32,11 @@ impl NamespaceStateMachine {
             })
             .count() as u32;
 
-        let has_active_flows: u32 = if self.active_flows.contains(workload_id) { 1 } else { 0 };
+        let has_active_flows: u32 = if self.active_flows.contains(workload_id) {
+            1
+        } else {
+            0
+        };
 
         service_demand + has_active_flows
     }
@@ -75,11 +83,7 @@ impl NamespaceStateMachine {
     /// - Ready: service in NeedBackend → send WorkloadReady
     /// - Not ready: service Active → send WorkloadUnready
     ///   (service SM handles Active → NeedBackend directly when has_activation is true)
-    fn reconcile_readiness(
-        &mut self,
-        workload_id: &WorkloadId,
-        out: &mut NamespaceOutput,
-    ) {
+    fn reconcile_readiness(&mut self, workload_id: &WorkloadId, out: &mut NamespaceOutput) {
         let ready_info = self.workload_readiness.get(workload_id).cloned();
 
         // Collect service IDs mapped to this workload.
@@ -127,10 +131,7 @@ impl NamespaceStateMachine {
                 }
 
                 let svc = self.services.get_mut(sid).unwrap();
-                let svc_outputs = svc.step(
-                    ServiceInput::WorkloadUnready,
-                    &self.namespace_id,
-                );
+                let svc_outputs = svc.step(ServiceInput::WorkloadUnready, &self.namespace_id);
                 if !svc_outputs.is_empty() {
                     self.translate_service_effects(&sid, svc_outputs, out);
                 }

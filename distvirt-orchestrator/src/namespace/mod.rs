@@ -9,9 +9,9 @@ use std::net::Ipv4Addr;
 
 use crate::pod_map::PodMap;
 use crate::sm::service::ServiceStateMachine;
+use crate::sm::workload::WorkloadStateMachine;
 use crate::types::*;
 use crate::wg_peers::WireGuardPeerManager;
-use crate::sm::workload::WorkloadStateMachine;
 
 /// Cached readiness info per workload, updated from BecameReady/BecameUnready outputs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -60,11 +60,8 @@ impl NamespaceStateMachine {
             // Only serviceless workloads without activation auto-start from construction.
             let has_services = spec.services.values().any(|s| s.workload_id == *wl_id);
             let has_activation = wl_spec.activation.is_some() || has_services;
-            let (wl_sm, _init_outputs) = WorkloadStateMachine::new(
-                wl_id.clone(),
-                wl_spec.suspend_on_idle,
-                has_activation,
-            );
+            let (wl_sm, _init_outputs) =
+                WorkloadStateMachine::new(wl_id.clone(), wl_spec.suspend_on_idle, has_activation);
             // Note: init_outputs are discarded here because the namespace is in
             // Creating state — no workers are connected yet to handle PodRequests.
             // The reconciliation pass after first worker join will re-drive demand.
@@ -103,13 +100,16 @@ impl NamespaceStateMachine {
             if service_demand > 0 {
                 // Outputs (PodRequest) are discarded — no workers connected yet.
                 let _ = wl.step(
-                    crate::sm::workload::WorkloadInput::SetDemand { count: service_demand },
+                    crate::sm::workload::WorkloadInput::SetDemand {
+                        count: service_demand,
+                    },
                     ns_id_ref,
                 );
             }
         }
 
-        let wg_peer_manager = WireGuardPeerManager::new(spec.network.subnet, spec.network.prefix_len);
+        let wg_peer_manager =
+            WireGuardPeerManager::new(spec.network.subnet, spec.network.prefix_len);
 
         NamespaceStateMachine {
             namespace_id,
@@ -126,7 +126,6 @@ impl NamespaceStateMachine {
             active_flows: BTreeSet::new(),
         }
     }
-
 
     pub(crate) fn active_worker_ids(&self) -> Vec<WorkerId> {
         self.workers
@@ -169,7 +168,10 @@ impl NamespaceStateMachine {
                 _ => None,
             };
 
-            let ip = self.spec.services.get(svc_id)
+            let ip = self
+                .spec
+                .services
+                .get(svc_id)
                 .map(|spec| spec.ip.to_string())
                 .unwrap_or_default();
 
@@ -189,21 +191,30 @@ impl NamespaceStateMachine {
         // Pods
         let mut pods = BTreeMap::new();
         for (pod_id, info) in self.pod_map.iter() {
-            let is_running = self.workloads
-                .get(&info.workload_id)
-                .map_or(false, |wl| match &wl.state {
-                    WorkloadState::Active {
-                        pod: crate::sm::pod::PodSlot { pod_id: running_pod, pod_state: crate::sm::pod::PodState::Running, .. },
-                        ..
-                    } => running_pod == pod_id,
-                    _ => false,
-                });
+            let is_running =
+                self.workloads
+                    .get(&info.workload_id)
+                    .map_or(false, |wl| match &wl.state {
+                        WorkloadState::Active {
+                            pod:
+                                crate::sm::pod::PodSlot {
+                                    pod_id: running_pod,
+                                    pod_state: crate::sm::pod::PodState::Running,
+                                    ..
+                                },
+                            ..
+                        } => running_pod == pod_id,
+                        _ => false,
+                    });
             let state = if is_running {
                 PodStatus::Running
             } else {
                 PodStatus::Launching
             };
-            let ip = self.spec.workloads.get(&info.workload_id)
+            let ip = self
+                .spec
+                .workloads
+                .get(&info.workload_id)
                 .map(|wl| wl.network.ip.to_string())
                 .unwrap_or_default();
             pods.insert(
@@ -282,9 +293,7 @@ impl NamespaceStateMachine {
     fn build_service_backend(&self, svc_id: &ServiceId) -> Option<EndpointPodBackend> {
         let svc = self.services.get(svc_id)?;
         match &svc.state {
-            ServiceState::Active {
-                worker_id, ..
-            } => {
+            ServiceState::Active { worker_id, .. } => {
                 let wl_spec = self.spec.workloads.get(&svc.workload_id)?;
                 Some(EndpointPodBackend {
                     pod_ip: wl_spec.network.ip,
@@ -303,11 +312,9 @@ impl NamespaceStateMachine {
         use crate::broadcast::broadcast_to_active_workers;
         let specs = self.build_endpoint_specs();
         let ns_id = self.namespace_id.clone();
-        broadcast_to_active_workers(&self.workers, out, |_| {
-            WorkerCommand::EndpointSync {
-                namespace_id: ns_id.clone(),
-                endpoints: specs.clone(),
-            }
+        broadcast_to_active_workers(&self.workers, out, |_| WorkerCommand::EndpointSync {
+            namespace_id: ns_id.clone(),
+            endpoints: specs.clone(),
         });
     }
 
@@ -349,12 +356,10 @@ impl NamespaceStateMachine {
             };
             let ns_id = self.namespace_id.clone();
             use crate::broadcast::broadcast_to_active_workers;
-            broadcast_to_active_workers(&self.workers, out, |_| {
-                WorkerCommand::EndpointUpdate {
-                    namespace_id: ns_id.clone(),
-                    upserted: vec![spec.clone()],
-                    removed_ips: vec![],
-                }
+            broadcast_to_active_workers(&self.workers, out, |_| WorkerCommand::EndpointUpdate {
+                namespace_id: ns_id.clone(),
+                upserted: vec![spec.clone()],
+                removed_ips: vec![],
             });
         }
     }
@@ -377,12 +382,10 @@ impl NamespaceStateMachine {
             };
             let ns_id = self.namespace_id.clone();
             use crate::broadcast::broadcast_to_active_workers;
-            broadcast_to_active_workers(&self.workers, out, |_| {
-                WorkerCommand::EndpointUpdate {
-                    namespace_id: ns_id.clone(),
-                    upserted: vec![spec.clone()],
-                    removed_ips: vec![],
-                }
+            broadcast_to_active_workers(&self.workers, out, |_| WorkerCommand::EndpointUpdate {
+                namespace_id: ns_id.clone(),
+                upserted: vec![spec.clone()],
+                removed_ips: vec![],
             });
         }
     }
@@ -391,11 +394,9 @@ impl NamespaceStateMachine {
         use crate::broadcast::broadcast_to_active_workers;
         let entries = self.build_registry_entries();
         let ns_id = self.namespace_id.clone();
-        broadcast_to_active_workers(&self.workers, out, |_| {
-            WorkerCommand::RegistrySync {
-                namespace_id: ns_id.clone(),
-                entries: entries.clone(),
-            }
+        broadcast_to_active_workers(&self.workers, out, |_| WorkerCommand::RegistrySync {
+            namespace_id: ns_id.clone(),
+            entries: entries.clone(),
         });
     }
 
@@ -406,14 +407,22 @@ impl NamespaceStateMachine {
     ) {
         use crate::broadcast::send_to_worker;
         let entries = self.build_registry_entries();
-        send_to_worker(worker_id, out, WorkerCommand::RegistrySync {
-            namespace_id: self.namespace_id.clone(),
-            entries,
-        });
+        send_to_worker(
+            worker_id,
+            out,
+            WorkerCommand::RegistrySync {
+                namespace_id: self.namespace_id.clone(),
+                entries,
+            },
+        );
     }
 
     /// Pure state transition. No I/O.
-    pub fn step(&mut self, input: NamespaceInput, placement_table: &mut PlacementTable) -> NamespaceOutput {
+    pub fn step(
+        &mut self,
+        input: NamespaceInput,
+        placement_table: &mut PlacementTable,
+    ) -> NamespaceOutput {
         let mut out = NamespaceOutput::default();
 
         match input {
@@ -474,7 +483,13 @@ impl NamespaceStateMachine {
                 worker_id,
                 pod_id,
             } => {
-                self.handle_launch_pod(&workload_id, &worker_id, &pod_id, placement_table, &mut out);
+                self.handle_launch_pod(
+                    &workload_id,
+                    &worker_id,
+                    &pod_id,
+                    placement_table,
+                    &mut out,
+                );
             }
             NamespaceInput::ResumePod {
                 workload_id,
@@ -482,7 +497,14 @@ impl NamespaceStateMachine {
                 pod_id,
                 artifact_id,
             } => {
-                self.handle_resume_pod(&workload_id, &worker_id, &pod_id, &artifact_id, placement_table, &mut out);
+                self.handle_resume_pod(
+                    &workload_id,
+                    &worker_id,
+                    &pod_id,
+                    &artifact_id,
+                    placement_table,
+                    &mut out,
+                );
             }
             NamespaceInput::Connect {
                 client_id,

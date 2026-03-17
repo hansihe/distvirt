@@ -12,9 +12,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use distvirt_guest_protocol::{
-    GuestEvent, GuestMessage, HostMessage, StreamHeader,
-};
+use distvirt_guest_protocol::{GuestEvent, GuestMessage, HostMessage, StreamHeader};
 
 /// How the simulated guest responds to PrepareSuspend.
 #[derive(Clone, Default)]
@@ -65,7 +63,13 @@ impl YamuxHandle {
             driver_loop(conn, inbound_tx, &mut open_rx).await;
         });
 
-        (YamuxHandle { inbound_rx, open_tx }, task)
+        (
+            YamuxHandle {
+                inbound_rx,
+                open_tx,
+            },
+            task,
+        )
     }
 
     /// Accept the next inbound stream from the peer.
@@ -155,11 +159,7 @@ async fn open_outbound(
 pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow::Result<()> {
     let compat_socket = socket.compat();
 
-    let conn = yamux::Connection::new(
-        compat_socket,
-        yamux::Config::default(),
-        yamux::Mode::Server,
-    );
+    let conn = yamux::Connection::new(compat_socket, yamux::Config::default(), yamux::Mode::Server);
 
     // Spawn driver immediately so all stream I/O works.
     let (mut handle, driver_task) = YamuxHandle::spawn(conn);
@@ -170,7 +170,8 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
         .await
         .context("yamux closed before control stream")?;
 
-    let header = read_framed::<StreamHeader>(&mut control).await
+    let header = read_framed::<StreamHeader>(&mut control)
+        .await
         .context("read control stream header")?;
     match header {
         StreamHeader::Control => {}
@@ -178,12 +179,10 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
     }
 
     // Phase 2: Open event stream (outbound).
-    let mut event_stream = handle
-        .open_stream()
-        .await
-        .context("open event stream")?;
+    let mut event_stream = handle.open_stream().await.context("open event stream")?;
 
-    write_framed(&mut event_stream, &StreamHeader::Events).await
+    write_framed(&mut event_stream, &StreamHeader::Events)
+        .await
         .context("write event stream header")?;
 
     // Phase 3: Optionally fail before sending Ready.
@@ -196,17 +195,23 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
     }
 
     // Send Ready.
-    write_framed(&mut control, &GuestMessage::Ready {
-        running_containers: vec![],
-        pre_config_responses: vec![],
-    }).await.context("send Ready")?;
+    write_framed(
+        &mut control,
+        &GuestMessage::Ready {
+            running_containers: vec![],
+            pre_config_responses: vec![],
+        },
+    )
+    .await
+    .context("send Ready")?;
 
     // Track state for container exit signaling.
     let mut waiting_for_signal: Option<String> = None;
 
     // Control loop: read host messages, respond.
     loop {
-        let msg: HostMessage = read_framed(&mut control).await
+        let msg: HostMessage = read_framed(&mut control)
+            .await
             .context("read host message")?;
 
         match msg {
@@ -219,14 +224,20 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
             HostMessage::AddContainer { id, .. } => {
                 write_framed(&mut control, &GuestMessage::ContainerAdded { id }).await?;
             }
-            HostMessage::StartContainer { id, capture_output, .. } => {
+            HostMessage::StartContainer {
+                id, capture_output, ..
+            } => {
                 // If capture_output, open an output stream and close it.
                 if capture_output {
                     match handle.open_stream().await {
                         Ok(mut output_stream) => {
-                            let _ = write_framed(&mut output_stream, &StreamHeader::ContainerOutput {
-                                container_id: id.clone(),
-                            }).await;
+                            let _ = write_framed(
+                                &mut output_stream,
+                                &StreamHeader::ContainerOutput {
+                                    container_id: id.clone(),
+                                },
+                            )
+                            .await;
                             drop(output_stream);
                         }
                         Err(e) => {
@@ -235,18 +246,24 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
                     }
                 }
 
-                write_framed(&mut control, &GuestMessage::ContainerStarted {
-                    id: id.clone(),
-                    pid: 1,
-                }).await?;
+                write_framed(
+                    &mut control,
+                    &GuestMessage::ContainerStarted {
+                        id: id.clone(),
+                        pid: 1,
+                    },
+                )
+                .await?;
 
                 // Schedule container behavior.
                 match &config.container_behavior {
                     ContainerBehavior::ExitImmediately(code) => {
-                        write_framed(&mut event_stream, &GuestEvent::ContainerExited {
-                            id,
-                            code: *code,
-                        }).await.context("send ContainerExited event")?;
+                        write_framed(
+                            &mut event_stream,
+                            &GuestEvent::ContainerExited { id, code: *code },
+                        )
+                        .await
+                        .context("send ContainerExited event")?;
                     }
                     ContainerBehavior::RunUntilSignaled => {
                         waiting_for_signal = Some(id);
@@ -254,17 +271,21 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
                 }
             }
             HostMessage::SignalContainer { id, .. } => {
-                write_framed(&mut control, &GuestMessage::ContainerSignaled {
-                    id: id.clone(),
-                }).await?;
+                write_framed(
+                    &mut control,
+                    &GuestMessage::ContainerSignaled { id: id.clone() },
+                )
+                .await?;
 
                 // If RunUntilSignaled and this is the container, trigger exit.
                 if waiting_for_signal.as_deref() == Some(&id) {
                     waiting_for_signal = None;
-                    write_framed(&mut event_stream, &GuestEvent::ContainerExited {
-                        id,
-                        code: 0,
-                    }).await.context("send ContainerExited event after signal")?;
+                    write_framed(
+                        &mut event_stream,
+                        &GuestEvent::ContainerExited { id, code: 0 },
+                    )
+                    .await
+                    .context("send ContainerExited event after signal")?;
                 }
             }
             HostMessage::PrepareSuspend => {
@@ -289,9 +310,14 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
 }
 
 /// Read a length-prefixed JSON message from a yamux stream.
-async fn read_framed<T: serde::de::DeserializeOwned>(stream: &mut yamux::Stream) -> anyhow::Result<T> {
+async fn read_framed<T: serde::de::DeserializeOwned>(
+    stream: &mut yamux::Stream,
+) -> anyhow::Result<T> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.context("read length")?;
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("read length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > 1024 * 1024 {
         anyhow::bail!("message too large: {} bytes", len);
@@ -302,7 +328,10 @@ async fn read_framed<T: serde::de::DeserializeOwned>(stream: &mut yamux::Stream)
 }
 
 /// Write a length-prefixed JSON message to a yamux stream.
-async fn write_framed<T: serde::Serialize>(stream: &mut yamux::Stream, msg: &T) -> anyhow::Result<()> {
+async fn write_framed<T: serde::Serialize>(
+    stream: &mut yamux::Stream,
+    msg: &T,
+) -> anyhow::Result<()> {
     let json = serde_json::to_vec(msg).context("serialize message")?;
     let len = (json.len() as u32).to_le_bytes();
     stream.write_all(&len).await.context("write length")?;

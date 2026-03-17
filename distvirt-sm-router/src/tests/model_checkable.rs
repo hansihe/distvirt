@@ -52,7 +52,9 @@ struct ASm {
 
 impl ASm {
     fn new() -> Self {
-        ASm { deliveries: Vec::new() }
+        ASm {
+            deliveries: Vec::new(),
+        }
     }
 }
 
@@ -70,7 +72,9 @@ struct BSm {
 
 impl BSm {
     fn new() -> Self {
-        BSm { deliveries: Vec::new() }
+        BSm {
+            deliveries: Vec::new(),
+        }
     }
 }
 

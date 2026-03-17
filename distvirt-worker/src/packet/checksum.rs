@@ -86,7 +86,11 @@ pub fn complete_checksum(frame: &mut [u8]) {
 
     log::debug!(
         "complete_checksum: flags=0x{:02x} csum_start={} csum_offset={} abs_start={} abs_csum={}",
-        flags, csum_start, csum_offset, abs_start, abs_csum,
+        flags,
+        csum_start,
+        csum_offset,
+        abs_start,
+        abs_csum,
     );
 
     // Do NOT zero the checksum field. When the guest kernel sets NEEDS_CSUM
@@ -110,8 +114,8 @@ pub fn complete_checksum(frame: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM};
     use crate::packet::frame::with_fabric_header;
+    use crate::packet::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM};
 
     // --- complete_checksum oracle tests using etherparse ---
 
@@ -124,8 +128,7 @@ mod tests {
         payload: &[u8],
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
-        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
-            .tcp(src_port, dst_port, 1000, 65535);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).tcp(src_port, dst_port, 1000, 65535);
         let mut ip_packet = Vec::new();
         builder.write(&mut ip_packet, payload).unwrap();
         ip_packet

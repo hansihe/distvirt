@@ -99,7 +99,10 @@ pub struct SnapshotArtifacts {
 /// A VMM implementation that can launch VMs.
 pub trait Vmm: Send + Sync {
     type Instance: VmInstance;
-    fn launch(&self, config: &VmConfig) -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
+    fn launch(
+        &self,
+        config: &VmConfig,
+    ) -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
 
     /// Restore a VM from a snapshot. The `net` config provides the network
     /// parameters for the restored instance (fresh TAP, potentially new IP).
@@ -136,7 +139,10 @@ pub trait VmInstance: Send + 'static {
     /// Snapshot the VM to the given directory. Pauses vCPUs, writes snapshot
     /// files, and copies the container disk. The caller should kill the VM
     /// after this returns.
-    fn snapshot(&mut self, snapshot_dir: &Path) -> impl Future<Output = anyhow::Result<SnapshotArtifacts>> + Send {
+    fn snapshot(
+        &mut self,
+        snapshot_dir: &Path,
+    ) -> impl Future<Output = anyhow::Result<SnapshotArtifacts>> + Send {
         let _ = snapshot_dir;
         async { anyhow::bail!("snapshot not supported by this VM instance") }
     }

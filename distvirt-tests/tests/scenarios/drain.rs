@@ -17,7 +17,10 @@ async fn test_drain_excludes_from_scheduling() {
 
     // Workload should be on w2 (not the drained w1).
     let hosting = cluster.worker_id_for_workload("ns", "echo");
-    assert_ne!(hosting, w1, "workload should not be scheduled on drained worker");
+    assert_ne!(
+        hosting, w1,
+        "workload should not be scheduled on drained worker"
+    );
 
     // Undrain w1.
     cluster.undrain_worker(&w1).await;

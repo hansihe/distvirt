@@ -21,16 +21,27 @@ pub enum EndpointSyncEffect {
     /// Pod buffer should be flushed (pod became locally reachable).
     FlushPodBuffer { ip: Ipv4Addr },
     /// Adapter buffer should be flushed to the adapter port.
-    FlushAdapterBuffer { ip: Ipv4Addr, port_id: PortId, frames: Vec<Vec<u8>> },
+    FlushAdapterBuffer {
+        ip: Ipv4Addr,
+        port_id: PortId,
+        frames: Vec<Vec<u8>>,
+    },
     /// Flow status changed due to endpoint reconfiguration (e.g. flow tracker cleared).
-    FlowStatusChange { ip: Ipv4Addr, service_id: Option<String>, has_active_flows: bool },
+    FlowStatusChange {
+        ip: Ipv4Addr,
+        service_id: Option<String>,
+        has_active_flows: bool,
+    },
 }
 
 /// What the fabric should do with a frame that matched an endpoint IP.
 #[derive(Debug)]
 pub enum EndpointAction {
     /// Forward to the ready backend pod (service DNAT path).
-    ServiceForward { pod_ip: Ipv4Addr, service_ip: Ipv4Addr },
+    ServiceForward {
+        pod_ip: Ipv4Addr,
+        service_ip: Ipv4Addr,
+    },
     /// Frame was accepted into the endpoint buffer.
     Buffered { service_id: Option<String> },
     /// Frame was dropped (buffer full or timed out).
@@ -71,7 +82,6 @@ pub enum MarkReadyResult {
     L4(EndpointAction),
 }
 
-
 /// Data returned by `flush_by_backend_ip` for each service whose buffer was drained.
 pub struct ServiceFlushData {
     pub service_ip: Ipv4Addr,
@@ -104,17 +114,11 @@ enum EndpointBackend {
         buffer_policy: distvirt_worker_protocol::BufferPolicy,
     },
     /// Pod located on a remote worker segment.
-    RemoteSegment {
-        worker_id: String,
-    },
+    RemoteSegment { worker_id: String },
     /// WireGuard peer or splice target connected locally via channel port.
-    LocalAdapter {
-        port_id: PortId,
-    },
+    LocalAdapter { port_id: PortId },
     /// Pod placed on this worker. `port_id` is None while launching, Some once TAP attached.
-    LocalPod {
-        port_id: Option<PortId>,
-    },
+    LocalPod { port_id: Option<PortId> },
 }
 
 impl EndpointBackend {
@@ -184,19 +188,24 @@ impl EndpointTable {
             ref mut backend_ip,
             ref mut processor,
             ..
-        } = endpoint.backend else {
+        } = endpoint.backend
+        else {
             return None;
         };
 
         let Some(backend_ip_val) = *backend_ip else {
-            log::warn!("service '{}': mark_ready called but no backend set", service_id);
+            log::warn!(
+                "service '{}': mark_ready called but no backend set",
+                service_id
+            );
             return None;
         };
         endpoint.state = EndpointState::Ready;
 
         log::debug!(
             "service '{}': mark_ready: buffer_len={}, has_stream_manager={}",
-            svc_id, endpoint.buffer.len(),
+            svc_id,
+            endpoint.buffer.len(),
             processor.has_stream_manager()
         );
 
@@ -215,11 +224,18 @@ impl EndpointTable {
 
             log::debug!(
                 "service '{}': mark_ready produced {} frames, {} actions",
-                svc_id, frames.len(), actions.len()
+                svc_id,
+                frames.len(),
+                actions.len()
             );
 
             let service_ip = endpoint.ip;
-            return Some(MarkReadyResult::Passthrough { frames, backend_ip: backend_ip_val, service_ip, actions });
+            return Some(MarkReadyResult::Passthrough {
+                frames,
+                backend_ip: backend_ip_val,
+                service_ip,
+                actions,
+            });
         }
 
         // Passthrough: drain buffer and enable flow tracking.
@@ -231,17 +247,26 @@ impl EndpointTable {
 
         log::debug!(
             "service '{}': mark_ready produced {} frames, 0 actions",
-            svc_id, frames.len()
+            svc_id,
+            frames.len()
         );
 
         let service_ip = endpoint.ip;
-        Some(MarkReadyResult::Passthrough { frames, backend_ip: backend_ip_val, service_ip, actions: Vec::new() })
+        Some(MarkReadyResult::Passthrough {
+            frames,
+            backend_ip: backend_ip_val,
+            service_ip,
+            actions: Vec::new(),
+        })
     }
 
     /// Drain buffered frames from an UnplacedPod or LocalPod endpoint.
     pub fn flush_pod_buffer(&mut self, ip: Ipv4Addr) -> Vec<Vec<u8>> {
         if let Some(endpoint) = self.by_ip.get_mut(&ip) {
-            if matches!(endpoint.backend, EndpointBackend::UnplacedPod { .. } | EndpointBackend::LocalPod { .. }) {
+            if matches!(
+                endpoint.backend,
+                EndpointBackend::UnplacedPod { .. } | EndpointBackend::LocalPod { .. }
+            ) {
                 endpoint.buffer_start = None;
                 return endpoint.buffer.drain(..).collect();
             }
@@ -275,7 +300,12 @@ impl EndpointTable {
     /// and returns the resulting `EndpointAction` (if the service has an L4 path).
     pub fn handle_timeout_for_ip(&mut self, ip: Ipv4Addr) -> Option<EndpointAction> {
         let endpoint = self.by_ip.get_mut(&ip)?;
-        let EndpointBackend::Service { ref service_id, ref mut processor, .. } = endpoint.backend else {
+        let EndpointBackend::Service {
+            ref service_id,
+            ref mut processor,
+            ..
+        } = endpoint.backend
+        else {
             return None;
         };
         processor.handle_timeout(service_id)
@@ -288,13 +318,23 @@ impl EndpointTable {
     pub fn flush_by_backend_ip(&mut self, target_ip: &Ipv4Addr) -> Vec<ServiceFlushData> {
         let mut result = Vec::new();
         for (ip, endpoint) in self.by_ip.iter_mut() {
-            let EndpointBackend::Service { ref service_id, ref backend_ip, .. } = endpoint.backend else {
+            let EndpointBackend::Service {
+                ref service_id,
+                ref backend_ip,
+                ..
+            } = endpoint.backend
+            else {
                 continue;
             };
-            if endpoint.state == EndpointState::Ready && backend_ip.as_ref() == Some(target_ip) && !endpoint.buffer.is_empty() {
+            if endpoint.state == EndpointState::Ready
+                && backend_ip.as_ref() == Some(target_ip)
+                && !endpoint.buffer.is_empty()
+            {
                 log::info!(
                     "service '{}': flush_by_backend_ip draining {} frames for IP {}",
-                    service_id, endpoint.buffer.len(), target_ip
+                    service_id,
+                    endpoint.buffer.len(),
+                    target_ip
                 );
                 let frames: Vec<Vec<u8>> = endpoint.buffer.drain(..).collect();
                 endpoint.buffer_start = None;
@@ -316,7 +356,9 @@ impl EndpointTable {
 
     /// Attach a port to a LocalPod endpoint. Returns buffered frames to flush.
     pub fn attach_port(&mut self, ip: Ipv4Addr, port_id: PortId) -> Result<Vec<Vec<u8>>, String> {
-        let endpoint = self.by_ip.get_mut(&ip)
+        let endpoint = self
+            .by_ip
+            .get_mut(&ip)
             .ok_or_else(|| format!("attach_port: no endpoint for IP {}", ip))?;
         match &mut endpoint.backend {
             EndpointBackend::LocalPod { port_id: pid } => {
@@ -337,7 +379,10 @@ impl EndpointTable {
     /// Scans all endpoints for matching port_id and resets to None.
     pub fn detach_port(&mut self, port_id: PortId) {
         for endpoint in self.by_ip.values_mut() {
-            if let EndpointBackend::LocalPod { port_id: ref mut pid } = endpoint.backend {
+            if let EndpointBackend::LocalPod {
+                port_id: ref mut pid,
+            } = endpoint.backend
+            {
                 if *pid == Some(port_id) {
                     *pid = None;
                     endpoint.state = EndpointState::Pending;

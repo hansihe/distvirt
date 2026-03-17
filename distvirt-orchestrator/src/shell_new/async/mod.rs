@@ -19,11 +19,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::adapter::timer::TimerConfig;
+use crate::core::orchestrator::OrchestratorCore;
 use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
     SchedulerCoreInput, WorkerConnectedInfo, WorkerStateCoreEvent,
 };
-use crate::core::orchestrator::OrchestratorCore;
 use crate::task::{GlobalWorkerId, WorkerWriterHandle};
 use crate::types::NamespaceId;
 
@@ -49,12 +49,16 @@ pub(crate) enum ShellEvent {
 
 /// Commands sent to the shell from external callers.
 pub(crate) enum ShellCommand {
-    WorkerConnection { conn: OrchestratorConnection },
+    WorkerConnection {
+        conn: OrchestratorConnection,
+    },
     CreateNamespace {
         namespace_id: NamespaceId,
         network: distvirt_worker_protocol::NetworkConfig,
     },
-    DestroyNamespace { namespace_id: NamespaceId },
+    DestroyNamespace {
+        namespace_id: NamespaceId,
+    },
 }
 
 // =============================================================================
@@ -176,14 +180,13 @@ impl Shell {
                     namespace_id,
                     network,
                 } => {
-                    let effects =
-                        self.orchestrator.create_namespace(
-                            CreateNamespaceInfo {
-                                namespace_id,
-                                network,
-                            },
-                            now,
-                        );
+                    let effects = self.orchestrator.create_namespace(
+                        CreateNamespaceInfo {
+                            namespace_id,
+                            network,
+                        },
+                        now,
+                    );
                     self.execute_effects(effects).await;
                 }
                 ShellCommand::DestroyNamespace { namespace_id } => {
@@ -195,14 +198,13 @@ impl Shell {
                 namespace_id,
                 event,
             } => {
-                let effects =
-                    self.orchestrator.process(
-                        OrchestratorInput::NamespaceEvent {
-                            namespace_id,
-                            event,
-                        },
-                        now,
-                    );
+                let effects = self.orchestrator.process(
+                    OrchestratorInput::NamespaceEvent {
+                        namespace_id,
+                        event,
+                    },
+                    now,
+                );
                 self.execute_effects(effects).await;
             }
             ShellEvent::WorkerStateEvent(event) => {
@@ -233,10 +235,7 @@ impl Shell {
     ) -> anyhow::Result<()> {
         let hello = conn.recv_hello().await?;
 
-        if !constant_time_eq(
-            hello.auth_token.as_bytes(),
-            self.worker_secret.as_bytes(),
-        ) {
+        if !constant_time_eq(hello.auth_token.as_bytes(), self.worker_secret.as_bytes()) {
             anyhow::bail!("worker authentication failed");
         }
 
@@ -270,8 +269,7 @@ impl Shell {
         let writer_handle = tokio::spawn(worker_writer::run(cmd_rx, writer));
         let writer_hdl = WorkerWriterHandle::new(cmd_tx);
 
-        let reader_handle =
-            worker_reader::spawn(global_id, reader, self.self_tx.clone());
+        let reader_handle = worker_reader::spawn(global_id, reader, self.self_tx.clone());
 
         let now = self.now();
 

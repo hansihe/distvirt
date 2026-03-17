@@ -109,9 +109,11 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_a, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-xfer")
-    })
+    recv_until(
+        &mut conn_a,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-xfer"),
+    )
     .await?;
     eprintln!("e2e: pod-xfer running on worker-a");
 
@@ -202,7 +204,10 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
             assert_eq!(*transfer_id, 42, "transfer_id mismatch");
             assert_eq!(dest_artifact_id, "snap-xfer-copy");
             assert_eq!(dest_pool_id, "pool-b");
-            assert!(*size_bytes > 0, "transferred artifact should have non-zero size");
+            assert!(
+                *size_bytes > 0,
+                "transferred artifact should have non-zero size"
+            );
             eprintln!(
                 "e2e: artifact transfer received on worker-b, size={}",
                 size_bytes
@@ -239,9 +244,11 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_b, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-xfer-resumed")
-    })
+    recv_until(
+        &mut conn_b,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-xfer-resumed"),
+    )
     .await?;
     eprintln!("e2e: pod-xfer-resumed running on worker-b after cross-worker transfer");
 
@@ -254,9 +261,11 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
         })
         .await?;
 
-    recv_until(&mut conn_b, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-xfer-resumed")
-    })
+    recv_until(
+        &mut conn_b,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-xfer-resumed"),
+    )
     .await?;
     eprintln!("e2e: pod-xfer-resumed stopped on worker-b");
 

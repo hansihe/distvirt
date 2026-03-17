@@ -3,13 +3,16 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-use distvirt_activator::types::Action;
 use super::endpoint::EndpointAction;
 use super::nat::{NatEntry, NatFlowKey};
-use crate::packet::{FabricPacket, FABRIC_HDR_SZ, IP_PROTO_TCP, format_tcp_flags, ip_packet_dst, ip_packet_protocol, ip_packet_transport_ports, rewrite_ipv4_dst, rewrite_ipv4_src, with_fabric_header};
 use super::port::{FramePort, PortId};
 use super::{FabricEvent, SharedPort, convert_backend_need, handle_log_action};
+use crate::packet::{
+    FABRIC_HDR_SZ, FabricPacket, IP_PROTO_TCP, format_tcp_flags, ip_packet_dst, ip_packet_protocol,
+    ip_packet_transport_ports, rewrite_ipv4_dst, rewrite_ipv4_src, with_fabric_header,
+};
+use distvirt_activator::types::Action;
+use tokio::sync::mpsc;
 
 /// Shared fabric tables wrapped in a single Arc.
 pub(crate) struct FabricContextInner<P: FramePort> {
@@ -90,7 +93,10 @@ impl<P: FramePort> Drop for PortGuard<P> {
 /// Source of a packet being dispatched through the fabric.
 enum FrameSource<'a, P: FramePort> {
     /// Packet from a local port.
-    Port { port_id: PortId, port: &'a SharedPort<P> },
+    Port {
+        port_id: PortId,
+        port: &'a SharedPort<P>,
+    },
     /// Packet from the gateway (TUN ingress).
     Gateway,
     /// Internally generated frame (DNAT rewrite, replay).
@@ -121,7 +127,11 @@ fn insert_reverse_nat<P: FramePort>(
             backend_ip: pod_ip,
             last_seen: std::time::Instant::now(),
         };
-        ctx.inner.nat_table.lock().expect("poisoned").insert(reverse_key, nat_entry);
+        ctx.inner
+            .nat_table
+            .lock()
+            .expect("poisoned")
+            .insert(reverse_key, nat_entry);
     }
 }
 
@@ -158,14 +168,21 @@ async fn dispatch_frame<P: FramePort>(
             let ip_pkt = fp.ip_packet();
             let tcp_info = if ip_packet_protocol(ip_pkt) == Some(IP_PROTO_TCP) {
                 let flags = fp.tcp_flags().map(format_tcp_flags).unwrap_or_default();
-                let ports = fp.transport_ports().map(|(s, d)| format!(" {}→{}", s, d)).unwrap_or_default();
+                let ports = fp
+                    .transport_ports()
+                    .map(|(s, d)| format!(" {}→{}", s, d))
+                    .unwrap_or_default();
                 format!(" TCP{}{}", ports, flags)
             } else {
                 String::new()
             };
             log::debug!(
                 "fabric: dispatch_frame from {} | IPv4 {:?} -> {}{} len={}",
-                source_label, src_ip, dst_ip, tcp_info, pkt.len()
+                source_label,
+                src_ip,
+                dst_ip,
+                tcp_info,
+                pkt.len()
             );
         }
 
@@ -190,7 +207,8 @@ async fn dispatch_frame<P: FramePort>(
             EndpointAction::ServiceForward { pod_ip, service_ip } => {
                 log::debug!(
                     "fabric: service Forward (DNAT {} -> {})",
-                    service_ip, pod_ip
+                    service_ip,
+                    pod_ip
                 );
                 let mut rewritten = pkt.to_vec();
                 rewrite_ipv4_dst(&mut rewritten, service_ip, pod_ip);
@@ -220,10 +238,14 @@ async fn dispatch_frame<P: FramePort>(
                 }
                 return;
             }
-            EndpointAction::ActivatorActions { actions, service_id } => {
+            EndpointAction::ActivatorActions {
+                actions,
+                service_id,
+            } => {
                 log::debug!(
                     "fabric: service '{}' activator returned {} actions",
-                    service_id, actions.len()
+                    service_id,
+                    actions.len()
                 );
                 for action in actions {
                     dispatch_action(&action, &service_id, dst_ip, ctx).await;
@@ -233,7 +255,12 @@ async fn dispatch_frame<P: FramePort>(
                 }
                 return;
             }
-            EndpointAction::L4Result { actions, frames, service_id, poll_delay } => {
+            EndpointAction::L4Result {
+                actions,
+                frames,
+                service_id,
+                poll_delay,
+            } => {
                 send_l4_frames(&frames, ctx);
                 for action in actions {
                     dispatch_action(&action, &service_id, dst_ip, ctx).await;
@@ -249,9 +276,8 @@ async fn dispatch_frame<P: FramePort>(
             EndpointAction::RemoteWorker { worker_id } => {
                 let port = {
                     let tp = ctx.inner.tunnel_ports.lock().expect("poisoned");
-                    tp.get(&worker_id).and_then(|pid| {
-                        ctx.inner.ports.lock().expect("poisoned").get(pid).cloned()
-                    })
+                    tp.get(&worker_id)
+                        .and_then(|pid| ctx.inner.ports.lock().expect("poisoned").get(pid).cloned())
                 };
                 if let Some(port) = port {
                     if let Err(e) = port.send_frame(pkt).await {
@@ -264,7 +290,12 @@ async fn dispatch_frame<P: FramePort>(
             }
             EndpointAction::LocalAdapter { port_id } => {
                 let port = {
-                    ctx.inner.ports.lock().expect("poisoned").get(&port_id).cloned()
+                    ctx.inner
+                        .ports
+                        .lock()
+                        .expect("poisoned")
+                        .get(&port_id)
+                        .cloned()
                 };
                 if let Some(port) = port {
                     if let Err(e) = port.send_frame(pkt).await {
@@ -277,7 +308,12 @@ async fn dispatch_frame<P: FramePort>(
             }
             EndpointAction::LocalPod { port_id } => {
                 let dst_port = {
-                    ctx.inner.ports.lock().expect("poisoned").get(&port_id).cloned()
+                    ctx.inner
+                        .ports
+                        .lock()
+                        .expect("poisoned")
+                        .get(&port_id)
+                        .cloned()
                 };
                 if let Some(dst_port) = dst_port {
                     // Check NAT table for SNAT (return traffic from backend to client).
@@ -306,7 +342,8 @@ async fn dispatch_frame<P: FramePort>(
                         let backend_ip = src_ip;
                         log::debug!(
                             "fabric: SNAT return traffic (rewriting src {} -> {})",
-                            backend_ip, svc_ip
+                            backend_ip,
+                            svc_ip
                         );
                         let mut rewritten = pkt.to_vec();
                         rewrite_ipv4_src(&mut rewritten, backend_ip, svc_ip);
@@ -327,14 +364,20 @@ async fn dispatch_frame<P: FramePort>(
                 // Gateway or drop.
                 if dst_ip == ctx.inner.gateway_ip || !ctx.inner.is_in_subnet(&dst_ip) {
                     if matches!(source, FrameSource::Gateway | FrameSource::Internal) {
-                        log::debug!("fabric: dropping non-port frame to {} (no route back)", dst_ip);
+                        log::debug!(
+                            "fabric: dropping non-port frame to {} (no route back)",
+                            dst_ip
+                        );
                     } else if let Some(gw_tx) = ctx.inner.gateway_tx.get() {
                         let _ = gw_tx.try_send(pkt.to_vec());
                     } else {
                         log::debug!("fabric: dropping frame to {} (no gateway)", dst_ip);
                     }
                 } else {
-                    log::debug!("fabric: dropping frame to {} (in subnet, no route/port)", dst_ip);
+                    log::debug!(
+                        "fabric: dropping frame to {} (in subnet, no route/port)",
+                        dst_ip
+                    );
                 }
                 return;
             }
@@ -349,10 +392,7 @@ async fn emit_activation<P: FramePort>(
     service_id: Option<String>,
 ) {
     if let Some(tx) = ctx.inner.event_tx.get() {
-        let _ = tx.try_send(FabricEvent::EndpointActivation {
-            dst_ip,
-            service_id,
-        });
+        let _ = tx.try_send(FabricEvent::EndpointActivation { dst_ip, service_id });
     }
 }
 
@@ -388,8 +428,21 @@ pub(super) async fn port_read_loop<P: FramePort>(
         }
 
         let frame = &buf[..n];
-        log::debug!("fabric: port {} received {} bytes (fabric_flags=0x{:02x})", port_id, n, frame[0]);
-        dispatch_frame(frame, FrameSource::Port { port_id, port: &port }, &ctx).await;
+        log::debug!(
+            "fabric: port {} received {} bytes (fabric_flags=0x{:02x})",
+            port_id,
+            n,
+            frame[0]
+        );
+        dispatch_frame(
+            frame,
+            FrameSource::Port {
+                port_id,
+                port: &port,
+            },
+            &ctx,
+        )
+        .await;
     }
 }
 
@@ -422,7 +475,8 @@ pub(super) async fn dispatch_action<P: FramePort>(
         Action::ReplayPacket(raw_frame) => {
             log::debug!(
                 "fabric: dispatching ReplayPacket for service '{}' (frame_len={})",
-                service_id, raw_frame.len()
+                service_id,
+                raw_frame.len()
             );
             let nat_info = {
                 let st = ctx.inner.endpoint_table.lock().expect("poisoned");
@@ -443,12 +497,19 @@ pub(super) async fn dispatch_action<P: FramePort>(
         Action::SetBackendNeed(need) => {
             let proto_need = convert_backend_need(need);
             if let Some(tx) = ctx.inner.event_tx.get() {
-                if let Err(e) = tx.send(FabricEvent::ServiceBackendNeed {
-                    service_id: service_id.to_string(),
-                    dst_ip,
-                    need: proto_need,
-                }).await {
-                    log::warn!("fabric: failed to send ServiceBackendNeed for {}: {}", service_id, e);
+                if let Err(e) = tx
+                    .send(FabricEvent::ServiceBackendNeed {
+                        service_id: service_id.to_string(),
+                        dst_ip,
+                        need: proto_need,
+                    })
+                    .await
+                {
+                    log::warn!(
+                        "fabric: failed to send ServiceBackendNeed for {}: {}",
+                        service_id,
+                        e
+                    );
                 }
             }
         }
@@ -457,7 +518,10 @@ pub(super) async fn dispatch_action<P: FramePort>(
         }
         Action::PacketDecision { .. } => {
             // Decision already handled by activator internally.
-            log::debug!("fabric: activator action for '{}': PacketDecision", service_id);
+            log::debug!(
+                "fabric: activator action for '{}': PacketDecision",
+                service_id
+            );
         }
         _ => {
             log::debug!("fabric: unhandled activator action in forwarding path");
@@ -469,10 +533,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
 ///
 /// StreamManager emits raw IP packets. We prepend a fabric header and route
 /// by destination IP.
-pub(super) fn send_l4_frames<P: FramePort>(
-    frames: &[Vec<u8>],
-    ctx: &FabricContext<P>,
-) {
+pub(super) fn send_l4_frames<P: FramePort>(frames: &[Vec<u8>], ctx: &FabricContext<P>) {
     if frames.is_empty() {
         return;
     }
@@ -492,10 +553,7 @@ pub(super) fn send_l4_frames<P: FramePort>(
                 }
             });
         } else {
-            log::debug!(
-                "fabric: send_l4_frame: dst IP {} not reachable",
-                dst_ip
-            );
+            log::debug!("fabric: send_l4_frame: dst IP {} not reachable", dst_ip);
         }
     }
 }
@@ -505,11 +563,7 @@ pub(super) fn send_l4_frames<P: FramePort>(
 /// Spawns a tokio task that sleeps for `delay`, then calls
 /// `handle_timeout_for_ip` on the service table to drive TCP state machine
 /// timers (retransmissions, TIME_WAIT cleanup, FIN/FIN-ACK, etc.).
-fn schedule_poll_timer<P: FramePort>(
-    delay: Duration,
-    ip: Ipv4Addr,
-    ctx: FabricContext<P>,
-) {
+fn schedule_poll_timer<P: FramePort>(delay: Duration, ip: Ipv4Addr, ctx: FabricContext<P>) {
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
 
@@ -518,7 +572,13 @@ fn schedule_poll_timer<P: FramePort>(
             st.handle_timeout_for_ip(ip)
         };
 
-        if let Some(EndpointAction::L4Result { actions, frames, service_id, poll_delay }) = result {
+        if let Some(EndpointAction::L4Result {
+            actions,
+            frames,
+            service_id,
+            poll_delay,
+        }) = result
+        {
             send_l4_frames(&frames, &ctx);
 
             for action in &actions {

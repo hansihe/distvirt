@@ -6,7 +6,7 @@ pub mod frame;
 // --- FabricHeader ---
 
 use std::mem::size_of;
-use zerocopy::{FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, network_endian::U16};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, network_endian::U16};
 
 /// Custom 3-byte fabric header prepended to all IP packets in the fabric.
 ///
@@ -41,10 +41,6 @@ pub const IP_PROTO_UDP: u8 = 17;
 
 pub use checksum::complete_checksum;
 pub use frame::{
-    FabricPacket,
-    format_tcp_flags,
-    ip_packet_dst, ip_packet_protocol, ip_packet_src,
-    ip_packet_transport_ports,
-    rewrite_ipv4_dst, rewrite_ipv4_src,
-    with_fabric_header,
+    FabricPacket, format_tcp_flags, ip_packet_dst, ip_packet_protocol, ip_packet_src,
+    ip_packet_transport_ports, rewrite_ipv4_dst, rewrite_ipv4_src, with_fabric_header,
 };

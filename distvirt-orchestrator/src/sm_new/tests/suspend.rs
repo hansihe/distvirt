@@ -157,7 +157,13 @@ fn spec_change_during_suspend() {
     assert!(wl.awaiting_suspend);
 
     // Spec changes while pod is suspending.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), suspend_on_idle: true });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            suspend_on_idle: true,
+        },
+    );
     router.propagate();
 
     // Spec change while pod_running=false doesn't trigger immediate restart
@@ -259,14 +265,20 @@ fn suspend_resume_suspend_cycle() {
     router.send_notify_pod_suspended(worker, pod1, artifact1);
     router.propagate();
 
-    assert_eq!(router.get_workload(&W1).unwrap().suspended_artifact, Some(artifact1));
+    assert_eq!(
+        router.get_workload(&W1).unwrap().suspended_artifact,
+        Some(artifact1)
+    );
 
     // First resume.
     router.send_activate_service(mgmt, S1, true);
     router.propagate();
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_ne!(pod1, pod2);
-    assert_eq!(router.get_pod(&pod2).unwrap().resume_artifact, Some(artifact1));
+    assert_eq!(
+        router.get_pod(&pod2).unwrap().resume_artifact,
+        Some(artifact1)
+    );
     make_pod_running(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
@@ -288,7 +300,10 @@ fn suspend_resume_suspend_cycle() {
     router.propagate();
     let pod3 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_ne!(pod2, pod3);
-    assert_eq!(router.get_pod(&pod3).unwrap().resume_artifact, Some(artifact2));
+    assert_eq!(
+        router.get_pod(&pod3).unwrap().resume_artifact,
+        Some(artifact2)
+    );
 }
 
 /// 39. Scavenge on suspendable workload with no demand — should behave like
@@ -341,7 +356,13 @@ fn suspend_on_idle_disabled_during_suspend() {
     assert!(wl.pod_id.is_some());
 
     // Spec changes: same image, suspend_on_idle goes false.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: false });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            suspend_on_idle: false,
+        },
+    );
     router.propagate();
 
     // Pod should have been abandoned (destroy_current_pod).
@@ -375,7 +396,13 @@ fn suspend_on_idle_disabled_discards_artifact() {
     assert_eq!(wl.suspended_artifact, Some(artifact));
 
     // Spec changes: same image, suspend_on_idle goes false.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: false });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            suspend_on_idle: false,
+        },
+    );
     router.propagate();
 
     // Artifact should be discarded.
@@ -406,7 +433,13 @@ fn suspend_on_idle_enabled_with_running_pod() {
     assert!(!wl.suspend_on_idle);
 
     // Enable suspend_on_idle via spec (same image).
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: true });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            suspend_on_idle: true,
+        },
+    );
     router.propagate();
 
     // Pod should still be running (demand is present).
@@ -446,7 +479,13 @@ fn suspend_on_idle_change_no_restart() {
     let original_pod = wl.pod_id.unwrap();
 
     // Toggle suspend_on_idle (same image).
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: true });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            suspend_on_idle: true,
+        },
+    );
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -468,7 +507,13 @@ fn image_and_suspend_change_together() {
     let original_pod = wl.pod_id.unwrap();
 
     // Change both image and suspend_on_idle.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), suspend_on_idle: true });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            suspend_on_idle: true,
+        },
+    );
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();

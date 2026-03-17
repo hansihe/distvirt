@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// Build an ext4 image from a rootfs directory.
 ///
@@ -14,10 +14,7 @@ pub fn build_ext4_image(rootfs: &Path, output: &Path) -> anyhow::Result<()> {
         .output()
         .context("running du")?;
     if !du_output.status.success() {
-        bail!(
-            "du failed: {}",
-            String::from_utf8_lossy(&du_output.stderr)
-        );
+        bail!("du failed: {}", String::from_utf8_lossy(&du_output.stderr));
     }
     let du_str = String::from_utf8_lossy(&du_output.stdout);
     let size_bytes: u64 = du_str

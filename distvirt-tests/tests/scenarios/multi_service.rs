@@ -33,9 +33,7 @@ async fn test_multi_service_shared_workload() {
     cluster.deactivate_service("ns", "svc-b", &w1).await;
 
     // Advance past idle timeout.
-    cluster
-        .advance_time(Duration::from_secs(31))
-        .await;
+    cluster.advance_time(Duration::from_secs(31)).await;
     cluster.wait_workload_suspended("ns", "shared").await;
 }
 

@@ -6,8 +6,8 @@ use async_executor::LocalExecutor;
 use async_io::Async;
 use futures::io::AsyncRead;
 
-use crate::{net, vsock};
 use crate::yamux_driver::YamuxHandle;
+use crate::{net, vsock};
 use distvirt_guest_protocol::{GuestMessage, HostMessage, StreamHeader};
 
 /// Result of executing a host command.
@@ -61,7 +61,10 @@ pub fn execute_command(
         } => {
             log::info!(
                 "StartContainer: id={}, entrypoint={}, capture_output={}, stdin={}",
-                id, entrypoint, capture_output, stdin
+                id,
+                entrypoint,
+                capture_output,
+                stdin
             );
             match containers.start(
                 &id,
@@ -93,7 +96,10 @@ pub fn execute_command(
         } => {
             log::info!(
                 "ConfigureNetwork: {}={}, netmask={}, gw={}",
-                interface, ip, netmask, gateway
+                interface,
+                ip,
+                netmask,
+                gateway
             );
             match net::configure_network(&interface, &ip, &netmask, &gateway) {
                 Ok(()) => CommandResult::Response(GuestMessage::NetworkConfigured),
@@ -121,7 +127,11 @@ pub fn execute_command(
             epoch_secs,
             epoch_nanos,
         } => {
-            log::info!("SetClock: epoch_secs={}, epoch_nanos={}", epoch_secs, epoch_nanos);
+            log::info!(
+                "SetClock: epoch_secs={}, epoch_nanos={}",
+                epoch_secs,
+                epoch_nanos
+            );
             let ts = libc::timespec {
                 tv_sec: epoch_secs as libc::time_t,
                 tv_nsec: epoch_nanos as libc::c_long,
@@ -187,9 +197,7 @@ impl ControlReader {
                     self.buf.extend_from_slice(&tmp[..n]);
                 }
                 Poll::Ready(Err(e)) => {
-                    return Poll::Ready(
-                        Err(anyhow::Error::from(e).context("read control stream")),
-                    );
+                    return Poll::Ready(Err(anyhow::Error::from(e).context("read control stream")));
                 }
                 Poll::Pending => break,
             }
@@ -207,8 +215,7 @@ impl ControlReader {
             return Poll::Pending;
         }
 
-        let result =
-            serde_json::from_slice(&self.buf[4..4 + len]).context("deserialize message");
+        let result = serde_json::from_slice(&self.buf[4..4 + len]).context("deserialize message");
         self.buf.drain(..4 + len);
         Poll::Ready(result)
     }
@@ -250,11 +257,8 @@ impl Session {
         let accepted = listener.accept().await?;
         let async_socket = Async::new(accepted).context("wrap vsock fd in Async")?;
 
-        let conn = yamux::Connection::new(
-            async_socket,
-            yamux::Config::default(),
-            yamux::Mode::Server,
-        );
+        let conn =
+            yamux::Connection::new(async_socket, yamux::Config::default(), yamux::Mode::Server);
 
         let (handle, yamux_task) = YamuxHandle::spawn(conn, ex);
 

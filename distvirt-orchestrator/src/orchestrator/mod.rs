@@ -84,7 +84,13 @@ impl Orchestrator {
                 wg_config,
                 tunnel_config,
             } => {
-                self.handle_worker_connected(worker_id, capabilities, wg_config, tunnel_config, &mut out);
+                self.handle_worker_connected(
+                    worker_id,
+                    capabilities,
+                    wg_config,
+                    tunnel_config,
+                    &mut out,
+                );
             }
             OrchestratorInput::WorkerDisconnected { worker_id } => {
                 self.handle_worker_disconnected(worker_id, &mut out);
@@ -103,10 +109,7 @@ impl Orchestrator {
             } => {
                 self.handle_worker_pressure_update(worker_id, cpu, memory, io, &mut out);
             }
-            OrchestratorInput::WorkerPoolCapacityUpdate {
-                worker_id,
-                pools,
-            } => {
+            OrchestratorInput::WorkerPoolCapacityUpdate { worker_id, pools } => {
                 self.handle_worker_pool_capacity_update(worker_id, pools, &mut out);
             }
             OrchestratorInput::WorkerArtifactTransferReceived {
@@ -195,11 +198,13 @@ impl Orchestrator {
 
     /// Recompute pressure scores for a specific worker based on pod counts across all namespaces.
     pub fn recompute_worker_pressure(&mut self, worker_id: &WorkerId) {
-        let pod_count: usize = self.namespaces.values()
+        let pod_count: usize = self
+            .namespaces
+            .values()
             .map(|ns| ns.pod_map.worker_pod_count(worker_id))
             .sum();
-        let committed_mb = pod_count as u64 * DEFAULT_POD_MEMORY_MB
-            + self.lease_table.leased_memory_mb(worker_id);
+        let committed_mb =
+            pod_count as u64 * DEFAULT_POD_MEMORY_MB + self.lease_table.leased_memory_mb(worker_id);
         if let Some(ws) = self.workers.get_mut(worker_id) {
             ws.recompute_pressure(committed_mb);
         }
@@ -246,8 +251,7 @@ impl Orchestrator {
                 _ => {}
             },
             NamespaceInput::TimerFired { timer_key } => match timer_key {
-                TimerKey::LaunchTimeout { pod_id, .. }
-                | TimerKey::ResumeTimeout { pod_id, .. } => {
+                TimerKey::LaunchTimeout { pod_id, .. } | TimerKey::ResumeTimeout { pod_id, .. } => {
                     self.lease_table.release(pod_id);
                 }
                 _ => {}

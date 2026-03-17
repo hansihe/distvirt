@@ -20,9 +20,11 @@ async fn test_sim_vm_crash() -> anyhow::Result<()> {
     crash_handle.crash();
 
     // Expect PodFailed with VM exit message.
-    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim")
-    })
+    let event = recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim"),
+    )
     .await?;
     assert!(
         matches!(&event, WorkerEvent::PodFailed { error, .. }
@@ -50,9 +52,11 @@ async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
     crash_handle.crash();
 
     // Wait for PodFailed.
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim-1")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim-1"),
+    )
     .await?;
 
     // Launch a new pod in the same namespace — worker should still be healthy.
@@ -67,9 +71,11 @@ async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-sim-2")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-sim-2"),
+    )
     .await?;
 
     shutdown_worker(&mut conn, worker_handle).await?;

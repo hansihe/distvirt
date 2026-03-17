@@ -69,12 +69,21 @@ pub enum GuestMessage {
     },
     /// Guest has flushed output and is ready for vCPU freeze.
     SuspendReady,
-    ContainerAdded { id: String },
-    ContainerStarted { id: String, pid: u32 },
-    ContainerSignaled { id: String },
+    ContainerAdded {
+        id: String,
+    },
+    ContainerStarted {
+        id: String,
+        pid: u32,
+    },
+    ContainerSignaled {
+        id: String,
+    },
     NetworkConfigured,
     ClockSet,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Stream header sent as the first message on any new yamux stream.
@@ -91,11 +100,19 @@ pub enum StreamHeader {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GuestEvent {
-    ContainerExited { id: String, code: i32 },
+    ContainerExited {
+        id: String,
+        code: i32,
+    },
     /// Guest requests the host to set the balloon to this size.
-    BalloonSet { amount_mib: u32 },
+    BalloonSet {
+        amount_mib: u32,
+    },
     /// A supervised task failed unexpectedly.
-    TaskError { task: String, message: String },
+    TaskError {
+        task: String,
+        message: String,
+    },
 }
 
 /// Stream identifiers for output chunk framing.

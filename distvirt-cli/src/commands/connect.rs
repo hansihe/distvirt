@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use boringtun::noise::{Tunn, TunnResult};
@@ -15,7 +15,7 @@ use rand::rngs::OsRng;
 
 use crate::client::{self, Client};
 use crate::connection::ConnectionParams;
-use crate::platform::{TunDevice, configure_interface, add_route, remove_route};
+use crate::platform::{TunDevice, add_route, configure_interface, remove_route};
 
 const MAX_PACKET_SIZE: usize = 65536;
 
@@ -196,13 +196,7 @@ pub async fn connect(
     eprintln!("press Ctrl+C to disconnect");
 
     // 9. Run packet forwarding loop.
-    let result = run_tunnel(
-        tun,
-        Arc::clone(&tunn),
-        Arc::clone(&udp),
-        endpoint,
-    )
-    .await;
+    let result = run_tunnel(tun, Arc::clone(&tunn), Arc::clone(&udp), endpoint).await;
 
     // 10. Cleanup on exit.
     eprintln!("\ndisconnecting...");
@@ -265,7 +259,10 @@ pub async fn disconnect(mut client: Client, namespace_id: &str) -> anyhow::Resul
         if ret == 0 {
             unsafe { libc::kill(pid, libc::SIGTERM) };
         } else {
-            eprintln!("warning: connect process (pid {}) is no longer running", pid);
+            eprintln!(
+                "warning: connect process (pid {}) is no longer running",
+                pid
+            );
         }
     }
 
@@ -305,7 +302,11 @@ async fn run_tunnel(
 
                 match result {
                     TunnResult::WriteToNetwork(data) => {
-                        log::trace!("connect: sending {} byte encrypted to {}", data.len(), endpoint);
+                        log::trace!(
+                            "connect: sending {} byte encrypted to {}",
+                            data.len(),
+                            endpoint
+                        );
                         udp.send_to(data, endpoint).await?;
                     }
                     TunnResult::Err(e) => {
@@ -337,13 +338,19 @@ async fn run_tunnel(
                     t.decapsulate(Some(src.ip()), datagram, &mut dec_buf)
                 };
 
-                log::trace!("connect: decapsulate result: {}", match &result {
-                    TunnResult::Done => "Done".to_string(),
-                    TunnResult::Err(e) => format!("Err({:?})", e),
-                    TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
-                    TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
-                    TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
-                });
+                log::trace!(
+                    "connect: decapsulate result: {}",
+                    match &result {
+                        TunnResult::Done => "Done".to_string(),
+                        TunnResult::Err(e) => format!("Err({:?})", e),
+                        TunnResult::WriteToNetwork(d) =>
+                            format!("WriteToNetwork({} bytes)", d.len()),
+                        TunnResult::WriteToTunnelV4(d, _) =>
+                            format!("WriteToTunnelV4({} bytes)", d.len()),
+                        TunnResult::WriteToTunnelV6(d, _) =>
+                            format!("WriteToTunnelV6({} bytes)", d.len()),
+                    }
+                );
 
                 match result {
                     TunnResult::Done => {}

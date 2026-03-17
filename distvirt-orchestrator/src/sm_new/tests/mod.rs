@@ -1,15 +1,15 @@
 use super::*;
 
 mod basic;
-mod transitions;
-mod retry;
-mod suspend;
-mod service_idle;
 mod misc;
 mod multi;
-mod stateright_workload;
-mod stateright_service;
+mod retry;
+mod service_idle;
 mod stateright_pod;
+mod stateright_service;
+mod stateright_workload;
+mod suspend;
+mod transitions;
 
 const S1: ServiceId = ServiceId(1);
 const S2: ServiceId = ServiceId(2);
@@ -47,7 +47,12 @@ fn assert_timer_requested(router: &mut Router, expected: &[TimerRequest]) {
     );
     // Last delivery should have one workload's timer list matching expected.
     let last = deliveries.last().unwrap();
-    assert_eq!(last.len(), 1, "expected 1 workload's timers, got {:?}", last);
+    assert_eq!(
+        last.len(),
+        1,
+        "expected 1 workload's timers, got {:?}",
+        last
+    );
     assert_eq!(last[0].1.as_slice(), expected, "timer requests mismatch");
 }
 
@@ -92,7 +97,13 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -100,7 +111,9 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -152,7 +165,13 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(max_retries));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -160,7 +179,9 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -183,7 +204,13 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: true });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            suspend_on_idle: true,
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -191,7 +218,9 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 

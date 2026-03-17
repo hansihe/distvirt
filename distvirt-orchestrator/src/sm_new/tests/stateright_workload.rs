@@ -18,8 +18,8 @@
 use distvirt_sm_router::{SequentialIds, SmHandler};
 use stateright::*;
 
-use super::super::*;
 use super::super::workload::MAX_RETRIES;
+use super::super::*;
 
 // ============================================================================
 // Environment types — track what the world outside the SM is doing
@@ -135,10 +135,7 @@ enum WlNewAction {
 // ============================================================================
 
 /// Deliver an input to the SM using CtxConcrete, apply effects to env state.
-fn apply_input(
-    state: &WlNewModelState,
-    input: WorkloadInput,
-) -> WlNewModelState {
+fn apply_input(state: &WlNewModelState, input: WorkloadInput) -> WlNewModelState {
     let mut next = state.clone();
     let mut alloc = SequentialIds::<NodeKind>::new();
     // Seed allocator to match current pod ID generation state.
@@ -328,10 +325,7 @@ impl Model for WlNewModel {
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut next = match action {
             WlNewAction::SetDemand { count } => {
-                let mut s = apply_input(
-                    state,
-                    WorkloadInput::DemandInput(make_demand(count)),
-                );
+                let mut s = apply_input(state, WorkloadInput::DemandInput(make_demand(count)));
                 s.demand_count = count;
                 s
             }
@@ -341,10 +335,7 @@ impl Model for WlNewModel {
                 let suspend = self.enable_suspend;
                 let mut s = apply_input(
                     state,
-                    WorkloadInput::SpecInput(Some((
-                        ManagementId(0),
-                        make_spec("app:v1", suspend),
-                    ))),
+                    WorkloadInput::SpecInput(Some((ManagementId(0), make_spec("app:v1", suspend)))),
                 );
                 s.spec_present = true;
                 s
@@ -376,10 +367,7 @@ impl Model for WlNewModel {
                 )
             }
             WlNewAction::RemoveSpec => {
-                let mut s = apply_input(
-                    state,
-                    WorkloadInput::SpecInput(None),
-                );
+                let mut s = apply_input(state, WorkloadInput::SpecInput(None));
                 s.spec_present = false;
                 s
             }
@@ -391,29 +379,20 @@ impl Model for WlNewModel {
                     WorkloadInput::PodStatusInput(vec![PodStatus::Running]),
                 );
                 // Also deliver PodWorkerInput with a worker assignment.
-                apply_input(
-                    &s,
-                    WorkloadInput::PodWorkerInput(vec![Some(WorkerId(1))]),
-                )
+                apply_input(&s, WorkloadInput::PodWorkerInput(vec![Some(WorkerId(1))]))
             }
-            WlNewAction::PodFailed => {
-                apply_input(
-                    state,
-                    WorkloadInput::PodStatusInput(vec![PodStatus::Failed]),
-                )
-            }
-            WlNewAction::PodDisplaced => {
-                apply_input(
-                    state,
-                    WorkloadInput::PodStatusInput(vec![PodStatus::Displaced]),
-                )
-            }
-            WlNewAction::PodFinished => {
-                apply_input(
-                    state,
-                    WorkloadInput::PodStatusInput(vec![PodStatus::Finished]),
-                )
-            }
+            WlNewAction::PodFailed => apply_input(
+                state,
+                WorkloadInput::PodStatusInput(vec![PodStatus::Failed]),
+            ),
+            WlNewAction::PodDisplaced => apply_input(
+                state,
+                WorkloadInput::PodStatusInput(vec![PodStatus::Displaced]),
+            ),
+            WlNewAction::PodFinished => apply_input(
+                state,
+                WorkloadInput::PodStatusInput(vec![PodStatus::Finished]),
+            ),
             WlNewAction::PodSuspended => {
                 // Use a synthetic artifact ID based on SM's artifact counter.
                 let artifact_id = ArtifactId(state.sm.artifact_counter + 1);
@@ -422,12 +401,7 @@ impl Model for WlNewModel {
                     WorkloadInput::PodStatusInput(vec![PodStatus::Suspended { artifact_id }]),
                 )
             }
-            WlNewAction::PodGone => {
-                apply_input(
-                    state,
-                    WorkloadInput::PodStatusInput(vec![]),
-                )
-            }
+            WlNewAction::PodGone => apply_input(state, WorkloadInput::PodStatusInput(vec![])),
             WlNewAction::TimerFired => {
                 let mut s = apply_input(
                     state,
@@ -438,16 +412,10 @@ impl Model for WlNewModel {
                 s
             }
             WlNewAction::AdminRestart => {
-                apply_input(
-                    state,
-                    WorkloadInput::AdminCommand(AdminCmd::Restart),
-                )
+                apply_input(state, WorkloadInput::AdminCommand(AdminCmd::Restart))
             }
             WlNewAction::AdminScavenge => {
-                apply_input(
-                    state,
-                    WorkloadInput::AdminCommand(AdminCmd::Scavenge),
-                )
+                apply_input(state, WorkloadInput::AdminCommand(AdminCmd::Scavenge))
             }
         };
 
@@ -473,12 +441,16 @@ impl Model for WlNewModel {
         let mut props = vec![
             // Safety: consecutive failures never exceed MAX_RETRIES.
             Property::<Self>::always("consecutive failures bounded", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 state.sm.consecutive_failures <= MAX_RETRIES
             }),
             // Safety: if SM reports Failed status, failures must be at max.
             Property::<Self>::always("failed implies max retries", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 let is_failed = state.sm.consecutive_failures >= state.sm.max_retries
                     && (state.sm.has_demand || state.sm.committed_to_boot);
                 if !state.sm.has_spec && !state.sm.has_demand {
@@ -492,7 +464,9 @@ impl Model for WlNewModel {
             }),
             // Safety: if in_backoff, timer should be pending.
             Property::<Self>::always("backoff has timer", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if state.sm.in_backoff {
                     state.timer_pending
                 } else {
@@ -501,7 +475,9 @@ impl Model for WlNewModel {
             }),
             // Safety: if pod_running, consecutive_failures must be 0.
             Property::<Self>::always("running resets failures", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if state.sm.pod_running {
                     state.sm.consecutive_failures == 0
                 } else {
@@ -510,7 +486,9 @@ impl Model for WlNewModel {
             }),
             // Safety: dormant state has no timer.
             Property::<Self>::always("dormant has no timer", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 let is_dormant = !state.sm.has_demand
                     && !state.sm.committed_to_boot
                     && state.sm.pod_id.is_none()
@@ -523,25 +501,34 @@ impl Model for WlNewModel {
             }),
             // Safety: pod_id.is_some() iff pod_env is not None.
             Property::<Self>::always("pod tracking consistent", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 state.sm.pod_id.is_some() == (state.pod_env != PodEnvState::None)
             }),
             // Safety: awaiting_suspend is only true when pod is in Suspending env state.
-            Property::<Self>::always("awaiting_suspend implies suspending env", |_model, state| {
-                if state.self_destructed { return true; }
-                if state.sm.awaiting_suspend {
-                    matches!(state.pod_env, PodEnvState::Suspending { .. })
-                } else {
-                    true
-                }
-            }),
+            Property::<Self>::always(
+                "awaiting_suspend implies suspending env",
+                |_model, state| {
+                    if state.self_destructed {
+                        return true;
+                    }
+                    if state.sm.awaiting_suspend {
+                        matches!(state.pod_env, PodEnvState::Suspending { .. })
+                    } else {
+                        true
+                    }
+                },
+            ),
             // Safety: wants_pod and no pod_id means something is wrong
             // (reconcile should have created one, unless in_backoff or failed).
             // Assumption: each action is a full handle() call which always
             // ends with reconcile(), so the transient state where wants_pod
             // is true but pod_id is None should never be observable here.
             Property::<Self>::always("wants_pod consistency", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if state.sm.wants_pod && state.sm.pod_id.is_none() {
                     false
                 } else {
@@ -560,7 +547,9 @@ impl Model for WlNewModel {
             // If a pod exists (pod_id is Some), the suspended_artifact should
             // have been consumed (taken) during pod creation, or discarded.
             Property::<Self>::always("no artifact during active pod", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if state.sm.pod_id.is_some() {
                     state.sm.suspended_artifact.is_none()
                 } else {
@@ -570,7 +559,9 @@ impl Model for WlNewModel {
             // Safety: suspend_on_idle=false implies no artifact and no awaiting_suspend.
             // When suspend is disabled, there should never be suspend-related state.
             Property::<Self>::always("no suspend state when disabled", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if !state.sm.suspend_on_idle {
                     // awaiting_suspend could briefly be true if we just toggled
                     // suspend_on_idle off — but destroy_current_pod clears it.
@@ -586,9 +577,7 @@ impl Model for WlNewModel {
                 state.self_destructed
             }),
             // Reachability: can reach a state where pod is running.
-            Property::<Self>::sometimes("can reach running", |_model, state| {
-                state.sm.pod_running
-            }),
+            Property::<Self>::sometimes("can reach running", |_model, state| state.sm.pod_running),
             // Reachability: can return to dormant after having a pod.
             Property::<Self>::sometimes("can reach dormant after pod", |_model, state| {
                 state.sm.has_spec
@@ -603,16 +592,18 @@ impl Model for WlNewModel {
         // Checks that after hitting max retries, the system can recover (e.g. via
         // demand drop resetting failures) and get a pod running again.
         if self.enable_pod_failure {
-            props.push(Property::<Self>::sometimes("can recover from failed", |_model, state| {
-                state.was_ever_max_retries && state.sm.pod_running
-            }));
+            props.push(Property::<Self>::sometimes(
+                "can recover from failed",
+                |_model, state| state.was_ever_max_retries && state.sm.pod_running,
+            ));
         }
 
         // Reachability: can reach suspended state (only with suspend enabled).
         if self.enable_suspend {
-            props.push(Property::<Self>::sometimes("can reach suspended", |_model, state| {
-                state.sm.suspended_artifact.is_some()
-            }));
+            props.push(Property::<Self>::sometimes(
+                "can reach suspended",
+                |_model, state| state.sm.suspended_artifact.is_some(),
+            ));
         }
 
         props

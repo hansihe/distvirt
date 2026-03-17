@@ -19,7 +19,9 @@ pub(crate) fn detect_host_memory_mb() -> u64 {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
                     // Format: "MemTotal:       16384000 kB"
                     let rest = rest.trim();
-                    if let Some(kb_str) = rest.strip_suffix("kB").or_else(|| rest.strip_suffix("KB")) {
+                    if let Some(kb_str) =
+                        rest.strip_suffix("kB").or_else(|| rest.strip_suffix("KB"))
+                    {
                         if let Ok(kb) = kb_str.trim().parse::<u64>() {
                             return kb / 1024;
                         }
@@ -54,17 +56,30 @@ pub(crate) fn parse_psi(content: &str) -> PsiMetrics {
         for part in line.split_whitespace() {
             if let Some(val) = part.strip_prefix("avg10=") {
                 if let Ok(v) = val.parse::<f64>() {
-                    if is_some { some_avg10 = v; } else { full_avg10 = v; }
+                    if is_some {
+                        some_avg10 = v;
+                    } else {
+                        full_avg10 = v;
+                    }
                 }
             } else if let Some(val) = part.strip_prefix("avg60=") {
                 if let Ok(v) = val.parse::<f64>() {
-                    if is_some { some_avg60 = v; } else { full_avg60 = v; }
+                    if is_some {
+                        some_avg60 = v;
+                    } else {
+                        full_avg60 = v;
+                    }
                 }
             }
         }
     }
 
-    PsiMetrics { some_avg10, some_avg60, full_avg10, full_avg60 }
+    PsiMetrics {
+        some_avg10,
+        some_avg60,
+        full_avg10,
+        full_avg60,
+    }
 }
 
 /// Read and parse a single `/proc/pressure/{cpu,memory,io}` file.
@@ -87,7 +102,9 @@ pub(crate) fn psi_changed_significantly(
     old: &(PsiMetrics, PsiMetrics, PsiMetrics),
     new: &(PsiMetrics, PsiMetrics, PsiMetrics),
 ) -> bool {
-    fn delta(a: f64, b: f64) -> bool { (a - b).abs() > 1.0 }
+    fn delta(a: f64, b: f64) -> bool {
+        (a - b).abs() > 1.0
+    }
     delta(old.0.some_avg10, new.0.some_avg10)
         || delta(old.1.some_avg10, new.1.some_avg10)
         || delta(old.2.some_avg10, new.2.some_avg10)
@@ -125,12 +142,22 @@ mod tests {
     #[test]
     fn test_psi_changed_significantly_small_delta() {
         let a = (
-            PsiMetrics { some_avg10: 1.0, some_avg60: 0.0, full_avg10: 0.0, full_avg60: 0.0 },
+            PsiMetrics {
+                some_avg10: 1.0,
+                some_avg60: 0.0,
+                full_avg10: 0.0,
+                full_avg60: 0.0,
+            },
             PsiMetrics::default(),
             PsiMetrics::default(),
         );
         let b = (
-            PsiMetrics { some_avg10: 1.5, some_avg60: 0.0, full_avg10: 0.0, full_avg60: 0.0 },
+            PsiMetrics {
+                some_avg10: 1.5,
+                some_avg60: 0.0,
+                full_avg10: 0.0,
+                full_avg60: 0.0,
+            },
             PsiMetrics::default(),
             PsiMetrics::default(),
         );
@@ -140,12 +167,22 @@ mod tests {
     #[test]
     fn test_psi_changed_significantly_large_delta() {
         let a = (
-            PsiMetrics { some_avg10: 1.0, some_avg60: 0.0, full_avg10: 0.0, full_avg60: 0.0 },
+            PsiMetrics {
+                some_avg10: 1.0,
+                some_avg60: 0.0,
+                full_avg10: 0.0,
+                full_avg60: 0.0,
+            },
             PsiMetrics::default(),
             PsiMetrics::default(),
         );
         let b = (
-            PsiMetrics { some_avg10: 5.0, some_avg60: 0.0, full_avg10: 0.0, full_avg60: 0.0 },
+            PsiMetrics {
+                some_avg10: 5.0,
+                some_avg60: 0.0,
+                full_avg10: 0.0,
+                full_avg60: 0.0,
+            },
             PsiMetrics::default(),
             PsiMetrics::default(),
         );

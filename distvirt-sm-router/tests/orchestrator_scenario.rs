@@ -22,7 +22,7 @@
 //! workload by aggregating incoming WorkloadToPod edges. Worker assignment
 //! (worker_to_pod edges) is managed externally as a placement concern.
 
-use distvirt_sm_router::{trace, Aggregator, ListAggregator, SmHandler};
+use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler, trace};
 
 // ============================================================================
 // Domain types
@@ -49,7 +49,9 @@ enum PodStatus {
     Running,
     Suspending,
     /// Terminal: pod successfully suspended, artifact available for resume.
-    Suspended { artifact_id: ArtifactId },
+    Suspended {
+        artifact_id: ArtifactId,
+    },
     /// Terminal: pod exited gracefully (exit code 0). Not counted as failure.
     Finished,
     /// Terminal: pod failed (non-zero exit, error, worker loss, timeout, abandoned).
@@ -242,7 +244,10 @@ impl Aggregator for SpecAggregator {
     type Input = (ManagementId, WorkloadSpec);
     type Output = Option<(ManagementId, WorkloadSpec)>;
 
-    fn aggregate(&self, inputs: &[(ManagementId, WorkloadSpec)]) -> Option<(ManagementId, WorkloadSpec)> {
+    fn aggregate(
+        &self,
+        inputs: &[(ManagementId, WorkloadSpec)],
+    ) -> Option<(ManagementId, WorkloadSpec)> {
         inputs.first().cloned()
     }
 }
@@ -548,28 +553,26 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                     }
                 }
             }
-            ServiceInput::BackendNeedInput(need) => {
-                match (&self.state, &need) {
-                    (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
-                        if !self.idle_timer_active {
-                            self.idle_timer_active = true;
-                            self.idle_generation += 1;
-                            self.update_timer_signal(ctx);
-                        }
+            ServiceInput::BackendNeedInput(need) => match (&self.state, &need) {
+                (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
+                    if !self.idle_timer_active {
+                        self.idle_timer_active = true;
+                        self.idle_generation += 1;
+                        self.update_timer_signal(ctx);
                     }
-                    (ServiceState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
-                        if self.idle_timer_active {
-                            self.idle_timer_active = false;
-                            self.update_timer_signal(ctx);
-                        }
-                    }
-                    (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
-                        ctx.set_demand(true);
-                        self.state = ServiceState::NeedBackend;
-                    }
-                    _ => {}
                 }
-            }
+                (ServiceState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
+                    if self.idle_timer_active {
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
+                    }
+                }
+                (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
+                    ctx.set_demand(true);
+                    self.state = ServiceState::NeedBackend;
+                }
+                _ => {}
+            },
             ServiceInput::ServiceTimerFired(key) => match key {
                 ServiceTimerKey::IdleTimeout => {
                     if matches!(self.state, ServiceState::Active { .. })
@@ -1230,26 +1233,24 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     self.maybe_reap(ctx);
                 }
             }
-            PodInput::PodTimerFired(key) => {
-                match key {
-                    PodTimerKey::LaunchTimeout => {
-                        if matches!(self.status, PodStatus::Pending) {
-                            self.status = PodStatus::Failed;
-                            ctx.set_status(PodStatus::Failed);
-                            self.update_timer_signal(ctx);
-                            self.maybe_reap(ctx);
-                        }
-                    }
-                    PodTimerKey::SuspendTimeout => {
-                        if matches!(self.status, PodStatus::Suspending) {
-                            self.status = PodStatus::Failed;
-                            ctx.set_status(PodStatus::Failed);
-                            self.update_timer_signal(ctx);
-                            self.maybe_reap(ctx);
-                        }
+            PodInput::PodTimerFired(key) => match key {
+                PodTimerKey::LaunchTimeout => {
+                    if matches!(self.status, PodStatus::Pending) {
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
                     }
                 }
-            }
+                PodTimerKey::SuspendTimeout => {
+                    if matches!(self.status, PodStatus::Suspending) {
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
+                    }
+                }
+            },
         }
     }
 }
@@ -1294,7 +1295,12 @@ fn assert_timer_requested(router: &mut Router, timer: TimerId, expected: &[Timer
     );
     // Last delivery should have one workload's timer list matching expected.
     let last = deliveries.last().unwrap();
-    assert_eq!(last.len(), 1, "expected 1 workload's timers, got {:?}", last);
+    assert_eq!(
+        last.len(),
+        1,
+        "expected 1 workload's timers, got {:?}",
+        last
+    );
     assert_eq!(last[0].as_slice(), expected, "timer requests mismatch");
 }
 
@@ -1391,7 +1397,12 @@ fn reactive_readiness_edges() {
 
     // Deliver workload spec.
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "test:latest".into(),
+        },
+    );
 
     // Deliver service specs — always-on services auto-set demand + edges.
     router.set_management_to_service_edges(mgmt, vec![S1, S2]);
@@ -1448,7 +1459,12 @@ fn pod_lifecycle() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test:latest".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "test:latest".into(),
+        },
+    );
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -1502,7 +1518,12 @@ fn worker_loss_via_port_removal() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -1539,10 +1560,14 @@ fn worker_loss_via_port_removal() {
     assert!(wl.in_backoff);
 
     // Timer signal should show a retry backoff request.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Service should be back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
@@ -1620,7 +1645,12 @@ fn admin_restart_event() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -1674,7 +1704,12 @@ fn full_end_to_end() {
 
     // Wire management → SMs.
     router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
-    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt_wl,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
     router.set_management_to_service_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
@@ -1745,10 +1780,14 @@ fn full_end_to_end() {
     assert!(wl.in_backoff);
 
     // Timer signal: workload wants a retry backoff timer.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // S1 goes back to NeedBackend.
     let s1 = router.get_service(&S1).unwrap();
@@ -1772,7 +1811,12 @@ fn handler_driven_pod_creation() {
 
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     // Always-on service
     router.create_service(S1, ServiceSm::new(timer, false));
@@ -1825,7 +1869,12 @@ fn handler_and_router_share_id_counter() {
     // Create workload and wire it.
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "test".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "test".into(),
+        },
+    );
 
     // Create service to give workload demand → workload creates pod in handler.
     router.create_service(S1, ServiceSm::new(timer, false));
@@ -1859,7 +1908,9 @@ fn handler_and_router_share_id_counter() {
 /// activated, return (mgmt, worker, pod_id, timer).
 /// After this, workload has spec + demand, a pod exists in Pending state.
 /// Use send_activate_service(mgmt, S1, false) to drop demand.
-fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, WorkerId, PodId, TimerId) {
+fn setup_workload_with_pending_pod(
+    router: &mut Router,
+) -> (ManagementId, WorkerId, PodId, TimerId) {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -1867,7 +1918,12 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -1906,7 +1962,10 @@ fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) {
 
 /// Helper: set up a workload (with configurable max_retries) with an always-on
 /// service, a running pod, and return (mgmt, worker, timer).
-fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementId, WorkerId, TimerId) {
+fn setup_running_workload(
+    router: &mut Router,
+    max_retries: u32,
+) -> (ManagementId, WorkerId, TimerId) {
     let timer = router.create_timer();
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -1914,7 +1973,12 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, max_retries));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -2014,7 +2078,12 @@ fn spec_change_during_launch_triggers_restart() {
     let original_pod = wl.pod_id.unwrap();
 
     // Spec changes while pod is launching.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+        },
+    );
     router.propagate();
 
     // Pod should still exist (launch continues).
@@ -2045,7 +2114,12 @@ fn spec_change_while_running_restarts_immediately() {
     let original_pod = wl.pod_id.unwrap();
 
     // Spec changes while running.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+        },
+    );
     router.propagate();
 
     // Workload should have restarted: old pod destroyed, new pod created.
@@ -2095,7 +2169,12 @@ fn scavenge_idle_workload() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     // Activation-based service.
     router.create_service(S1, ServiceSm::new(timer, true));
@@ -2204,7 +2283,12 @@ fn spec_change_and_demand_drop_during_launch() {
     let original_pod = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Both happen during launch: spec changes and demand drops.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+        },
+    );
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
 
@@ -2274,10 +2358,14 @@ fn pod_failure_backoff_and_retry() {
     assert!(wl.pod_id.is_none()); // pod released
 
     // Workload should have signaled a retry backoff timer.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Timer fires — backoff cleared, reconcile creates new pod.
     router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
@@ -2319,10 +2407,14 @@ fn consecutive_failures_increment() {
     assert!(wl.in_backoff);
 
     // Generation 1 timer requested.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Timer fires → retry.
     router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
@@ -2340,10 +2432,14 @@ fn consecutive_failures_increment() {
     assert!(wl.in_backoff);
 
     // Generation 2 timer requested (new backoff cycle).
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 2,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 2,
+        }],
+    );
 }
 
 /// 22. After max_retries failures, workload stops retrying (terminal Failed).
@@ -2361,10 +2457,14 @@ fn max_retries_enters_failed() {
     assert!(wl.in_backoff); // still under limit
 
     // Timer requested for first backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Timer fires → retry.
     router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
@@ -2403,7 +2503,12 @@ fn failed_recovery_via_spec_change() {
     assert!(wl.pod_id.is_none());
 
     // Spec change resets failures.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+        },
+    );
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -2447,7 +2552,12 @@ fn failed_recovery_via_demand_cycle() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, 1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     // Activation-based service so we can toggle demand.
     router.create_service(S1, ServiceSm::new(timer, true));
@@ -2535,7 +2645,12 @@ fn backoff_cleared_on_demand_drop() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, 5));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -2564,10 +2679,14 @@ fn backoff_cleared_on_demand_drop() {
     assert_eq!(wl.consecutive_failures, 1);
 
     // Timer requested during backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Drop demand → clears everything.
     router.send_activate_service(mgmt, S1, false);
@@ -2596,13 +2715,22 @@ fn backoff_cleared_on_spec_change() {
     assert!(wl.in_backoff);
 
     // Timer requested during backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Spec change clears backoff + failures → immediate retry.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+        },
+    );
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -2628,10 +2756,14 @@ fn scavenge_during_backoff() {
     assert!(wl.in_backoff);
 
     // Timer requested during backoff.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Scavenge is noop when demand is present (always-on service).
     // So scavenge won't do anything here — demand is still active.
@@ -2655,7 +2787,12 @@ fn scavenge_during_failed() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(timer, 1));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -2710,10 +2847,14 @@ fn success_resets_failure_counter() {
     assert_eq!(wl.consecutive_failures, 1);
 
     // First backoff: generation 1.
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 1,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 1,
+        }],
+    );
 
     // Timer fires → retry.
     router.send_workload_timer_fired(timer, W1, WorkloadTimerKey::RetryBackoff);
@@ -2739,10 +2880,14 @@ fn success_resets_failure_counter() {
     assert!(wl.in_backoff);
 
     // Second backoff: generation 2 (incremented again after success reset).
-    assert_timer_requested(&mut router, timer, &[TimerRequest {
-        key: WorkloadTimerKey::RetryBackoff,
-        generation: 2,
-    }]);
+    assert_timer_requested(
+        &mut router,
+        timer,
+        &[TimerRequest {
+            key: WorkloadTimerKey::RetryBackoff,
+            generation: 2,
+        }],
+    );
 }
 
 // ============================================================================
@@ -2759,7 +2904,12 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new_suspendable(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -2936,7 +3086,12 @@ fn spec_change_during_suspend() {
     assert!(wl.awaiting_suspend);
 
     // Spec changes while pod is suspending.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+        },
+    );
     router.propagate();
 
     // Spec change while pod_running=false doesn't trigger immediate restart
@@ -3037,14 +3192,20 @@ fn suspend_resume_suspend_cycle() {
     router.send_notify_pod_suspended(worker, pod1, artifact1);
     router.propagate();
 
-    assert_eq!(router.get_workload(&W1).unwrap().suspended_artifact, Some(artifact1));
+    assert_eq!(
+        router.get_workload(&W1).unwrap().suspended_artifact,
+        Some(artifact1)
+    );
 
     // First resume.
     router.send_activate_service(mgmt, S1, true);
     router.propagate();
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_ne!(pod1, pod2);
-    assert_eq!(router.get_pod(&pod2).unwrap().resume_artifact, Some(artifact1));
+    assert_eq!(
+        router.get_pod(&pod2).unwrap().resume_artifact,
+        Some(artifact1)
+    );
     make_pod_running(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
@@ -3066,7 +3227,10 @@ fn suspend_resume_suspend_cycle() {
     router.propagate();
     let pod3 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_ne!(pod2, pod3);
-    assert_eq!(router.get_pod(&pod3).unwrap().resume_artifact, Some(artifact2));
+    assert_eq!(
+        router.get_pod(&pod3).unwrap().resume_artifact,
+        Some(artifact2)
+    );
 }
 
 /// 39. Scavenge on suspendable workload with no demand — should behave like
@@ -3113,7 +3277,12 @@ fn traffic_triggered_activation() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3167,7 +3336,12 @@ fn idle_timeout_deactivation() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3230,7 +3404,12 @@ fn traffic_cancels_idle_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3287,7 +3466,12 @@ fn idle_timeout_suspend_integration() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new_suspendable(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3363,7 +3547,12 @@ fn worker_loss_removes_backend_need() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3419,7 +3608,12 @@ fn multiple_workers_one_loses_traffic() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3619,7 +3813,12 @@ fn worker_identity_in_readiness() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -3750,7 +3949,12 @@ fn shared_worker_death_independent_failure() {
     router.create_workload(W2, WorkloadSm::new(timer));
 
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(timer, false));
     router.create_service(S2, ServiceSm::new(timer, false));
@@ -3878,7 +4082,12 @@ fn service_retarget_workload() {
     router.create_workload(W1, WorkloadSm::new(timer));
     router.create_workload(W2, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     // One always-on service pointing at W1.
     router.create_service(S1, ServiceSm::new(timer, false));
@@ -3958,7 +4167,12 @@ fn independent_workload_subgraphs() {
 
     let mgmt1 = router.create_management();
     router.set_management_to_workload_edges(mgmt1, vec![W1]);
-    router.set_management_wl_spec(mgmt1, WorkloadSpec { image: "app-a:v1".into() });
+    router.set_management_wl_spec(
+        mgmt1,
+        WorkloadSpec {
+            image: "app-a:v1".into(),
+        },
+    );
     router.set_management_to_service_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
@@ -3974,7 +4188,12 @@ fn independent_workload_subgraphs() {
 
     let mgmt2 = router.create_management();
     router.set_management_to_workload_edges(mgmt2, vec![W2]);
-    router.set_management_wl_spec(mgmt2, WorkloadSpec { image: "app-b:v1".into() });
+    router.set_management_wl_spec(
+        mgmt2,
+        WorkloadSpec {
+            image: "app-b:v1".into(),
+        },
+    );
     router.set_management_to_service_edges(mgmt2, vec![S2]);
     router.set_management_svc_spec(
         mgmt2,
@@ -4056,7 +4275,12 @@ fn service_fan_in_with_retarget() {
     router.create_workload(W1, WorkloadSm::new(timer));
     router.create_workload(W2, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     // Two always-on services both pointing at W1.
     router.create_service(S1, ServiceSm::new(timer, false));
@@ -4157,7 +4381,12 @@ fn service_self_destructs_on_spec_removal() {
     // Use separate mgmt ports so we can remove the service spec independently.
     let mgmt_wl = router.create_management();
     router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
-    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt_wl,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     let mgmt_svc = router.create_management();
     router.set_management_to_service_edges(mgmt_svc, vec![S1]);
@@ -4233,7 +4462,12 @@ fn full_teardown_cascade() {
     router.create_workload(W1, WorkloadSm::new(timer));
     router.create_workload(W2, WorkloadSm::new(timer));
     router.set_management_to_workload_edges(mgmt_wl, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into() });
+    router.set_management_wl_spec(
+        mgmt_wl,
+        WorkloadSpec {
+            image: "app:v1".into(),
+        },
+    );
 
     let mgmt_s1 = router.create_management();
     router.create_service(S1, ServiceSm::new(timer, false));

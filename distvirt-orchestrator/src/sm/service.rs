@@ -41,8 +41,12 @@ pub enum ServiceInput {
     },
     WorkloadUnready,
     ServiceActivation,
-    ServiceBackendNeed { need: BackendNeed },
-    TimerFired { timer_key: TimerKey },
+    ServiceBackendNeed {
+        need: BackendNeed,
+    },
+    TimerFired {
+        timer_key: TimerKey,
+    },
     ForceDeactivate,
 }
 
@@ -52,13 +56,26 @@ pub enum ServiceOutput {
     EndpointChanged,
     TimerSet(TimerKey, std::time::Duration),
     TimerCancel(TimerKey),
-    ConditionSet { key: String, message: String },
-    ConditionClear { key: String },
-    IdleTimerStarted { timeout: std::time::Duration },
-    IdleTimerCancelled { reason: IdleTimerCancelReason },
+    ConditionSet {
+        key: String,
+        message: String,
+    },
+    ConditionClear {
+        key: String,
+    },
+    IdleTimerStarted {
+        timeout: std::time::Duration,
+    },
+    IdleTimerCancelled {
+        reason: IdleTimerCancelReason,
+    },
     IdleTimeoutFired,
-    Deactivated { reason: ServiceDeactivationReason },
-    Activated { trigger: ServiceActivationTrigger },
+    Deactivated {
+        reason: ServiceDeactivationReason,
+    },
+    Activated {
+        trigger: ServiceActivationTrigger,
+    },
     BackendReady,
 }
 
@@ -105,7 +122,10 @@ impl ServiceStateMachine {
     /// Returns true if this service currently wants a backend (i.e., contributes demand).
     /// True for NeedBackend and Active states.
     pub fn wants_backend(&self) -> bool {
-        matches!(self.state, ServiceState::NeedBackend | ServiceState::Active { .. })
+        matches!(
+            self.state,
+            ServiceState::NeedBackend | ServiceState::Active { .. }
+        )
     }
 
     pub fn step(&mut self, input: ServiceInput, _namespace_id: &NamespaceId) -> Vec<ServiceOutput> {
@@ -116,24 +136,22 @@ impl ServiceStateMachine {
                 pod_id,
                 worker_id,
                 backend: _,
-            } => {
-                match &self.state {
-                    ServiceState::NeedBackend => {
-                        self.state = ServiceState::Active {
-                            pod_id: pod_id.clone(),
-                            worker_id: worker_id.clone(),
-                            backend_need: BackendNeed::Active,
-                            idle_timer: None,
-                        };
-                        outputs.push(ServiceOutput::BackendReady);
-                        outputs.push(ServiceOutput::ConditionClear {
-                            key: "activation-pending".into(),
-                        });
-                        outputs.push(ServiceOutput::EndpointChanged);
-                    }
-                    _ => {}
+            } => match &self.state {
+                ServiceState::NeedBackend => {
+                    self.state = ServiceState::Active {
+                        pod_id: pod_id.clone(),
+                        worker_id: worker_id.clone(),
+                        backend_need: BackendNeed::Active,
+                        idle_timer: None,
+                    };
+                    outputs.push(ServiceOutput::BackendReady);
+                    outputs.push(ServiceOutput::ConditionClear {
+                        key: "activation-pending".into(),
+                    });
+                    outputs.push(ServiceOutput::EndpointChanged);
                 }
-            }
+                _ => {}
+            },
             ServiceInput::WorkloadUnready => {
                 match std::mem::replace(&mut self.state, ServiceState::NeedBackend) {
                     ServiceState::Active { idle_timer, .. } => {
@@ -159,7 +177,9 @@ impl ServiceStateMachine {
             ServiceInput::ServiceActivation => {
                 if matches!(self.state, ServiceState::Idle) {
                     self.state = ServiceState::NeedBackend;
-                    outputs.push(ServiceOutput::Activated { trigger: ServiceActivationTrigger::Traffic });
+                    outputs.push(ServiceOutput::Activated {
+                        trigger: ServiceActivationTrigger::Traffic,
+                    });
                     outputs.push(ServiceOutput::ConditionSet {
                         key: "activation-pending".into(),
                         message: "waiting for backend to become ready".into(),
@@ -185,13 +205,17 @@ impl ServiceStateMachine {
                                     self.idle_timeout,
                                 ));
                                 *idle_timer = Some(timer_key);
-                                outputs.push(ServiceOutput::IdleTimerStarted { timeout: self.idle_timeout });
+                                outputs.push(ServiceOutput::IdleTimerStarted {
+                                    timeout: self.idle_timeout,
+                                });
                             }
                         }
                         BackendNeed::Traffic | BackendNeed::Active => {
                             if let Some(timer_key) = idle_timer.take() {
                                 outputs.push(ServiceOutput::TimerCancel(timer_key));
-                                outputs.push(ServiceOutput::IdleTimerCancelled { reason: IdleTimerCancelReason::NewTraffic });
+                                outputs.push(ServiceOutput::IdleTimerCancelled {
+                                    reason: IdleTimerCancelReason::NewTraffic,
+                                });
                             }
                         }
                     }
@@ -209,22 +233,22 @@ impl ServiceStateMachine {
                         && self.has_activation
                     {
                         outputs.push(ServiceOutput::IdleTimeoutFired);
-                        outputs.push(ServiceOutput::Deactivated { reason: ServiceDeactivationReason::IdleTimeout });
+                        outputs.push(ServiceOutput::Deactivated {
+                            reason: ServiceDeactivationReason::IdleTimeout,
+                        });
                         outputs.push(ServiceOutput::EndpointChanged);
                         self.state = ServiceState::Idle;
                     }
                 }
             }
             ServiceInput::ForceDeactivate => {
-                if let ServiceState::Active {
-                    ref idle_timer,
-                    ..
-                } = self.state
-                {
+                if let ServiceState::Active { ref idle_timer, .. } = self.state {
                     if let Some(tk) = idle_timer.clone() {
                         outputs.push(ServiceOutput::TimerCancel(tk));
                     }
-                    outputs.push(ServiceOutput::Deactivated { reason: ServiceDeactivationReason::ForceDeactivate });
+                    outputs.push(ServiceOutput::Deactivated {
+                        reason: ServiceDeactivationReason::ForceDeactivate,
+                    });
                     outputs.push(ServiceOutput::EndpointChanged);
                     if self.has_activation {
                         self.state = ServiceState::Idle;

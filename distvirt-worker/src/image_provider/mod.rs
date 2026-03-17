@@ -1,7 +1,7 @@
 pub(crate) mod containerd;
+pub mod containerd_overlayfs;
 pub(crate) mod docker_config;
 pub(crate) mod image;
-pub mod containerd_overlayfs;
 pub mod rootfs_dir;
 pub mod stub;
 
@@ -40,5 +40,8 @@ impl PreparedArtifact {
 /// Implementations interpret `image_ref` according to their backend
 /// (e.g. a directory path, an OCI image reference, etc).
 pub trait ImageProvider: Send + Sync {
-    fn prepare(&self, image_ref: &str) -> impl Future<Output = anyhow::Result<PreparedArtifact>> + Send;
+    fn prepare(
+        &self,
+        image_ref: &str,
+    ) -> impl Future<Output = anyhow::Result<PreparedArtifact>> + Send;
 }

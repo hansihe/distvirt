@@ -4,7 +4,7 @@
 //! `[u32 LE length][capnp message bytes]`. Log streams use the same framing
 //! for the initial [`LogStreamHeader`](crate::LogStreamHeader), then raw bytes.
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use capnp::message::{self, ReaderOptions};
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -40,18 +40,16 @@ async fn recv_capnp_msg<R: AsyncReadExt + Unpin>(
         .context("read length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > MAX_MESSAGE_SIZE {
-        bail!("message too large: {} bytes (max {})", len, MAX_MESSAGE_SIZE);
+        bail!(
+            "message too large: {} bytes (max {})",
+            len,
+            MAX_MESSAGE_SIZE
+        );
     }
     let mut buf = vec![0u8; len];
-    reader
-        .read_exact(&mut buf)
-        .await
-        .context("read payload")?;
-    let msg = capnp::serialize::read_message(
-        &mut buf.as_slice(),
-        ReaderOptions::new(),
-    )
-    .context("deserialize capnp message")?;
+    reader.read_exact(&mut buf).await.context("read payload")?;
+    let msg = capnp::serialize::read_message(&mut buf.as_slice(), ReaderOptions::new())
+        .context("deserialize capnp message")?;
     Ok(msg)
 }
 

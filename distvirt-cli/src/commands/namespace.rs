@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use distvirt_client_protocol::*;
 
 use crate::client::{self, Client};
@@ -16,7 +16,9 @@ fn find_default_file() -> anyhow::Result<std::path::PathBuf> {
             return Ok(p);
         }
     }
-    bail!("no spec file found (looked for distvirt.yaml, distvirt.yml, docker-compose.yml). Use -f to specify a file.")
+    bail!(
+        "no spec file found (looked for distvirt.yaml, distvirt.yml, docker-compose.yml). Use -f to specify a file."
+    )
 }
 
 /// Parse a spec file (native or compose) and return (optional namespace_id, NamespaceSpec).
@@ -191,11 +193,7 @@ pub async fn deactivate(mut client: Client, target: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub async fn clone_namespace(
-    mut client: Client,
-    source: &str,
-    target: &str,
-) -> anyhow::Result<()> {
+pub async fn clone_namespace(mut client: Client, source: &str, target: &str) -> anyhow::Result<()> {
     client
         .clone_namespace(CloneNamespaceRequest {
             source_namespace_id: source.to_string(),

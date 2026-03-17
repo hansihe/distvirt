@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::core::GlobalWorkerId;
 use crate::sm_new::PodId;
-use crate::task::scheduler::{select_worker, PlacementTable, WorkerCandidate};
+use crate::task::scheduler::{PlacementTable, WorkerCandidate, select_worker};
 use crate::types::NamespaceId;
 
 use super::types::SchedulerCoreInput;
@@ -61,8 +61,12 @@ impl SchedulerCore {
                         worker_id,
                     }]
                 } else {
-                    self.pending
-                        .insert(key, PendingEntry { proto_resume_artifact });
+                    self.pending.insert(
+                        key,
+                        PendingEntry {
+                            proto_resume_artifact,
+                        },
+                    );
                     vec![]
                 }
             }

@@ -971,7 +971,11 @@ impl fmt::Display for TraceSummary {
             parts.push(format!(
                 "{} invariant violation{}",
                 self.invariant_violations,
-                if self.invariant_violations != 1 { "s" } else { "" }
+                if self.invariant_violations != 1 {
+                    "s"
+                } else {
+                    ""
+                }
             ));
         }
         if parts.is_empty() {
@@ -1015,7 +1019,11 @@ pub fn write_trace_tree(
             TraceEvent::PropagateEnd { rounds } => {
                 depth = depth.saturating_sub(1);
                 let indent = "  ".repeat(depth);
-                writeln!(w, "{}{}=== complete ({} rounds) ===", prefix, indent, rounds)?;
+                writeln!(
+                    w,
+                    "{}{}=== complete ({} rounds) ===",
+                    prefix, indent, rounds
+                )?;
             }
             TraceEvent::RoundStart { depth: d } => {
                 writeln!(w, "{}{}Round {}:", prefix, indent, d)?;
@@ -1030,7 +1038,11 @@ pub fn write_trace_tree(
                 input,
                 value,
             } => {
-                writeln!(w, "{}{}deliver {}({}) <- {}({})", prefix, indent, node, id, input, value)?;
+                writeln!(
+                    w,
+                    "{}{}deliver {}({}) <- {}({})",
+                    prefix, indent, node, id, input, value
+                )?;
             }
             TraceEvent::InputSuppressed { node, id, input } => {
                 writeln!(

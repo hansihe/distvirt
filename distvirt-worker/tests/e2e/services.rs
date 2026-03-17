@@ -4,8 +4,8 @@ use std::time::Duration;
 use futures_lite::io::AsyncReadExt;
 
 use distvirt_worker_protocol::{
-    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
-    EndpointPodBackend, EndpointSpec, RegistryEntry, ServicePolicy, WorkerCommand, WorkerEvent,
+    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
+    EndpointSpec, RegistryEntry, ServicePolicy, WorkerCommand, WorkerEvent,
 };
 
 use super::common::*;
@@ -37,7 +37,13 @@ async fn test_registry_sync() -> anyhow::Result<()> {
     .await?;
 
     // Launch a pod that resolves the name via the gateway DNS
-    register_pod_endpoint(&mut conn, "ns-dns", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-dns",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-dns".into(),
@@ -130,7 +136,13 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     .await?;
 
     // Launch a pod that sends a TCP SYN to the service IP
-    register_pod_endpoint(&mut conn, "ns-tcp-act", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-tcp-act",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-tcp-act".into(),
@@ -143,10 +155,14 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "trigger\n".into(),
-                    "--timeout".into(), "5".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "trigger\n".into(),
+                    "--timeout".into(),
+                    "5".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -165,7 +181,13 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     // Note: ServiceBackendNeed may arrive before PodRunning because the SYN
     // is sent as soon as the guest network is up, so we must wait for it first.
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::ServiceBackendNeed { need: BackendNeed::Traffic, .. })
+        matches!(
+            e,
+            WorkerEvent::ServiceBackendNeed {
+                need: BackendNeed::Traffic,
+                ..
+            }
+        )
     })
     .await?;
 
@@ -226,7 +248,13 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     // Launch backend pod that listens on port 80 at the service VIP.
-    register_pod_endpoint(&mut conn, "ns-svc-fwd", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-svc-fwd",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-fwd".into(),
@@ -239,10 +267,14 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "recv".into(),
-                    "--port".into(), "80".into(),
-                    "--expected".into(), "hello-service\n".into(),
-                    "--response".into(), "ok".into(),
-                    "--timeout".into(), "30".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--expected".into(),
+                    "hello-service\n".into(),
+                    "--response".into(),
+                    "ok".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -258,18 +290,17 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     // Wait for backend pod running
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-backend")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-backend"),
+    )
     .await?;
 
     // Accept the log stream for the backend pod
-    let (_header, mut log_stream) = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        conn.accept_log_stream(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
+    let (_header, mut log_stream) = tokio::time::timeout(EVENT_TIMEOUT, conn.accept_log_stream())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
 
     // Set the backend and mark service ready via EndpointUpdate
     conn.send_command(&WorkerCommand::EndpointUpdate {
@@ -295,7 +326,13 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     // Launch client pod that sends data to the service VIP
-    register_pod_endpoint(&mut conn, "ns-svc-fwd", &test_pod_network_config_2(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-svc-fwd",
+        &test_pod_network_config_2(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-fwd".into(),
@@ -308,10 +345,14 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "hello-service\n".into(),
-                    "--timeout".into(), "30".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "hello-service\n".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -327,9 +368,11 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     // Wait for backend pod to exit — test-containers recv exits 0 on data match
-    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend")
-    })
+    let event = recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend"),
+    )
     .await?;
 
     // Drain the backend log stream (for debug output)
@@ -403,7 +446,13 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     // Launch backend pod that listens on port 80 at the service VIP.
-    register_pod_endpoint(&mut conn, "ns-svc-buf", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-svc-buf",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-buf".into(),
@@ -416,10 +465,14 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "recv".into(),
-                    "--port".into(), "80".into(),
-                    "--expected".into(), "hello-buffered\n".into(),
-                    "--response".into(), "ok".into(),
-                    "--timeout".into(), "30".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--expected".into(),
+                    "hello-buffered\n".into(),
+                    "--response".into(),
+                    "ok".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -435,21 +488,26 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     // Wait for backend pod running
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-backend")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-backend"),
+    )
     .await?;
 
     // Accept backend log stream
-    let (_header, mut log_stream) = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        conn.accept_log_stream(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
+    let (_header, mut log_stream) = tokio::time::timeout(EVENT_TIMEOUT, conn.accept_log_stream())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
 
     // Launch client pod BEFORE setting backend — traffic will be buffered
-    register_pod_endpoint(&mut conn, "ns-svc-buf", &test_pod_network_config_2(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-svc-buf",
+        &test_pod_network_config_2(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-buf".into(),
@@ -462,10 +520,14 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "hello-buffered\n".into(),
-                    "--timeout".into(), "30".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "hello-buffered\n".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -482,7 +544,13 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
 
     // Wait for the TCP activator to signal backend need (SYN was buffered)
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::ServiceBackendNeed { need: BackendNeed::Traffic, .. })
+        matches!(
+            e,
+            WorkerEvent::ServiceBackendNeed {
+                need: BackendNeed::Traffic,
+                ..
+            }
+        )
     })
     .await?;
 
@@ -514,9 +582,11 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     // Wait for backend pod to exit — test-containers recv exits 0 on data match
-    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend")
-    })
+    let event = recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend"),
+    )
     .await?;
 
     // Drain the backend log stream (for debug output)

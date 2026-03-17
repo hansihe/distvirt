@@ -89,11 +89,7 @@ impl Orchestrator {
         out: &mut OrchestratorOutput,
     ) {
         if let Some(ws) = self.workers.get_mut(&worker_id) {
-            ws.psi = Some(WorkerPsi {
-                cpu,
-                memory,
-                io,
-            });
+            ws.psi = Some(WorkerPsi { cpu, memory, io });
         }
         self.recompute_worker_pressure(&worker_id);
         self.schedule_waiting_pods(out);
@@ -107,7 +103,12 @@ impl Orchestrator {
     ) {
         if let Some(ws) = self.workers.get_mut(&worker_id) {
             for new_pool in &pools {
-                if let Some(existing) = ws.capabilities.pools.iter_mut().find(|p| p.pool_id == new_pool.pool_id) {
+                if let Some(existing) = ws
+                    .capabilities
+                    .pools
+                    .iter_mut()
+                    .find(|p| p.pool_id == new_pool.pool_id)
+                {
                     existing.capacity_bytes = new_pool.capacity_bytes;
                     existing.available_bytes = new_pool.available_bytes;
                 }

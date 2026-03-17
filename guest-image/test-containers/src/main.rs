@@ -91,10 +91,29 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Command::Send { host, port, data, timeout } => cmd_send(&host, port, &data, timeout),
-        Command::Recv { port, expected, response, timeout } => cmd_recv(port, &expected, &response, timeout),
-        Command::Serve { port, response, max_connections, timeout } => cmd_serve(port, &response, max_connections, timeout),
-        Command::MemStress { target_mib, step_mib, interval_ms } => cmd_mem_stress(target_mib, step_mib, interval_ms),
+        Command::Send {
+            host,
+            port,
+            data,
+            timeout,
+        } => cmd_send(&host, port, &data, timeout),
+        Command::Recv {
+            port,
+            expected,
+            response,
+            timeout,
+        } => cmd_recv(port, &expected, &response, timeout),
+        Command::Serve {
+            port,
+            response,
+            max_connections,
+            timeout,
+        } => cmd_serve(port, &response, max_connections, timeout),
+        Command::MemStress {
+            target_mib,
+            step_mib,
+            interval_ms,
+        } => cmd_mem_stress(target_mib, step_mib, interval_ms),
         Command::Sleep => cmd_sleep(),
         Command::Echo { args } => cmd_echo(&args),
         Command::ExitCode { code } => process::exit(code),

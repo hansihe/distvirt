@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use tokio::io::unix::AsyncFd;
 
 const TUNSETIFF: libc::c_ulong = 0x400454ca;
@@ -41,8 +41,7 @@ impl TunDevice {
             _pad: [0u8; 22],
         };
 
-        let ret =
-            unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, &mut ifr as *mut Ifreq) };
+        let ret = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, &mut ifr as *mut Ifreq) };
         if ret < 0 {
             return Err(io::Error::last_os_error()).context("TUNSETIFF ioctl");
         }

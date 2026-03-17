@@ -32,15 +32,15 @@ pub(crate) enum ClassifiedWorkerEvent {
 ///
 /// Pure function — no I/O, no state. The reader calls this and forwards the
 /// result to the shell's event channel.
-pub(crate) fn classify(
-    worker_id: GlobalWorkerId,
-    event: WorkerEvent,
-) -> ClassifiedWorkerEvent {
+pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> ClassifiedWorkerEvent {
     match event {
         // =====================================================================
         // Namespace-scoped events
         // =====================================================================
-        WorkerEvent::PodRunning { namespace_id, pod_id } => ns_event(
+        WorkerEvent::PodRunning {
+            namespace_id,
+            pod_id,
+        } => ns_event(
             &namespace_id,
             worker_id,
             WorkerNamespaceEventKind::PodRunning { pod_id },

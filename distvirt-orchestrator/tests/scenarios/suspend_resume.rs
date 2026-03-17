@@ -23,7 +23,9 @@ fn test_resume_from_suspended() {
     h.activate_service("ns", "web-svc");
 
     // Verify ResumePod was sent (not LaunchPod after the first one)
-    h.assert_worker_command_count(&w1, "ResumePod", 1, |c| matches!(c, WorkerCommand::ResumePod { .. }));
+    h.assert_worker_command_count(&w1, "ResumePod", 1, |c| {
+        matches!(c, WorkerCommand::ResumePod { .. })
+    });
 }
 
 /// Use suspend_hang handler. Activate → run → idle → suspending → advance past SUSPEND_TIMEOUT.
@@ -97,8 +99,12 @@ fn test_activation_no_suspend_cold_start() {
     h.activate_service("ns", "web-svc");
 
     // Verify LaunchPod was used both times (not ResumePod)
-    h.assert_worker_command_count(&w1, "LaunchPod", 2, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
-    h.assert_worker_command_count(&w1, "ResumePod", 0, |c| matches!(c, WorkerCommand::ResumePod { .. }));
+    h.assert_worker_command_count(&w1, "LaunchPod", 2, |c| {
+        matches!(c, WorkerCommand::LaunchPod { .. })
+    });
+    h.assert_worker_command_count(&w1, "ResumePod", 0, |c| {
+        matches!(c, WorkerCommand::ResumePod { .. })
+    });
 }
 
 /// Test: Pod crashes (exits unexpectedly) while in the Suspending state.
@@ -107,9 +113,7 @@ fn test_pod_exit_during_suspend() {
     let mut h = TestHarness::new();
 
     // Worker with suspend hang (no response to SuspendPod) + pool.
-    let w1 = h
-        .add_worker_with(MockWorkerConfig::with_suspend_hang().add_pool())
-        ;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_suspend_hang().add_pool());
     h.converge();
 
     let spec = activation_spec(Duration::from_secs(30));
@@ -124,7 +128,9 @@ fn test_pod_exit_during_suspend() {
     h.assert_workload_suspending("ns1", "web");
 
     // Get the pod_id from the workload state so we can inject the right event.
-    let pod_id = h.workload_proto_pod_id("ns1", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns1", "web")
+        .expect("expected pod_id");
 
     // Pod crashes while suspending: inject PodFailed.
     h.worker(&w1).send_event(WorkerEvent::PodFailed {
@@ -150,9 +156,7 @@ fn test_pod_exit_during_suspend() {
 fn test_pod_exited_during_suspend() {
     let mut h = TestHarness::new();
 
-    let w1 = h
-        .add_worker_with(MockWorkerConfig::with_suspend_hang().add_pool())
-        ;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_suspend_hang().add_pool());
     h.converge();
 
     let spec = activation_spec(Duration::from_secs(30));
@@ -165,7 +169,9 @@ fn test_pod_exited_during_suspend() {
     h.advance_past_idle_timeout("ns1", "web-svc");
     h.assert_workload_suspending("ns1", "web");
 
-    let pod_id = h.workload_proto_pod_id("ns1", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns1", "web")
+        .expect("expected pod_id");
 
     // Inject PodExited (exit_code: 1) while suspending.
     h.worker(&w1).send_event(WorkerEvent::PodExited {
@@ -263,7 +269,9 @@ fn test_spec_change_during_resume() {
     h.converge();
     h.assert_workload_resuming("ns", "web");
 
-    let pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "web")
+        .expect("expected pod_id");
 
     // Update spec with new image while resuming.
     let mut new_spec = activation_spec(timeout);
@@ -288,7 +296,9 @@ fn test_spec_change_during_resume() {
 
     // The Restart intent should have stopped the old pod and relaunched.
     h.assert_workload_running("ns", "web");
-    let new_pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
+    let new_pod_id = h
+        .workload_proto_pod_id("ns", "web")
+        .expect("expected pod_id");
     assert_ne!(
         new_pod_id, pod_id,
         "pod should have been replaced (stopped + relaunched) due to Restart intent"
@@ -298,7 +308,10 @@ fn test_spec_change_during_resume() {
     let commands = h.worker(&w1).commands();
     let stop_count = commands
         .iter()
-        .filter(|cmd| match cmd { distvirt_worker_protocol::WorkerCommand::StopPod { pod_id: pid, .. } => *pid == pod_id, _ => false })
+        .filter(|cmd| match cmd {
+            distvirt_worker_protocol::WorkerCommand::StopPod { pod_id: pid, .. } => *pid == pod_id,
+            _ => false,
+        })
         .count();
     assert!(
         stop_count >= 1,

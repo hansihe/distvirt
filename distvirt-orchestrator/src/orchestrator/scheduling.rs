@@ -21,17 +21,24 @@ impl Orchestrator {
             if let Some(worker_id) = self.select_worker_for_pod(&namespace_id) {
                 let pod_id = self.gen_pod_id();
                 if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
-                    let memory_mb = ns.spec.workloads.get(&req.workload_id)
+                    let memory_mb = ns
+                        .spec
+                        .workloads
+                        .get(&req.workload_id)
                         .and_then(|wl| wl.resources.as_ref())
                         .and_then(|r| r.limits.as_ref())
                         .map(|l| l.memory_mb)
                         .unwrap_or(DEFAULT_POD_MEMORY_MB);
-                    let launch_out = ns.step(NamespaceInput::LaunchPod {
-                        workload_id: req.workload_id,
-                        worker_id: worker_id.clone(),
-                        pod_id: pod_id.clone(),
-                    }, &mut self.placement_table);
-                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, memory_mb);
+                    let launch_out = ns.step(
+                        NamespaceInput::LaunchPod {
+                            workload_id: req.workload_id,
+                            worker_id: worker_id.clone(),
+                            pod_id: pod_id.clone(),
+                        },
+                        &mut self.placement_table,
+                    );
+                    self.lease_table
+                        .grant(pod_id, worker_id, LeaseIntent::PodLaunch, memory_mb);
                     // Recursively process outputs from LaunchPod (it won't emit more pod_requests).
                     out.merge_namespace(namespace_id.clone(), launch_out);
                 }
@@ -45,7 +52,8 @@ impl Orchestrator {
         for req in resume_requests {
             let pod_id = self.gen_pod_id();
             // Look up placement table to resolve worker_id for the artifact.
-            let worker_id = self.placement_table
+            let worker_id = self
+                .placement_table
                 .get(&req.artifact_id)
                 .map(|p| p.worker_id.clone());
             let worker_id = match worker_id {
@@ -53,21 +61,29 @@ impl Orchestrator {
                 None => continue,
             };
             if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
-                let memory_mb = ns.spec.workloads.get(&req.workload_id)
+                let memory_mb = ns
+                    .spec
+                    .workloads
+                    .get(&req.workload_id)
                     .and_then(|wl| wl.resources.as_ref())
                     .and_then(|r| r.limits.as_ref())
                     .map(|l| l.memory_mb)
                     .unwrap_or(DEFAULT_POD_MEMORY_MB);
-                let resume_out = ns.step(NamespaceInput::ResumePod {
-                    workload_id: req.workload_id,
-                    worker_id: worker_id.clone(),
-                    pod_id: pod_id.clone(),
-                    artifact_id: req.artifact_id.clone(),
-                }, &mut self.placement_table);
+                let resume_out = ns.step(
+                    NamespaceInput::ResumePod {
+                        workload_id: req.workload_id,
+                        worker_id: worker_id.clone(),
+                        pod_id: pod_id.clone(),
+                        artifact_id: req.artifact_id.clone(),
+                    },
+                    &mut self.placement_table,
+                );
                 self.lease_table.grant(
                     pod_id,
                     worker_id,
-                    LeaseIntent::PodResume { artifact_id: req.artifact_id },
+                    LeaseIntent::PodResume {
+                        artifact_id: req.artifact_id,
+                    },
                     memory_mb,
                 );
                 // Recursively process outputs from ResumePod.
@@ -116,17 +132,24 @@ impl Orchestrator {
             if let Some(worker_id) = self.select_worker_for_pod(&ns_id) {
                 let pod_id = self.gen_pod_id();
                 if let Some(ns) = self.namespaces.get_mut(&ns_id) {
-                    let memory_mb = ns.spec.workloads.get(&wl_id)
+                    let memory_mb = ns
+                        .spec
+                        .workloads
+                        .get(&wl_id)
                         .and_then(|wl| wl.resources.as_ref())
                         .and_then(|r| r.limits.as_ref())
                         .map(|l| l.memory_mb)
                         .unwrap_or(DEFAULT_POD_MEMORY_MB);
-                    let launch_out = ns.step(NamespaceInput::LaunchPod {
-                        workload_id: wl_id,
-                        worker_id: worker_id.clone(),
-                        pod_id: pod_id.clone(),
-                    }, &mut self.placement_table);
-                    self.lease_table.grant(pod_id, worker_id, LeaseIntent::PodLaunch, memory_mb);
+                    let launch_out = ns.step(
+                        NamespaceInput::LaunchPod {
+                            workload_id: wl_id,
+                            worker_id: worker_id.clone(),
+                            pod_id: pod_id.clone(),
+                        },
+                        &mut self.placement_table,
+                    );
+                    self.lease_table
+                        .grant(pod_id, worker_id, LeaseIntent::PodLaunch, memory_mb);
                     out.merge_namespace(ns_id.clone(), launch_out);
                 }
             }
@@ -171,11 +194,12 @@ impl Orchestrator {
 
             // Check service backend_need for all services mapped to this workload.
             let has_active_traffic = ns.services.iter().any(|(_, svc)| {
-                svc.workload_id == *wl_id && matches!(
-                    svc.state,
-                    ServiceState::Active { backend_need, .. }
-                    if backend_need != BackendNeed::None
-                )
+                svc.workload_id == *wl_id
+                    && matches!(
+                        svc.state,
+                        ServiceState::Active { backend_need, .. }
+                        if backend_need != BackendNeed::None
+                    )
             });
 
             if has_active_traffic {
@@ -246,7 +270,9 @@ impl Orchestrator {
             })
             // Soft preferences: lowest pressure band first, then fewest pods, then WorkerId for determinism.
             .min_by_key(|(wid, _)| {
-                let band = self.workers.get(*wid)
+                let band = self
+                    .workers
+                    .get(*wid)
                     .map(|ws| ws.pressure_bands.max_band())
                     .unwrap_or(PressureBand::Critical);
                 (band, ns.pod_map.worker_pod_count(wid), (*wid).clone())
@@ -306,11 +332,14 @@ mod tests {
 
         for i in 0..worker_count {
             let wid = WorkerId(format!("w-{}", i));
-            ns.workers.insert(wid.clone(), NamespaceWorkerState {
-                fabric_status: FabricStatus::Active,
-                primary_pool_id: None,
-                pressure_band: PressureBand::Normal,
-            });
+            ns.workers.insert(
+                wid.clone(),
+                NamespaceWorkerState {
+                    fabric_status: FabricStatus::Active,
+                    primary_pool_id: None,
+                    pressure_band: PressureBand::Normal,
+                },
+            );
             orch.workers.insert(wid.clone(), test_worker_state(&ns_id));
             worker_ids.push(wid);
         }
@@ -336,7 +365,11 @@ mod tests {
         let (mut orch, ns_id, workers) = setup_orchestrator(2);
 
         // w-0: Elevated memory pressure
-        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::Elevated;
+        orch.workers
+            .get_mut(&workers[0])
+            .unwrap()
+            .pressure_bands
+            .memory = PressureBand::Elevated;
         // w-1: Normal (default)
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
@@ -348,7 +381,11 @@ mod tests {
         let (mut orch, ns_id, workers) = setup_orchestrator(2);
 
         // w-0: High memory pressure
-        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::High;
+        orch.workers
+            .get_mut(&workers[0])
+            .unwrap()
+            .pressure_bands
+            .memory = PressureBand::High;
         // w-1: Normal
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
@@ -360,11 +397,18 @@ mod tests {
         let (mut orch, ns_id, workers) = setup_orchestrator(2);
 
         // w-0: Critical storage pressure
-        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.storage = PressureBand::Critical;
+        orch.workers
+            .get_mut(&workers[0])
+            .unwrap()
+            .pressure_bands
+            .storage = PressureBand::Critical;
         // w-1: Normal
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
-        assert_eq!(selected, workers[1], "should exclude Critical pressure worker");
+        assert_eq!(
+            selected, workers[1],
+            "should exclude Critical pressure worker"
+        );
     }
 
     #[test]
@@ -372,11 +416,22 @@ mod tests {
         let (mut orch, ns_id, workers) = setup_orchestrator(2);
 
         // Both workers at High pressure
-        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::High;
-        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.compute = PressureBand::Critical;
+        orch.workers
+            .get_mut(&workers[0])
+            .unwrap()
+            .pressure_bands
+            .memory = PressureBand::High;
+        orch.workers
+            .get_mut(&workers[1])
+            .unwrap()
+            .pressure_bands
+            .compute = PressureBand::Critical;
 
         let selected = orch.select_worker_for_pod(&ns_id);
-        assert!(selected.is_none(), "should return None when all workers are at High+ pressure");
+        assert!(
+            selected.is_none(),
+            "should return None when all workers are at High+ pressure"
+        );
     }
 
     #[test]
@@ -384,11 +439,22 @@ mod tests {
         let (mut orch, ns_id, workers) = setup_orchestrator(2);
 
         // w-0: High (excluded), w-1: Elevated (allowed)
-        orch.workers.get_mut(&workers[0]).unwrap().pressure_bands.memory = PressureBand::High;
-        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.memory = PressureBand::Elevated;
+        orch.workers
+            .get_mut(&workers[0])
+            .unwrap()
+            .pressure_bands
+            .memory = PressureBand::High;
+        orch.workers
+            .get_mut(&workers[1])
+            .unwrap()
+            .pressure_bands
+            .memory = PressureBand::Elevated;
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
-        assert_eq!(selected, workers[1], "Elevated worker should be selected when High is excluded");
+        assert_eq!(
+            selected, workers[1],
+            "Elevated worker should be selected when High is excluded"
+        );
     }
 
     #[test]
@@ -401,7 +467,10 @@ mod tests {
         insert_pods(&mut ns.pod_map, 1, "b", &workers[1]);
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
-        assert_eq!(selected, workers[1], "should prefer worker with fewer pods at same pressure");
+        assert_eq!(
+            selected, workers[1],
+            "should prefer worker with fewer pods at same pressure"
+        );
     }
 
     #[test]
@@ -412,10 +481,17 @@ mod tests {
         // w-1: Elevated pressure, 0 pods
         let ns = orch.namespaces.get_mut(&ns_id).unwrap();
         insert_pods(&mut ns.pod_map, 5, "a", &workers[0]);
-        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.memory = PressureBand::Elevated;
+        orch.workers
+            .get_mut(&workers[1])
+            .unwrap()
+            .pressure_bands
+            .memory = PressureBand::Elevated;
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
-        assert_eq!(selected, workers[0], "should prefer Normal worker even with more pods over Elevated");
+        assert_eq!(
+            selected, workers[0],
+            "should prefer Normal worker even with more pods over Elevated"
+        );
     }
 
     #[test]
@@ -435,13 +511,17 @@ mod tests {
         let (mut orch, ns_id, workers) = setup_orchestrator(2);
 
         // w-0: draining
-        orch.workers.get_mut(&workers[0]).unwrap().conditions.insert(
-            "draining".to_string(),
-            WorkerCondition {
-                active: true,
-                message: "draining".to_string(),
-            },
-        );
+        orch.workers
+            .get_mut(&workers[0])
+            .unwrap()
+            .conditions
+            .insert(
+                "draining".to_string(),
+                WorkerCondition {
+                    active: true,
+                    message: "draining".to_string(),
+                },
+            );
         // w-1: normal
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
@@ -463,7 +543,10 @@ mod tests {
         }
 
         let selected = orch.select_worker_for_pod(&ns_id);
-        assert!(selected.is_none(), "should return None when all workers are draining");
+        assert!(
+            selected.is_none(),
+            "should return None when all workers are draining"
+        );
     }
 
     #[test]
@@ -472,9 +555,16 @@ mod tests {
 
         // w-0: Normal on all dimensions
         // w-1: Normal memory but High on storage -> max_band is High -> excluded
-        orch.workers.get_mut(&workers[1]).unwrap().pressure_bands.storage = PressureBand::High;
+        orch.workers
+            .get_mut(&workers[1])
+            .unwrap()
+            .pressure_bands
+            .storage = PressureBand::High;
 
         let selected = orch.select_worker_for_pod(&ns_id).unwrap();
-        assert_eq!(selected, workers[0], "High on any dimension should exclude the worker");
+        assert_eq!(
+            selected, workers[0],
+            "High on any dimension should exclude the worker"
+        );
     }
 }

@@ -16,8 +16,8 @@
 
 mod client;
 mod events;
-mod orchestrator_io;
 mod namespace_io;
+mod orchestrator_io;
 mod specs;
 mod states;
 
@@ -33,8 +33,8 @@ pub use distvirt_worker_protocol::{
 // Re-export all submodule types.
 pub use client::*;
 pub use events::*;
-pub use orchestrator_io::*;
 pub use namespace_io::*;
+pub use orchestrator_io::*;
 pub use specs::*;
 pub use states::*;
 
@@ -52,11 +52,24 @@ pub struct ClientId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TimerKey {
-    IdleTimeout { service_id: ServiceId },
-    LaunchTimeout { workload_id: WorkloadId, pod_id: PodId },
-    SuspendTimeout { workload_id: WorkloadId, pod_id: PodId },
-    ResumeTimeout { workload_id: WorkloadId, pod_id: PodId },
-    RetryBackoffTimeout { workload_id: WorkloadId },
+    IdleTimeout {
+        service_id: ServiceId,
+    },
+    LaunchTimeout {
+        workload_id: WorkloadId,
+        pod_id: PodId,
+    },
+    SuspendTimeout {
+        workload_id: WorkloadId,
+        pod_id: PodId,
+    },
+    ResumeTimeout {
+        workload_id: WorkloadId,
+        pod_id: PodId,
+    },
+    RetryBackoffTimeout {
+        workload_id: WorkloadId,
+    },
 }
 
 // --- Pod Request ---

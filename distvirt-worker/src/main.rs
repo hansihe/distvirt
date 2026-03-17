@@ -61,7 +61,13 @@ async fn main() -> anyhow::Result<()> {
     let stream = tokio::net::TcpStream::connect(&cli.orchestrator).await?;
     let conn = WorkerConnection::accept(stream).await?;
 
-    let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs, distvirt_worker::HostResourceMonitor>::new(
+    let worker = distvirt_worker::worker::Worker::<
+        _,
+        _,
+        _,
+        distvirt_worker::TokioFs,
+        distvirt_worker::HostResourceMonitor,
+    >::new(
         cli.kernel,
         cli.rootfs_image,
         vmm,

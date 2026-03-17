@@ -21,7 +21,10 @@ use distvirt_worker_protocol::{ArtifactId, PoolId, WorkerEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use zerocopy::{FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, network_endian::{U16, U64}};
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned,
+    network_endian::{U16, U64},
+};
 
 use super::supervisor::send_event;
 
@@ -109,21 +112,21 @@ async fn handle_incoming_transfer(
     stream.read_exact(&mut str_buf).await?;
 
     let mut offset = 0;
-    let source_artifact_id = ArtifactId::from(
-        std::str::from_utf8(&str_buf[offset..offset + hdr.source_artifact_id_len.get() as usize])?,
-    );
+    let source_artifact_id = ArtifactId::from(std::str::from_utf8(
+        &str_buf[offset..offset + hdr.source_artifact_id_len.get() as usize],
+    )?);
     offset += hdr.source_artifact_id_len.get() as usize;
-    let source_pool_id = PoolId::from(
-        std::str::from_utf8(&str_buf[offset..offset + hdr.source_pool_id_len.get() as usize])?,
-    );
+    let source_pool_id = PoolId::from(std::str::from_utf8(
+        &str_buf[offset..offset + hdr.source_pool_id_len.get() as usize],
+    )?);
     offset += hdr.source_pool_id_len.get() as usize;
-    let dest_artifact_id = ArtifactId::from(
-        std::str::from_utf8(&str_buf[offset..offset + hdr.dest_artifact_id_len.get() as usize])?,
-    );
+    let dest_artifact_id = ArtifactId::from(std::str::from_utf8(
+        &str_buf[offset..offset + hdr.dest_artifact_id_len.get() as usize],
+    )?);
     offset += hdr.dest_artifact_id_len.get() as usize;
-    let dest_pool_id = PoolId::from(
-        std::str::from_utf8(&str_buf[offset..offset + hdr.dest_pool_id_len.get() as usize])?,
-    );
+    let dest_pool_id = PoolId::from(std::str::from_utf8(
+        &str_buf[offset..offset + hdr.dest_pool_id_len.get() as usize],
+    )?);
 
     log::info!(
         "artifact transfer: receiving transfer_id={} {}:{} -> {}:{}",
@@ -171,7 +174,11 @@ async fn handle_incoming_transfer(
     let size_bytes = match dir_size(&dest_dir).await {
         Ok(size) => size,
         Err(e) => {
-            log::warn!("artifact transfer: failed to calculate size for {}: {:#}", dest_artifact_id, e);
+            log::warn!(
+                "artifact transfer: failed to calculate size for {}: {:#}",
+                dest_artifact_id,
+                e
+            );
             0
         }
     };
@@ -228,20 +235,26 @@ pub async fn send_artifact(
     stream.write_all(hdr.as_bytes()).await?;
 
     // Write variable-length strings.
-    stream.write_all(source_artifact_id.as_ref().as_bytes()).await?;
+    stream
+        .write_all(source_artifact_id.as_ref().as_bytes())
+        .await?;
     stream.write_all(source_pool_id.as_ref().as_bytes()).await?;
-    stream.write_all(dest_artifact_id.as_ref().as_bytes()).await?;
+    stream
+        .write_all(dest_artifact_id.as_ref().as_bytes())
+        .await?;
     stream.write_all(dest_pool_id.as_ref().as_bytes()).await?;
 
     // Stream tar archive using spawn_blocking + SyncIoBridge.
     let source_dir = source_dir.to_path_buf();
     let bridge = tokio_util::io::SyncIoBridge::new(stream);
-    let bridge = tokio::task::spawn_blocking(move || -> anyhow::Result<tokio_util::io::SyncIoBridge<TcpStream>> {
-        let mut builder = tar::Builder::new(bridge);
-        builder.append_dir_all(".", &source_dir)?;
-        let bridge = builder.into_inner()?;
-        Ok(bridge)
-    })
+    let bridge = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<tokio_util::io::SyncIoBridge<TcpStream>> {
+            let mut builder = tar::Builder::new(bridge);
+            builder.append_dir_all(".", &source_dir)?;
+            let bridge = builder.into_inner()?;
+            Ok(bridge)
+        },
+    )
     .await??;
 
     // Recover the TcpStream and shut down the write half.

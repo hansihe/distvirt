@@ -27,9 +27,9 @@ use std::sync::{Arc, RwLock};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 
+use super::port::ChannelPort;
 use crate::packet::{FABRIC_HDR_SZ, complete_checksum};
 use crate::task_handle::TaskHandle;
-use super::port::ChannelPort;
 
 /// Noise protocol pattern string.
 const NOISE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
@@ -129,8 +129,12 @@ impl TunnelTransport {
 
         let encryption = if encrypted {
             let builder = noise_builder();
-            let keypair = builder.generate_keypair()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise keypair generation failed: {}", e)))?;
+            let keypair = builder.generate_keypair().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("noise keypair generation failed: {}", e),
+                )
+            })?;
             Some(EncryptionConfig { keypair })
         } else {
             None
@@ -158,7 +162,9 @@ impl TunnelTransport {
     /// The static public key for this transport (32 bytes), or `None` if
     /// encryption is disabled.
     pub fn public_key(&self) -> Option<&[u8]> {
-        self.encryption.as_ref().map(|e| e.keypair.public.as_slice())
+        self.encryption
+            .as_ref()
+            .map(|e| e.keypair.public.as_slice())
     }
 
     /// Register a remote worker's endpoint address.
@@ -176,17 +182,33 @@ impl TunnelTransport {
             (Some(enc), Some(remote_pub)) => {
                 let builder = noise_builder()
                     .local_private_key(&enc.keypair.private)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: local_private_key failed: {}", e)))?
+                    .map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("noise: local_private_key failed: {}", e),
+                        )
+                    })?
                     .remote_public_key(remote_pub)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: remote_public_key failed: {}", e)))?;
+                    .map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("noise: remote_public_key failed: {}", e),
+                        )
+                    })?;
                 let hs = if is_initiator {
-                    builder
-                        .build_initiator()
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: build_initiator failed: {}", e)))?
+                    builder.build_initiator().map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("noise: build_initiator failed: {}", e),
+                        )
+                    })?
                 } else {
-                    builder
-                        .build_responder()
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("noise: build_responder failed: {}", e)))?
+                    builder.build_responder().map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("noise: build_responder failed: {}", e),
+                        )
+                    })?
                 };
                 Some(NoiseSession::Handshaking(hs))
             }
@@ -196,10 +218,16 @@ impl TunnelTransport {
         {
             let mut st = self.state.write().expect("poisoned");
             st.addr_to_worker.insert(endpoint, worker_id.clone());
-            st.peers.insert(worker_id.clone(), PeerState { endpoint, noise });
+            st.peers
+                .insert(worker_id.clone(), PeerState { endpoint, noise });
         }
 
-        log::info!("tunnel: added peer {} at {} (initiator={})", worker_id, endpoint, is_initiator);
+        log::info!(
+            "tunnel: added peer {} at {} (initiator={})",
+            worker_id,
+            endpoint,
+            is_initiator
+        );
 
         // If we're the initiator, send the first handshake message.
         if is_initiator && self.encryption.is_some() {
@@ -232,15 +260,12 @@ impl TunnelTransport {
     ) -> io::Result<(ChannelPort, TunnelPortHandle)> {
         let endpoint = {
             let st = self.state.read().expect("poisoned");
-            st.peers
-                .get(worker_id)
-                .map(|p| p.endpoint)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("unknown peer: {}", worker_id),
-                    )
-                })?
+            st.peers.get(worker_id).map(|p| p.endpoint).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("unknown peer: {}", worker_id),
+                )
+            })?
         };
 
         // Create a ChannelPort. The fabric writes to the port (fabric→adapter_rx),
@@ -312,7 +337,11 @@ impl TunnelTransport {
                     log::info!("tunnel: sent handshake message to {}", worker_id);
                 }
                 Err(e) => {
-                    log::error!("tunnel: handshake write_message error for {}: {}", worker_id, e);
+                    log::error!(
+                        "tunnel: handshake write_message error for {}: {}",
+                        worker_id,
+                        e
+                    );
                 }
             }
         }
@@ -372,7 +401,11 @@ async fn recv_loop(
                             log::info!("tunnel: processed handshake message from {}", worker_id);
                         }
                         Err(e) => {
-                            log::error!("tunnel: handshake read_message error from {}: {}", worker_id, e);
+                            log::error!(
+                                "tunnel: handshake read_message error from {}: {}",
+                                worker_id,
+                                e
+                            );
                             continue;
                         }
                     }
@@ -393,7 +426,11 @@ async fn recv_loop(
                                 log::info!("tunnel: sent handshake response to {}", worker_id);
                             }
                             Err(e) => {
-                                log::error!("tunnel: handshake write_message error for {}: {}", worker_id, e);
+                                log::error!(
+                                    "tunnel: handshake write_message error for {}: {}",
+                                    worker_id,
+                                    e
+                                );
                                 continue;
                             }
                         }
@@ -403,19 +440,29 @@ async fn recv_loop(
                     let finished = hs.is_handshake_finished();
                     if finished {
                         let Some(old) = peer.noise.take() else {
-                            log::error!("tunnel: handshake finished but noise state missing for {}", worker_id);
+                            log::error!(
+                                "tunnel: handshake finished but noise state missing for {}",
+                                worker_id
+                            );
                             continue;
                         };
                         if let NoiseSession::Handshaking(hs) = old {
                             match hs.into_transport_mode() {
                                 Ok(transport) => {
                                     peer.noise = Some(NoiseSession::Transport(transport));
-                                    log::info!("tunnel: handshake with {} complete, transport mode active", worker_id);
+                                    log::info!(
+                                        "tunnel: handshake with {} complete, transport mode active",
+                                        worker_id
+                                    );
                                     // Notify egress loops.
                                     let _ = handshake_done_tx.send_modify(|v| *v += 1);
                                 }
                                 Err(e) => {
-                                    log::error!("tunnel: into_transport_mode failed for {}: {}", worker_id, e);
+                                    log::error!(
+                                        "tunnel: into_transport_mode failed for {}: {}",
+                                        worker_id,
+                                        e
+                                    );
                                     // peer.noise is now None — peer is broken but recv loop survives
                                 }
                             }
@@ -513,7 +560,10 @@ async fn egress_loop(
                 return;
             }
         }
-        log::info!("tunnel: egress loop for segment {} encryption ready", segment_id);
+        log::info!(
+            "tunnel: egress loop for segment {} encryption ready",
+            segment_id
+        );
     }
 
     while let Some(mut frame) = adapter_rx.recv().await {
@@ -542,27 +592,34 @@ async fn egress_loop(
                         match ts.write_message(&frame, &mut encrypt_buf) {
                             Ok(n) => n,
                             Err(e) => {
-                                log::warn!("tunnel: encrypt error for segment {}: {}", segment_id, e);
+                                log::warn!(
+                                    "tunnel: encrypt error for segment {}: {}",
+                                    segment_id,
+                                    e
+                                );
                                 continue;
                             }
                         }
                     }
                     _ => {
-                        log::warn!("tunnel: peer {} not in transport mode, dropping frame", worker_id);
+                        log::warn!(
+                            "tunnel: peer {} not in transport mode, dropping frame",
+                            worker_id
+                        );
                         continue;
                     }
                 }
             };
 
-            if let Err(e) = socket.send_to(&encrypt_buf[..ciphertext_len], endpoint).await {
+            if let Err(e) = socket
+                .send_to(&encrypt_buf[..ciphertext_len], endpoint)
+                .await
+            {
                 log::warn!("tunnel: egress send to {} failed: {}", endpoint, e);
             }
         } else {
             if let Err(e) = socket.send_to(&frame, endpoint).await {
-                log::warn!(
-                    "tunnel: egress send to {} failed: {}",
-                    endpoint, e,
-                );
+                log::warn!("tunnel: egress send to {} failed: {}", endpoint, e,);
             }
         }
     }
@@ -573,14 +630,11 @@ async fn egress_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::with_fabric_header;
     use crate::packet::FabricPacket;
+    use crate::packet::with_fabric_header;
 
     /// Helper: build a minimal IPv4 fabric frame.
-    fn make_ipv4_frame(
-        src_ip: std::net::Ipv4Addr,
-        dst_ip: std::net::Ipv4Addr,
-    ) -> Vec<u8> {
+    fn make_ipv4_frame(src_ip: std::net::Ipv4Addr, dst_ip: std::net::Ipv4Addr) -> Vec<u8> {
         let mut ip_hdr = [0u8; 20];
         ip_hdr[0] = 0x45; // version=4, IHL=5
         ip_hdr[2..4].copy_from_slice(&20u16.to_be_bytes()); // total length
@@ -602,8 +656,12 @@ mod tests {
         let addr_a = transport_a.local_addr().unwrap();
         let addr_b = transport_b.local_addr().unwrap();
 
-        transport_a.add_peer("worker-b".into(), addr_b, None, false).unwrap();
-        transport_b.add_peer("worker-a".into(), addr_a, None, false).unwrap();
+        transport_a
+            .add_peer("worker-b".into(), addr_b, None, false)
+            .unwrap();
+        transport_b
+            .add_peer("worker-a".into(), addr_a, None, false)
+            .unwrap();
 
         let segment_id = 42;
 
@@ -660,8 +718,12 @@ mod tests {
         let addr_a = transport_a.local_addr().unwrap();
         let addr_b = transport_b.local_addr().unwrap();
 
-        transport_a.add_peer("worker-b".into(), addr_b, None, false).unwrap();
-        transport_b.add_peer("worker-a".into(), addr_a, None, false).unwrap();
+        transport_a
+            .add_peer("worker-b".into(), addr_b, None, false)
+            .unwrap();
+        transport_b
+            .add_peer("worker-a".into(), addr_a, None, false)
+            .unwrap();
 
         let (port_a_seg1, _h1) = transport_a.create_namespace_port("worker-b", 1).unwrap();
         let (port_a_seg2, _h2) = transport_a.create_namespace_port("worker-b", 2).unwrap();
@@ -719,7 +781,9 @@ mod tests {
         let addr = transport.local_addr().unwrap();
 
         // Register segment 10 only.
-        transport.add_peer("peer".into(), addr, None, false).unwrap();
+        transport
+            .add_peer("peer".into(), addr, None, false)
+            .unwrap();
         let (_port, _handle) = transport.create_namespace_port("peer", 10).unwrap();
 
         // Send a datagram with segment_id=99 directly to the socket.
@@ -766,8 +830,12 @@ mod tests {
         // Determine initiator by lexicographic key comparison.
         let a_initiates = pub_a < pub_b;
 
-        transport_a.add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates).unwrap();
-        transport_b.add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates).unwrap();
+        transport_a
+            .add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates)
+            .unwrap();
+        transport_b
+            .add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates)
+            .unwrap();
 
         // Give the handshake some time to complete.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -827,8 +895,12 @@ mod tests {
 
         let a_initiates = pub_a < pub_b;
 
-        transport_a.add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates).unwrap();
-        transport_b.add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates).unwrap();
+        transport_a
+            .add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates)
+            .unwrap();
+        transport_b
+            .add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates)
+            .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

@@ -72,9 +72,7 @@ async fn test_remove_workload_from_namespace() {
     let mut cluster = TestCluster::new();
     let _w1 = cluster.add_worker().await;
 
-    cluster
-        .create_namespace("ns", two_workload_spec())
-        .await;
+    cluster.create_namespace("ns", two_workload_spec()).await;
     cluster.converge().await;
     cluster.assert_workload_running("ns", "echo-a");
     cluster.assert_workload_running("ns", "echo-b");

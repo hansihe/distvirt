@@ -9,7 +9,7 @@ use futures::io::{AsyncRead, AsyncWriteExt};
 use crate::container::PipeFd;
 use crate::util::ReadPipeResult;
 use crate::vsock;
-use distvirt_guest_protocol::{GuestEvent, STREAM_STDOUT, STREAM_STDERR, encode_output_chunk};
+use distvirt_guest_protocol::{GuestEvent, STREAM_STDERR, STREAM_STDOUT, encode_output_chunk};
 
 // ---------------------------------------------------------------------------
 // Fill task — per-container lifetime, survives reconnects
@@ -100,11 +100,13 @@ async fn fill_loop(
         }
 
         let action = futures::future::select(
-            std::pin::pin!(futures::future::select(
-                std::pin::pin!(stdout_ready.map(|_| Action::Stdout)),
-                std::pin::pin!(stderr_ready.map(|_| Action::Stderr)),
-            )
-            .map(|either| either.factor_first().0)),
+            std::pin::pin!(
+                futures::future::select(
+                    std::pin::pin!(stdout_ready.map(|_| Action::Stdout)),
+                    std::pin::pin!(stderr_ready.map(|_| Action::Stderr)),
+                )
+                .map(|either| either.factor_first().0)
+            ),
             std::pin::pin!(exit.map(|r| match r {
                 Ok(()) => Action::ExitSignal,
                 Err(_) => Action::Disconnected,
@@ -277,29 +279,30 @@ pub async fn relay_stdin(mut yamux_stream: yamux::Stream, stdin_write_fd: OwnedF
 
     let mut buf = [0u8; 8192];
     loop {
-        let result = std::future::poll_fn(|cx| {
-            Pin::new(&mut yamux_stream).poll_read(cx, &mut buf)
-        })
-        .await;
+        let result =
+            std::future::poll_fn(|cx| Pin::new(&mut yamux_stream).poll_read(cx, &mut buf)).await;
         match result {
             Ok(0) => break, // EOF from host
             Ok(n) => {
                 let mut offset = 0;
                 while offset < n {
-                    match async_fd.write_with(|fd| {
-                        let written = unsafe {
-                            libc::write(
-                                fd.as_raw_fd(),
-                                buf[offset..n].as_ptr() as *const libc::c_void,
-                                n - offset,
-                            )
-                        };
-                        if written < 0 {
-                            Err(std::io::Error::last_os_error())
-                        } else {
-                            Ok(written as usize)
-                        }
-                    }).await {
+                    match async_fd
+                        .write_with(|fd| {
+                            let written = unsafe {
+                                libc::write(
+                                    fd.as_raw_fd(),
+                                    buf[offset..n].as_ptr() as *const libc::c_void,
+                                    n - offset,
+                                )
+                            };
+                            if written < 0 {
+                                Err(std::io::Error::last_os_error())
+                            } else {
+                                Ok(written as usize)
+                            }
+                        })
+                        .await
+                    {
                         Ok(written) => offset += written,
                         Err(e) => {
                             log::warn!("write to stdin pipe: {}", e);

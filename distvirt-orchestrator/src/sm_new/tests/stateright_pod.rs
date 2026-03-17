@@ -128,10 +128,7 @@ enum PodNewAction {
 // ============================================================================
 
 /// Deliver an input to the SM, apply effects to env state.
-fn apply_pod_input(
-    state: &PodNewModelState,
-    input: PodInput,
-) -> PodNewModelState {
+fn apply_pod_input(state: &PodNewModelState, input: PodInput) -> PodNewModelState {
     let mut next = state.clone();
     let mut alloc = SequentialIds::<NodeKind>::new();
     let pod_id = PodId(0);
@@ -171,7 +168,6 @@ impl Model for PodNewModel {
     type Action = PodNewAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        
         let sm = PodSm::new();
         vec![PodNewModelState {
             sm,
@@ -276,18 +272,12 @@ impl Model for PodNewModel {
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let next = match action {
             PodNewAction::AssignWorker => {
-                let mut s = apply_pod_input(
-                    state,
-                    PodInput::WorkerInput(Some(make_worker_info())),
-                );
+                let mut s = apply_pod_input(state, PodInput::WorkerInput(Some(make_worker_info())));
                 s.worker_env = WorkerEnv::Assigned;
                 s
             }
             PodNewAction::LoseWorker => {
-                let mut s = apply_pod_input(
-                    state,
-                    PodInput::WorkerInput(None),
-                );
+                let mut s = apply_pod_input(state, PodInput::WorkerInput(None));
                 s.worker_env = WorkerEnv::None;
                 s
             }
@@ -296,7 +286,9 @@ impl Model for PodNewModel {
                     state,
                     PodInput::OwnerInput(Some((WorkloadId(1), PodIntent::Want))),
                 );
-                s.owner_env = OwnerEnv::Owned { intent: PodIntent::Want };
+                s.owner_env = OwnerEnv::Owned {
+                    intent: PodIntent::Want,
+                };
                 s.was_ever_owned = true;
                 s
             }
@@ -305,71 +297,48 @@ impl Model for PodNewModel {
                     state,
                     PodInput::OwnerInput(Some((WorkloadId(1), PodIntent::Suspend))),
                 );
-                s.owner_env = OwnerEnv::Owned { intent: PodIntent::Suspend };
+                s.owner_env = OwnerEnv::Owned {
+                    intent: PodIntent::Suspend,
+                };
                 s.was_ever_owned = true;
                 s
             }
             PodNewAction::OwnerRemove => {
-                let mut s = apply_pod_input(
-                    state,
-                    PodInput::OwnerInput(None),
-                );
+                let mut s = apply_pod_input(state, PodInput::OwnerInput(None));
                 s.owner_env = OwnerEnv::None;
                 s
             }
             PodNewAction::NotifyRunning => {
-                apply_pod_input(
-                    state,
-                    PodInput::NotifyPodStatus(PodStatus::Running),
-                )
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Running))
             }
             PodNewAction::NotifyFailed => {
-                apply_pod_input(
-                    state,
-                    PodInput::NotifyPodStatus(PodStatus::Failed),
-                )
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Failed))
             }
             PodNewAction::NotifyFinished => {
-                apply_pod_input(
-                    state,
-                    PodInput::NotifyPodStatus(PodStatus::Finished),
-                )
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Finished))
             }
             PodNewAction::NotifySuspended => {
-                apply_pod_input(
-                    state,
-                    PodInput::NotifyPodSuspended(ArtifactId(1)),
-                )
+                apply_pod_input(state, PodInput::NotifyPodSuspended(ArtifactId(1)))
             }
             PodNewAction::LaunchTimeoutFired => {
-                let mut s = apply_pod_input(
-                    state,
-                    PodInput::PodTimerFired(PodTimerKey::LaunchTimeout),
-                );
+                let mut s =
+                    apply_pod_input(state, PodInput::PodTimerFired(PodTimerKey::LaunchTimeout));
                 s.timer_pending = false;
                 s.timer_key = None;
                 s
             }
             PodNewAction::SuspendTimeoutFired => {
-                let mut s = apply_pod_input(
-                    state,
-                    PodInput::PodTimerFired(PodTimerKey::SuspendTimeout),
-                );
+                let mut s =
+                    apply_pod_input(state, PodInput::PodTimerFired(PodTimerKey::SuspendTimeout));
                 s.timer_pending = false;
                 s.timer_key = None;
                 s
             }
             PodNewAction::NotifyPending => {
-                apply_pod_input(
-                    state,
-                    PodInput::NotifyPodStatus(PodStatus::Pending),
-                )
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Pending))
             }
             PodNewAction::NotifySuspending => {
-                apply_pod_input(
-                    state,
-                    PodInput::NotifyPodStatus(PodStatus::Suspending),
-                )
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Suspending))
             }
         };
 
@@ -383,20 +352,26 @@ impl Model for PodNewModel {
                 if state.sm.status.is_terminal() {
                     matches!(
                         state.sm.status,
-                        PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished | PodStatus::Displaced
+                        PodStatus::Suspended { .. }
+                            | PodStatus::Failed
+                            | PodStatus::Finished
+                            | PodStatus::Displaced
                     )
                 } else {
                     true
                 }
             }),
             // Safety: self-destruct only fires when terminal AND no owner.
-            Property::<Self>::always("self-destruct requires terminal + no owner", |_model, state| {
-                if state.self_destructed {
-                    state.sm.status.is_terminal() && state.sm.workload_id.is_none()
-                } else {
-                    true
-                }
-            }),
+            Property::<Self>::always(
+                "self-destruct requires terminal + no owner",
+                |_model, state| {
+                    if state.self_destructed {
+                        state.sm.status.is_terminal() && state.sm.workload_id.is_none()
+                    } else {
+                        true
+                    }
+                },
+            ),
             // Safety: timer is only pending when in Pending or Suspending state.
             Property::<Self>::always("timer consistent with status", |_model, state| {
                 if state.self_destructed {
@@ -454,9 +429,7 @@ impl Model for PodNewModel {
                 state.sm.status.is_terminal()
             }),
             // Reachability: can self-destruct.
-            Property::<Self>::sometimes("can self-destruct", |_model, state| {
-                state.self_destructed
-            }),
+            Property::<Self>::sometimes("can self-destruct", |_model, state| state.self_destructed),
         ]
     }
 }
@@ -484,7 +457,9 @@ impl Representative for PodNewModelState {
 
         // Normalize artifact_id in Suspended status and resume_artifact.
         if let PodStatus::Suspended { .. } = s.sm.status {
-            s.sm.status = PodStatus::Suspended { artifact_id: ArtifactId(0) };
+            s.sm.status = PodStatus::Suspended {
+                artifact_id: ArtifactId(0),
+            };
         }
         if let Some(_) = s.sm.resume_artifact {
             s.sm.resume_artifact = Some(ArtifactId(0));

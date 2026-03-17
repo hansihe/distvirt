@@ -1,27 +1,27 @@
 use std::env::consts;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use containerd_client as client;
-use containerd_client::services::v1::{
-    content_client::ContentClient, images_client::ImagesClient,
-    streaming_client::StreamingClient, transfer_client::TransferClient, GetImageRequest,
-    InfoRequest, ReadContentRequest, StreamInit, TransferOptions, TransferRequest,
-};
 use containerd_client::services::v1::snapshots::{
-    snapshots_client::SnapshotsClient, RemoveSnapshotRequest, ViewSnapshotRequest,
+    RemoveSnapshotRequest, ViewSnapshotRequest, snapshots_client::SnapshotsClient,
+};
+use containerd_client::services::v1::{
+    GetImageRequest, InfoRequest, ReadContentRequest, StreamInit, TransferOptions, TransferRequest,
+    content_client::ContentClient, images_client::ImagesClient, streaming_client::StreamingClient,
+    transfer_client::TransferClient,
 };
 use containerd_client::to_any;
+use containerd_client::types::Platform;
 use containerd_client::types::transfer::{
     AuthResponse, AuthType, ImageStore, OciRegistry, RegistryResolver, UnpackConfiguration,
 };
-use containerd_client::types::Platform;
 use containerd_client::with_namespace;
 use oci_spec::image::ImageConfiguration;
 use prost::Name;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 use tonic::Request;
+use tonic::transport::Channel;
 
 use super::docker_config;
 
@@ -79,8 +79,7 @@ pub async fn prepare_image(
     let config = read_image_config(&channel, namespace, image_ref).await?;
 
     // Step 3: Mount rootfs via snapshot view.
-    let (rootfs_path, snapshot_key) =
-        mount_rootfs(&channel, namespace, image_ref).await?;
+    let (rootfs_path, snapshot_key) = mount_rootfs(&channel, namespace, image_ref).await?;
 
     Ok(PreparedImage {
         config,
@@ -115,7 +114,8 @@ async fn pull_image(
     };
 
     // Look up registry credentials from docker config, if provided.
-    let credential = docker_config.and_then(|path| docker_config::lookup_credentials(path, image_ref));
+    let credential =
+        docker_config.and_then(|path| docker_config::lookup_credentials(path, image_ref));
 
     // Set up auth stream if we have credentials.
     let resolver = if let Some(cred) = credential {
@@ -185,18 +185,13 @@ async fn setup_auth_stream(
     let init = StreamInit {
         id: stream_id.to_string(),
     };
-    tx.send(to_any(&init))
-        .await
-        .context("sending StreamInit")?;
+    tx.send(to_any(&init)).await.context("sending StreamInit")?;
 
     let stream = ReceiverStream::new(rx);
     let mut req = Request::new(stream);
     let md = req.metadata_mut();
     md.insert("containerd-namespace", namespace.parse().unwrap());
-    let resp = streaming
-        .stream(req)
-        .await
-        .context("opening auth stream")?;
+    let resp = streaming.stream(req).await.context("opening auth stream")?;
 
     let mut inbound = resp.into_inner();
 
@@ -244,10 +239,7 @@ async fn read_image_config(
         .get(with_namespace!(req, namespace))
         .await
         .with_context(|| format!("getting image {}", image_ref))?;
-    let image = resp
-        .into_inner()
-        .image
-        .context("image record missing")?;
+    let image = resp.into_inner().image.context("image record missing")?;
     let target = image.target.context("image target descriptor missing")?;
 
     // Read the manifest/index from content store.
@@ -268,16 +260,12 @@ async fn read_image_config(
             .iter()
             .find(|m| {
                 m.platform().as_ref().is_some_and(|p| {
-                    p.os() == &oci_spec::image::Os::Linux
-                        && p.architecture().to_string() == arch
+                    p.os() == &oci_spec::image::Os::Linux && p.architecture().to_string() == arch
                 })
             })
             .context("no manifest found for linux/{arch}")?;
-        let manifest_digest = platform_manifest
-            .digest()
-            .to_string();
-        let inner_manifest_bytes =
-            read_content(&mut content, namespace, &manifest_digest).await?;
+        let manifest_digest = platform_manifest.digest().to_string();
+        let inner_manifest_bytes = read_content(&mut content, namespace, &manifest_digest).await?;
         let manifest: oci_spec::image::ImageManifest =
             serde_json::from_slice(&inner_manifest_bytes).context("parsing image manifest")?;
         manifest.config().digest().to_string()
@@ -298,12 +286,8 @@ async fn read_image_config(
         entrypoint: oci_config
             .and_then(|c| c.entrypoint().clone())
             .unwrap_or_default(),
-        cmd: oci_config
-            .and_then(|c| c.cmd().clone())
-            .unwrap_or_default(),
-        env: oci_config
-            .and_then(|c| c.env().clone())
-            .unwrap_or_default(),
+        cmd: oci_config.and_then(|c| c.cmd().clone()).unwrap_or_default(),
+        env: oci_config.and_then(|c| c.env().clone()).unwrap_or_default(),
         working_dir: oci_config
             .and_then(|c| c.working_dir().clone())
             .filter(|s| !s.is_empty()),
@@ -329,11 +313,7 @@ async fn read_content(
 
     let mut data = Vec::new();
     let mut stream = resp.into_inner();
-    while let Some(chunk) = stream
-        .message()
-        .await
-        .context("reading content stream")?
-    {
+    while let Some(chunk) = stream.message().await.context("reading content stream")? {
         data.extend_from_slice(&chunk.data);
     }
     Ok(data)
@@ -374,8 +354,7 @@ async fn mount_rootfs(
             .iter()
             .find(|m| {
                 m.platform().as_ref().is_some_and(|p| {
-                    p.os() == &oci_spec::image::Os::Linux
-                        && p.architecture().to_string() == arch
+                    p.os() == &oci_spec::image::Os::Linux && p.architecture().to_string() == arch
                 })
             })
             .context("no platform manifest")?;
@@ -432,7 +411,10 @@ async fn mount_rootfs(
     let options = mount.options.join(",");
     log::debug!(
         "snapshot mount: source={:?}, type={:?}, target={:?}, options={:?}",
-        mount.source, mount.r#type, mount_dir, options
+        mount.source,
+        mount.r#type,
+        mount_dir,
+        options
     );
 
     // Containerd returns "bind" type for single-layer images, which needs

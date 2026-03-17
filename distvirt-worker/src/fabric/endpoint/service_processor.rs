@@ -1,10 +1,10 @@
 use std::net::Ipv4Addr;
 
-use distvirt_activator::{
-    ActivatorInstance, FlowTracker, StreamManager, StreamManagerOutput,
-    is_l4_action, parse_frame_to_packet_info,
-};
 use distvirt_activator::types::Event;
+use distvirt_activator::{
+    ActivatorInstance, FlowTracker, StreamManager, StreamManagerOutput, is_l4_action,
+    parse_frame_to_packet_info,
+};
 
 use super::EndpointAction;
 
@@ -36,13 +36,22 @@ impl ServiceProcessor {
     ) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::Passthrough => None,
-            ServiceProcessor::L4 { activator, stream_manager } => {
+            ServiceProcessor::L4 {
+                activator,
+                stream_manager,
+            } => {
                 let sm_output = stream_manager.receive_frame(ip_packet);
                 Some(process_l4_output(
-                    service_id, activator.as_mut(), stream_manager, sm_output,
+                    service_id,
+                    activator.as_mut(),
+                    stream_manager,
+                    sm_output,
                 ))
             }
-            ServiceProcessor::L3 { activator, flow_tracker } => {
+            ServiceProcessor::L3 {
+                activator,
+                flow_tracker,
+            } => {
                 if let Some(packet_info) =
                     parse_frame_to_packet_info(ip_packet, raw_frame, flow_tracker)
                 {
@@ -54,10 +63,7 @@ impl ServiceProcessor {
                         service_id: service_id.to_owned(),
                     }),
                     Err(e) => {
-                        log::error!(
-                            "activator error for service '{}': {:#}",
-                            service_id, e
-                        );
+                        log::error!("activator error for service '{}': {:#}", service_id, e);
                         // Fall through to passthrough buffering on error.
                         None
                     }
@@ -72,13 +78,19 @@ impl ServiceProcessor {
     pub fn on_mark_ready(&mut self, service_id: &str) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::Passthrough => None,
-            ServiceProcessor::L4 { activator, stream_manager } => {
+            ServiceProcessor::L4 {
+                activator,
+                stream_manager,
+            } => {
                 if let Some(act) = activator {
                     act.push_event(Event::BackendAvailable(true));
                 }
                 let sm_output = stream_manager.handle_timeout();
                 Some(process_l4_output(
-                    service_id, activator.as_mut(), stream_manager, sm_output,
+                    service_id,
+                    activator.as_mut(),
+                    stream_manager,
+                    sm_output,
                 ))
             }
             ServiceProcessor::L3 { activator, .. } => {
@@ -86,10 +98,7 @@ impl ServiceProcessor {
                 let actions = match activator.process_events() {
                     Ok(a) => a,
                     Err(e) => {
-                        log::error!(
-                            "activator error for service '{}': {:#}",
-                            service_id, e
-                        );
+                        log::error!("activator error for service '{}': {:#}", service_id, e);
                         Vec::new()
                     }
                 };
@@ -102,14 +111,13 @@ impl ServiceProcessor {
     }
 
     /// Push BackendAvailable event and update the stream manager backend.
-    pub fn on_backend_update(
-        &mut self,
-        has_backend: bool,
-        backend_ip: Option<Ipv4Addr>,
-    ) {
+    pub fn on_backend_update(&mut self, has_backend: bool, backend_ip: Option<Ipv4Addr>) {
         match self {
             ServiceProcessor::Passthrough => {}
-            ServiceProcessor::L4 { activator, stream_manager } => {
+            ServiceProcessor::L4 {
+                activator,
+                stream_manager,
+            } => {
                 if let Some(act) = activator {
                     act.push_event(Event::BackendAvailable(has_backend));
                 }
@@ -124,10 +132,16 @@ impl ServiceProcessor {
     /// Handle a smoltcp timeout (L4 only).
     pub fn handle_timeout(&mut self, service_id: &str) -> Option<EndpointAction> {
         match self {
-            ServiceProcessor::L4 { activator, stream_manager } => {
+            ServiceProcessor::L4 {
+                activator,
+                stream_manager,
+            } => {
                 let sm_output = stream_manager.handle_timeout();
                 Some(process_l4_output(
-                    service_id, activator.as_mut(), stream_manager, sm_output,
+                    service_id,
+                    activator.as_mut(),
+                    stream_manager,
+                    sm_output,
                 ))
             }
             _ => None,
@@ -160,10 +174,7 @@ fn process_l4_output(
             let actions = match activator.process_events() {
                 Ok(a) => a,
                 Err(e) => {
-                    log::error!(
-                        "activator error for service '{}': {:#}",
-                        service_id, e
-                    );
+                    log::error!("activator error for service '{}': {:#}", service_id, e);
                     break;
                 }
             };
@@ -185,7 +196,11 @@ fn process_l4_output(
                 "service '{}': L4 event loop hit 4-round cap with {} pending SM events and {} pending activator events",
                 service_id,
                 sm_output.events.len(),
-                if activator.has_pending_events() { "some" } else { "no" },
+                if activator.has_pending_events() {
+                    "some"
+                } else {
+                    "no"
+                },
             );
         }
     }

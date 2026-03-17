@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// Configure a network interface with IP, netmask, bring it up, and add a default route.
 pub fn configure_network(
@@ -38,8 +38,7 @@ fn configure_network_inner(
         .with_context(|| format!("set netmask {} on {}", netmask, interface))?;
 
     // Bring interface up (SIOCSIFFLAGS with IFF_UP | IFF_RUNNING).
-    bring_if_up(sock, &ifname)
-        .with_context(|| format!("bring up {}", interface))?;
+    bring_if_up(sock, &ifname).with_context(|| format!("bring up {}", interface))?;
 
     // Add default route via gateway (SIOCADDRT).
     add_default_route(sock, gateway)
@@ -47,14 +46,19 @@ fn configure_network_inner(
 
     log::info!(
         "configured {}: ip={}, netmask={}, gateway={}",
-        interface, ip, netmask, gateway
+        interface,
+        ip,
+        netmask,
+        gateway
     );
     Ok(())
 }
 
 /// Build a sockaddr_in from an IPv4 address string.
 fn make_sockaddr_in(addr: &str) -> anyhow::Result<libc::sockaddr_in> {
-    let ip: Ipv4Addr = addr.parse().with_context(|| format!("parse IP: {}", addr))?;
+    let ip: Ipv4Addr = addr
+        .parse()
+        .with_context(|| format!("parse IP: {}", addr))?;
     let octets = ip.octets();
     let s_addr = u32::from_ne_bytes(octets);
     Ok(libc::sockaddr_in {
@@ -66,7 +70,12 @@ fn make_sockaddr_in(addr: &str) -> anyhow::Result<libc::sockaddr_in> {
 }
 
 /// Set an interface address using the given ioctl (SIOCSIFADDR or SIOCSIFNETMASK).
-fn set_if_addr(sock: i32, ifname: &CString, addr: &str, ioctl_num: libc::c_ulong) -> anyhow::Result<()> {
+fn set_if_addr(
+    sock: i32,
+    ifname: &CString,
+    addr: &str,
+    ioctl_num: libc::c_ulong,
+) -> anyhow::Result<()> {
     let sockaddr = make_sockaddr_in(addr)?;
 
     #[repr(C)]
@@ -223,14 +232,22 @@ fn get_ifindex(interface: &str) -> anyhow::Result<u32> {
     let ifname = CString::new(interface)?;
     let idx = unsafe { libc::if_nametoindex(ifname.as_ptr()) };
     if idx == 0 {
-        bail!("if_nametoindex({}): {}", interface, std::io::Error::last_os_error());
+        bail!(
+            "if_nametoindex({}): {}",
+            interface,
+            std::io::Error::last_os_error()
+        );
     }
     Ok(idx)
 }
 
 fn netlink_open() -> anyhow::Result<OwnedFd> {
     let fd = unsafe {
-        libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE)
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
     };
     if fd < 0 {
         bail!("netlink socket: {}", std::io::Error::last_os_error());

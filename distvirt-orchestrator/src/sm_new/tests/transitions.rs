@@ -79,7 +79,13 @@ fn spec_change_during_launch_triggers_restart() {
     let original_pod = wl.pod_id.unwrap();
 
     // Spec changes while pod is launching.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            ..Default::default()
+        },
+    );
     router.propagate();
 
     // Pod should still exist (launch continues).
@@ -110,7 +116,13 @@ fn spec_change_while_running_restarts_immediately() {
     let original_pod = wl.pod_id.unwrap();
 
     // Spec changes while running.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            ..Default::default()
+        },
+    );
     router.propagate();
 
     // Workload should have restarted: old pod destroyed, new pod created.
@@ -141,7 +153,9 @@ fn scavenge_idle_workload() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -160,7 +174,13 @@ fn scavenge_idle_workload() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     // Activation-based service.
     router.create_service(S1, ServiceSm::new(true));
@@ -169,7 +189,9 @@ fn scavenge_idle_workload() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -268,7 +290,13 @@ fn spec_change_and_demand_drop_during_launch() {
     let original_pod = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Both happen during launch: spec changes and demand drops.
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            ..Default::default()
+        },
+    );
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
 

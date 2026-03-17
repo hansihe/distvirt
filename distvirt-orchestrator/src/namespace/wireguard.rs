@@ -37,7 +37,8 @@ impl NamespaceStateMachine {
                 ));
             }
             ConnectResult::Error { message } => {
-                out.client_events.push((client_id, ClientEvent::Error { message }));
+                out.client_events
+                    .push((client_id, ClientEvent::Error { message }));
             }
         }
     }
@@ -57,7 +58,10 @@ impl NamespaceStateMachine {
         let mut has_changes = false;
         for wg_out in outputs {
             match wg_out {
-                WgPeerOutput::AddPeer { peer_public_key, peer_ip } => {
+                WgPeerOutput::AddPeer {
+                    peer_public_key,
+                    peer_ip,
+                } => {
                     if let Some(worker_id) = self.active_worker_ids().into_iter().next() {
                         out.worker_commands.push((
                             worker_id,
@@ -75,9 +79,7 @@ impl NamespaceStateMachine {
                     for worker_id in self.active_worker_ids() {
                         out.worker_commands.push((
                             worker_id,
-                            WorkerCommand::RemoveWireGuardPeer {
-                                peer_public_key,
-                            },
+                            WorkerCommand::RemoveWireGuardPeer { peer_public_key },
                         ));
                     }
                     has_changes = true;

@@ -2,19 +2,23 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use distvirt_activator::{ActivatorInstance, ActivatorRuntime, FlowTracker, StreamManager, StreamManagerConfig};
 use crate::fabric::ServiceProcessor;
+use distvirt_activator::{
+    ActivatorInstance, ActivatorRuntime, FlowTracker, StreamManager, StreamManagerConfig,
+};
 use distvirt_worker_protocol::{
     ActivatorConfig, NamespaceId, PodId, RegistryEntry, ServiceId, ServicePolicy, WorkerEvent,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::supervisor::{PodState, STOP_POD_TIMEOUT, send_event};
 use crate::adapter::{AdapterManager, AdapterPortHandle};
-use crate::fabric::{Fabric, FabricContextInner, FabricEvent, FabricPort, DnsRegistry, FabricGateway};
 use crate::fabric::gateway::GatewayProvider;
 use crate::fabric::port::FramePort;
-use super::supervisor::{send_event, PodState, STOP_POD_TIMEOUT};
+use crate::fabric::{
+    DnsRegistry, Fabric, FabricContextInner, FabricEvent, FabricGateway, FabricPort,
+};
 use crate::task_handle::TaskHandle;
 
 /// Errors that should kill the entire worker.
@@ -111,11 +115,13 @@ impl NamespaceState {
         let egress = gateway_provider
             .create_egress(namespace_id, pod_gateway_ip, network.prefix_len)
             .map_err(|e| FatalError::InternalInvariant(format!("create gateway: {e:#}")))?;
-        let (gateway, egress_tx, ingress_rx) =
-            FabricGateway::new_with_egress(egress, Arc::clone(&registry), pod_gateway_ip, network.prefix_len)
-                .map_err(|e| {
-                    FatalError::InternalInvariant(format!("create fabric gateway: {:#}", e))
-                })?;
+        let (gateway, egress_tx, ingress_rx) = FabricGateway::new_with_egress(
+            egress,
+            Arc::clone(&registry),
+            pod_gateway_ip,
+            network.prefix_len,
+        )
+        .map_err(|e| FatalError::InternalInvariant(format!("create fabric gateway: {:#}", e)))?;
         fabric.set_gateway(egress_tx, ingress_rx);
 
         let ns_token = worker_token.child_token();
@@ -157,36 +163,41 @@ impl NamespaceState {
                 match event {
                     FabricEvent::EndpointActivation { dst_ip, service_id } => {
                         let svc_id = service_id.map(ServiceId::from);
-                        if let Err(e) = bridge_event_tx
-                            .try_send(WorkerEvent::EndpointActivation {
-                                namespace_id: bridge_ns_id.clone(),
-                                ip: dst_ip,
-                                service_id: svc_id,
-                            })
-                        {
+                        if let Err(e) = bridge_event_tx.try_send(WorkerEvent::EndpointActivation {
+                            namespace_id: bridge_ns_id.clone(),
+                            ip: dst_ip,
+                            service_id: svc_id,
+                        }) {
                             log::warn!("worker: dropped EndpointActivation event: {}", e);
                         }
                     }
-                    FabricEvent::EndpointFlowStatus { ip, service_id, has_active_flows } => {
+                    FabricEvent::EndpointFlowStatus {
+                        ip,
+                        service_id,
+                        has_active_flows,
+                    } => {
                         let svc_id = service_id.map(ServiceId::from);
-                        if let Err(e) = bridge_event_tx
-                            .try_send(WorkerEvent::EndpointFlowStatus {
-                                namespace_id: bridge_ns_id.clone(),
-                                ip,
-                                service_id: svc_id,
-                                has_active_flows,
-                            })
-                        {
+                        if let Err(e) = bridge_event_tx.try_send(WorkerEvent::EndpointFlowStatus {
+                            namespace_id: bridge_ns_id.clone(),
+                            ip,
+                            service_id: svc_id,
+                            has_active_flows,
+                        }) {
                             log::warn!("worker: dropped EndpointFlowStatus event: {}", e);
                         }
                     }
-                    FabricEvent::ServiceBackendNeed { service_id, dst_ip: _, need } => {
+                    FabricEvent::ServiceBackendNeed {
+                        service_id,
+                        dst_ip: _,
+                        need,
+                    } => {
                         if let Err(e) = bridge_event_tx
                             .send(WorkerEvent::ServiceBackendNeed {
                                 namespace_id: bridge_ns_id.clone(),
                                 service_id: ServiceId::from(service_id),
                                 need,
-                            }).await
+                            })
+                            .await
                         {
                             log::warn!("worker: failed to send ServiceBackendNeed event: {}", e);
                         }
@@ -197,7 +208,8 @@ impl NamespaceState {
 
         // Create adapter virtual ports and plug them into the fabric.
         let adapter_ports_result = adapter_manager
-            .create_namespace_ports(namespace_id.as_ref()).await;
+            .create_namespace_ports(namespace_id.as_ref())
+            .await;
         let mut adapter_handles = Vec::new();
         let mut adapter_tasks = Vec::new();
         let mut adapter_port_id = None;
@@ -292,9 +304,10 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         entries: Vec<RegistryEntry>,
     ) -> Result<(), FatalError> {
-        let mut map = self.registry.write().map_err(|e| {
-            FatalError::InternalInvariant(format!("registry lock poisoned: {}", e))
-        })?;
+        let mut map = self
+            .registry
+            .write()
+            .map_err(|e| FatalError::InternalInvariant(format!("registry lock poisoned: {}", e)))?;
         map.clear();
         for entry in entries {
             map.insert(entry.name, entry.ip);
@@ -310,9 +323,10 @@ impl NamespaceState {
         added: Vec<RegistryEntry>,
         removed: Vec<String>,
     ) -> Result<(), FatalError> {
-        let mut map = self.registry.write().map_err(|e| {
-            FatalError::InternalInvariant(format!("registry lock poisoned: {}", e))
-        })?;
+        let mut map = self
+            .registry
+            .write()
+            .map_err(|e| FatalError::InternalInvariant(format!("registry lock poisoned: {}", e)))?;
         for name in &removed {
             map.remove(name);
         }
@@ -328,7 +342,6 @@ impl NamespaceState {
         Ok(())
     }
 
-
     // -----------------------------------------------------------------------
     // Endpoint protocol (unified)
     // -----------------------------------------------------------------------
@@ -340,8 +353,8 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         effects: Vec<crate::fabric::endpoint::EndpointSyncEffect>,
     ) -> Result<Vec<WorkerEvent>, FatalError> {
-        use crate::fabric::endpoint::{EndpointSyncEffect, EndpointAction};
         use crate::fabric::MarkReadyResult;
+        use crate::fabric::endpoint::{EndpointAction, EndpointSyncEffect};
         let mut pending_events = Vec::new();
 
         for effect in effects {
@@ -349,15 +362,24 @@ impl NamespaceState {
                 EndpointSyncEffect::ServiceReady { service_id } => {
                     let flush_data = {
                         let mut st = self.tables.endpoint_table.lock().map_err(|e| {
-                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+                            FatalError::InternalInvariant(format!(
+                                "endpoint table lock poisoned: {}",
+                                e
+                            ))
                         })?;
                         st.mark_service_ready(service_id.as_str())
                     };
                     if let Some(result) = flush_data {
                         match result {
-                            MarkReadyResult::Passthrough { frames, backend_ip, service_ip, actions } => {
+                            MarkReadyResult::Passthrough {
+                                frames,
+                                backend_ip,
+                                service_ip,
+                                actions,
+                            } => {
                                 if !frames.is_empty() {
-                                    self.fabric.flush_service_frames(frames, backend_ip, service_ip);
+                                    self.fabric
+                                        .flush_service_frames(frames, backend_ip, service_ip);
                                 }
                                 let fabric = Arc::clone(&self.fabric);
                                 let svc_id_str = service_id.clone();
@@ -365,7 +387,11 @@ impl NamespaceState {
                                     fabric.dispatch_actions(&actions, &svc_id_str).await;
                                 });
                             }
-                            MarkReadyResult::L4(EndpointAction::L4Result { actions, frames, .. }) => {
+                            MarkReadyResult::L4(EndpointAction::L4Result {
+                                actions,
+                                frames,
+                                ..
+                            }) => {
                                 self.fabric.send_l4_frames(frames);
                                 let fabric = Arc::clone(&self.fabric);
                                 let svc_id_str = service_id.clone();
@@ -376,7 +402,9 @@ impl NamespaceState {
                             other => {
                                 log::debug!(
                                     "worker: unexpected MarkReadyResult variant {:?} for service '{}' in namespace '{}'",
-                                    other, service_id, namespace_id
+                                    other,
+                                    service_id,
+                                    namespace_id
                                 );
                             }
                         }
@@ -385,14 +413,19 @@ impl NamespaceState {
                 EndpointSyncEffect::FlushPodBuffer { ip } => {
                     let buffered = {
                         let mut et = self.tables.endpoint_table.lock().map_err(|e| {
-                            FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
+                            FatalError::InternalInvariant(format!(
+                                "endpoint table lock poisoned: {}",
+                                e
+                            ))
                         })?;
                         et.flush_pod_buffer(ip)
                     };
                     if !buffered.is_empty() {
                         log::info!(
                             "worker: flushing {} buffered pod frames for {} in namespace '{}'",
-                            buffered.len(), ip, namespace_id
+                            buffered.len(),
+                            ip,
+                            namespace_id
                         );
                         let port = self.tables.resolve_ip(&ip);
                         if let Some(port) = port {
@@ -407,11 +440,18 @@ impl NamespaceState {
                                 log::info!("fabric: flushed {} buffered pod frames", count);
                             });
                         } else {
-                            log::warn!("fabric: could not resolve port for buffered frames at {}", ip);
+                            log::warn!(
+                                "fabric: could not resolve port for buffered frames at {}",
+                                ip
+                            );
                         }
                     }
                 }
-                EndpointSyncEffect::FlowStatusChange { ip, service_id, has_active_flows } => {
+                EndpointSyncEffect::FlowStatusChange {
+                    ip,
+                    service_id,
+                    has_active_flows,
+                } => {
                     pending_events.push(WorkerEvent::EndpointFlowStatus {
                         namespace_id: namespace_id.clone(),
                         ip,
@@ -419,14 +459,26 @@ impl NamespaceState {
                         has_active_flows,
                     });
                 }
-                EndpointSyncEffect::FlushAdapterBuffer { ip, port_id, frames } => {
+                EndpointSyncEffect::FlushAdapterBuffer {
+                    ip,
+                    port_id,
+                    frames,
+                } => {
                     if !frames.is_empty() {
                         log::info!(
                             "worker: flushing {} buffered adapter frames for {} to port {} in namespace '{}'",
-                            frames.len(), ip, port_id, namespace_id
+                            frames.len(),
+                            ip,
+                            port_id,
+                            namespace_id
                         );
                         let port = {
-                            self.tables.ports.lock().expect("poisoned").get(&port_id).cloned()
+                            self.tables
+                                .ports
+                                .lock()
+                                .expect("poisoned")
+                                .get(&port_id)
+                                .cloned()
                         };
                         if let Some(port) = port {
                             let count = frames.len();
@@ -437,10 +489,18 @@ impl NamespaceState {
                                         break;
                                     }
                                 }
-                                log::info!("fabric: flushed {} adapter frames to port {}", count, port_id);
+                                log::info!(
+                                    "fabric: flushed {} adapter frames to port {}",
+                                    count,
+                                    port_id
+                                );
                             });
                         } else {
-                            log::warn!("fabric: adapter port {} not found for flush at {}", port_id, ip);
+                            log::warn!(
+                                "fabric: adapter port {} not found for flush at {}",
+                                port_id,
+                                ip
+                            );
                         }
                     }
                 }
@@ -462,19 +522,24 @@ impl NamespaceState {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
             })?;
 
-            let mut make_processor = |_svc_id: &str, policy: &ServicePolicy, ip: std::net::Ipv4Addr| -> ServiceProcessor {
+            let mut make_processor = |_svc_id: &str,
+                                      policy: &ServicePolicy,
+                                      ip: std::net::Ipv4Addr|
+             -> ServiceProcessor {
                 Self::build_processor(policy, ip, activator_runtime)
             };
 
-            et.apply_endpoint_sync(endpoints, my_worker_id.as_ref(), &mut make_processor, self.adapter_port_id)
+            et.apply_endpoint_sync(
+                endpoints,
+                my_worker_id.as_ref(),
+                &mut make_processor,
+                self.adapter_port_id,
+            )
         };
 
         let pending_events = self.handle_endpoint_effects(namespace_id, effects)?;
 
-        log::info!(
-            "worker: endpoint sync for namespace '{}'",
-            namespace_id
-        );
+        log::info!("worker: endpoint sync for namespace '{}'", namespace_id);
         Ok(pending_events)
     }
 
@@ -491,19 +556,25 @@ impl NamespaceState {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
             })?;
 
-            let mut make_processor = |_svc_id: &str, policy: &ServicePolicy, ip: std::net::Ipv4Addr| -> ServiceProcessor {
+            let mut make_processor = |_svc_id: &str,
+                                      policy: &ServicePolicy,
+                                      ip: std::net::Ipv4Addr|
+             -> ServiceProcessor {
                 Self::build_processor(policy, ip, activator_runtime)
             };
 
-            et.apply_endpoint_update(upserted, removed_ips, my_worker_id.as_ref(), &mut make_processor, self.adapter_port_id)
+            et.apply_endpoint_update(
+                upserted,
+                removed_ips,
+                my_worker_id.as_ref(),
+                &mut make_processor,
+                self.adapter_port_id,
+            )
         };
 
         let pending_events = self.handle_endpoint_effects(namespace_id, effects)?;
 
-        log::info!(
-            "worker: endpoint update for namespace '{}'",
-            namespace_id
-        );
+        log::info!("worker: endpoint update for namespace '{}'", namespace_id);
         Ok(pending_events)
     }
 
@@ -521,15 +592,13 @@ impl NamespaceState {
                     None => unreachable!(),
                 };
                 match runtime.get_component(component_name) {
-                    Some(component) => {
-                        match ActivatorInstance::new(runtime.engine(), component) {
-                            Ok(instance) => Some(instance),
-                            Err(e) => {
-                                log::error!("failed to instantiate activator: {:#}", e);
-                                None
-                            }
+                    Some(component) => match ActivatorInstance::new(runtime.engine(), component) {
+                        Ok(instance) => Some(instance),
+                        Err(e) => {
+                            log::error!("failed to instantiate activator: {:#}", e);
+                            None
                         }
-                    }
+                    },
                     None => {
                         log::warn!("activator component '{}' not found", component_name);
                         None
@@ -550,15 +619,18 @@ impl NamespaceState {
                     listen_ports: vec![80],
                     ..StreamManagerConfig::default()
                 });
-                ServiceProcessor::L4 { activator: act, stream_manager: sm }
+                ServiceProcessor::L4 {
+                    activator: act,
+                    stream_manager: sm,
+                }
             }
-            (_, Some(act)) => {
-                ServiceProcessor::L3 { activator: act, flow_tracker: FlowTracker::new() }
-            }
+            (_, Some(act)) => ServiceProcessor::L3 {
+                activator: act,
+                flow_tracker: FlowTracker::new(),
+            },
             _ => ServiceProcessor::Passthrough,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -648,5 +720,4 @@ mod tests {
         assert!(map.get("api").is_none());
         assert_eq!(map.get("web"), Some(&Ipv4Addr::new(172, 16, 0, 20)));
     }
-
 }

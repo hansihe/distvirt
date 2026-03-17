@@ -8,18 +8,26 @@ use distvirt_worker_protocol::{
     WorkerEvent, WorkerId,
 };
 
+use distvirt_worker::image_provider::stub::StubImageProvider;
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::{CrashHandle, TestVmm};
-use distvirt_worker::image_provider::stub::StubImageProvider;
 use tokio::sync::mpsc;
 
 pub const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn setup() -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+pub async fn setup() -> anyhow::Result<(
+    OrchestratorConnection,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     setup_with_behavior(ContainerBehavior::ExitImmediately(0)).await
 }
 
-pub async fn setup_with_behavior(behavior: ContainerBehavior) -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+pub async fn setup_with_behavior(
+    behavior: ContainerBehavior,
+) -> anyhow::Result<(
+    OrchestratorConnection,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     let _ = env_logger::try_init();
 
     let vmm = TestVmm::new(behavior);
@@ -153,9 +161,11 @@ pub async fn create_namespace(
     })
     .await?;
 
-    recv_until(conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == ns_id)
-    })
+    recv_until(
+        conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == ns_id),
+    )
     .await?;
 
     Ok(())

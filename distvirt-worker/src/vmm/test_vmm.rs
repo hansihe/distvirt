@@ -170,8 +170,8 @@ impl Vmm for TestVmm {
         // `start_paused` (the blocking pool is shared across test runtimes and
         // doesn't advance with fake time).
         let metadata_path = snapshot.snapshot_dir.join("metadata.json");
-        let _bytes = std::fs::read(&metadata_path)
-            .context("read metadata.json from snapshot dir")?;
+        let _bytes =
+            std::fs::read(&metadata_path).context("read metadata.json from snapshot dir")?;
 
         let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.make_config())?;
 
@@ -225,8 +225,7 @@ impl VmInstance for TestVmInstance {
         // spawn_blocking, which causes flaky tests under `current_thread` +
         // `start_paused` (the blocking pool is shared across test runtimes and
         // doesn't advance with fake time).
-        std::fs::create_dir_all(snapshot_dir)
-            .context("create snapshot dir")?;
+        std::fs::create_dir_all(snapshot_dir).context("create snapshot dir")?;
 
         let metadata = SnapshotMetadata {
             kernel_path: "/dev/null".into(),
@@ -236,8 +235,7 @@ impl VmInstance for TestVmInstance {
         };
 
         // Write metadata.json.
-        let metadata_json =
-            serde_json::to_vec_pretty(&metadata).context("serialize metadata")?;
+        let metadata_json = serde_json::to_vec_pretty(&metadata).context("serialize metadata")?;
         std::fs::write(snapshot_dir.join("metadata.json"), &metadata_json)
             .context("write metadata.json")?;
 

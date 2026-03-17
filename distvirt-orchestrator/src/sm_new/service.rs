@@ -1,5 +1,5 @@
-use distvirt_sm_router::SmHandler;
 use super::*;
+use distvirt_sm_router::SmHandler;
 
 // ---- Service SM ----
 
@@ -153,28 +153,26 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                     }
                 }
             }
-            ServiceInput::BackendNeedInput(need) => {
-                match (&self.state, &need) {
-                    (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
-                        if !self.idle_timer_active {
-                            self.idle_timer_active = true;
-                            self.idle_generation += 1;
-                            self.update_timer_signal(ctx);
-                        }
+            ServiceInput::BackendNeedInput(need) => match (&self.state, &need) {
+                (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
+                    if !self.idle_timer_active {
+                        self.idle_timer_active = true;
+                        self.idle_generation += 1;
+                        self.update_timer_signal(ctx);
                     }
-                    (ServiceState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
-                        if self.idle_timer_active {
-                            self.idle_timer_active = false;
-                            self.update_timer_signal(ctx);
-                        }
-                    }
-                    (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
-                        ctx.set_demand(true);
-                        self.activate();
-                    }
-                    _ => {}
                 }
-            }
+                (ServiceState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
+                    if self.idle_timer_active {
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
+                    }
+                }
+                (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
+                    ctx.set_demand(true);
+                    self.activate();
+                }
+                _ => {}
+            },
             ServiceInput::ServiceTimerFired(key) => match key {
                 ServiceTimerKey::IdleTimeout => {
                     if matches!(self.state, ServiceState::Active { .. })

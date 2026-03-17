@@ -108,11 +108,19 @@ async fn handle_container_started(
             Ok(mut stream) => {
                 if let Err(e) = vsock::send_msg(
                     &mut stream,
-                    &StreamHeader::ContainerOutput { container_id: id.to_string() },
-                ).await {
+                    &StreamHeader::ContainerOutput {
+                        container_id: id.to_string(),
+                    },
+                )
+                .await
+                {
                     log::warn!("send ContainerOutput header for {}: {:#}", id, e);
                 } else {
-                    conn_tasks.push(ex.spawn(output::drain_output_to_yamux(id.to_string(), buffer_rx, stream)));
+                    conn_tasks.push(ex.spawn(output::drain_output_to_yamux(
+                        id.to_string(),
+                        buffer_rx,
+                        stream,
+                    )));
                 }
             }
             Err(e) => {
@@ -125,10 +133,12 @@ async fn handle_container_started(
         stdin_streams.insert(id.to_string(), fd);
     }
     // Send container task request to supervisor.
-    let _ = container_task_tx.send(ContainerTaskRequest {
-        id: id.to_string(),
-        pid: pid as libc::pid_t,
-    }).await;
+    let _ = container_task_tx
+        .send(ContainerTaskRequest {
+            id: id.to_string(),
+            pid: pid as libc::pid_t,
+        })
+        .await;
 }
 
 /// Graceful shutdown: SIGTERM all containers, reactively wait for exits
@@ -142,7 +152,11 @@ async fn shutdown_containers(
     }
 
     let running = containers.running_container_ids();
-    log::info!("sending SIGTERM to {} running containers: {:?}", running.len(), running);
+    log::info!(
+        "sending SIGTERM to {} running containers: {:?}",
+        running.len(),
+        running
+    );
     containers.signal_all_running(libc::SIGTERM);
 
     // Reactively wait for container exits with a 2s timeout.
@@ -165,9 +179,16 @@ async fn shutdown_containers(
             futures::future::Either::Left(((id, result), _)) => {
                 match result {
                     Ok(()) => log::info!("shutdown: container task {} exited after SIGTERM", id),
-                    Err(e) => log::error!("shutdown: container task {} failed after SIGTERM: {:#}", id, e),
+                    Err(e) => log::error!(
+                        "shutdown: container task {} failed after SIGTERM: {:#}",
+                        id,
+                        e
+                    ),
                 }
-                log::info!("shutdown: {} containers still running", containers.running_container_ids().len());
+                log::info!(
+                    "shutdown: {} containers still running",
+                    containers.running_container_ids().len()
+                );
             }
             futures::future::Either::Right(_) => {
                 log::warn!(
@@ -196,12 +217,14 @@ async fn shutdown_containers(
                 }
             };
             match futures::future::select(std::pin::pin!(next_exit), &mut kill_deadline).await {
-                futures::future::Either::Left(((id, result), _)) => {
-                    match result {
-                        Ok(()) => log::info!("shutdown: container task {} exited after SIGKILL", id),
-                        Err(e) => log::error!("shutdown: container task {} failed after SIGKILL: {:#}", id, e),
-                    }
-                }
+                futures::future::Either::Left(((id, result), _)) => match result {
+                    Ok(()) => log::info!("shutdown: container task {} exited after SIGKILL", id),
+                    Err(e) => log::error!(
+                        "shutdown: container task {} failed after SIGKILL: {:#}",
+                        id,
+                        e
+                    ),
+                },
                 futures::future::Either::Right(_) => break,
             }
         }
@@ -305,8 +328,7 @@ async fn connection_loop(
                         log::warn!("send ContainerOutput header for {}: {:#}", id, e);
                         continue;
                     }
-                    conn_tasks
-                        .push(ex.spawn(output::drain_output_to_yamux(id, buffer_rx, stream)));
+                    conn_tasks.push(ex.spawn(output::drain_output_to_yamux(id, buffer_rx, stream)));
                 }
                 Err(e) => {
                     log::warn!("open yamux output stream for {}: {:#}", id, e);
@@ -420,8 +442,7 @@ fn run() -> anyhow::Result<()> {
     memory::init::set_tcp_memory_caps(&vm_config);
 
     log::info!("starting vsock listener on port {}", VSOCK_CONTROL_PORT);
-    let listener =
-        vsock::VsockListener::bind(VSOCK_CONTROL_PORT).context("bind vsock listener")?;
+    let listener = vsock::VsockListener::bind(VSOCK_CONTROL_PORT).context("bind vsock listener")?;
 
     let ex = LocalExecutor::new();
 

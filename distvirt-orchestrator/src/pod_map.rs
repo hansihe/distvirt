@@ -82,9 +82,7 @@ impl PodMap {
     }
 
     pub fn worker_pod_count(&self, worker_id: &WorkerId) -> usize {
-        self.worker_pods
-            .get(worker_id)
-            .map_or(0, |set| set.len())
+        self.worker_pods.get(worker_id).map_or(0, |set| set.len())
     }
 
     pub fn len(&self) -> usize {
@@ -99,7 +97,7 @@ impl PodMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{WorkloadId};
+    use crate::types::WorkloadId;
 
     fn wid(s: &str) -> WorkerId {
         WorkerId(s.into())
@@ -260,6 +258,9 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             m.insert(pid("p1"), info("w2", "wl2"));
         }));
-        assert!(result.is_err(), "duplicate insert should panic in debug mode");
+        assert!(
+            result.is_err(),
+            "duplicate insert should panic in debug mode"
+        );
     }
 }

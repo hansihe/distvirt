@@ -2,12 +2,10 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{
-    ActivatorConfig, ServiceId, ServicePolicy, WorkerEvent,
-};
+use distvirt_worker_protocol::{ActivatorConfig, ServiceId, ServicePolicy, WorkerEvent};
 
 /// Namespace with two activation-based workloads: "wl-a" (service "svc-a") and "wl-b" (service "svc-b").
 /// Both have suspend_on_idle=true and activation.
@@ -112,15 +110,19 @@ fn test_basic_preemption() {
     // wl-b should be in WaitingForCapacity since worker is still high-pressure.
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
-        wl_a_state.awaiting_suspend || wl_a_state.suspended_artifact.is_some() || (!wl_a_state.has_demand && !wl_a_state.pod_running),
-        "wl-a should be deactivating/dormant after preemption, got {:?}", wl_a_state
+        wl_a_state.awaiting_suspend
+            || wl_a_state.suspended_artifact.is_some()
+            || (!wl_a_state.has_demand && !wl_a_state.pod_running),
+        "wl-a should be deactivating/dormant after preemption, got {:?}",
+        wl_a_state
     );
 
     // Check preempted condition is set on wl-a.
     let conditions = h.workload_conditions("ns", "wl-a");
     assert!(
         conditions.contains_key("preempted"),
-        "wl-a should have 'preempted' condition, got {:?}", conditions
+        "wl-a should have 'preempted' condition, got {:?}",
+        conditions
     );
 
     // Now relax pressure so wl-b can be scheduled.
@@ -233,7 +235,8 @@ fn test_preempted_workload_can_reactivate() {
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
         !wl_a_state.pod_running,
-        "wl-a should not be Running after preemption, got {:?}", wl_a_state
+        "wl-a should not be Running after preemption, got {:?}",
+        wl_a_state
     );
 
     // Now restore pressure and let wl-b schedule.

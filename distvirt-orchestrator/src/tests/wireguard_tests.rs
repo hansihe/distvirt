@@ -14,12 +14,15 @@ fn test_wg_connect_happy_path() {
     let mut pt = PlacementTable::default();
     let pubkey = [0x01; 32];
 
-    let out = ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
 
     // Should get ConnectResult with IP 172.16.0.254.
     assert!(out.client_events.iter().any(|(cid, ev)| {
@@ -57,21 +60,27 @@ fn test_wg_connect_idempotent() {
     let pubkey = [0x01; 32];
 
     // First connect.
-    ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.wg_peer_manager.next_host_offset, 253);
 
     // Second connect with same key.
-    let out = ns.step(NamespaceInput::Connect {
-        client_id: client_id(2),
-        client_public_key: pubkey,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(2),
+            client_public_key: pubkey,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
 
     // Should return same IP, no new AddWireGuardPeer, offset unchanged.
     assert!(out.client_events.iter().any(|(cid, ev)| {
@@ -89,18 +98,24 @@ fn test_wg_connect_multiple_peers() {
     let pubkey_a = [0x01; 32];
     let pubkey_b = [0x02; 32];
 
-    let out_a = ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: pubkey_a,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
-    let out_b = ns.step(NamespaceInput::Connect {
-        client_id: client_id(2),
-        client_public_key: pubkey_b,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out_a = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: pubkey_a,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
+    let out_b = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(2),
+            client_public_key: pubkey_b,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
 
     // First gets .254, second gets .253.
     assert!(out_a.client_events.iter().any(|(_, ev)| {
@@ -121,12 +136,15 @@ fn test_wg_connect_namespace_not_active() {
     let mut pt = PlacementTable::default();
     assert_eq!(ns.status, NamespaceStatus::Creating);
 
-    let out = ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: [0x01; 32],
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: [0x01; 32],
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
 
     assert!(out.client_events.iter().any(|(cid, ev)| {
         *cid == client_id(1)
@@ -141,12 +159,15 @@ fn test_wg_connect_ip_exhaustion() {
     let mut pt = PlacementTable::default();
     ns.wg_peer_manager.next_host_offset = 1; // No IPs left (< 2).
 
-    let out = ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: [0x01; 32],
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: [0x01; 32],
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
 
     assert!(out.client_events.iter().any(|(cid, ev)| {
         *cid == client_id(1)
@@ -162,23 +183,31 @@ fn test_wg_disconnect_known_peer() {
     let pubkey = [0x01; 32];
 
     // Connect first.
-    ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
     assert!(ns.wg_peer_manager.peers.contains_key(&pubkey));
 
     // Disconnect.
-    let out = ns.step(NamespaceInput::Disconnect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Disconnect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+        },
+        &mut pt,
+    );
 
-    assert!(out.client_events.iter().any(|(cid, ev)| {
-        *cid == client_id(1) && *ev == ClientEvent::Ok
-    }));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(cid, ev)| { *cid == client_id(1) && *ev == ClientEvent::Ok })
+    );
     assert!(out.worker_commands.iter().any(|(wid, cmd)| {
         *wid == worker_id(1)
             && matches!(cmd, WorkerCommand::RemoveWireGuardPeer { peer_public_key } if *peer_public_key == pubkey)
@@ -193,19 +222,25 @@ fn test_wg_disconnect_unknown_peer() {
     let pubkey = [0x01; 32];
 
     // Disconnect without prior connect.
-    let out = ns.step(NamespaceInput::Disconnect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Disconnect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+        },
+        &mut pt,
+    );
 
-    assert!(out.client_events.iter().any(|(cid, ev)| {
-        *cid == client_id(1) && *ev == ClientEvent::Ok
-    }));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(cid, ev)| { *cid == client_id(1) && *ev == ClientEvent::Ok })
+    );
     // No RemoveWireGuardPeer should be emitted.
-    assert!(!out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::RemoveWireGuardPeer { .. }
-    )));
+    assert!(
+        !out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::RemoveWireGuardPeer { .. }))
+    );
 }
 
 #[test]
@@ -215,29 +250,38 @@ fn test_wg_connect_after_disconnect() {
     let pubkey = [0x01; 32];
 
     // Connect → gets .254.
-    let out1 = ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out1 = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
     assert!(out1.client_events.iter().any(|(_, ev)| {
         matches!(ev, ClientEvent::ConnectResult { client_ip, .. } if client_ip == "172.16.0.254")
     }));
 
     // Disconnect.
-    ns.step(NamespaceInput::Disconnect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::Disconnect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+        },
+        &mut pt,
+    );
 
     // Reconnect same key → gets NEW IP (.253, offset doesn't go back).
-    let out2 = ns.step(NamespaceInput::Connect {
-        client_id: client_id(1),
-        client_public_key: pubkey,
-        worker_wg_public_key: [0xab; 32],
-        worker_endpoint: "1.2.3.4:51820".to_string(),
-    }, &mut pt);
+    let out2 = ns.step(
+        NamespaceInput::Connect {
+            client_id: client_id(1),
+            client_public_key: pubkey,
+            worker_wg_public_key: [0xab; 32],
+            worker_endpoint: "1.2.3.4:51820".to_string(),
+        },
+        &mut pt,
+    );
     assert!(out2.client_events.iter().any(|(_, ev)| {
         matches!(ev, ClientEvent::ConnectResult { client_ip, .. } if client_ip == "172.16.0.253")
     }));
@@ -485,7 +529,15 @@ fn test_deactivate_workload_active_idle() {
 
     // Get pod_id from launching state.
     let pod_id = match &orch.namespaces[&ns_id("ns1")].workloads[&wl_id()].state {
-        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
+        WorkloadState::Active {
+            pod:
+                PodSlot {
+                    pod_id,
+                    pod_state: PodState::Launching { .. },
+                    ..
+                },
+            ..
+        } => pod_id.clone(),
         _ => panic!("expected Launching"),
     };
 
@@ -535,17 +587,20 @@ fn test_deactivate_workload_active_idle() {
     let has_result = out.namespace_outputs.iter().any(|(_, ns_out)| {
         ns_out.client_events.iter().any(|(cid, ev)| {
             *cid == client_id(1)
-                && matches!(ev, ClientEvent::DeactivateWorkloadResult { deactivated: true, .. })
+                && matches!(
+                    ev,
+                    ClientEvent::DeactivateWorkloadResult {
+                        deactivated: true,
+                        ..
+                    }
+                )
         })
     });
     assert!(has_result);
 
     // Service should be Idle, workload should be stopping.
     let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
-    assert!(matches!(
-        ns.services[&svc_id()].state,
-        ServiceState::Idle
-    ));
+    assert!(matches!(ns.services[&svc_id()].state, ServiceState::Idle));
     // Workload demand should have dropped.
     assert_eq!(ns.workloads[&wl_id()].current_demand, 0);
 }
@@ -590,7 +645,15 @@ fn test_deactivate_workload_with_demand_refused() {
     });
 
     let pod_id = match &orch.namespaces[&ns_id("ns1")].workloads[&wl_id()].state {
-        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
+        WorkloadState::Active {
+            pod:
+                PodSlot {
+                    pod_id,
+                    pod_state: PodState::Launching { .. },
+                    ..
+                },
+            ..
+        } => pod_id.clone(),
         _ => panic!("expected Launching"),
     };
 

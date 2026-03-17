@@ -69,7 +69,10 @@ fn arb_worker_event() -> impl Strategy<Value = WorkerEvent> {
             error: "test failure".into(),
         }),
         Just(WorkerEvent::NamespaceDestroyed),
-        arb_service_id().prop_map(|sid| WorkerEvent::EndpointActivation { ip: Ipv4Addr::new(172, 16, 0, 100), service_id: Some(sid) }),
+        arb_service_id().prop_map(|sid| WorkerEvent::EndpointActivation {
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            service_id: Some(sid)
+        }),
         (arb_service_id(), arb_backend_need()).prop_map(|(sid, need)| {
             WorkerEvent::ServiceBackendNeed {
                 service_id: sid,
@@ -310,7 +313,12 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
     // Workloads in Active (Launching/Running/etc) must reference pods in the pods map.
     for (wl_id, wl) in &ns.workloads {
         match &wl.state {
-            WorkloadState::Active { pod: PodSlot { pod_id, worker_id, .. }, .. } => {
+            WorkloadState::Active {
+                pod: PodSlot {
+                    pod_id, worker_id, ..
+                },
+                ..
+            } => {
                 assert!(
                     ns.pod_map.contains(pod_id),
                     "Workload {:?} in Active references unknown pod {:?}",
@@ -330,7 +338,10 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
 
     // Services in Active must have a workload that is Running.
     for (sid, svc) in &ns.services {
-        if let ServiceState::Active { pod_id, worker_id, .. } = &svc.state {
+        if let ServiceState::Active {
+            pod_id, worker_id, ..
+        } = &svc.state
+        {
             let wl = ns.workloads.get(&svc.workload_id);
             assert!(
                 wl.map(|w| w.state.is_running()).unwrap_or(false),
@@ -340,9 +351,26 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
             );
             // Pod and worker should match the workload's.
             if let Some(wl) = wl {
-                if let WorkloadState::Active { pod: PodSlot { pod_id: wl_pid, worker_id: wl_wid, pod_state: PodState::Running }, .. } = &wl.state {
-                    assert_eq!(pod_id, wl_pid, "Service {:?} pod_id doesn't match workload", sid);
-                    assert_eq!(worker_id, wl_wid, "Service {:?} worker_id doesn't match workload", sid);
+                if let WorkloadState::Active {
+                    pod:
+                        PodSlot {
+                            pod_id: wl_pid,
+                            worker_id: wl_wid,
+                            pod_state: PodState::Running,
+                        },
+                    ..
+                } = &wl.state
+                {
+                    assert_eq!(
+                        pod_id, wl_pid,
+                        "Service {:?} pod_id doesn't match workload",
+                        sid
+                    );
+                    assert_eq!(
+                        worker_id, wl_wid,
+                        "Service {:?} worker_id doesn't match workload",
+                        sid
+                    );
                 }
             }
         }
@@ -370,10 +398,17 @@ fn check_namespace_invariants(ns: &NamespaceStateMachine, output: &NamespaceOutp
             .iter()
             .filter(|(_, w)| *w == wl_id)
             .filter(|(svc_id, _)| {
-                ns.services.get(svc_id).map(|s| s.wants_backend()).unwrap_or(false)
+                ns.services
+                    .get(svc_id)
+                    .map(|s| s.wants_backend())
+                    .unwrap_or(false)
             })
             .count() as u32;
-        let active_flows: u32 = if ns.active_flows.contains(wl_id) { 1 } else { 0 };
+        let active_flows: u32 = if ns.active_flows.contains(wl_id) {
+            1
+        } else {
+            0
+        };
         let expected_demand = service_demand + active_flows;
         assert_eq!(
             wl.current_demand, expected_demand,
@@ -450,7 +485,9 @@ fn check_pod_map_consistency(map: &PodMap, shadow: &HashMap<PodId, (WorkerId, Wo
 
     // Every shadow entry is in the map with correct worker.
     for (pid, (wid, wlid)) in shadow {
-        let info = map.get(pid).unwrap_or_else(|| panic!("pod {:?} missing from PodMap", pid));
+        let info = map
+            .get(pid)
+            .unwrap_or_else(|| panic!("pod {:?} missing from PodMap", pid));
         assert_eq!(&info.worker_id, wid);
         assert_eq!(&info.workload_id, wlid);
     }

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_orchestrator::types::*;
 
 /// Basic drain: set draining condition, verify it's visible, undrain clears it.
@@ -37,10 +37,13 @@ fn test_drain_excludes_from_scheduling() {
     h.activate_service("ns", "web-svc");
     h.assert_workload_running("ns", "web");
 
-    let worker_id = h.workload_global_worker_id("ns", "web").expect("workload should have a worker");
+    let worker_id = h
+        .workload_global_worker_id("ns", "web")
+        .expect("workload should have a worker");
     assert_eq!(
         worker_id, w2,
-        "workload should be scheduled on non-draining worker w2, got {:?}", worker_id
+        "workload should be scheduled on non-draining worker w2, got {:?}",
+        worker_id
     );
 }
 
@@ -98,11 +101,12 @@ fn test_drain_single_worker_no_scheduling() {
 
     // Try to activate — workload should be stuck in WaitingForCapacity.
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
-        namespace_id: "ns".into(),
-        ip: svc_ip,
-        service_id: Some(ServiceId::from("web-svc")),
-    });
+    h.worker(&w1)
+        .send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
+            namespace_id: "ns".into(),
+            ip: svc_ip,
+            service_id: Some(ServiceId::from("web-svc")),
+        });
     h.converge();
     h.assert_workload_waiting_for_capacity("ns", "web");
 

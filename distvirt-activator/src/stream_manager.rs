@@ -57,8 +57,14 @@ impl FabricDevice {
 }
 
 impl Device for FabricDevice {
-    type RxToken<'a> = FabricRxToken where Self: 'a;
-    type TxToken<'a> = FabricTxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = FabricRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = FabricTxToken<'a>
+    where
+        Self: 'a;
 
     fn receive(
         &mut self,
@@ -168,17 +174,18 @@ impl StreamManager {
         let mut device = FabricDevice::new();
 
         let iface_config = Config::new(HardwareAddress::Ip);
-        let mut iface = Interface::new(
-            iface_config,
-            &mut device,
-            SmolInstant::from_millis(0),
-        );
+        let mut iface = Interface::new(iface_config, &mut device, SmolInstant::from_millis(0));
 
         let ip = config.service_ip;
         iface.update_ip_addrs(|addrs| {
             addrs
                 .push(IpCidr::new(
-                    IpAddress::v4(ip.octets()[0], ip.octets()[1], ip.octets()[2], ip.octets()[3]),
+                    IpAddress::v4(
+                        ip.octets()[0],
+                        ip.octets()[1],
+                        ip.octets()[2],
+                        ip.octets()[3],
+                    ),
                     24,
                 ))
                 .ok();
@@ -193,7 +200,9 @@ impl StreamManager {
         let mut listeners = Vec::new();
         for &port in &config.listen_ports {
             for _ in 0..config.listen_pool_size {
-                if let Some(handle) = Self::create_listener(&mut sockets, port, config.tcp_buffer_size) {
+                if let Some(handle) =
+                    Self::create_listener(&mut sockets, port, config.tcp_buffer_size)
+                {
                     listeners.push(handle);
                 }
             }
@@ -221,7 +230,8 @@ impl StreamManager {
         let range_size = 16384u16;
         for _ in 0..range_size {
             let port = self.next_upstream_port;
-            self.next_upstream_port = range_start + (self.next_upstream_port - range_start + 1) % range_size;
+            self.next_upstream_port =
+                range_start + (self.next_upstream_port - range_start + 1) % range_size;
             if !self.upstream_ports.contains(&port) {
                 self.upstream_ports.insert(port);
                 return port;
@@ -272,8 +282,7 @@ impl StreamManager {
 
     /// Poll smoltcp and drain outgoing frames.
     fn poll_and_drain(&mut self, now: SmolInstant) -> Vec<Vec<u8>> {
-        self.iface
-            .poll(now, &mut self.device, &mut self.sockets);
+        self.iface.poll(now, &mut self.device, &mut self.sockets);
         self.device.tx_queue.drain(..).collect()
     }
 
@@ -305,7 +314,9 @@ impl StreamManager {
                 match socket.local_endpoint() {
                     Some(ep) => ep.port,
                     None => {
-                        log::warn!("stream_manager: established socket has no local endpoint, skipping");
+                        log::warn!(
+                            "stream_manager: established socket has no local endpoint, skipping"
+                        );
                         continue;
                     }
                 }
@@ -373,7 +384,9 @@ impl StreamManager {
                 }
             }
 
-            let Some(state) = self.streams.get_mut(&stream_id) else { continue; };
+            let Some(state) = self.streams.get_mut(&stream_id) else {
+                continue;
+            };
             let socket = self.sockets.get::<tcp::Socket>(handle);
 
             // Check for upstream connect completion.
@@ -465,7 +478,11 @@ impl StreamManager {
                     if socket.can_send() {
                         match socket.send_slice(data) {
                             Ok(sent) if sent < data.len() => {
-                                log::warn!("stream_manager: downstream partial write: {}/{}", sent, data.len());
+                                log::warn!(
+                                    "stream_manager: downstream partial write: {}/{}",
+                                    sent,
+                                    data.len()
+                                );
                             }
                             Err(e) => {
                                 log::warn!("stream_manager: downstream send error: {:?}", e);
@@ -547,7 +564,11 @@ impl StreamManager {
                         if socket.can_send() {
                             match socket.send_slice(data) {
                                 Ok(sent) if sent < data.len() => {
-                                    log::warn!("stream_manager: upstream partial write: {}/{}", sent, data.len());
+                                    log::warn!(
+                                        "stream_manager: upstream partial write: {}/{}",
+                                        sent,
+                                        data.len()
+                                    );
                                 }
                                 Err(e) => {
                                     log::warn!("stream_manager: upstream send error: {:?}", e);
@@ -655,7 +676,7 @@ mod tests {
     fn is_tcp_packet(packet: &[u8]) -> bool {
         packet.len() >= 40
             && (packet[0] >> 4) == 4  // IPv4
-            && packet[9] == 6         // IP protocol TCP
+            && packet[9] == 6 // IP protocol TCP
     }
 
     /// Build TCP SYN IP packet using etherparse.
@@ -794,14 +815,7 @@ mod tests {
         let (server_seq, _server_ack) = extract_tcp_seq_ack(tcp_packets[0]);
 
         // ACK (completes handshake)
-        let ack = make_tcp_ack(
-            CLIENT_IP,
-            SVC_IP,
-            12345,
-            80,
-            1001,
-            server_seq + 1,
-        );
+        let ack = make_tcp_ack(CLIENT_IP, SVC_IP, 12345, 80, 1001, server_seq + 1);
         let output = sm.receive_frame(&ack);
 
         // Should get StreamOpen event.
@@ -809,7 +823,10 @@ mod tests {
             .events
             .iter()
             .find(|e| matches!(e, Event::StreamOpen(_)));
-        assert!(stream_open.is_some(), "completing handshake should produce StreamOpen");
+        assert!(
+            stream_open.is_some(),
+            "completing handshake should produce StreamOpen"
+        );
     }
 
     /// Complete a TCP handshake and return (stream_id, server_seq).
@@ -820,10 +837,7 @@ mod tests {
         assert!(!tcp_packets.is_empty(), "SYN should produce SYN-ACK");
         let (server_seq, _) = extract_tcp_seq_ack(tcp_packets[0]);
 
-        let ack = make_tcp_ack(
-            CLIENT_IP, SVC_IP,
-            12345, 80, 1001, server_seq + 1,
-        );
+        let ack = make_tcp_ack(CLIENT_IP, SVC_IP, 12345, 80, 1001, server_seq + 1);
         let output = sm.receive_frame(&ack);
         let stream_id = output
             .events
@@ -842,16 +856,17 @@ mod tests {
         let mut sm = StreamManager::new(config);
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
-        let data_packet = make_tcp_data(
-            CLIENT_IP, SVC_IP,
-            12345, 80, 1001, server_seq + 1, b"hello",
-        );
+        let data_packet =
+            make_tcp_data(CLIENT_IP, SVC_IP, 12345, 80, 1001, server_seq + 1, b"hello");
         let output = sm.receive_frame(&data_packet);
 
         let stream_data = output.events.iter().find(|e| {
             matches!(e, Event::StreamData { stream, data } if *stream == stream_id && data == b"hello")
         });
-        assert!(stream_data.is_some(), "data packet should produce StreamData event");
+        assert!(
+            stream_data.is_some(),
+            "data packet should produce StreamData event"
+        );
     }
 
     #[test]
@@ -860,17 +875,17 @@ mod tests {
         let mut sm = StreamManager::new(config);
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
-        let fin = make_tcp_fin(
-            CLIENT_IP, SVC_IP,
-            12345, 80, 1001, server_seq + 1,
-        );
+        let fin = make_tcp_fin(CLIENT_IP, SVC_IP, 12345, 80, 1001, server_seq + 1);
         let output = sm.receive_frame(&fin);
 
         let stream_close = output
             .events
             .iter()
             .find(|e| matches!(e, Event::StreamClose(s) if *s == stream_id));
-        assert!(stream_close.is_some(), "FIN should produce StreamClose event");
+        assert!(
+            stream_close.is_some(),
+            "FIN should produce StreamClose event"
+        );
     }
 
     #[test]
@@ -885,9 +900,15 @@ mod tests {
         });
 
         let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
-        assert!(!tcp_packets.is_empty(), "DownstreamSend should produce TCP packet");
+        assert!(
+            !tcp_packets.is_empty(),
+            "DownstreamSend should produce TCP packet"
+        );
         let flags = extract_tcp_flags(tcp_packets[0]);
-        assert!(flags & 0x08 != 0 || flags & 0x10 != 0, "should be PSH and/or ACK");
+        assert!(
+            flags & 0x08 != 0 || flags & 0x10 != 0,
+            "should be PSH and/or ACK"
+        );
     }
 
     #[test]
@@ -899,7 +920,10 @@ mod tests {
         let output = sm.execute_action(&Action::DownstreamClose(stream_id));
 
         let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
-        assert!(!tcp_packets.is_empty(), "DownstreamClose should produce FIN");
+        assert!(
+            !tcp_packets.is_empty(),
+            "DownstreamClose should produce FIN"
+        );
         let flags = extract_tcp_flags(tcp_packets[0]);
         assert!(flags & 0x01 != 0, "should have FIN flag set");
     }
@@ -913,15 +937,23 @@ mod tests {
         sm.execute_action(&Action::PauseDownstream(stream_id));
 
         let data_packet = make_tcp_data(
-            CLIENT_IP, SVC_IP,
-            12345, 80, 1001, server_seq + 1, b"ignored",
+            CLIENT_IP,
+            SVC_IP,
+            12345,
+            80,
+            1001,
+            server_seq + 1,
+            b"ignored",
         );
         let output = sm.receive_frame(&data_packet);
         let has_stream_data = output
             .events
             .iter()
             .any(|e| matches!(e, Event::StreamData { .. }));
-        assert!(!has_stream_data, "paused stream should not produce StreamData");
+        assert!(
+            !has_stream_data,
+            "paused stream should not produce StreamData"
+        );
 
         let _output = sm.execute_action(&Action::ResumeDownstream(stream_id));
         let _timeout_out = sm.handle_timeout();
@@ -947,7 +979,10 @@ mod tests {
 
         // Should produce some TCP packets (partial write handled).
         let tcp_packets: Vec<_> = output.frames.iter().filter(|f| is_tcp_packet(f)).collect();
-        assert!(!tcp_packets.is_empty(), "partial write should still produce packets");
+        assert!(
+            !tcp_packets.is_empty(),
+            "partial write should still produce packets"
+        );
     }
 
     #[test]
@@ -963,7 +998,10 @@ mod tests {
         let output = sm.execute_action(&Action::UpstreamConnect { port: 8080 });
 
         // Should produce a TCP SYN packet.
-        assert!(!output.frames.is_empty(), "UpstreamConnect should produce packets");
+        assert!(
+            !output.frames.is_empty(),
+            "UpstreamConnect should produce packets"
+        );
         let has_tcp = output.frames.iter().any(|f| is_tcp_packet(f));
         assert!(has_tcp, "should produce TCP SYN packet");
     }
@@ -988,7 +1026,11 @@ mod tests {
             }
         }
         // All source ports should be unique.
-        assert_eq!(src_ports.len(), 100, "all 100 upstream connections should have unique source ports");
+        assert_eq!(
+            src_ports.len(),
+            100,
+            "all 100 upstream connections should have unique source ports"
+        );
     }
 
     #[test]
@@ -998,21 +1040,24 @@ mod tests {
         let (stream_id, server_seq) = do_handshake(&mut sm);
 
         // Client sends FIN.
-        let fin = make_tcp_fin(
-            CLIENT_IP, SVC_IP,
-            12345, 80, 1001, server_seq + 1,
-        );
+        let fin = make_tcp_fin(CLIENT_IP, SVC_IP, 12345, 80, 1001, server_seq + 1);
         let output = sm.receive_frame(&fin);
 
         // Should get StreamClose event.
-        let has_close = output.events.iter().any(|e| matches!(e, Event::StreamClose(s) if *s == stream_id));
+        let has_close = output
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::StreamClose(s) if *s == stream_id));
         assert!(has_close, "FIN should produce StreamClose");
 
         // After processing FIN, smoltcp should want a timer (for TIME_WAIT or retransmit).
         // Calling handle_timeout should produce packets (ACK for the FIN at minimum).
         let timeout_output = sm.handle_timeout();
         let total_frames = output.frames.len() + timeout_output.frames.len();
-        assert!(total_frames > 0, "FIN processing should produce at least one outgoing packet (ACK)");
+        assert!(
+            total_frames > 0,
+            "FIN processing should produce at least one outgoing packet (ACK)"
+        );
     }
 
     #[test]
@@ -1026,7 +1071,10 @@ mod tests {
 
         // poll_delay should be Some after initiating close (FIN sent, waiting for ACK).
         let delay = sm.poll_delay();
-        assert!(delay.is_some(), "poll_delay should be Some after initiating close, got None");
+        assert!(
+            delay.is_some(),
+            "poll_delay should be Some after initiating close, got None"
+        );
     }
 
     #[test]

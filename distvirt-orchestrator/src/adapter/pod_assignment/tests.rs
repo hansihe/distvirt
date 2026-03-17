@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm_new::{
-    DRouter, LeaseInfo, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId,
-    WorkloadSm, WorkloadSpec, SCHEDULE_REQUEST, TIMER,
+    DRouter, LeaseInfo, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
+    WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -18,7 +18,13 @@ fn setup_workload(router: &mut DRouter) -> (WorkerId, PodId) {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -180,7 +186,13 @@ fn multiple_workers() {
     let mgmt1 = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt1, vec![W1]);
-    router.set_management_wl_spec(mgmt1, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt1,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
@@ -195,7 +207,13 @@ fn multiple_workers() {
     let mgmt2 = router.create_management();
     router.create_workload(w2_id, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt2, vec![w2_id]);
-    router.set_management_wl_spec(mgmt2, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt2,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            ..Default::default()
+        },
+    );
     router.create_service(s2_id, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(

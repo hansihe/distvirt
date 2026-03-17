@@ -10,7 +10,10 @@ impl Orchestrator {
         out: &mut OrchestratorOutput,
     ) {
         match command {
-            ClientCommand::CreateNamespace { namespace_id, mut spec } => {
+            ClientCommand::CreateNamespace {
+                namespace_id,
+                mut spec,
+            } => {
                 if self.namespaces.contains_key(&namespace_id) {
                     out.client_events.push((
                         client_id,
@@ -40,11 +43,7 @@ impl Orchestrator {
                 out.client_events.push((client_id, ClientEvent::Ok));
             }
             ClientCommand::DeleteNamespace { namespace_id } => {
-                self.route_namespace_input(
-                    namespace_id,
-                    NamespaceInput::Delete { client_id },
-                    out,
-                );
+                self.route_namespace_input(namespace_id, NamespaceInput::Delete { client_id }, out);
             }
             ClientCommand::UpdateNamespace { namespace_id, spec } => {
                 self.route_namespace_input(
@@ -67,10 +66,8 @@ impl Orchestrator {
                     .map(|ns| ns.status_report())
                     .collect();
 
-                out.client_events.push((
-                    client_id,
-                    ClientEvent::NamespaceList { namespaces },
-                ));
+                out.client_events
+                    .push((client_id, ClientEvent::NamespaceList { namespaces }));
             }
             ClientCommand::Splice {
                 namespace_id,
@@ -170,22 +167,30 @@ impl Orchestrator {
                         .pod_map
                         .iter()
                         .map(|(pod_id, info)| {
-                            let is_running = ns
-                                .workloads
-                                .get(&info.workload_id)
-                                .map_or(false, |wl| match &wl.state {
-                                    WorkloadState::Active {
-                                        pod: PodSlot { pod_id: running_pod, pod_state: PodState::Running, .. },
-                                        ..
-                                    } => running_pod == pod_id,
-                                    _ => false,
+                            let is_running =
+                                ns.workloads.get(&info.workload_id).map_or(false, |wl| {
+                                    match &wl.state {
+                                        WorkloadState::Active {
+                                            pod:
+                                                PodSlot {
+                                                    pod_id: running_pod,
+                                                    pod_state: PodState::Running,
+                                                    ..
+                                                },
+                                            ..
+                                        } => running_pod == pod_id,
+                                        _ => false,
+                                    }
                                 });
                             let state = if is_running {
                                 PodStatus::Running
                             } else {
                                 PodStatus::Launching
                             };
-                            let ip = ns.spec.workloads.get(&info.workload_id)
+                            let ip = ns
+                                .spec
+                                .workloads
+                                .get(&info.workload_id)
                                 .map(|wl| wl.network.ip.to_string())
                                 .unwrap_or_default();
                             PodStatusReport {
@@ -259,7 +264,8 @@ impl Orchestrator {
                         "draining".to_string(),
                         WorkerCondition {
                             active: true,
-                            message: "worker is draining, no new pods will be scheduled".to_string(),
+                            message: "worker is draining, no new pods will be scheduled"
+                                .to_string(),
                         },
                     );
                     out.client_events.push((client_id, ClientEvent::Ok));

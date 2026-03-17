@@ -17,9 +17,7 @@ pub enum WgPeerOutput {
         peer_ip: Ipv4Addr,
     },
     /// A peer was removed — emit `RemoveWireGuardPeer` to workers.
-    RemovePeer {
-        peer_public_key: [u8; 32],
-    },
+    RemovePeer { peer_public_key: [u8; 32] },
 }
 
 /// Result of a connect attempt.
@@ -30,9 +28,7 @@ pub enum ConnectResult {
         outputs: Vec<WgPeerOutput>,
     },
     /// The connect failed.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// Manages WireGuard peer IP allocation and peer tracking for a single namespace.
@@ -82,10 +78,8 @@ impl WireGuardPeerManager {
         let client_ip = Ipv4Addr::from(subnet_u32 + self.next_host_offset as u32);
         self.next_host_offset -= 1;
 
-        self.peers.insert(
-            client_public_key,
-            WgPeerInfo { client_ip },
-        );
+        self.peers
+            .insert(client_public_key, WgPeerInfo { client_ip });
 
         ConnectResult::Ok {
             client_ip,

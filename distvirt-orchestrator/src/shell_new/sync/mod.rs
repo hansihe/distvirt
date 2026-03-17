@@ -29,7 +29,7 @@ use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
     WorkerConnectedInfo, WorkerStateCoreEvent,
 };
-use crate::core::worker_event::{classify, ClassifiedWorkerEvent};
+use crate::core::worker_event::{ClassifiedWorkerEvent, classify};
 //use crate::task::{ClientCommand, GlobalWorkerId, WorkerNamespaceEvent, WorkerNamespaceEventKind};
 use crate::types::NamespaceId;
 
@@ -428,11 +428,10 @@ impl SyncShell {
 
     /// Queue a client command to a namespace (processed on next `step()`/`drain()`).
     pub fn client_command(&mut self, namespace_id: &NamespaceId, cmd: ClientCommand) {
-        self.pending
-            .push_back(OrchestratorInput::NamespaceEvent {
-                namespace_id: namespace_id.clone(),
-                event: NamespaceCoreEvent::ClientCommand(cmd),
-            });
+        self.pending.push_back(OrchestratorInput::NamespaceEvent {
+            namespace_id: namespace_id.clone(),
+            event: NamespaceCoreEvent::ClientCommand(cmd),
+        });
     }
 
     /// Queue a worker event for a specific namespace (processed on next `step()`/`drain()`).
@@ -442,14 +441,10 @@ impl SyncShell {
         worker_id: GlobalWorkerId,
         event: WorkerNamespaceEventKind,
     ) {
-        self.pending
-            .push_back(OrchestratorInput::NamespaceEvent {
-                namespace_id: namespace_id.clone(),
-                event: NamespaceCoreEvent::WorkerEvent(WorkerNamespaceEvent {
-                    worker_id,
-                    event,
-                }),
-            });
+        self.pending.push_back(OrchestratorInput::NamespaceEvent {
+            namespace_id: namespace_id.clone(),
+            event: NamespaceCoreEvent::WorkerEvent(WorkerNamespaceEvent { worker_id, event }),
+        });
     }
 
     /// Inject a pressure update for a worker (processed on next `step()`/`drain()`).
@@ -460,15 +455,14 @@ impl SyncShell {
         memory: distvirt_worker_protocol::PsiMetrics,
         io: distvirt_worker_protocol::PsiMetrics,
     ) {
-        self.pending
-            .push_back(OrchestratorInput::WorkerStateEvent(
-                WorkerStateCoreEvent::PressureUpdate {
-                    worker_id,
-                    cpu,
-                    memory,
-                    io,
-                },
-            ));
+        self.pending.push_back(OrchestratorInput::WorkerStateEvent(
+            WorkerStateCoreEvent::PressureUpdate {
+                worker_id,
+                cpu,
+                memory,
+                io,
+            },
+        ));
     }
 
     /// Advance the logical clock by `delta` and fire any expired timers.
@@ -587,9 +581,7 @@ impl SyncShell {
                 namespace_id,
                 event,
             },
-            ClassifiedWorkerEvent::WorkerState(event) => {
-                OrchestratorInput::WorkerStateEvent(event)
-            }
+            ClassifiedWorkerEvent::WorkerState(event) => OrchestratorInput::WorkerStateEvent(event),
             ClassifiedWorkerEvent::Scheduler(input) => OrchestratorInput::SchedulerEvent(input),
             ClassifiedWorkerEvent::Ignored => return,
         };
@@ -611,10 +603,7 @@ impl SyncShell {
     }
 
     /// Get commands sent to a specific worker.
-    pub fn worker_commands(
-        &self,
-        worker_id: &GlobalWorkerId,
-    ) -> &[WorkerCommand] {
+    pub fn worker_commands(&self, worker_id: &GlobalWorkerId) -> &[WorkerCommand] {
         self.workers
             .get(worker_id)
             .map(|s| s.commands_sent.as_slice())

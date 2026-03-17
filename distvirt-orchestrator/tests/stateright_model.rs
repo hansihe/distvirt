@@ -227,9 +227,22 @@ impl NamespaceSnapshot {
 
         let mut workloads = BTreeMap::new();
         for (wl_id, wl_snap) in &self.workloads {
-            let suspend_on_idle = self.spec.workloads.get(wl_id).map_or(false, |w| w.suspend_on_idle);
-            let has_activation = self.spec.workloads.get(wl_id).and_then(|w| w.activation.as_ref()).is_some();
-            let (mut wl, _) = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(wl_id.clone(), suspend_on_idle, has_activation);
+            let suspend_on_idle = self
+                .spec
+                .workloads
+                .get(wl_id)
+                .map_or(false, |w| w.suspend_on_idle);
+            let has_activation = self
+                .spec
+                .workloads
+                .get(wl_id)
+                .and_then(|w| w.activation.as_ref())
+                .is_some();
+            let (mut wl, _) = distvirt_orchestrator::sm::workload::WorkloadStateMachine::new(
+                wl_id.clone(),
+                suspend_on_idle,
+                has_activation,
+            );
             wl.max_retries = max_retries;
             wl.state = wl_snap.state.clone();
             wl.current_demand = wl_snap.current_demand;
@@ -379,7 +392,11 @@ fn track_service_commands(
                     }
                 }
             }
-            WorkerCommand::EndpointUpdate { upserted, removed_ips, .. } => {
+            WorkerCommand::EndpointUpdate {
+                upserted,
+                removed_ips,
+                ..
+            } => {
                 let entry = tracker.entry(wid.clone()).or_default();
                 for ep in upserted {
                     if let EndpointKind::Service { service_id, .. } = &ep.kind {
@@ -418,8 +435,11 @@ impl Model for NamespaceModel {
     type Action = ModelAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        let mut sm =
-            NamespaceStateMachine::new(NamespaceId("model-ns".into()), self.initial_spec.clone(), 1);
+        let mut sm = NamespaceStateMachine::new(
+            NamespaceId("model-ns".into()),
+            self.initial_spec.clone(),
+            1,
+        );
 
         // Pre-register workers with Creating fabric status.
         for i in 0..self.worker_count {
@@ -436,7 +456,9 @@ impl Model for NamespaceModel {
         let snapshot = NamespaceSnapshot::from_state_machine(&sm);
         vec![ModelState {
             namespace: snapshot,
-            placement: PlacementSnapshot { placements: BTreeMap::new() },
+            placement: PlacementSnapshot {
+                placements: BTreeMap::new(),
+            },
             pending_timers: BTreeSet::new(),
             ever_launched_pod: false,
             last_output_commands_valid: true,
@@ -465,7 +487,10 @@ impl Model for NamespaceModel {
                 // Service-level events.
                 match &svc_snap.state {
                     ServiceState::Idle => {
-                        let svc_ip = self.initial_spec.services.get(service_id)
+                        let svc_ip = self
+                            .initial_spec
+                            .services
+                            .get(service_id)
                             .map(|s| s.ip)
                             .unwrap_or(Ipv4Addr::UNSPECIFIED);
                         actions.push(ModelAction::WorkerEvent {
@@ -478,11 +503,8 @@ impl Model for NamespaceModel {
                     }
                     ServiceState::Active { .. } => {
                         // Backend need can change from any worker.
-                        for need in &[
-                            BackendNeed::None,
-                            BackendNeed::Traffic,
-                            BackendNeed::Active,
-                        ] {
+                        for need in &[BackendNeed::None, BackendNeed::Traffic, BackendNeed::Active]
+                        {
                             actions.push(ModelAction::WorkerEvent {
                                 worker_id: wid.clone(),
                                 event: WorkerEvent::ServiceBackendNeed {
@@ -499,7 +521,12 @@ impl Model for NamespaceModel {
                 if let Some(wl) = wl_snap {
                     match &wl.state {
                         WorkloadState::Active {
-                            pod: PodSlot { pod_id, worker_id: launch_wid, pod_state: PodState::Launching { .. } },
+                            pod:
+                                PodSlot {
+                                    pod_id,
+                                    worker_id: launch_wid,
+                                    pod_state: PodState::Launching { .. },
+                                },
                             ..
                         } => {
                             if wid.0 == launch_wid.0 {
@@ -519,7 +546,12 @@ impl Model for NamespaceModel {
                             }
                         }
                         WorkloadState::Active {
-                            pod: PodSlot { pod_id, worker_id: active_wid, pod_state: PodState::Running },
+                            pod:
+                                PodSlot {
+                                    pod_id,
+                                    worker_id: active_wid,
+                                    pod_state: PodState::Running,
+                                },
                             ..
                         } => {
                             if wid.0 == active_wid.0 {
@@ -533,7 +565,12 @@ impl Model for NamespaceModel {
                             }
                         }
                         WorkloadState::Active {
-                            pod: PodSlot { pod_id, worker_id: suspend_wid, pod_state: PodState::Suspending { artifact_id, .. } },
+                            pod:
+                                PodSlot {
+                                    pod_id,
+                                    worker_id: suspend_wid,
+                                    pod_state: PodState::Suspending { artifact_id, .. },
+                                },
                             ..
                         } => {
                             if wid.0 == suspend_wid.0 {
@@ -566,7 +603,12 @@ impl Model for NamespaceModel {
                             // triggered by demand, not worker events.
                         }
                         WorkloadState::Active {
-                            pod: PodSlot { pod_id, worker_id: resume_wid, pod_state: PodState::Resuming { .. } },
+                            pod:
+                                PodSlot {
+                                    pod_id,
+                                    worker_id: resume_wid,
+                                    pod_state: PodState::Resuming { .. },
+                                },
                             ..
                         } => {
                             if wid.0 == resume_wid.0 {
@@ -622,18 +664,13 @@ impl Model for NamespaceModel {
         }
 
         // Delete action (if enabled and not already destroying/destroyed).
-        if self.enable_delete
-            && ns.status != NamespaceStatus::Destroying
-            && !ns.workers.is_empty()
+        if self.enable_delete && ns.status != NamespaceStatus::Destroying && !ns.workers.is_empty()
         {
             actions.push(ModelAction::Delete);
         }
 
         // Spec update action (if enabled, not already updated, and namespace is active).
-        if self.enable_spec_update
-            && !state.spec_updated
-            && ns.status == NamespaceStatus::Active
-        {
+        if self.enable_spec_update && !state.spec_updated && ns.status == NamespaceStatus::Active {
             actions.push(ModelAction::UpdateSpec);
         }
 
@@ -685,7 +722,11 @@ impl Model for NamespaceModel {
             ModelAction::AddService => {
                 // Add a new service pointing to the first workload.
                 let mut new_spec = sm.spec.clone();
-                let wl_id = new_spec.workloads.keys().next().cloned()
+                let wl_id = new_spec
+                    .workloads
+                    .keys()
+                    .next()
+                    .cloned()
                     .expect("AddService requires at least one workload");
                 new_spec.services.insert(
                     ServiceId("svc-added".into()),
@@ -749,11 +790,14 @@ impl Model for NamespaceModel {
                 let pod_id = next_free_pod_id(&sm);
                 ever_launched_pod = true;
 
-                let launch_out = sm.step(NamespaceInput::LaunchPod {
-                    workload_id: req.workload_id.clone(),
-                    worker_id: wid,
-                    pod_id,
-                }, &mut placement_table);
+                let launch_out = sm.step(
+                    NamespaceInput::LaunchPod {
+                        workload_id: req.workload_id.clone(),
+                        worker_id: wid,
+                        pod_id,
+                    },
+                    &mut placement_table,
+                );
 
                 track_service_commands(&launch_out, &mut worker_service_created);
                 commands_valid = commands_valid
@@ -780,12 +824,15 @@ impl Model for NamespaceModel {
                 None => continue,
             };
 
-            let resume_out = sm.step(NamespaceInput::ResumePod {
-                workload_id: req.workload_id.clone(),
-                worker_id,
-                pod_id,
-                artifact_id: req.artifact_id.clone(),
-            }, &mut placement_table);
+            let resume_out = sm.step(
+                NamespaceInput::ResumePod {
+                    workload_id: req.workload_id.clone(),
+                    worker_id,
+                    pod_id,
+                    artifact_id: req.artifact_id.clone(),
+                },
+                &mut placement_table,
+            );
 
             track_service_commands(&resume_out, &mut worker_service_created);
             commands_valid = commands_valid
@@ -838,7 +885,10 @@ impl Model for NamespaceModel {
         let mut props = vec![
             // Safety: Transitioning sentinel must never survive a step() call.
             Property::<Self>::always("no transitioning state", |_model, state| {
-                state.namespace.workloads.values()
+                state
+                    .namespace
+                    .workloads
+                    .values()
                     .all(|wl| !matches!(wl.state, WorkloadState::Transitioning))
             }),
             // Safety: No commands sent to workers not in namespace's worker map.
@@ -846,7 +896,10 @@ impl Model for NamespaceModel {
                 let ns = &state.namespace;
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
-                        WorkloadState::Active { pod: PodSlot { worker_id, .. }, .. } => {
+                        WorkloadState::Active {
+                            pod: PodSlot { worker_id, .. },
+                            ..
+                        } => {
                             if !ns.workers.contains_key(worker_id) {
                                 return false;
                             }
@@ -865,7 +918,10 @@ impl Model for NamespaceModel {
                 let ns = &state.namespace;
                 for (_wl_id, wl) in &ns.workloads {
                     match &wl.state {
-                        WorkloadState::Active { pod: PodSlot { pod_id, .. }, .. } => {
+                        WorkloadState::Active {
+                            pod: PodSlot { pod_id, .. },
+                            ..
+                        } => {
                             if !ns.pods.contains_key(pod_id) {
                                 return false;
                             }
@@ -894,37 +950,46 @@ impl Model for NamespaceModel {
                 true
             }),
             // Safety: Workloads only reference workers that are present.
-            Property::<Self>::always("workloads only reference present workers", |_model, state| {
-                let ns = &state.namespace;
-                for (_wl_id, wl) in &ns.workloads {
-                    match &wl.state {
-                        WorkloadState::Active { pod: PodSlot { worker_id, .. }, .. } => {
-                            if !ns.workers.contains_key(worker_id) {
-                                return false;
+            Property::<Self>::always(
+                "workloads only reference present workers",
+                |_model, state| {
+                    let ns = &state.namespace;
+                    for (_wl_id, wl) in &ns.workloads {
+                        match &wl.state {
+                            WorkloadState::Active {
+                                pod: PodSlot { worker_id, .. },
+                                ..
+                            } => {
+                                if !ns.workers.contains_key(worker_id) {
+                                    return false;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
-                }
-                true
-            }),
+                    true
+                },
+            ),
             // Safety: No worker commands to absent workers (checked against
             // pre-transition worker set during next_state).
             Property::<Self>::always("no worker commands to absent workers", |_model, state| {
                 state.last_output_commands_valid
             }),
             // Safety: Suspended workloads have valid placement table entries.
-            Property::<Self>::always("suspended workloads have valid placement", |_model, state| {
-                let ns = &state.namespace;
-                for (_wl_id, wl) in &ns.workloads {
-                    if let WorkloadState::Suspended { ref artifact_id } = wl.state {
-                        if !state.placement.placements.contains_key(artifact_id) {
-                            return false;
+            Property::<Self>::always(
+                "suspended workloads have valid placement",
+                |_model, state| {
+                    let ns = &state.namespace;
+                    for (_wl_id, wl) in &ns.workloads {
+                        if let WorkloadState::Suspended { ref artifact_id } = wl.state {
+                            if !state.placement.placements.contains_key(artifact_id) {
+                                return false;
+                            }
                         }
                     }
-                }
-                true
-            }),
+                    true
+                },
+            ),
             // Reachability: Can reach a Running workload state.
             Property::<Self>::sometimes("can reach active service", |_model, state| {
                 state
@@ -980,37 +1045,34 @@ impl Model for NamespaceModel {
         // Safety: active workers should have received endpoint data for all
         // non-Pending services.
         {
-        props.push(Property::<Self>::always(
-            "active workers have all services in endpoints",
-            |_model, state| {
-                let ns = &state.namespace;
-                if ns.status != NamespaceStatus::Active {
-                    return true;
-                }
-                // Collect all service IDs.
-                let all_services: BTreeSet<&ServiceId> = ns
-                    .services
-                    .keys()
-                    .collect();
-
-                for (wid, worker) in &ns.workers {
-                    if worker.fabric_status != FabricStatus::Active {
-                        continue;
+            props.push(Property::<Self>::always(
+                "active workers have all services in endpoints",
+                |_model, state| {
+                    let ns = &state.namespace;
+                    if ns.status != NamespaceStatus::Active {
+                        return true;
                     }
-                    let created = state
-                        .worker_service_created
-                        .get(wid)
-                        .map(|m| tracked_service_ids(m))
-                        .unwrap_or_default();
-                    for svc_id in &all_services {
-                        if !created.contains(*svc_id) {
-                            return false;
+                    // Collect all service IDs.
+                    let all_services: BTreeSet<&ServiceId> = ns.services.keys().collect();
+
+                    for (wid, worker) in &ns.workers {
+                        if worker.fabric_status != FabricStatus::Active {
+                            continue;
+                        }
+                        let created = state
+                            .worker_service_created
+                            .get(wid)
+                            .map(|m| tracked_service_ids(m))
+                            .unwrap_or_default();
+                        for svc_id in &all_services {
+                            if !created.contains(*svc_id) {
+                                return false;
+                            }
                         }
                     }
-                }
-                true
-            },
-        ));
+                    true
+                },
+            ));
         }
 
         if self.enable_service_addition {
@@ -1037,7 +1099,9 @@ impl Model for NamespaceModel {
         {
             let mut wl_svc_count: BTreeMap<WorkloadId, usize> = BTreeMap::new();
             for svc_spec in self.initial_spec.services.values() {
-                *wl_svc_count.entry(svc_spec.workload_id.clone()).or_default() += 1;
+                *wl_svc_count
+                    .entry(svc_spec.workload_id.clone())
+                    .or_default() += 1;
             }
             if wl_svc_count.values().any(|&c| c > 1) {
                 props.push(Property::<Self>::sometimes(
@@ -1300,7 +1364,11 @@ fn run_check_with_known_failures(
     use stateright::Expectation;
     let result = model
         .checker()
-        .threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+        .threads(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        )
         .target_max_depth(max_depth)
         .spawn_dfs()
         .join();

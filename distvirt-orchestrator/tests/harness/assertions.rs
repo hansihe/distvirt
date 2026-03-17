@@ -1,11 +1,15 @@
-use distvirt_orchestrator::sm_new::{WlStatus, SvcStatus};
+use distvirt_orchestrator::sm_new::{SvcStatus, WlStatus};
 use distvirt_orchestrator::task::GlobalWorkerId;
 use distvirt_orchestrator::types::NamespaceId;
 
 use super::test_harness::TestHarness;
 
 impl TestHarness {
-    pub fn assert_namespace_status(&self, ns_id: &str, expected: distvirt_orchestrator::types::NamespaceStatus) {
+    pub fn assert_namespace_status(
+        &self,
+        ns_id: &str,
+        expected: distvirt_orchestrator::types::NamespaceStatus,
+    ) {
         use distvirt_orchestrator::types::NamespaceStatus;
         let ns_id_typed = distvirt_orchestrator::types::NamespaceId::from(ns_id);
         let actual = match self.shell.namespace(&ns_id_typed) {
@@ -43,7 +47,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Running),
             "workload '{}/{}': expected Running, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -52,7 +58,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Dormant),
             "workload '{}/{}': expected Dormant, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -76,7 +84,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Suspended),
             "workload '{}/{}': expected Suspended, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -85,7 +95,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Failed),
             "workload '{}/{}': expected Failed, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -94,7 +106,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::RetryBackoff),
             "workload '{}/{}': expected RetryBackoff, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -103,7 +117,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Launching),
             "workload '{}/{}': expected Launching, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -112,7 +128,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Suspending),
             "workload '{}/{}': expected Suspending, got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -123,7 +141,9 @@ impl TestHarness {
         assert!(
             matches!(status, WlStatus::Launching),
             "workload '{}/{}': expected Resuming (Launching with resume artifact), got {:?}",
-            ns_id, wl_id, status
+            ns_id,
+            wl_id,
+            status
         );
     }
 
@@ -132,7 +152,9 @@ impl TestHarness {
         assert!(
             matches!(status, SvcStatus::Active),
             "service '{}/{}': expected Active, got {:?}",
-            ns_id, svc_id, status
+            ns_id,
+            svc_id,
+            status
         );
     }
 
@@ -141,7 +163,9 @@ impl TestHarness {
         assert!(
             matches!(status, SvcStatus::Idle),
             "service '{}/{}': expected Idle, got {:?}",
-            ns_id, svc_id, status
+            ns_id,
+            svc_id,
+            status
         );
     }
 
@@ -150,7 +174,9 @@ impl TestHarness {
         assert!(
             matches!(status, SvcStatus::NeedBackend),
             "service '{}/{}': expected NeedBackend, got {:?}",
-            ns_id, svc_id, status
+            ns_id,
+            svc_id,
+            status
         );
     }
 
@@ -212,7 +238,9 @@ impl TestHarness {
         assert!(
             matching.is_empty(),
             "worker {:?}: expected NO command matching '{}', but found: {:#?}",
-            worker_id, description, matching
+            worker_id,
+            description,
+            matching
         );
     }
 

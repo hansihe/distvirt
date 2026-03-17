@@ -23,18 +23,16 @@ impl ImageProvider for ContainerdOverlayfsProvider {
             image_ref,
             self.docker_config.as_deref(),
         )
-            .await
-            .context("preparing containerd image")?;
+        .await
+        .context("preparing containerd image")?;
 
         let rootfs_path = prepared.rootfs_path.clone();
         let tmp = NamedTempFile::new().context("create temp file for ext4 image")?;
         let image_path = tmp.path().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            image::build_ext4_image(&rootfs_path, &image_path)
-        })
-        .await
-        .context("spawn_blocking ext4 build")?
-        .context("build ext4 image from containerd rootfs")?;
+        tokio::task::spawn_blocking(move || image::build_ext4_image(&rootfs_path, &image_path))
+            .await
+            .context("spawn_blocking ext4 build")?
+            .context("build ext4 image from containerd rootfs")?;
 
         let image_path = tmp.path().to_path_buf();
         log::info!("built container image at {}", image_path.display());

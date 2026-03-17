@@ -74,7 +74,9 @@ async fn mock_worker_handshake(conn: &mut WorkerConnection) {
         tunnel_listen_port: None,
         tunnel_public_key: None,
         transfer_listen_port: None,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 fn test_spec() -> NamespaceSpec {

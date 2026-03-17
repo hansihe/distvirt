@@ -40,8 +40,12 @@ enum SvcModelAction {
     },
     WorkloadUnready,
     ServiceActivation,
-    ServiceBackendNeed { need: BackendNeed },
-    TimerFired { timer_key: TimerKey },
+    ServiceBackendNeed {
+        need: BackendNeed,
+    },
+    TimerFired {
+        timer_key: TimerKey,
+    },
 }
 
 fn mock_backend() -> ServiceBackend {
@@ -125,9 +129,7 @@ impl Model for ServiceModel {
             ServiceState::Active { .. } => {
                 // Backend need can change.
                 for need in &[BackendNeed::None, BackendNeed::Traffic, BackendNeed::Active] {
-                    actions.push(SvcModelAction::ServiceBackendNeed {
-                        need: need.clone(),
-                    });
+                    actions.push(SvcModelAction::ServiceBackendNeed { need: need.clone() });
                 }
                 // Workload can become unready (pod lost).
                 if self.enable_workload_failure {
@@ -191,8 +193,7 @@ impl Model for ServiceModel {
             }
         }
 
-        let was_active =
-            state.was_active || matches!(state.state, ServiceState::Active { .. });
+        let was_active = state.was_active || matches!(state.state, ServiceState::Active { .. });
 
         Some(SvcModelState {
             state: sm.state,
@@ -227,10 +228,7 @@ impl Model for ServiceModel {
             }),
             // Safety: Active with idle_timer=Some has a matching pending timer.
             Property::<Self>::always("active idle timer consistent", |_model, state| {
-                if let ServiceState::Active {
-                    ref idle_timer, ..
-                } = state.state
-                {
+                if let ServiceState::Active { ref idle_timer, .. } = state.state {
                     match idle_timer {
                         Some(tk) => state.pending_timers.contains(tk),
                         None => true,
@@ -240,24 +238,21 @@ impl Model for ServiceModel {
                 }
             }),
             // Safety: Active with BackendNeed::Active or Traffic has no idle timer.
-            Property::<Self>::always(
-                "no idle timer during active traffic",
-                |_model, state| {
-                    if let ServiceState::Active {
-                        ref backend_need,
-                        ref idle_timer,
-                        ..
-                    } = state.state
-                    {
-                        match backend_need {
-                            BackendNeed::Traffic | BackendNeed::Active => idle_timer.is_none(),
-                            BackendNeed::None => true,
-                        }
-                    } else {
-                        true
+            Property::<Self>::always("no idle timer during active traffic", |_model, state| {
+                if let ServiceState::Active {
+                    ref backend_need,
+                    ref idle_timer,
+                    ..
+                } = state.state
+                {
+                    match backend_need {
+                        BackendNeed::Traffic | BackendNeed::Active => idle_timer.is_none(),
+                        BackendNeed::None => true,
                     }
-                },
-            ),
+                } else {
+                    true
+                }
+            }),
             // Reachability: Can reach Active state.
             Property::<Self>::sometimes("can reach active", |_model, state| {
                 matches!(state.state, ServiceState::Active { .. })
@@ -268,9 +263,7 @@ impl Model for ServiceModel {
             // Reachability: Activation service can return to Idle after being Active.
             props.push(Property::<Self>::sometimes(
                 "can reach idle after active",
-                |_model, state| {
-                    state.was_active && matches!(state.state, ServiceState::Idle)
-                },
+                |_model, state| state.was_active && matches!(state.state, ServiceState::Idle),
             ));
         }
 

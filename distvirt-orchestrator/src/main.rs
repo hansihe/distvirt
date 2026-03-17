@@ -1,8 +1,8 @@
 use clap::Parser;
+use distvirt_client_protocol::DistvirtClientServer;
 use distvirt_orchestrator::config::OrchestratorConfig;
 use distvirt_orchestrator::grpc::DistvirtClientService;
 use distvirt_orchestrator::shell::OrchestratorShell;
-use distvirt_client_protocol::DistvirtClientServer;
 use distvirt_worker_protocol::OrchestratorConnection;
 
 #[derive(Parser)]
@@ -44,7 +44,12 @@ async fn main() -> anyhow::Result<()> {
         .or(config.workers.secret)
         .expect("worker secret must be set via --worker-secret or workers.secret in config");
     let client_secret = cli.client_secret.or(config.grpc.secret);
-    let mut shell = OrchestratorShell::new(config.wireguard.listen_port, config.tunnels.encrypted, pool_configs, worker_secret);
+    let mut shell = OrchestratorShell::new(
+        config.wireguard.listen_port,
+        config.tunnels.encrypted,
+        pool_configs,
+        worker_secret,
+    );
     let handle = shell.handle();
 
     // Start gRPC server.

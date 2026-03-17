@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
-    EndpointPodBackend, EndpointSpec, ServicePolicy, WorkerCommand, WorkerEvent,
+    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
+    EndpointSpec, ServicePolicy, WorkerCommand, WorkerEvent,
 };
 
 use super::common::*;
@@ -28,7 +28,13 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     // Launch a long-running pod
-    register_pod_endpoint(&mut conn, "ns-suspend", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-suspend",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-suspend".into(),
@@ -54,9 +60,11 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     // Wait for PodRunning
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-suspend")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-suspend"),
+    )
     .await?;
     eprintln!("e2e: pod-suspend is running, sending SuspendPod");
 
@@ -141,16 +149,19 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
                 "snapshot should have non-zero size, got {}",
                 artifact_size_bytes
             );
-            eprintln!(
-                "e2e: pod suspended, artifact_size={}",
-                artifact_size_bytes
-            );
+            eprintln!("e2e: pod suspended, artifact_size={}", artifact_size_bytes);
         }
         other => panic!("expected PodSuspended, got {:?}", other),
     }
 
     // Resume the pod from the snapshot
-    register_pod_endpoint(&mut conn, "ns-suspend", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-suspend",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-suspend".into(),
@@ -162,9 +173,11 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     // Wait for PodRunning again
-    let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-resumed")
-    })
+    let event = recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-resumed"),
+    )
     .await?;
     eprintln!("e2e: pod-resumed is running: {:?}", event);
 
@@ -177,9 +190,11 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     // Wait for PodExited
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-resumed")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-resumed"),
+    )
     .await?;
 
     // Clean up snapshot
@@ -243,7 +258,13 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     // Launch server pod with a persistent TCP listener (responds "pong" per connection)
-    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-susp-net",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-susp-net".into(),
@@ -256,9 +277,12 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "serve".into(),
-                    "--port".into(), "80".into(),
-                    "--response".into(), "pong".into(),
-                    "--timeout".into(), "120".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--response".into(),
+                    "pong".into(),
+                    "--timeout".into(),
+                    "120".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -273,9 +297,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server"),
+    )
     .await?;
 
     // Point service at server pod and mark ready via EndpointUpdate
@@ -302,7 +328,13 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     // --- Pre-suspend: verify TCP connectivity ---
-    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config_2(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-susp-net",
+        &test_pod_network_config_2(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-susp-net".into(),
@@ -315,10 +347,14 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "ping\n".into(),
-                    "--timeout".into(), "30".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "ping\n".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -333,9 +369,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-client-pre")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-client-pre"),
+    )
     .await?;
 
     let log_str = drain_log_stream(&mut conn).await?;
@@ -345,9 +383,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
         log_str
     );
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client-pre")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client-pre"),
+    )
     .await?;
     eprintln!("e2e: pre-suspend connectivity verified");
 
@@ -368,7 +408,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
             if namespace_id == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default"),
-        "unexpected ArtifactWriteStarted: {:?}", event
+        "unexpected ArtifactWriteStarted: {:?}",
+        event
     );
     eprintln!("e2e: received ArtifactWriteStarted");
 
@@ -379,7 +420,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
             if namespace_id == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default" && *size_bytes > 0),
-        "unexpected ArtifactWriteCommitted: {:?}", event
+        "unexpected ArtifactWriteCommitted: {:?}",
+        event
     );
     eprintln!("e2e: received ArtifactWriteCommitted");
 
@@ -397,7 +439,13 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     eprintln!("e2e: server pod suspended");
 
     // --- Resume the server pod ---
-    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-susp-net",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-susp-net".into(),
@@ -408,9 +456,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server-resumed")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server-resumed"),
+    )
     .await?;
     eprintln!("e2e: server pod resumed");
 
@@ -438,7 +488,13 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     // --- Post-resume: verify TCP connectivity ---
-    register_pod_endpoint(&mut conn, "ns-susp-net", &test_pod_network_config_2(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-susp-net",
+        &test_pod_network_config_2(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-susp-net".into(),
@@ -451,10 +507,14 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "ping\n".into(),
-                    "--timeout".into(), "30".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "ping\n".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -469,9 +529,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-client-post")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-client-post"),
+    )
     .await?;
 
     let log_str = drain_log_stream(&mut conn).await?;
@@ -482,9 +544,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     );
     eprintln!("e2e: post-resume connectivity verified");
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client-post")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client-post"),
+    )
     .await?;
 
     // Clean up
@@ -495,9 +559,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-server-resumed")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-server-resumed"),
+    )
     .await?;
 
     conn.send_command(&WorkerCommand::DeleteArtifact {
@@ -568,7 +634,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     // Launch server pod with a persistent TCP listener
-    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-act-resume",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-act-resume".into(),
@@ -581,9 +653,12 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "serve".into(),
-                    "--port".into(), "80".into(),
-                    "--response".into(), "pong".into(),
-                    "--timeout".into(), "120".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--response".into(),
+                    "pong".into(),
+                    "--timeout".into(),
+                    "120".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -598,9 +673,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server"),
+    )
     .await?;
 
     // Point service at server pod and mark ready via EndpointUpdate
@@ -631,7 +708,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     // Pre-suspend sanity check: verify connectivity
-    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config_2(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-act-resume",
+        &test_pod_network_config_2(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-act-resume".into(),
@@ -644,10 +727,14 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "ping\n".into(),
-                    "--timeout".into(), "30".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "ping\n".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -662,9 +749,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-pre-check")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-pre-check"),
+    )
     .await?;
 
     let log_str = drain_log_stream(&mut conn).await?;
@@ -674,9 +763,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
         log_str
     );
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-pre-check")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-pre-check"),
+    )
     .await?;
     eprintln!("e2e: pre-suspend connectivity verified");
 
@@ -697,7 +788,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
             if namespace_id == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default"),
-        "unexpected ArtifactWriteStarted: {:?}", event
+        "unexpected ArtifactWriteStarted: {:?}",
+        event
     );
     eprintln!("e2e: received ArtifactWriteStarted");
 
@@ -708,7 +800,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
             if namespace_id == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default" && *size_bytes > 0),
-        "unexpected ArtifactWriteCommitted: {:?}", event
+        "unexpected ArtifactWriteCommitted: {:?}",
+        event
     );
     eprintln!("e2e: received ArtifactWriteCommitted");
 
@@ -750,7 +843,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     // Launch client that connects to the service VIP while no backend exists.
-    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config_2(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-act-resume",
+        &test_pod_network_config_2(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-act-resume".into(),
@@ -763,10 +862,14 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 entrypoint: vec!["/bin/test-containers".into()],
                 args: vec![
                     "send".into(),
-                    "--host".into(), "10.0.0.99".into(),
-                    "--port".into(), "80".into(),
-                    "--data".into(), "ping\n".into(),
-                    "--timeout".into(), "30".into(),
+                    "--host".into(),
+                    "10.0.0.99".into(),
+                    "--port".into(),
+                    "80".into(),
+                    "--data".into(),
+                    "ping\n".into(),
+                    "--timeout".into(),
+                    "30".into(),
                 ],
                 env: vec![],
                 working_dir: None,
@@ -783,7 +886,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Wait for the TCP activator to detect the SYN and signal activation
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::ServiceBackendNeed { need: BackendNeed::Traffic, .. })
+        matches!(
+            e,
+            WorkerEvent::ServiceBackendNeed {
+                need: BackendNeed::Traffic,
+                ..
+            }
+        )
     })
     .await?;
 
@@ -796,7 +905,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     eprintln!("e2e: activator signaled BackendNeed::Traffic, resuming server pod");
 
     // Resume the server pod from the snapshot
-    register_pod_endpoint(&mut conn, "ns-act-resume", &test_pod_network_config(), "test-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-act-resume",
+        &test_pod_network_config(),
+        "test-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::ResumePod {
         namespace_id: "ns-act-resume".into(),
@@ -807,9 +922,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server-resumed")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-server-resumed"),
+    )
     .await?;
     eprintln!("e2e: server pod resumed");
 
@@ -851,9 +968,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     eprintln!("e2e: client received response after activation + resume");
 
     // Wait for client to exit
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-client"),
+    )
     .await?;
 
     // Clean up
@@ -864,9 +983,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-server-resumed")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-server-resumed"),
+    )
     .await?;
 
     conn.send_command(&WorkerCommand::DeleteArtifact {

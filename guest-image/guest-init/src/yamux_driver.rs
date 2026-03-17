@@ -23,10 +23,13 @@ impl YamuxHandle {
 
         let task = ex.spawn(driver_loop(conn, inbound_tx, request_rx));
 
-        (YamuxHandle {
-            inbound_rx,
-            request_tx,
-        }, task)
+        (
+            YamuxHandle {
+                inbound_rx,
+                request_tx,
+            },
+            task,
+        )
     }
 
     pub async fn open_stream(&self) -> anyhow::Result<yamux::Stream> {
@@ -76,7 +79,14 @@ async fn driver_loop(
             }
         };
 
-        match futures::future::select(std::pin::pin!(drive_and_inbound), std::pin::pin!(handle_request)).await.factor_first().0 {
+        match futures::future::select(
+            std::pin::pin!(drive_and_inbound),
+            std::pin::pin!(handle_request),
+        )
+        .await
+        .factor_first()
+        .0
+        {
             DriveResult::Inbound(stream) => {
                 if inbound_tx.send(stream).await.is_err() {
                     break;
@@ -131,10 +141,10 @@ async fn open_outbound(
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Err(anyhow::anyhow!("yamux error: {}", e)))
+                    return Poll::Ready(Err(anyhow::anyhow!("yamux error: {}", e)));
                 }
                 Poll::Ready(None) => {
-                    return Poll::Ready(Err(anyhow::anyhow!("yamux closed during open_outbound")))
+                    return Poll::Ready(Err(anyhow::anyhow!("yamux closed during open_outbound")));
                 }
                 Poll::Pending => break,
             }

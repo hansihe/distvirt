@@ -4,15 +4,39 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NamespaceInput {
-    WorkerEvent { worker_id: WorkerId, event: WorkerEvent },
-    WorkerLost { worker_id: WorkerId },
-    TimerFired { timer_key: TimerKey },
-    UpdateSpec { client_id: ClientId, spec: NamespaceSpec },
-    Delete { client_id: ClientId },
-    GetStatus { client_id: ClientId },
-    Splice { client_id: ClientId, workload_id: WorkloadId, worker_id: WorkerId },
-    Unsplice { client_id: ClientId, workload_id: WorkloadId },
-    StreamLogs { client_id: ClientId, service_id: Option<ServiceId> },
+    WorkerEvent {
+        worker_id: WorkerId,
+        event: WorkerEvent,
+    },
+    WorkerLost {
+        worker_id: WorkerId,
+    },
+    TimerFired {
+        timer_key: TimerKey,
+    },
+    UpdateSpec {
+        client_id: ClientId,
+        spec: NamespaceSpec,
+    },
+    Delete {
+        client_id: ClientId,
+    },
+    GetStatus {
+        client_id: ClientId,
+    },
+    Splice {
+        client_id: ClientId,
+        workload_id: WorkloadId,
+        worker_id: WorkerId,
+    },
+    Unsplice {
+        client_id: ClientId,
+        workload_id: WorkloadId,
+    },
+    StreamLogs {
+        client_id: ClientId,
+        service_id: Option<ServiceId>,
+    },
     LaunchPod {
         workload_id: WorkloadId,
         worker_id: WorkerId,
@@ -69,16 +93,50 @@ pub struct ResumeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkerEvent {
     NamespaceCreated,
-    NamespaceFailed { error: String },
+    NamespaceFailed {
+        error: String,
+    },
     NamespaceDestroyed,
-    PodRunning { pod_id: PodId },
-    PodExited { pod_id: PodId, exit_code: i32 },
-    PodFailed { pod_id: PodId, error: String },
-    PodSuspended { pod_id: PodId, artifact_id: ArtifactId, pool_id: PoolId },
-    PodSuspendFailed { pod_id: PodId, error: String },
-    ArtifactWriteStarted { artifact_id: ArtifactId, pool_id: PoolId },
-    ArtifactWriteCommitted { artifact_id: ArtifactId, pool_id: PoolId, size_bytes: u64 },
-    ServiceBackendNeed { service_id: ServiceId, need: BackendNeed },
-    EndpointActivation { ip: std::net::Ipv4Addr, service_id: Option<ServiceId> },
-    EndpointFlowStatus { ip: std::net::Ipv4Addr, service_id: Option<ServiceId>, has_active_flows: bool },
+    PodRunning {
+        pod_id: PodId,
+    },
+    PodExited {
+        pod_id: PodId,
+        exit_code: i32,
+    },
+    PodFailed {
+        pod_id: PodId,
+        error: String,
+    },
+    PodSuspended {
+        pod_id: PodId,
+        artifact_id: ArtifactId,
+        pool_id: PoolId,
+    },
+    PodSuspendFailed {
+        pod_id: PodId,
+        error: String,
+    },
+    ArtifactWriteStarted {
+        artifact_id: ArtifactId,
+        pool_id: PoolId,
+    },
+    ArtifactWriteCommitted {
+        artifact_id: ArtifactId,
+        pool_id: PoolId,
+        size_bytes: u64,
+    },
+    ServiceBackendNeed {
+        service_id: ServiceId,
+        need: BackendNeed,
+    },
+    EndpointActivation {
+        ip: std::net::Ipv4Addr,
+        service_id: Option<ServiceId>,
+    },
+    EndpointFlowStatus {
+        ip: std::net::Ipv4Addr,
+        service_id: Option<ServiceId>,
+        has_active_flows: bool,
+    },
 }

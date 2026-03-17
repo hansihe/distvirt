@@ -39,7 +39,9 @@ pub(super) fn gen_create_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
         let id_type = port_id_type(port);
         let node_str = port.name.to_string();
 
-        let has_signal_state = nodes_with_signal_state(def).iter().any(|n| **n == port.name);
+        let has_signal_state = nodes_with_signal_state(def)
+            .iter()
+            .any(|n| **n == port.name);
         let state_init = if has_signal_state {
             let state_field = signal_state_field(&port.name);
             quote! { self.#state_field.insert(id, Default::default()); }
@@ -126,7 +128,9 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
         let id_type = port_id_type(port);
         let node_str = port.name.to_string();
 
-        let has_signal_state = nodes_with_signal_state(def).iter().any(|n| **n == port.name);
+        let has_signal_state = nodes_with_signal_state(def)
+            .iter()
+            .any(|n| **n == port.name);
         let state_remove = if has_signal_state {
             let state_field = signal_state_field(&port.name);
             quote! { self.#state_field.remove(&id); }
@@ -167,7 +171,8 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
             .collect();
 
         let queue_retains: Vec<_> = if def.inputs.iter().any(|inp| inp.node == port.name) {
-            let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
+            let pending_field =
+                format_ident!("{}_pending_inputs", to_snake_case(&port.name.to_string()));
             vec![quote! { self.#pending_field.retain(|(pid, _)| *pid != id); }]
         } else {
             vec![]

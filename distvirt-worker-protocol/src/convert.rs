@@ -98,7 +98,9 @@ pub fn write_container_config(
     val: &ContainerConfig,
 ) {
     {
-        let mut ep = builder.reborrow().init_entrypoint(val.entrypoint.len() as u32);
+        let mut ep = builder
+            .reborrow()
+            .init_entrypoint(val.entrypoint.len() as u32);
         for (i, e) in val.entrypoint.iter().enumerate() {
             ep.set(i as u32, e);
         }
@@ -277,7 +279,6 @@ pub fn read_registry_entry(
     })
 }
 
-
 pub fn write_activator_config(
     mut builder: schema::activator_config::Builder<'_>,
     val: &ActivatorConfig,
@@ -363,7 +364,6 @@ pub fn read_service_policy(
     })
 }
 
-
 // --- Endpoint Protocol Helpers ---
 
 pub fn write_endpoint_placement(
@@ -411,14 +411,15 @@ pub fn read_endpoint_pod_backend(
     })
 }
 
-pub fn write_endpoint_spec(
-    builder: schema::endpoint_spec::Builder<'_>,
-    val: &EndpointSpec,
-) {
+pub fn write_endpoint_spec(builder: schema::endpoint_spec::Builder<'_>, val: &EndpointSpec) {
     let mut b = builder;
     write_ipv4(&mut b.reborrow().init_ip(), &val.ip);
     match &val.kind {
-        EndpointKind::Service { service_id, policy, backend } => {
+        EndpointKind::Service {
+            service_id,
+            policy,
+            backend,
+        } => {
             let mut svc = b.init_service();
             svc.set_service_id(service_id.as_ref());
             write_service_policy(&mut svc.reborrow().init_policy(), policy);
@@ -508,18 +509,13 @@ fn read_backend_need(val: schema::BackendNeed) -> capnp::Result<BackendNeed> {
 
 // --- Handshake Messages ---
 
-pub fn write_worker_hello(
-    builder: &mut schema::worker_hello::Builder<'_>,
-    val: &WorkerHello,
-) {
+pub fn write_worker_hello(builder: &mut schema::worker_hello::Builder<'_>, val: &WorkerHello) {
     builder.set_auth_token(&val.auth_token);
     let mut caps = builder.reborrow().init_capabilities();
     write_worker_capabilities(&mut caps, &val.capabilities);
 }
 
-pub fn read_worker_hello(
-    reader: schema::worker_hello::Reader<'_>,
-) -> capnp::Result<WorkerHello> {
+pub fn read_worker_hello(reader: schema::worker_hello::Reader<'_>) -> capnp::Result<WorkerHello> {
     Ok(WorkerHello {
         auth_token: reader.get_auth_token()?.to_string()?,
         capabilities: read_worker_capabilities(reader.get_capabilities()?)?,
@@ -581,10 +577,7 @@ pub fn read_worker_capabilities(
     })
 }
 
-pub fn write_worker_ready(
-    builder: &mut schema::worker_ready::Builder<'_>,
-    val: &WorkerReady,
-) {
+pub fn write_worker_ready(builder: &mut schema::worker_ready::Builder<'_>, val: &WorkerReady) {
     if let Some(port) = val.tunnel_listen_port {
         builder.set_has_tunnel_listen_port(true);
         builder.set_tunnel_listen_port(port);
@@ -599,9 +592,7 @@ pub fn write_worker_ready(
     }
 }
 
-pub fn read_worker_ready(
-    reader: schema::worker_ready::Reader<'_>,
-) -> WorkerReady {
+pub fn read_worker_ready(reader: schema::worker_ready::Reader<'_>) -> WorkerReady {
     let tunnel_listen_port = if reader.get_has_tunnel_listen_port() {
         Some(reader.get_tunnel_listen_port())
     } else {
@@ -633,9 +624,7 @@ pub fn write_worker_accepted(
 ) {
     builder.set_worker_id(val.worker_id.as_ref());
     builder.set_tunnel_encrypted(val.tunnel_encrypted);
-    let mut adapters = builder
-        .reborrow()
-        .init_adapters(val.adapters.len() as u32);
+    let mut adapters = builder.reborrow().init_adapters(val.adapters.len() as u32);
     for (i, ac) in val.adapters.iter().enumerate() {
         write_adapter_config(adapters.reborrow().get(i as u32), ac);
     }
@@ -676,10 +665,7 @@ pub fn read_worker_accepted(
     })
 }
 
-pub fn write_adapter_config(
-    builder: schema::adapter_config::Builder<'_>,
-    val: &AdapterConfig,
-) {
+pub fn write_adapter_config(builder: schema::adapter_config::Builder<'_>, val: &AdapterConfig) {
     match val {
         AdapterConfig::WireGuard {
             listen_port,
@@ -763,10 +749,7 @@ pub fn read_worker_peer_info(
 
 // --- WorkerCommand ---
 
-pub fn write_worker_command(
-    mut builder: schema::worker_command::Builder<'_>,
-    cmd: &WorkerCommand,
-) {
+pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cmd: &WorkerCommand) {
     match cmd {
         WorkerCommand::CreateNamespace {
             namespace_id,
@@ -891,7 +874,10 @@ pub fn write_worker_command(
             write_pod_network_config(&mut b.reborrow().init_network(), network);
             b.set_pool_id(pool_id.as_ref());
         }
-        WorkerCommand::DeleteArtifact { artifact_id, pool_id } => {
+        WorkerCommand::DeleteArtifact {
+            artifact_id,
+            pool_id,
+        } => {
             let mut b = builder.init_delete_snapshot();
             b.set_snapshot_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
@@ -1036,10 +1022,14 @@ pub fn read_worker_command(
             })
         }
         // Deprecated command variants — removed from Rust types but still in Cap'n Proto schema.
-        FabricRouteSync(_) | FabricRouteUpdate(_) | CreateService(_)
-        | UpdateServiceBackend(_) | ServiceReady(_) | DestroyService(_) => {
-            Err(capnp::Error::failed("received deprecated command variant".into()))
-        }
+        FabricRouteSync(_)
+        | FabricRouteUpdate(_)
+        | CreateService(_)
+        | UpdateServiceBackend(_)
+        | ServiceReady(_)
+        | DestroyService(_) => Err(capnp::Error::failed(
+            "received deprecated command variant".into(),
+        )),
         AddWireGuardPeer(r) => {
             let r = r?;
             let pubkey_data = r.get_peer_public_key()?;
@@ -1111,7 +1101,11 @@ pub fn read_worker_command(
         TransferArtifact(r) => {
             let r = r?;
             let ep = r.get_dest_endpoint()?.to_str()?;
-            let dest_endpoint = if ep.is_empty() { None } else { Some(ep.to_string()) };
+            let dest_endpoint = if ep.is_empty() {
+                None
+            } else {
+                Some(ep.to_string())
+            };
             Ok(WorkerCommand::TransferArtifact {
                 transfer_id: r.get_transfer_id(),
                 source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
@@ -1157,10 +1151,7 @@ pub fn read_worker_command(
 
 // --- WorkerEvent ---
 
-pub fn write_worker_event(
-    mut builder: schema::worker_event::Builder<'_>,
-    event: &WorkerEvent,
-) {
+pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event: &WorkerEvent) {
     match event {
         WorkerEvent::NamespaceCreated { namespace_id } => {
             let mut b = builder.init_namespace_created();
@@ -1409,9 +1400,7 @@ fn read_psi_metrics(r: schema::psi_metrics::Reader<'_>) -> PsiMetrics {
     }
 }
 
-pub fn read_worker_event(
-    reader: schema::worker_event::Reader<'_>,
-) -> capnp::Result<WorkerEvent> {
+pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Result<WorkerEvent> {
     use schema::worker_event::*;
     match reader.which()? {
         NamespaceCreated(r) => {
@@ -1468,9 +1457,9 @@ pub fn read_worker_event(
             })
         }
         // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
-        ServiceActivation(_) => {
-            Err(capnp::Error::failed("received deprecated event variant: ServiceActivation".into()))
-        }
+        ServiceActivation(_) => Err(capnp::Error::failed(
+            "received deprecated event variant: ServiceActivation".into(),
+        )),
         ServiceBackendNeed(r) => {
             let r = r?;
             Ok(WorkerEvent::ServiceBackendNeed {
@@ -1480,9 +1469,9 @@ pub fn read_worker_event(
             })
         }
         // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
-        FabricRouteMiss(_) => {
-            Err(capnp::Error::failed("received deprecated event variant: FabricRouteMiss".into()))
-        }
+        FabricRouteMiss(_) => Err(capnp::Error::failed(
+            "received deprecated event variant: FabricRouteMiss".into(),
+        )),
         PodSuspended(r) => {
             let r = r?;
             Ok(WorkerEvent::PodSuspended {

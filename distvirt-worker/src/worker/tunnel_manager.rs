@@ -90,20 +90,19 @@ impl TunnelManager {
                 Err(e) => {
                     log::warn!(
                         "tunnel_manager: invalid endpoint '{}' for {}: {}",
-                        info.endpoint, worker_id, e,
+                        info.endpoint,
+                        worker_id,
+                        e,
                     );
                     continue;
                 }
             };
 
-            let segments_changed = self
-                .peers
-                .get(&worker_id)
-                .map_or(true, |p| {
-                    p.segments != info.segments
-                        || p.endpoint != endpoint
-                        || p.public_key != info.public_key
-                });
+            let segments_changed = self.peers.get(&worker_id).map_or(true, |p| {
+                p.segments != info.segments
+                    || p.endpoint != endpoint
+                    || p.public_key != info.public_key
+            });
 
             if segments_changed {
                 // Remove old state if exists, then re-add.
@@ -171,7 +170,9 @@ impl TunnelManager {
 
         // Create tunnel ports on all peers that share this segment.
         for (worker_id, peer) in &mut self.peers {
-            if peer.segments.contains(&segment_id) && !peer.namespace_ports.contains_key(&segment_id) {
+            if peer.segments.contains(&segment_id)
+                && !peer.namespace_ports.contains_key(&segment_id)
+            {
                 if let Some((handle, task)) =
                     Self::create_port_static(&self.transport, worker_id, segment_id, fabric)
                 {
@@ -182,7 +183,8 @@ impl TunnelManager {
 
         log::info!(
             "tunnel_manager: namespace '{}' registered with segment {}",
-            ns_id, segment_id
+            ns_id,
+            segment_id
         );
     }
 
@@ -233,18 +235,21 @@ impl TunnelManager {
     ) -> Option<(TunnelPortHandle, TaskHandle<()>)> {
         match transport.create_namespace_port(worker_id, segment_id) {
             Ok((channel_port, handle)) => {
-                let (_port_id, task) =
-                    fabric.add_tunnel_port(worker_id.to_string(), FabricPort::Virtual(channel_port));
+                let (_port_id, task) = fabric
+                    .add_tunnel_port(worker_id.to_string(), FabricPort::Virtual(channel_port));
                 log::info!(
                     "tunnel_manager: created tunnel port for worker {} segment {}",
-                    worker_id, segment_id
+                    worker_id,
+                    segment_id
                 );
                 Some((handle, task))
             }
             Err(e) => {
                 log::error!(
                     "tunnel_manager: failed to create port for worker {} segment {}: {}",
-                    worker_id, segment_id, e
+                    worker_id,
+                    segment_id,
+                    e
                 );
                 None
             }
@@ -380,14 +385,8 @@ mod tests {
         let ns_id = NamespaceId::from("test-ns");
 
         // Create fabrics for each side.
-        let fabric_a = Arc::new(Fabric::<FabricPort>::new(
-            Ipv4Addr::new(10, 0, 0, 0),
-            24,
-        ));
-        let fabric_b = Arc::new(Fabric::<FabricPort>::new(
-            Ipv4Addr::new(10, 0, 0, 0),
-            24,
-        ));
+        let fabric_a = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let fabric_b = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
 
         // Register namespace first on both sides.
         mgr_a.on_namespace_created(&ns_id, segment_id, &fabric_a);
@@ -408,8 +407,22 @@ mod tests {
         }]);
 
         // Verify ports were created for the matching segment.
-        assert!(mgr_a.peers.get("worker-b").unwrap().namespace_ports.contains_key(&segment_id));
-        assert!(mgr_b.peers.get("worker-a").unwrap().namespace_ports.contains_key(&segment_id));
+        assert!(
+            mgr_a
+                .peers
+                .get("worker-b")
+                .unwrap()
+                .namespace_ports
+                .contains_key(&segment_id)
+        );
+        assert!(
+            mgr_b
+                .peers
+                .get("worker-a")
+                .unwrap()
+                .namespace_ports
+                .contains_key(&segment_id)
+        );
     }
 
     #[tokio::test]
@@ -429,14 +442,8 @@ mod tests {
         let segment_id = 42u16;
         let ns_id = NamespaceId::from("test-ns");
 
-        let fabric_a = Arc::new(Fabric::<FabricPort>::new(
-            Ipv4Addr::new(10, 0, 0, 0),
-            24,
-        ));
-        let fabric_b = Arc::new(Fabric::<FabricPort>::new(
-            Ipv4Addr::new(10, 0, 0, 0),
-            24,
-        ));
+        let fabric_a = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let fabric_b = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
 
         // Sync peers first (before namespace exists).
         mgr_a.handle_registry_sync(vec![WorkerPeerInfo {
@@ -453,14 +460,35 @@ mod tests {
         }]);
 
         // No ports yet (namespace not registered).
-        assert!(mgr_a.peers.get("worker-b").unwrap().namespace_ports.is_empty());
+        assert!(
+            mgr_a
+                .peers
+                .get("worker-b")
+                .unwrap()
+                .namespace_ports
+                .is_empty()
+        );
 
         // Register namespace — ports should be created.
         mgr_a.on_namespace_created(&ns_id, segment_id, &fabric_a);
         mgr_b.on_namespace_created(&ns_id, segment_id, &fabric_b);
 
-        assert!(mgr_a.peers.get("worker-b").unwrap().namespace_ports.contains_key(&segment_id));
-        assert!(mgr_b.peers.get("worker-a").unwrap().namespace_ports.contains_key(&segment_id));
+        assert!(
+            mgr_a
+                .peers
+                .get("worker-b")
+                .unwrap()
+                .namespace_ports
+                .contains_key(&segment_id)
+        );
+        assert!(
+            mgr_b
+                .peers
+                .get("worker-a")
+                .unwrap()
+                .namespace_ports
+                .contains_key(&segment_id)
+        );
     }
 
     #[tokio::test]
@@ -483,11 +511,23 @@ mod tests {
             public_key: [0u8; 32],
         }]);
 
-        assert!(mgr.peers.get("w1").unwrap().namespace_ports.contains_key(&segment_id));
+        assert!(
+            mgr.peers
+                .get("w1")
+                .unwrap()
+                .namespace_ports
+                .contains_key(&segment_id)
+        );
 
         mgr.on_namespace_destroyed(segment_id);
 
-        assert!(!mgr.peers.get("w1").unwrap().namespace_ports.contains_key(&segment_id));
+        assert!(
+            !mgr.peers
+                .get("w1")
+                .unwrap()
+                .namespace_ports
+                .contains_key(&segment_id)
+        );
         assert!(!mgr.namespaces.contains_key(&segment_id));
     }
 }

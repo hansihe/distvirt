@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// Read a parameter value from /proc/cmdline by key prefix (e.g. "distvirt.balloon_mib").
 pub fn read_cmdline_param(key: &str) -> Option<String> {
@@ -14,13 +14,15 @@ pub fn read_cmdline_param(key: &str) -> Option<String> {
 
 /// Parse MemTotal from /proc/meminfo in MiB.
 pub fn read_memtotal_mib() -> anyhow::Result<u32> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo")
-        .context("failed to read /proc/meminfo")?;
+    let meminfo =
+        std::fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
     for line in meminfo.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             let rest = rest.trim();
             if let Some(kb_str) = rest.strip_suffix("kB") {
-                let kb = kb_str.trim().parse::<u64>()
+                let kb = kb_str
+                    .trim()
+                    .parse::<u64>()
                     .context("failed to parse MemTotal value")?;
                 return Ok((kb / 1024) as u32);
             }
@@ -41,7 +43,8 @@ pub struct VmMemoryConfig {
 impl VmMemoryConfig {
     pub fn from_vm_mem(vm_mem_mib: u32) -> Self {
         let zram_mib = (vm_mem_mib / 4).clamp(64, 256);
-        let tcp_buf_max = ((vm_mem_mib as u64) * 1024).clamp(2 * 1024 * 1024, 8 * 1024 * 1024) as u32;
+        let tcp_buf_max =
+            ((vm_mem_mib as u64) * 1024).clamp(2 * 1024 * 1024, 8 * 1024 * 1024) as u32;
 
         VmMemoryConfig {
             vm_mem_mib,
@@ -76,7 +79,10 @@ pub fn setup_zram_swap(config: &VmMemoryConfig) {
         return;
     }
 
-    if let Err(e) = std::fs::write("/sys/block/zram0/disksize", config.zram_size_bytes.to_string()) {
+    if let Err(e) = std::fs::write(
+        "/sys/block/zram0/disksize",
+        config.zram_size_bytes.to_string(),
+    ) {
         log::warn!("zram: failed to set disksize: {}", e);
         return;
     }
@@ -88,7 +94,10 @@ pub fn setup_zram_swap(config: &VmMemoryConfig) {
     match mkswap {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
-            log::warn!("zram: mkswap failed: {}", String::from_utf8_lossy(&out.stderr));
+            log::warn!(
+                "zram: mkswap failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return;
         }
         Err(e) => {
@@ -105,17 +114,26 @@ pub fn setup_zram_swap(config: &VmMemoryConfig) {
         return;
     }
 
-    log::info!("zram: {} MiB zram0 swap enabled (lz4)", config.zram_size_bytes / (1024 * 1024));
+    log::info!(
+        "zram: {} MiB zram0 swap enabled (lz4)",
+        config.zram_size_bytes / (1024 * 1024)
+    );
 }
 
 /// Cap TCP buffer sizes to prevent runaway kernel memory usage from network buffers.
 pub fn set_tcp_memory_caps(config: &VmMemoryConfig) {
-    let value = format!("{}\t{}\t{}", config.tcp_buf_min, config.tcp_buf_default, config.tcp_buf_max);
+    let value = format!(
+        "{}\t{}\t{}",
+        config.tcp_buf_min, config.tcp_buf_default, config.tcp_buf_max
+    );
     for file in &["tcp_rmem", "tcp_wmem"] {
         let path = format!("/proc/sys/net/ipv4/{}", file);
         if let Err(e) = std::fs::write(&path, &value) {
             log::warn!("tcp caps: failed to write {}: {}", path, e);
         }
     }
-    log::info!("tcp caps: set tcp_rmem and tcp_wmem limits (max={} bytes)", config.tcp_buf_max);
+    log::info!(
+        "tcp caps: set tcp_rmem and tcp_wmem limits (max={} bytes)",
+        config.tcp_buf_max
+    );
 }

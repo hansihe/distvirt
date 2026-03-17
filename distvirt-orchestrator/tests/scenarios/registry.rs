@@ -22,16 +22,14 @@ fn test_registry_sync_on_namespace_create() {
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
     // Worker should have received RegistrySync with "echo-svc" → 172.16.0.100.
-    h.assert_worker_received_command_matching(
-        &w1,
-        "RegistrySync with echo-svc entry",
-        |cmd| match cmd {
-            WorkerCommand::RegistrySync { entries, .. } => {
-                entries.iter().any(|e| e.name == "echo-svc" && e.ip == Ipv4Addr::new(172, 16, 0, 100))
-            }
+    h.assert_worker_received_command_matching(&w1, "RegistrySync with echo-svc entry", |cmd| {
+        match cmd {
+            WorkerCommand::RegistrySync { entries, .. } => entries
+                .iter()
+                .any(|e| e.name == "echo-svc" && e.ip == Ipv4Addr::new(172, 16, 0, 100)),
             _ => false,
-        },
-    );
+        }
+    });
 }
 
 /// Test: Adding a second worker to an active namespace sends RegistrySync to the new worker.
@@ -99,7 +97,9 @@ fn test_registry_update_on_service_change() {
     let mut updated_spec = spec.clone();
     updated_spec.services.remove(&ServiceId::from("svc-b"));
     // Also remove the workload for svc-b since it's no longer needed.
-    updated_spec.workloads.remove(&WorkloadId("echo-b".to_string()));
+    updated_spec
+        .workloads
+        .remove(&WorkloadId("echo-b".to_string()));
     h.update_namespace("ns1", updated_spec);
     h.converge();
 
@@ -112,7 +112,9 @@ fn test_registry_update_on_service_change() {
         .collect();
 
     // The last RegistrySync should have only svc-a.
-    let last_sync = registry_syncs.last().expect("should have at least one RegistrySync");
+    let last_sync = registry_syncs
+        .last()
+        .expect("should have at least one RegistrySync");
     match last_sync {
         WorkerCommand::RegistrySync { entries, .. } => {
             assert!(
@@ -142,9 +144,7 @@ fn test_worker_registry_sync_with_tunnel_workers() {
 
     // Add first tunnel-capable worker.
     let key1 = [1u8; 32];
-    let w1 = h
-        .add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.1", key1))
-        ;
+    let w1 = h.add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.1", key1));
     h.converge();
 
     // With only one worker, WorkerRegistrySync should still be sent (containing that worker).
@@ -174,9 +174,7 @@ fn test_worker_registry_sync_with_tunnel_workers() {
 
     // Add second tunnel-capable worker.
     let key2 = [2u8; 32];
-    let w2 = h
-        .add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.2", key2))
-        ;
+    let w2 = h.add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.2", key2));
     h.converge();
 
     // Both workers should have received updated WorkerRegistrySync containing 2 entries.
@@ -257,9 +255,7 @@ fn test_non_tunnel_workers_excluded_from_registry_entries() {
 
     // Add a tunnel-capable worker.
     let key2 = [2u8; 32];
-    let _w2 = h
-        .add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.2", key2))
-        ;
+    let _w2 = h.add_worker_with(MockWorkerConfig::with_tunnel("10.0.0.2", key2));
     h.converge();
 
     // w1 (non-tunnel) should still receive WorkerRegistrySync.

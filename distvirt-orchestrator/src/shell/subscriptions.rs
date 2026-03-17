@@ -124,9 +124,7 @@ impl Subscriptions {
         for sm_event in events {
             // Extract workload_id and service_id for filtering.
             let (event_wl_id, event_svc_id) = match sm_event {
-                SmNamespaceEvent::Workload { workload_id, .. } => {
-                    (Some(workload_id), None)
-                }
+                SmNamespaceEvent::Workload { workload_id, .. } => (Some(workload_id), None),
                 SmNamespaceEvent::Service {
                     workload_id,
                     service_id,

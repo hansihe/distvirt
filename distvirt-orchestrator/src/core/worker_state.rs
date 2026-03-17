@@ -5,9 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::task::GlobalWorkerId;
 use crate::task::scheduler::WorkerCandidate;
 use crate::task::worker_state::WorkerTunnelInfo;
-use crate::task::GlobalWorkerId;
 use crate::types::{NamespaceId, PressureBands, WorkerPressure, WorkerPsi};
 
 use super::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects};
@@ -159,8 +159,7 @@ impl WorkerStateCore {
                 tunnel_info,
                 proto_worker_id,
             } => {
-                let state =
-                    TrackedWorkerStateCore::new(capabilities, tunnel_info, proto_worker_id);
+                let state = TrackedWorkerStateCore::new(capabilities, tunnel_info, proto_worker_id);
                 let candidate = state.to_candidate(worker_id);
                 self.workers.insert(worker_id, state);
                 effects

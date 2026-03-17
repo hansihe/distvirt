@@ -182,10 +182,11 @@ fn manual_propagate_basic() {
     assert!(router.is_quiescent());
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
 }
 
 #[test]
@@ -306,8 +307,16 @@ fn manual_propagate_dirty_and_events() {
     }
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1.deliveries.iter().any(|inp| *inp == BetaInput::DemandInput(1)));
-    assert!(b1.deliveries.iter().any(|inp| *inp == BetaInput::GammaEvent(99)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::GammaEvent(99))
+    );
 }
 
 #[test]
@@ -345,10 +354,11 @@ fn manual_propagate_cascading() {
     assert!(router.is_quiescent());
 
     let a1 = router.get_alpha(&A1).unwrap();
-    assert!(a1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == AlphaInput::StatusInput(vec![42])));
+    assert!(
+        a1.deliveries
+            .iter()
+            .any(|inp| *inp == AlphaInput::StatusInput(vec![42]))
+    );
 }
 
 #[test]
@@ -405,7 +415,10 @@ fn manual_propagate_materializes_creates() {
     drain_round(&mut router);
 
     // Beta should now exist
-    assert!(router.get_beta(&B1).is_some(), "Beta should be materialized");
+    assert!(
+        router.get_beta(&B1).is_some(),
+        "Beta should be materialized"
+    );
 }
 
 #[test]
@@ -530,7 +543,9 @@ fn manual_propagate_events_from_input_handlers() {
     // Beta should have received the event
     let b1 = router.get_beta(&B1).unwrap();
     assert!(
-        b1.deliveries.iter().any(|inp| *inp == BetaInput::SmEvent(777)),
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::SmEvent(777)),
         "Beta should have received SmEvent(777), got: {:?}",
         b1.deliveries
     );

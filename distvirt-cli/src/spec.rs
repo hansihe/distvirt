@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use distvirt_client_protocol::*;
@@ -333,10 +333,13 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    let name = c
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| if i == 0 { "main".to_string() } else { format!("container-{}", i) });
+                    let name = c.name.clone().unwrap_or_else(|| {
+                        if i == 0 {
+                            "main".to_string()
+                        } else {
+                            format!("container-{}", i)
+                        }
+                    });
 
                     ContainerSpec {
                         name,
@@ -365,7 +368,11 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                 if let Some(ref passthrough) = a.passthrough {
                     let idle_timeout_ms = parse_duration_ms(&passthrough.idle_timeout)
                         .unwrap_or_else(|e| {
-                            log::warn!("workload '{}': failed to parse passthrough idle_timeout: {}", wid, e);
+                            log::warn!(
+                                "workload '{}': failed to parse passthrough idle_timeout: {}",
+                                wid,
+                                e
+                            );
                             30_000
                         });
                     Some(ActivationSpec {
@@ -377,7 +384,10 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
                         buffer_policy: None,
                     })
                 } else {
-                    log::warn!("workload '{}': only passthrough activator is valid on workloads; ignored", wid);
+                    log::warn!(
+                        "workload '{}': only passthrough activator is valid on workloads; ignored",
+                        wid
+                    );
                     None
                 }
             });
@@ -513,22 +523,22 @@ fn resolve_activation(
     }
 
     let activator = if let Some(ref passthrough) = activation.passthrough {
-        let idle_timeout_ms = parse_duration_ms(&passthrough.idle_timeout)
-            .unwrap_or_else(|e| {
-                log::warn!("failed to parse passthrough idle_timeout: {}", e);
-                30_000
-            });
+        let idle_timeout_ms = parse_duration_ms(&passthrough.idle_timeout).unwrap_or_else(|e| {
+            log::warn!("failed to parse passthrough idle_timeout: {}", e);
+            30_000
+        });
         Some(ActivatorConfig {
-            activator: Some(activator_config::Activator::Passthrough(PassthroughActivator {
-                idle_timeout_ms,
-            })),
+            activator: Some(activator_config::Activator::Passthrough(
+                PassthroughActivator { idle_timeout_ms },
+            )),
         })
     } else if activation.http2.is_some() {
         Some(ActivatorConfig {
             activator: Some(activator_config::Activator::Http2(Http2Activator {})),
         })
     } else if let Some(ref tcp) = activation.tcp {
-        let idle_timeout_ms = tcp.idle_timeout
+        let idle_timeout_ms = tcp
+            .idle_timeout
             .as_ref()
             .map(|s| parse_duration_ms(s))
             .transpose()
@@ -776,8 +786,14 @@ workloads:
         let api_ip2 = &proto2.workloads["api"].network.as_ref().unwrap().ip;
         let db_ip2 = &proto2.workloads["database"].network.as_ref().unwrap().ip;
 
-        assert_eq!(api_ip1, api_ip2, "api IP should be stable after adding cache");
-        assert_eq!(db_ip1, db_ip2, "database IP should be stable after adding cache");
+        assert_eq!(
+            api_ip1, api_ip2,
+            "api IP should be stable after adding cache"
+        );
+        assert_eq!(
+            db_ip1, db_ip2,
+            "database IP should be stable after adding cache"
+        );
     }
 
     // --- (c) IP stability on removal ---
@@ -821,8 +837,14 @@ workloads:
         let api_ip2 = &proto2.workloads["api"].network.as_ref().unwrap().ip;
         let fe_ip2 = &proto2.workloads["frontend"].network.as_ref().unwrap().ip;
 
-        assert_eq!(api_ip1, api_ip2, "api IP should be stable after removing database");
-        assert_eq!(fe_ip1, fe_ip2, "frontend IP should be stable after removing database");
+        assert_eq!(
+            api_ip1, api_ip2,
+            "api IP should be stable after removing database"
+        );
+        assert_eq!(
+            fe_ip1, fe_ip2,
+            "frontend IP should be stable after removing database"
+        );
     }
 
     // --- (d) Explicit IP respected ---
@@ -852,8 +874,14 @@ workloads:
         let auto2_ip = &proto.workloads["auto2"].network.as_ref().unwrap().ip;
 
         assert_eq!(fixed_ip, "172.16.0.50");
-        assert_ne!(auto1_ip, "172.16.0.50", "auto-assigned should not collide with explicit");
-        assert_ne!(auto2_ip, "172.16.0.50", "auto-assigned should not collide with explicit");
+        assert_ne!(
+            auto1_ip, "172.16.0.50",
+            "auto-assigned should not collide with explicit"
+        );
+        assert_ne!(
+            auto2_ip, "172.16.0.50",
+            "auto-assigned should not collide with explicit"
+        );
         assert_ne!(auto1_ip, auto2_ip, "auto-assigned IPs should be distinct");
     }
 
@@ -878,8 +906,14 @@ workloads:
       - image: img
 "#;
         let (_, proto) = convert(yaml);
-        assert!(proto.workloads["inherits"].suspend_on_idle, "should inherit default true");
-        assert!(!proto.workloads["overrides"].suspend_on_idle, "should override to false");
+        assert!(
+            proto.workloads["inherits"].suspend_on_idle,
+            "should inherit default true"
+        );
+        assert!(
+            !proto.workloads["overrides"].suspend_on_idle,
+            "should override to false"
+        );
     }
 
     // --- (f) Defaults activation ---
@@ -912,7 +946,14 @@ workloads:
 
         // Service that inherits default activation — idle_timeout inside tcp activator
         let inherits_act = proto.services["inherits"].activation.as_ref().unwrap();
-        let inherits_tcp = match inherits_act.activator.as_ref().unwrap().activator.as_ref().unwrap() {
+        let inherits_tcp = match inherits_act
+            .activator
+            .as_ref()
+            .unwrap()
+            .activator
+            .as_ref()
+            .unwrap()
+        {
             activator_config::Activator::Tcp(tcp) => tcp,
             _ => panic!("expected TCP activator"),
         };
@@ -920,7 +961,14 @@ workloads:
 
         // Service that overrides activation
         let overrides_act = proto.services["overrides"].activation.as_ref().unwrap();
-        let overrides_tcp = match overrides_act.activator.as_ref().unwrap().activator.as_ref().unwrap() {
+        let overrides_tcp = match overrides_act
+            .activator
+            .as_ref()
+            .unwrap()
+            .activator
+            .as_ref()
+            .unwrap()
+        {
             activator_config::Activator::Tcp(tcp) => tcp,
             _ => panic!("expected TCP activator"),
         };
@@ -954,7 +1002,10 @@ services:
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(compose.as_bytes()).unwrap();
         let result = try_parse(f.path()).unwrap();
-        assert!(result.is_none(), "docker-compose YAML should not parse as native spec");
+        assert!(
+            result.is_none(),
+            "docker-compose YAML should not parse as native spec"
+        );
     }
 
     // --- IpAllocator unit tests ---

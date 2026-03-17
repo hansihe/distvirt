@@ -5,9 +5,9 @@ use futures::FutureExt;
 
 use distvirt_guest_protocol::GuestEvent;
 
-use crate::cgroup;
 use super::MemoryManager;
 use super::monitor::BalloonChange;
+use crate::cgroup;
 
 /// Run the balloon management task: monitors PSI events, memory.events changes,
 /// and balloon sysfs confirmations, sending `GuestEvent::BalloonSet` through

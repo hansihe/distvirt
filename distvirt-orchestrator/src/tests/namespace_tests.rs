@@ -19,7 +19,10 @@ fn test_namespace_new_initializes_services() {
     assert!(ns.services.contains_key(&svc_id()));
     assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
     // Workload transitions to WaitingForCapacity because the service starts in NeedBackend.
-    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
+    assert!(matches!(
+        get_workload_state(&ns),
+        WorkloadState::WaitingForCapacity
+    ));
     assert!(ns.pod_map.is_empty());
     assert!(ns.workers.is_empty());
 }
@@ -29,32 +32,40 @@ fn test_namespace_update_spec() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     let mut pt = PlacementTable::default();
     let new_spec = test_spec_with_activation();
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(1),
-        spec: new_spec.clone(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::UpdateSpec {
+            client_id: client_id(1),
+            spec: new_spec.clone(),
+        },
+        &mut pt,
+    );
 
     assert_eq!(ns.spec, new_spec);
-    assert!(out
-        .client_events
-        .iter()
-        .any(|(_, ev)| *ev == ClientEvent::Ok));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(_, ev)| *ev == ClientEvent::Ok)
+    );
 }
 
 #[test]
 fn test_namespace_delete() {
     let mut ns = NamespaceStateMachine::new(ns_id("test"), test_spec(), 1);
     let mut pt = PlacementTable::default();
-    let out = ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
 
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(out.destroyed);
-    assert!(out
-        .client_events
-        .iter()
-        .any(|(_, ev)| *ev == ClientEvent::Ok));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(_, ev)| *ev == ClientEvent::Ok)
+    );
 }
 
 #[test]
@@ -70,9 +81,12 @@ fn test_namespace_worker_lost_removes_worker() {
         },
     );
 
-    ns.step(NamespaceInput::WorkerLost {
-        worker_id: worker_id(1),
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerLost {
+            worker_id: worker_id(1),
+        },
+        &mut pt,
+    );
 
     assert!(!ns.workers.contains_key(&worker_id(1)));
 }
@@ -82,9 +96,12 @@ fn test_namespace_get_status() {
     let ns_name = ns_id("test");
     let mut ns = NamespaceStateMachine::new(ns_name.clone(), test_spec(), 1);
     let mut pt = PlacementTable::default();
-    let out = ns.step(NamespaceInput::GetStatus {
-        client_id: client_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::GetStatus {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
 
     assert!(out.client_events.iter().any(|(cid, ev)| {
         *cid == client_id(1)
@@ -167,10 +184,15 @@ fn test_update_spec_removes_service() {
     // Directly launch the workload.
     launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning { pod_id: pod_id.clone() },
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning {
+                pod_id: pod_id.clone(),
+            },
+        },
+        &mut pt,
+    );
     assert!(get_workload_state(&ns).is_running());
 
     // Update spec with no services/workloads — svc1 should be removed.
@@ -179,18 +201,22 @@ fn test_update_spec_removes_service() {
         workloads: BTreeMap::new(),
         services: BTreeMap::new(),
     };
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(1),
-        spec: empty_spec,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::UpdateSpec {
+            client_id: client_id(1),
+            spec: empty_spec,
+        },
+        &mut pt,
+    );
 
     assert!(ns.services.is_empty());
     assert!(ns.workloads.is_empty());
     assert!(ns.pod_map.is_empty());
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::StopPod { .. }
-    )));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::StopPod { .. }))
+    );
 }
 
 #[test]
@@ -202,7 +228,16 @@ fn test_update_spec_removes_launching_service() {
     // Service already starts in NeedBackend, workload already in WaitingForCapacity.
     // Directly launch the workload.
     launch_workload(&mut ns, &mut pod_counter);
-    assert!(matches!(get_workload_state(&ns), WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }));
+    assert!(matches!(
+        get_workload_state(&ns),
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
+    ));
 
     // Update spec with no services — should stop the launching pod and cancel the launch timer.
     let empty_spec = NamespaceSpec {
@@ -210,18 +245,22 @@ fn test_update_spec_removes_launching_service() {
         workloads: BTreeMap::new(),
         services: BTreeMap::new(),
     };
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(1),
-        spec: empty_spec,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::UpdateSpec {
+            client_id: client_id(1),
+            spec: empty_spec,
+        },
+        &mut pt,
+    );
 
     assert!(ns.services.is_empty());
     assert!(ns.workloads.is_empty());
     assert!(ns.pod_map.is_empty());
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::StopPod { .. }
-    )));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::StopPod { .. }))
+    );
     assert!(!out.timers_cancel.is_empty());
 }
 
@@ -263,7 +302,10 @@ fn test_namespace_created_activates_namespace() {
         WorkerCommand::EndpointSync { .. } | WorkerCommand::EndpointUpdate { .. }
     )));
     // Workload stays in WaitingForCapacity, awaiting outer-layer scheduling.
-    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
+    assert!(matches!(
+        get_workload_state(&ns),
+        WorkloadState::WaitingForCapacity
+    ));
 }
 
 #[test]
@@ -288,58 +330,77 @@ fn test_activation_service_lifecycle() {
     );
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
     ));
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. })));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. }))
+    );
 
     // Get the pod_id from the Launching state.
     let pod_id = get_launching_pod_id(&ns);
 
     // PodRunning → Active.
     let mut pt = PlacementTable::default();
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning {
-            pod_id: pod_id.clone(),
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning {
+                pod_id: pod_id.clone(),
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(get_workload_state(&ns).is_running());
     assert!(matches!(
         get_service_state(&ns),
         ServiceState::Active { .. }
     ));
     // Service became active — should have emitted EndpointUpdate for the service.
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::EndpointUpdate { .. }
-    )));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::EndpointUpdate { .. }))
+    );
 
     // BackendNeed::None → idle timer set.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceBackendNeed {
-            service_id: svc_id(),
-            need: BackendNeed::None,
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceBackendNeed {
+                service_id: svc_id(),
+                need: BackendNeed::None,
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(!out.timers_set.is_empty());
     let idle_timer = out.timers_set[0].0.clone();
 
     // Idle timer fires → service back to Idle, workload goes Dormant.
-    let out = ns.step(NamespaceInput::TimerFired {
-        timer_key: idle_timer,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::TimerFired {
+            timer_key: idle_timer,
+        },
+        &mut pt,
+    );
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
     // The idle timeout causes DemandDown which stops the pod via the workload SM.
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::StopPod { .. })
-            || matches!(cmd, WorkerCommand::EndpointUpdate { .. })));
+    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
+        cmd,
+        WorkerCommand::StopPod { .. }
+    ) || matches!(
+        cmd,
+        WorkerCommand::EndpointUpdate { .. }
+    )));
 }
 
 #[test]
@@ -353,18 +414,27 @@ fn test_always_on_service_lifecycle() {
     let _out = launch_workload(&mut ns, &mut pod_counter);
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
     ));
 
     let pod_id = get_launching_pod_id(&ns);
 
     // PodRunning → Running.
-    let _out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning {
-            pod_id: pod_id.clone(),
+    let _out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning {
+                pod_id: pod_id.clone(),
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(get_workload_state(&ns).is_running());
     assert!(matches!(
         get_service_state(&ns),
@@ -385,7 +455,13 @@ fn test_always_on_service_lifecycle() {
     );
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
     ));
 }
 
@@ -409,20 +485,29 @@ fn test_worker_loss_during_active_service() {
         &mut pod_counter,
     );
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning { pod_id },
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning { pod_id },
+        },
+        &mut pt,
+    );
     assert!(get_workload_state(&ns).is_running());
 
     // Worker lost → workload enters WaitingForCapacity (demand preserved),
     // service stays NeedBackend (re-activated to wait for recovery).
     // Namespace goes to Creating (no workers left).
-    let _out = ns.step(NamespaceInput::WorkerLost {
-        worker_id: worker_id(1),
-    }, &mut pt);
+    let _out = ns.step(
+        NamespaceInput::WorkerLost {
+            worker_id: worker_id(1),
+        },
+        &mut pt,
+    );
     assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
+    assert!(matches!(
+        get_workload_state(&ns),
+        WorkloadState::WaitingForCapacity
+    ));
     assert_eq!(ns.status, NamespaceStatus::Creating);
     assert!(ns.workers.is_empty());
     assert!(ns.pod_map.is_empty());
@@ -449,7 +534,12 @@ fn test_launch_timeout() {
     );
     let (pod_id, launch_timeout) = match get_workload_state(&ns) {
         WorkloadState::Active {
-            pod: PodSlot { pod_id, pod_state: PodState::Launching { launch_timeout }, .. },
+            pod:
+                PodSlot {
+                    pod_id,
+                    pod_state: PodState::Launching { launch_timeout },
+                    ..
+                },
             ..
         } => (pod_id.clone(), launch_timeout.clone()),
         other => panic!("expected Launching, got {:?}", other),
@@ -457,20 +547,27 @@ fn test_launch_timeout() {
 
     // Launch timeout fires → workload enters WaitingForCapacity (demand preserved),
     // service stays NeedBackend (re-activated to wait for recovery).
-    let out = ns.step(NamespaceInput::TimerFired {
-        timer_key: launch_timeout,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::TimerFired {
+            timer_key: launch_timeout,
+        },
+        &mut pt,
+    );
     assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
+    assert!(matches!(
+        get_workload_state(&ns),
+        WorkloadState::WaitingForCapacity
+    ));
     // Pod stays in pod_map until PodExited/PodFailed confirms it's gone.
     assert!(ns.pod_map.contains(&pod_id));
     // Pod should be in the workload's retiring list.
     let wl = ns.workloads.get(&wl_id()).expect("workload exists");
     assert!(wl.is_retiring(&pod_id));
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::StopPod { .. })));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::StopPod { .. }))
+    );
 }
 
 #[test]
@@ -482,30 +579,40 @@ fn test_delete_single_worker_stateful() {
     // Get to Active with a running pod.
     launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning { pod_id },
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning { pod_id },
+        },
+        &mut pt,
+    );
 
     // Delete — stateful: workers stay in map with Destroying status.
-    let out = ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed); // Not destroyed yet, waiting for worker confirmation.
     assert!(!ns.workers.is_empty());
     assert!(ns.pod_map.is_empty()); // Pods cleared.
     assert!(ns.workers[&worker_id(1)].fabric_status == FabricStatus::Destroying);
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::DestroyNamespace { .. })));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::DestroyNamespace { .. }))
+    );
 
     // Worker confirms destruction.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::NamespaceDestroyed,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceDestroyed,
+        },
+        &mut pt,
+    );
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -525,26 +632,35 @@ fn test_delete_multi_worker_stateful() {
     );
 
     // Delete.
-    let out = ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed);
     assert_eq!(ns.workers.len(), 2);
 
     // First worker confirms.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::NamespaceDestroyed,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceDestroyed,
+        },
+        &mut pt,
+    );
     assert!(!out.destroyed); // Still waiting for worker-2.
     assert_eq!(ns.workers.len(), 1);
 
     // Second worker confirms.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(2),
-        event: WorkerEvent::NamespaceDestroyed,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(2),
+            event: WorkerEvent::NamespaceDestroyed,
+        },
+        &mut pt,
+    );
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -557,21 +673,30 @@ fn test_delete_worker_lost_during_teardown() {
 
     launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning { pod_id },
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning { pod_id },
+        },
+        &mut pt,
+    );
 
     // Delete.
-    ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
 
     // Worker disconnects instead of confirming.
-    let out = ns.step(NamespaceInput::WorkerLost {
-        worker_id: worker_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::WorkerLost {
+            worker_id: worker_id(1),
+        },
+        &mut pt,
+    );
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -583,9 +708,12 @@ fn test_delete_no_workers_immediate() {
     let mut pt = PlacementTable::default();
     ns.status = NamespaceStatus::Active;
 
-    let out = ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
@@ -611,29 +739,38 @@ fn test_idle_timer_cancelled_on_traffic() {
         &mut pod_counter,
     );
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning { pod_id },
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning { pod_id },
+        },
+        &mut pt,
+    );
 
     // BackendNeed::None → idle timer set.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceBackendNeed {
-            service_id: svc_id(),
-            need: BackendNeed::None,
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceBackendNeed {
+                service_id: svc_id(),
+                need: BackendNeed::None,
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(!out.timers_set.is_empty());
 
     // BackendNeed::Traffic → idle timer cancelled.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::ServiceBackendNeed {
-            service_id: svc_id(),
-            need: BackendNeed::Traffic,
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::ServiceBackendNeed {
+                service_id: svc_id(),
+                need: BackendNeed::Traffic,
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(!out.timers_cancel.is_empty());
 }
 
@@ -650,22 +787,28 @@ fn test_destroying_namespace_ignores_activation() {
     assert!(matches!(get_service_state(&ns), ServiceState::Idle));
 
     // Delete namespace.
-    ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     // Workers stay in map with Destroying status.
     assert!(!ns.workers.is_empty());
     assert!(ns.workers[&worker_id(1)].fabric_status == FabricStatus::Destroying);
 
     // Activation events during Destroying are ignored.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::EndpointActivation {
-            ip: Ipv4Addr::new(172, 16, 0, 100),
-            service_id: Some(svc_id()),
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::EndpointActivation {
+                ip: Ipv4Addr::new(172, 16, 0, 100),
+                service_id: Some(svc_id()),
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(out.pod_requests.is_empty());
     assert!(out.worker_commands.is_empty());
 }
@@ -674,19 +817,26 @@ fn test_destroying_namespace_ignores_activation() {
 fn test_update_spec_rejected_during_teardown() {
     let mut ns = active_namespace(test_spec());
     let mut pt = PlacementTable::default();
-    ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
 
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(2),
-        spec: test_spec(),
-    }, &mut pt);
-    assert!(out.client_events.iter().any(|(_, ev)| matches!(
-        ev,
-        ClientEvent::Error { .. }
-    )));
+    let out = ns.step(
+        NamespaceInput::UpdateSpec {
+            client_id: client_id(2),
+            spec: test_spec(),
+        },
+        &mut pt,
+    );
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ClientEvent::Error { .. }))
+    );
 }
 
 #[test]
@@ -698,18 +848,24 @@ fn test_stateful_destroy_with_running_pod() {
     // Get service to Active.
     launch_workload(&mut ns, &mut pod_counter);
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning {
-            pod_id: pod_id.clone(),
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning {
+                pod_id: pod_id.clone(),
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(get_workload_state(&ns).is_running());
 
     // Delete namespace — stateful: not immediately destroyed.
-    let out = ns.step(NamespaceInput::Delete {
-        client_id: client_id(1),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::Delete {
+            client_id: client_id(1),
+        },
+        &mut pt,
+    );
     assert_eq!(ns.status, NamespaceStatus::Destroying);
     assert!(!out.destroyed);
     assert!(!ns.workers.is_empty());
@@ -717,10 +873,13 @@ fn test_stateful_destroy_with_running_pod() {
     assert!(matches!(get_workload_state(&ns), WorkloadState::Dormant));
 
     // Worker confirms.
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::NamespaceDestroyed,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceDestroyed,
+        },
+        &mut pt,
+    );
     assert!(out.destroyed);
     assert!(ns.workers.is_empty());
 }
@@ -780,9 +939,11 @@ fn test_stateful_destroy_from_orchestrator() {
     });
     assert!(!orch.namespaces.contains_key(&ns_id("ns1")));
     // Worker should no longer reference the namespace.
-    assert!(!orch.workers[&worker_id(1)]
-        .namespaces
-        .contains(&ns_id("ns1")));
+    assert!(
+        !orch.workers[&worker_id(1)]
+            .namespaces
+            .contains(&ns_id("ns1"))
+    );
 }
 
 // --- NamespaceFailed Tests ---
@@ -807,24 +968,33 @@ fn test_namespace_failed_treats_like_worker_loss() {
         &mut pod_counter,
     );
     let pod_id = get_launching_pod_id(&ns);
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::PodRunning { pod_id },
-    }, &mut pt);
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::PodRunning { pod_id },
+        },
+        &mut pt,
+    );
     assert!(get_workload_state(&ns).is_running());
 
     // NamespaceFailed should act like worker loss: workload enters WaitingForCapacity
     // (demand preserved), service stays NeedBackend.
-    ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::NamespaceFailed {
-            error: "gateway crashed".into(),
+    ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceFailed {
+                error: "gateway crashed".into(),
+            },
         },
-    }, &mut pt);
+        &mut pt,
+    );
     assert!(ns.workers.is_empty());
     assert!(ns.pod_map.is_empty());
     assert!(matches!(get_service_state(&ns), ServiceState::NeedBackend));
-    assert!(matches!(get_workload_state(&ns), WorkloadState::WaitingForCapacity));
+    assert!(matches!(
+        get_workload_state(&ns),
+        WorkloadState::WaitingForCapacity
+    ));
     assert_eq!(ns.status, NamespaceStatus::Creating);
 }
 
@@ -846,10 +1016,13 @@ fn test_destroy_service_on_spec_update() {
         workloads: BTreeMap::new(),
         services: BTreeMap::new(),
     };
-    let out = ns.step(NamespaceInput::UpdateSpec {
-        client_id: client_id(1),
-        spec: empty_spec,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::UpdateSpec {
+            client_id: client_id(1),
+            spec: empty_spec,
+        },
+        &mut pt,
+    );
 
     // Removed services should emit EndpointUpdate with removed_ips.
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
@@ -873,17 +1046,21 @@ fn test_registry_sync_on_namespace_active() {
         },
     );
 
-    let out = ns.step(NamespaceInput::WorkerEvent {
-        worker_id: worker_id(1),
-        event: WorkerEvent::NamespaceCreated,
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::WorkerEvent {
+            worker_id: worker_id(1),
+            event: WorkerEvent::NamespaceCreated,
+        },
+        &mut pt,
+    );
 
     assert_eq!(ns.status, NamespaceStatus::Active);
     // Should emit RegistrySync.
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::RegistrySync { .. }
-    )));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::RegistrySync { .. }))
+    );
 }
 
 // --- Outer Layer Scheduling Tests ---
@@ -902,19 +1079,29 @@ fn test_outer_layer_scheduling_picks_worker() {
 
     // Inject LaunchPod (simulating outer layer).
     let pod_id = PodId("pod-0".into());
-    let out = ns.step(NamespaceInput::LaunchPod {
-        workload_id: wl_id(),
-        worker_id: worker_id(1),
-        pod_id: pod_id.clone(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::LaunchPod {
+            workload_id: wl_id(),
+            worker_id: worker_id(1),
+            pod_id: pod_id.clone(),
+        },
+        &mut pt,
+    );
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
     ));
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. })));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. }))
+    );
 }
 
 #[test]
@@ -942,14 +1129,23 @@ fn test_waiting_for_capacity_no_workers() {
         },
     );
     let pod_id = PodId("pod-0".into());
-    let out = ns.step(NamespaceInput::LaunchPod {
-        workload_id: wl_id(),
-        worker_id: worker_id(1),
-        pod_id: pod_id.clone(),
-    }, &mut pt);
+    let out = ns.step(
+        NamespaceInput::LaunchPod {
+            workload_id: wl_id(),
+            worker_id: worker_id(1),
+            pod_id: pod_id.clone(),
+        },
+        &mut pt,
+    );
     assert!(matches!(
         get_workload_state(&ns),
-        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
     ));
     assert!(out.worker_commands.iter().any(|(wid, cmd)| {
         *wid == worker_id(1) && matches!(cmd, WorkerCommand::LaunchPod { .. })
@@ -987,10 +1183,7 @@ fn test_full_activation_lifecycle_through_orchestrator() {
     });
     let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
     assert_eq!(ns.status, NamespaceStatus::Active);
-    assert!(matches!(
-        ns.services[&svc_id()].state,
-        ServiceState::Idle
-    ));
+    assert!(matches!(ns.services[&svc_id()].state, ServiceState::Idle));
     assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
         cmd,
         WorkerCommand::EndpointSync { .. } | WorkerCommand::EndpointUpdate { .. }
@@ -1010,16 +1203,31 @@ fn test_full_activation_lifecycle_through_orchestrator() {
     let ns = orch.namespaces.get(&ns_id("ns1")).unwrap();
     assert!(matches!(
         ns.workloads[&wl_id()].state,
-        WorkloadState::Active { pod: PodSlot { pod_state: PodState::Launching { .. }, .. }, .. }
+        WorkloadState::Active {
+            pod: PodSlot {
+                pod_state: PodState::Launching { .. },
+                ..
+            },
+            ..
+        }
     ));
-    assert!(out
-        .worker_commands
-        .iter()
-        .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. })));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::LaunchPod { .. }))
+    );
 
     // Get pod_id from Launching state.
     let pod_id = match &ns.workloads[&wl_id()].state {
-        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
+        WorkloadState::Active {
+            pod:
+                PodSlot {
+                    pod_id,
+                    pod_state: PodState::Launching { .. },
+                    ..
+                },
+            ..
+        } => pod_id.clone(),
         _ => panic!("expected Launching"),
     };
 
@@ -1040,9 +1248,9 @@ fn test_full_activation_lifecycle_through_orchestrator() {
         ServiceState::Active { .. }
     ));
     // Service backend update should be emitted as EndpointUpdate.
-    assert!(out.worker_commands.iter().any(|(_, cmd)| matches!(
-        cmd,
-        WorkerCommand::EndpointUpdate { .. }
-    )));
+    assert!(
+        out.worker_commands
+            .iter()
+            .any(|(_, cmd)| matches!(cmd, WorkerCommand::EndpointUpdate { .. }))
+    );
 }
-

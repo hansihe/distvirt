@@ -61,12 +61,15 @@ impl NatTable {
     pub fn gc(&mut self, max_age: Duration) {
         let now = Instant::now();
         let before = self.reverse.len();
-        self.reverse.retain(|_, entry| {
-            now.duration_since(entry.last_seen) <= max_age
-        });
+        self.reverse
+            .retain(|_, entry| now.duration_since(entry.last_seen) <= max_age);
         let expired = before - self.reverse.len();
         if expired > 0 {
-            log::info!("nat_table: gc removed {} stale entries ({} remaining)", expired, self.reverse.len());
+            log::info!(
+                "nat_table: gc removed {} stale entries ({} remaining)",
+                expired,
+                self.reverse.len()
+            );
         }
     }
 }

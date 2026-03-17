@@ -21,7 +21,13 @@ fn shared_worker_death_independent_failure() {
     router.create_workload(W2, WorkloadSm::new());
 
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false));
     router.create_service(S2, ServiceSm::new(false));
@@ -33,7 +39,9 @@ fn shared_worker_death_independent_failure() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
 
     let mgmt_s2 = router.create_management();
@@ -42,7 +50,9 @@ fn shared_worker_death_independent_failure() {
         mgmt_s2,
         ServiceSpec {
             workload: W2,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -141,7 +151,13 @@ fn service_retarget_workload() {
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     // One always-on service pointing at W1.
     router.create_service(S1, ServiceSm::new(false));
@@ -151,7 +167,9 @@ fn service_retarget_workload() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -175,7 +193,9 @@ fn service_retarget_workload() {
         mgmt_s1,
         ServiceSpec {
             workload: W2,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -220,13 +240,21 @@ fn independent_workload_subgraphs() {
 
     let mgmt1 = router.create_management();
     router.set_management_to_workload_edges(mgmt1, vec![W1]);
-    router.set_management_wl_spec(mgmt1, WorkloadSpec { image: "app-a:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt1,
+        WorkloadSpec {
+            image: "app-a:v1".into(),
+            ..Default::default()
+        },
+    );
     router.set_management_to_service_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
 
     // W2 + S2 subgraph.
@@ -235,13 +263,21 @@ fn independent_workload_subgraphs() {
 
     let mgmt2 = router.create_management();
     router.set_management_to_workload_edges(mgmt2, vec![W2]);
-    router.set_management_wl_spec(mgmt2, WorkloadSpec { image: "app-b:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt2,
+        WorkloadSpec {
+            image: "app-b:v1".into(),
+            ..Default::default()
+        },
+    );
     router.set_management_to_service_edges(mgmt2, vec![S2]);
     router.set_management_svc_spec(
         mgmt2,
         ServiceSpec {
             workload: W2,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -317,7 +353,13 @@ fn service_fan_in_with_retarget() {
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     // Two always-on services both pointing at W1.
     router.create_service(S1, ServiceSm::new(false));
@@ -329,7 +371,9 @@ fn service_fan_in_with_retarget() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
 
     let mgmt_s2 = router.create_management();
@@ -338,7 +382,9 @@ fn service_fan_in_with_retarget() {
         mgmt_s2,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -365,7 +411,9 @@ fn service_fan_in_with_retarget() {
         mgmt_s2,
         ServiceSpec {
             workload: W2,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -416,7 +464,13 @@ fn service_self_destructs_on_spec_removal() {
     // Use separate mgmt ports so we can remove the service spec independently.
     let mgmt_wl = router.create_management();
     router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
-    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt_wl,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     let mgmt_svc = router.create_management();
     router.set_management_to_service_edges(mgmt_svc, vec![S1]);
@@ -424,7 +478,9 @@ fn service_self_destructs_on_spec_removal() {
         mgmt_svc,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -492,7 +548,13 @@ fn full_teardown_cascade() {
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt_wl, vec![W1, W2]);
-    router.set_management_wl_spec(mgmt_wl, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt_wl,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     let mgmt_s1 = router.create_management();
     router.create_service(S1, ServiceSm::new(false));
@@ -501,7 +563,9 @@ fn full_teardown_cascade() {
         mgmt_s1,
         ServiceSpec {
             workload: W1,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
 
     let mgmt_s2 = router.create_management();
@@ -511,7 +575,9 @@ fn full_teardown_cascade() {
         mgmt_s2,
         ServiceSpec {
             workload: W2,
-            has_activation: false, ..Default::default() },
+            has_activation: false,
+            ..Default::default()
+        },
     );
     router.propagate();
 

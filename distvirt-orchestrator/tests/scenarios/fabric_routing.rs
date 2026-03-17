@@ -27,7 +27,9 @@ fn test_fabric_route_update_on_pod_launch() {
     h.assert_workload_running("ns1", "echo");
 
     // Determine which worker got the pod.
-    let pod_worker_id = h.workload_global_worker_id("ns1", "echo").expect("expected worker_id");
+    let pod_worker_id = h
+        .workload_global_worker_id("ns1", "echo")
+        .expect("expected worker_id");
 
     // The other worker should have received an EndpointSync or EndpointUpdate with endpoint entries.
     let other_worker_id = if pod_worker_id == w1 { &w2 } else { &w1 };
@@ -35,13 +37,15 @@ fn test_fabric_route_update_on_pod_launch() {
     h.assert_worker_received_command_matching(
         other_worker_id,
         "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            ) || matches!(
+                cmd,
+                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+            )
+        },
     );
 }
 
@@ -70,24 +74,24 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.assert_workload_running("ns1", "web");
 
     // Determine which worker hosts the pod.
-    let pod_worker_id = h.workload_global_worker_id("ns1", "web").expect("expected worker_id");
-    let other_worker_id = if pod_worker_id == w1 {
-        w2
-    } else {
-        w1
-    };
+    let pod_worker_id = h
+        .workload_global_worker_id("ns1", "web")
+        .expect("expected worker_id");
+    let other_worker_id = if pod_worker_id == w1 { w2 } else { w1 };
 
     // The other worker should have received an EndpointSync or EndpointUpdate with endpoints.
     h.assert_worker_received_command_matching(
         &other_worker_id,
         "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            ) || matches!(
+                cmd,
+                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+            )
+        },
     );
 
     // Idle → suspend.
@@ -104,10 +108,12 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.assert_worker_received_command_matching(
         &other_worker_id,
         "EndpointUpdate with upserted endpoints (after suspend, backend=None)",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            )
+        },
     );
 
     // Re-activate via EndpointActivation → resume.

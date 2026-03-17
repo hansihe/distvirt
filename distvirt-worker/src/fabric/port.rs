@@ -12,8 +12,12 @@ pub type PortId = usize;
 ///
 /// Implemented by `Port` for real TAP devices and by test doubles in tests.
 pub trait FramePort: Send + Sync + 'static {
-    fn recv_frame(&self, buf: &mut [u8]) -> impl std::future::Future<Output = io::Result<usize>> + Send;
-    fn send_frame(&self, buf: &[u8]) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+    fn recv_frame(
+        &self,
+        buf: &mut [u8],
+    ) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+    fn send_frame(&self, buf: &[u8])
+    -> impl std::future::Future<Output = io::Result<usize>> + Send;
 }
 
 /// An async port wrapping a PacketSocket's AF_PACKET socket.
@@ -37,10 +41,7 @@ impl Port {
     /// `guest_mac` is the MAC address configured on the guest's network interface.
     /// It is used as the destination MAC when injecting frames into the TAP device.
     pub fn new(socket: PacketSocket, guest_mac: [u8; 6]) -> Self {
-        Port {
-            socket,
-            guest_mac,
-        }
+        Port { socket, guest_mac }
     }
 
     /// Size of the virtio-net header prepended by AF_PACKET with PACKET_VNET_HDR.
@@ -82,7 +83,12 @@ impl Port {
         let proto_len = arp[5];
         let oper = u16::from_be_bytes([arp[6], arp[7]]);
 
-        if hw_type != 1 || proto_type != 0x0800 || hw_len != 6 || proto_len != 4 || oper != Self::ARP_REQUEST {
+        if hw_type != 1
+            || proto_type != 0x0800
+            || hw_len != 6
+            || proto_len != 4
+            || oper != Self::ARP_REQUEST
+        {
             return Ok(());
         }
 

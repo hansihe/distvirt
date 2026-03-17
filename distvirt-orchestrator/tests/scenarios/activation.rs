@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_orchestrator::types::NamespaceStatus;
 use distvirt_worker_protocol::{ServiceId, WorkerCommand, WorkerEvent};
 
@@ -69,7 +69,9 @@ fn test_activation_pending_condition_lifecycle() {
     h.assert_service_condition_set("ns", "web-svc", "activation-pending");
 
     // Complete the launch by injecting PodRunning.
-    let pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "web")
+        .expect("expected pod_id");
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
         namespace_id: "ns".into(),
         pod_id,
@@ -130,7 +132,9 @@ fn test_activation_pending_in_status_report() {
     );
 
     // Complete the launch.
-    let pod_id = h.workload_proto_pod_id("ns", "web").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "web")
+        .expect("expected pod_id");
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
         namespace_id: "ns".into(),
         pod_id,

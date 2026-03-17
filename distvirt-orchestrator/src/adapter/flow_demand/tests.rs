@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm_new::{
-    BackendNeed, DRouter, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
-    SCHEDULE_REQUEST, TIMER,
+    BackendNeed, DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
+    WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -17,7 +17,13 @@ fn setup(router: &mut DRouter) -> WorkerId {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);

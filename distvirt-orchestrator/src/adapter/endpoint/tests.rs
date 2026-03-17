@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm_new::{
-    DRouter, PodId, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
-    ENDPOINT, SCHEDULE_REQUEST, TIMER,
+    DRouter, ENDPOINT, PodId, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo,
+    WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -19,7 +19,13 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -38,18 +44,11 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
 }
 
 /// Make a pod reach Running state so the service becomes Active.
-fn make_pod_running(
-    router: &mut DRouter,
-    worker: crate::sm_new::WorkerId,
-    pod_id: PodId,
-) {
+fn make_pod_running(router: &mut DRouter, worker: crate::sm_new::WorkerId, pod_id: PodId) {
     // Grant lease
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
 
     // Assign worker to pod
@@ -89,7 +88,11 @@ fn service_becomes_active_update() {
 
     // Initially, service is NeedBackend — no active endpoints.
     let actions = adapter.reconcile(&mut router);
-    assert!(actions.is_empty(), "expected no actions before pod running, got {:?}", actions);
+    assert!(
+        actions.is_empty(),
+        "expected no actions before pod running, got {:?}",
+        actions
+    );
 
     // Make pod running → service becomes Active.
     make_pod_running(&mut router, worker, pod_id);
@@ -180,7 +183,13 @@ fn multiple_services_change() {
     let mgmt1 = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt1, vec![W1]);
-    router.set_management_wl_spec(mgmt1, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt1,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
@@ -195,7 +204,13 @@ fn multiple_services_change() {
     let mgmt2 = router.create_management();
     router.create_workload(w2_id, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt2, vec![w2_id]);
-    router.set_management_wl_spec(mgmt2, WorkloadSpec { image: "app:v2".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt2,
+        WorkloadSpec {
+            image: "app:v2".into(),
+            ..Default::default()
+        },
+    );
     router.create_service(s2_id, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(

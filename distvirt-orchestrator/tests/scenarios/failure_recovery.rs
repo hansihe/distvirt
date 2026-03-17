@@ -37,8 +37,8 @@ fn test_pod_launch_failure_retries() {
 /// Fail 2 launches, then succeed. Workload reaches Running. consecutive_failures reset.
 #[test]
 fn test_pod_launch_failure_recovery_on_success() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let fail_count = Arc::new(AtomicU32::new(0));
     let fail_count_clone = fail_count.clone();
@@ -98,8 +98,8 @@ fn test_pod_launch_failure_recovery_on_success() {
 /// Drive workload to Failed. Update spec with new image. Converge. Workload should retry and reach Running.
 #[test]
 fn test_failed_workload_recovery_via_spec_change() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let should_fail = Arc::new(AtomicBool::new(true));
     let should_fail_clone = should_fail.clone();
@@ -144,8 +144,12 @@ fn test_failed_workload_recovery_via_spec_change() {
     // Now switch handler to succeed and update spec with new image
     should_fail.store(false, Ordering::SeqCst);
     let mut new_spec = always_on_spec();
-    new_spec.workloads.get_mut(&WorkloadId("echo".to_string())).unwrap()
-        .containers[0].image_ref = "docker.io/library/alpine:new".to_string();
+    new_spec
+        .workloads
+        .get_mut(&WorkloadId("echo".to_string()))
+        .unwrap()
+        .containers[0]
+        .image_ref = "docker.io/library/alpine:new".to_string();
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -163,7 +167,9 @@ fn test_pod_exit_while_running() {
     h.assert_workload_running("ns", "echo");
 
     // Get the pod_id of the running workload
-    let pod_id = h.workload_proto_pod_id("ns", "echo").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "echo")
+        .expect("expected pod_id");
 
     // Inject PodExited with non-zero exit code
     h.worker(&w1).send_event(WorkerEvent::PodExited {
@@ -191,7 +197,9 @@ fn test_pod_exit_code_zero_no_backoff() {
     h.converge();
     h.assert_workload_running("ns", "echo");
 
-    let pod_id = h.workload_proto_pod_id("ns", "echo").expect("expected pod_id");
+    let pod_id = h
+        .workload_proto_pod_id("ns", "echo")
+        .expect("expected pod_id");
 
     // Inject clean exit
     h.worker(&w1).send_event(WorkerEvent::PodExited {
@@ -205,7 +213,10 @@ fn test_pod_exit_code_zero_no_backoff() {
     // (no backoff)
     h.assert_workload_running("ns", "echo");
     let wl = h.workload_state("ns", "echo");
-    assert_eq!(wl.consecutive_failures, 0, "clean exit should not increment failures");
+    assert_eq!(
+        wl.consecutive_failures, 0,
+        "clean exit should not increment failures"
+    );
 }
 
 // =============================================================================
@@ -237,11 +248,12 @@ fn test_resume_failure_falls_back_to_cold_launch() {
 
     // Re-activate via EndpointActivation — resume will fail.
     let svc_ip = h.service_ip("ns1", "web-svc");
-    h.worker(&w1).send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
-        namespace_id: "ns1".into(),
-        ip: svc_ip,
-        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
-    });
+    h.worker(&w1)
+        .send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
+            namespace_id: "ns1".into(),
+            ip: svc_ip,
+            service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
+        });
     h.converge();
 
     // Reconciliation-based readiness syncing ensures demand is preserved
@@ -257,9 +269,16 @@ fn test_resume_failure_falls_back_to_cold_launch() {
     h.assert_workload_running("ns1", "web");
 
     // Verify command counts
-    h.assert_worker_command_count(&w1, "ResumePod", 1, |c| matches!(c, WorkerCommand::ResumePod { .. }));
-    let launch_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
-    assert!(launch_count >= 2, "expected at least 2 LaunchPod commands (initial + cold restart), got {}", launch_count);
+    h.assert_worker_command_count(&w1, "ResumePod", 1, |c| {
+        matches!(c, WorkerCommand::ResumePod { .. })
+    });
+    let launch_count =
+        h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
+    assert!(
+        launch_count >= 2,
+        "expected at least 2 LaunchPod commands (initial + cold restart), got {}",
+        launch_count
+    );
 }
 
 // =============================================================================
@@ -270,8 +289,8 @@ fn test_resume_failure_falls_back_to_cold_launch() {
 /// When it recovers (PodRunning), the condition should be cleared.
 #[test]
 fn test_retry_backoff_condition_lifecycle() {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let fail_count = Arc::new(AtomicU32::new(0));
     let fail_count_clone = fail_count.clone();
@@ -320,7 +339,8 @@ fn test_retry_backoff_condition_lifecycle() {
     h.advance_time(Duration::from_secs(2)); // past 1s backoff → 2nd failure
     h.assert_workload_retry_backoff("ns", "echo");
     assert!(
-        h.workload_conditions("ns", "echo").contains_key("retry-backoff"),
+        h.workload_conditions("ns", "echo")
+            .contains_key("retry-backoff"),
         "retry-backoff should still be set after 2nd failure"
     );
 
@@ -340,8 +360,8 @@ fn test_retry_backoff_condition_lifecycle() {
 /// After recovery via spec change, it should be cleared.
 #[test]
 fn test_failed_condition_lifecycle() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let should_fail = Arc::new(AtomicBool::new(true));
     let should_fail_clone = should_fail.clone();
@@ -394,8 +414,12 @@ fn test_failed_condition_lifecycle() {
     // Recover via spec change.
     should_fail.store(false, Ordering::SeqCst);
     let mut new_spec = always_on_spec();
-    new_spec.workloads.get_mut(&WorkloadId("echo".to_string())).unwrap()
-        .containers[0].image_ref = "docker.io/library/alpine:fixed".to_string();
+    new_spec
+        .workloads
+        .get_mut(&WorkloadId("echo".to_string()))
+        .unwrap()
+        .containers[0]
+        .image_ref = "docker.io/library/alpine:fixed".to_string();
     h.update_namespace("ns", new_spec);
     h.converge();
 

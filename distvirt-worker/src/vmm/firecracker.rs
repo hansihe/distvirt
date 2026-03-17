@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
@@ -119,12 +119,26 @@ impl Vmm for Firecracker {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
         // Copy rootfs and container images into tmpdir (writable copies).
-        copy_file_writable(&config.rootfs_image_path, &tmpdir.path().join("rootfs.ext4")).await?;
-        copy_file_writable(&config.container_image_path, &tmpdir.path().join("container.ext4")).await?;
+        copy_file_writable(
+            &config.rootfs_image_path,
+            &tmpdir.path().join("rootfs.ext4"),
+        )
+        .await?;
+        copy_file_writable(
+            &config.container_image_path,
+            &tmpdir.path().join("container.ext4"),
+        )
+        .await?;
 
         // Spawn Firecracker and wait for API socket.
-        let spawned = spawn_firecracker(&self.firecracker_bin, tmpdir.path(), config.serial_console).await?;
-        let SpawnedFirecracker { child, serial_stdout, api_socket, vsock_uds_path } = spawned;
+        let spawned =
+            spawn_firecracker(&self.firecracker_bin, tmpdir.path(), config.serial_console).await?;
+        let SpawnedFirecracker {
+            child,
+            serial_stdout,
+            api_socket,
+            vsock_uds_path,
+        } = spawned;
 
         // Configure the VM via the API.
         //
@@ -165,7 +179,8 @@ impl Vmm for Firecracker {
         .await
         .context("configure boot-source")?;
 
-        api_request("PUT",
+        api_request(
+            "PUT",
             &api_socket,
             "/drives/rootfs",
             &serde_json::json!({
@@ -178,7 +193,8 @@ impl Vmm for Firecracker {
         .await
         .context("configure rootfs drive")?;
 
-        api_request("PUT",
+        api_request(
+            "PUT",
             &api_socket,
             "/drives/container",
             &serde_json::json!({
@@ -193,7 +209,8 @@ impl Vmm for Firecracker {
 
         // Register config drive if present.
         if !config.initial_commands.is_empty() {
-            api_request("PUT",
+            api_request(
+                "PUT",
                 &api_socket,
                 "/drives/config",
                 &serde_json::json!({
@@ -207,7 +224,8 @@ impl Vmm for Firecracker {
             .context("configure config drive")?;
         }
 
-        api_request("PUT",
+        api_request(
+            "PUT",
             &api_socket,
             "/vsock",
             &serde_json::json!({
@@ -222,7 +240,8 @@ impl Vmm for Firecracker {
         .await
         .context("configure vsock")?;
 
-        api_request("PUT",
+        api_request(
+            "PUT",
             &api_socket,
             "/machine-config",
             &serde_json::json!({
@@ -235,7 +254,8 @@ impl Vmm for Firecracker {
 
         // Configure balloon device if requested.
         if let Some(ref balloon) = config.balloon {
-            api_request("PUT",
+            api_request(
+                "PUT",
                 &api_socket,
                 "/balloon",
                 &serde_json::json!({
@@ -253,7 +273,8 @@ impl Vmm for Firecracker {
             let tap = PersistentTap::create().context("create TAP device")?;
             tap.bring_up().context("bring TAP interface up")?;
 
-            api_request("PUT",
+            api_request(
+                "PUT",
                 &api_socket,
                 "/network-interfaces/eth0",
                 &serde_json::json!({
@@ -277,7 +298,8 @@ impl Vmm for Firecracker {
             None
         };
 
-        api_request("PUT",
+        api_request(
+            "PUT",
             &api_socket,
             "/actions",
             &serde_json::json!({
@@ -290,7 +312,9 @@ impl Vmm for Firecracker {
         // Open AF_PACKET socket on the TAP and wrap as FabricPort.
         let fabric_port = if let Some(tap) = tap {
             let guest_mac = config.net.as_ref().unwrap().guest_mac;
-            let socket = tap.into_packet_socket().context("open packet socket on TAP")?;
+            let socket = tap
+                .into_packet_socket()
+                .context("open packet socket on TAP")?;
             Some(FabricPort::Tap(Port::new(socket, guest_mac)))
         } else {
             None
@@ -327,8 +351,16 @@ impl Vmm for Firecracker {
         let tmpdir = tempfile::tempdir().context("create tmpdir for restore")?;
 
         // 2. Copy rootfs from original source path and container.ext4 from snapshot.
-        copy_file_writable(&metadata.rootfs_source_path, &tmpdir.path().join("rootfs.ext4")).await?;
-        copy_file_writable(&snapshot_dir.join("container.ext4"), &tmpdir.path().join("container.ext4")).await?;
+        copy_file_writable(
+            &metadata.rootfs_source_path,
+            &tmpdir.path().join("rootfs.ext4"),
+        )
+        .await?;
+        copy_file_writable(
+            &snapshot_dir.join("container.ext4"),
+            &tmpdir.path().join("container.ext4"),
+        )
+        .await?;
 
         // 3. Copy snapshot.bin and mem.bin from snapshot dir into tmpdir.
         tokio::fs::copy(
@@ -337,17 +369,15 @@ impl Vmm for Firecracker {
         )
         .await
         .context("copy snapshot.bin from snapshot")?;
-        tokio::fs::copy(
-            snapshot_dir.join("mem.bin"),
-            tmpdir.path().join("mem.bin"),
-        )
-        .await
-        .context("copy mem.bin from snapshot")?;
+        tokio::fs::copy(snapshot_dir.join("mem.bin"), tmpdir.path().join("mem.bin"))
+            .await
+            .context("copy mem.bin from snapshot")?;
 
         // 4. Create fresh TAP if networking is configured.
         let tap = if net.is_some() {
             let tap = PersistentTap::create().context("create TAP device for restore")?;
-            tap.bring_up().context("bring TAP interface up for restore")?;
+            tap.bring_up()
+                .context("bring TAP interface up for restore")?;
             log::info!("restore: created TAP {}", tap.name());
             Some(tap)
         } else {
@@ -355,8 +385,18 @@ impl Vmm for Firecracker {
         };
 
         // 5. Spawn Firecracker and wait for API socket.
-        let spawned = spawn_firecracker(&self.firecracker_bin, tmpdir.path(), metadata.serial_console).await?;
-        let SpawnedFirecracker { child, serial_stdout, api_socket, vsock_uds_path } = spawned;
+        let spawned = spawn_firecracker(
+            &self.firecracker_bin,
+            tmpdir.path(),
+            metadata.serial_console,
+        )
+        .await?;
+        let SpawnedFirecracker {
+            child,
+            serial_stdout,
+            api_socket,
+            vsock_uds_path,
+        } = spawned;
 
         // 6. Load snapshot with network overrides.
         let mut load_body = serde_json::json!({
@@ -384,7 +424,8 @@ impl Vmm for Firecracker {
 
         // 7. Open AF_PACKET socket on the new TAP and wrap as FabricPort.
         let fabric_port = if let (Some(tap), Some(net_cfg)) = (tap, net) {
-            let socket = tap.into_packet_socket()
+            let socket = tap
+                .into_packet_socket()
                 .context("open packet socket on TAP (restore)")?;
             Some(FabricPort::Tap(Port::new(socket, net_cfg.guest_mac)))
         } else {
@@ -509,7 +550,8 @@ impl VmInstance for FirecrackerInstance {
         if !self.balloon_configured {
             bail!("balloon device not configured for this VM");
         }
-        api_request("PATCH",
+        api_request(
+            "PATCH",
             &self.api_socket,
             "/balloon",
             &serde_json::json!({"amount_mib": amount_mib}),
@@ -525,7 +567,8 @@ impl VmInstance for FirecrackerInstance {
             .with_context(|| format!("create snapshot dir {}", snapshot_dir.display()))?;
 
         // 1. Pause vCPUs.
-        api_request("PATCH",
+        api_request(
+            "PATCH",
             &self.api_socket,
             "/vm",
             &serde_json::json!({"state": "Paused"}),
@@ -534,7 +577,8 @@ impl VmInstance for FirecrackerInstance {
         .context("pause VM")?;
 
         // 2. Create snapshot — Firecracker writes to its cwd (tmpdir).
-        api_request("PUT",
+        api_request(
+            "PUT",
             &self.api_socket,
             "/snapshot/create",
             &serde_json::json!({
@@ -562,12 +606,9 @@ impl VmInstance for FirecrackerInstance {
         )
         .await
         .context("copy snapshot.bin to snapshot dir")?;
-        tokio::fs::copy(
-            tmpdir_path.join("mem.bin"),
-            snapshot_dir.join("mem.bin"),
-        )
-        .await
-        .context("copy mem.bin to snapshot dir")?;
+        tokio::fs::copy(tmpdir_path.join("mem.bin"), snapshot_dir.join("mem.bin"))
+            .await
+            .context("copy mem.bin to snapshot dir")?;
 
         // 5. Write metadata.json.
         let metadata = SnapshotMetadata {
@@ -681,7 +722,10 @@ async fn api_request(
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(e).context("read API response"),
         Err(_) => {
-            log::warn!("Firecracker API: read timeout on PUT {}, checking partial response", path);
+            log::warn!(
+                "Firecracker API: read timeout on PUT {}, checking partial response",
+                path
+            );
         }
     }
 
@@ -689,11 +733,7 @@ async fn api_request(
 
     if let Some(status_line) = response_str.lines().next() {
         if !status_line.contains("204") && !status_line.contains("200") {
-            bail!(
-                "Firecracker API error on PUT {}:\n{}",
-                path,
-                response_str
-            );
+            bail!("Firecracker API error on PUT {}:\n{}", path, response_str);
         }
     }
 

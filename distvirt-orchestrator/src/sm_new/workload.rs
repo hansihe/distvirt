@@ -1,5 +1,5 @@
-use distvirt_sm_router::SmHandler;
 use super::*;
+use distvirt_sm_router::SmHandler;
 
 // ---- Workload SM ----
 
@@ -131,8 +131,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.suspend_on_idle = spec.suspend_on_idle;
 
                     // --- Detect pod-affecting spec changes (image) ---
-                    let image_changed =
-                        self.current_image.as_deref() != Some(spec.image.as_str());
+                    let image_changed = self.current_image.as_deref() != Some(spec.image.as_str());
                     self.current_image = Some(spec.image.clone());
 
                     if self.has_spec && image_changed {

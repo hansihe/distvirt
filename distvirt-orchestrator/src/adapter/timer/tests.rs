@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::sm_new::{
-    DRouter, ServiceSm, ServiceSpec, WorkloadSm, WorkloadSpec, WorkerInfo, WorkloadId, ServiceId,
-    SCHEDULE_REQUEST,
+    DRouter, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId,
+    WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -31,7 +31,13 @@ fn setup_workload(
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -82,10 +88,7 @@ fn new_timer_produces_start() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
@@ -96,12 +99,15 @@ fn new_timer_produces_start() {
         .iter()
         .filter(|a| matches!(a, TimerAction::Start { .. }))
         .collect();
-    assert_eq!(starts.len(), 1, "expected 1 Start action, got {:?}", actions);
+    assert_eq!(
+        starts.len(),
+        1,
+        "expected 1 Start action, got {:?}",
+        actions
+    );
     match &starts[0] {
         TimerAction::Start {
-            identity,
-            duration,
-            ..
+            identity, duration, ..
         } => {
             assert_eq!(
                 *identity,
@@ -128,10 +134,7 @@ fn timer_removed_produces_cancel() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
@@ -139,12 +142,17 @@ fn timer_removed_produces_cancel() {
 
     let actions = adapter.reconcile(&mut router);
     assert!(
-        actions.iter().any(|a| matches!(a, TimerAction::Start { .. })),
+        actions
+            .iter()
+            .any(|a| matches!(a, TimerAction::Start { .. })),
         "expected Start"
     );
 
     // Fire the timer → workload leaves RetryBackoff → timer no longer wanted.
-    adapter.fire(&mut router, &TimerIdentity::Workload(W1, WorkloadTimerKey::RetryBackoff));
+    adapter.fire(
+        &mut router,
+        &TimerIdentity::Workload(W1, WorkloadTimerKey::RetryBackoff),
+    );
     router.propagate();
 
     let actions = adapter.reconcile(&mut router);
@@ -179,10 +187,7 @@ fn same_generation_no_action() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
@@ -219,7 +224,13 @@ fn generation_change_restarts_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -244,10 +255,7 @@ fn generation_change_restarts_timer() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Running);
@@ -259,10 +267,13 @@ fn generation_change_restarts_timer() {
     router.propagate();
     let actions = adapter.reconcile(&mut router);
     assert!(
-        actions.iter().any(|a| matches!(a, TimerAction::Start {
-            identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
-            ..
-        })),
+        actions.iter().any(|a| matches!(
+            a,
+            TimerAction::Start {
+                identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
+                ..
+            }
+        )),
         "expected idle timer Start, got {:?}",
         actions
     );
@@ -272,9 +283,12 @@ fn generation_change_restarts_timer() {
     router.propagate();
     let actions = adapter.reconcile(&mut router);
     assert!(
-        actions.iter().any(|a| matches!(a, TimerAction::Cancel {
-            identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
-        })),
+        actions.iter().any(|a| matches!(
+            a,
+            TimerAction::Cancel {
+                identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
+            }
+        )),
         "expected idle timer Cancel, got {:?}",
         actions
     );
@@ -283,11 +297,20 @@ fn generation_change_restarts_timer() {
     router.set_backend_need_level(bn, crate::sm_new::BackendNeed::None);
     router.propagate();
     let actions = adapter.reconcile(&mut router);
-    let start = actions.iter().find(|a| matches!(a, TimerAction::Start {
-        identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
-        ..
-    }));
-    assert!(start.is_some(), "expected new Start after generation change, got {:?}", actions);
+    let start = actions.iter().find(|a| {
+        matches!(
+            a,
+            TimerAction::Start {
+                identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
+                ..
+            }
+        )
+    });
+    assert!(
+        start.is_some(),
+        "expected new Start after generation change, got {:?}",
+        actions
+    );
 }
 
 // ============================================================================
@@ -308,7 +331,13 @@ fn multiple_sm_kinds_in_one_cycle() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -332,10 +361,7 @@ fn multiple_sm_kinds_in_one_cycle() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Running);
@@ -350,18 +376,28 @@ fn multiple_sm_kinds_in_one_cycle() {
     let actions = adapter.reconcile(&mut router);
 
     // Should have actions for multiple SM kinds.
-    let has_service_timer = actions.iter().any(|a| matches!(a, TimerAction::Start {
-        identity: TimerIdentity::Service(..),
-        ..
-    } | TimerAction::Cancel {
-        identity: TimerIdentity::Service(..),
-    }));
-    let has_workload_timer = actions.iter().any(|a| matches!(a, TimerAction::Start {
-        identity: TimerIdentity::Workload(..),
-        ..
-    } | TimerAction::Cancel {
-        identity: TimerIdentity::Workload(..),
-    }));
+    let has_service_timer = actions.iter().any(|a| {
+        matches!(
+            a,
+            TimerAction::Start {
+                identity: TimerIdentity::Service(..),
+                ..
+            } | TimerAction::Cancel {
+                identity: TimerIdentity::Service(..),
+            }
+        )
+    });
+    let has_workload_timer = actions.iter().any(|a| {
+        matches!(
+            a,
+            TimerAction::Start {
+                identity: TimerIdentity::Workload(..),
+                ..
+            } | TimerAction::Cancel {
+                identity: TimerIdentity::Workload(..),
+            }
+        )
+    });
 
     // At minimum we should see some timer activity. The exact combination depends on
     // the SM logic, but both kinds should produce something.
@@ -393,7 +429,13 @@ fn fire_dispatches_workload_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(false));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -411,10 +453,7 @@ fn fire_dispatches_workload_timer() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
@@ -448,7 +487,13 @@ fn fire_dispatches_service_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -471,10 +516,7 @@ fn fire_dispatches_service_timer() {
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(
-        lease,
-        crate::sm_new::LeaseInfo { worker_id: worker },
-    );
+    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Running);

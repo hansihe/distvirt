@@ -185,7 +185,14 @@ pub async fn run_compose(
             pod_id: planned.name.clone().into(),
             network: PodNetworkConfig {
                 ip: planned.pod_ip,
-                mac: [0x06, 0x00, planned.pod_ip.octets()[0], planned.pod_ip.octets()[1], planned.pod_ip.octets()[2], planned.pod_ip.octets()[3]],
+                mac: [
+                    0x06,
+                    0x00,
+                    planned.pod_ip.octets()[0],
+                    planned.pod_ip.octets()[1],
+                    planned.pod_ip.octets()[2],
+                    planned.pod_ip.octets()[3],
+                ],
                 gateway: DEFAULT_GATEWAY,
                 netmask: DEFAULT_NETMASK.to_string(),
             },
@@ -197,11 +204,8 @@ pub async fn run_compose(
     }
 
     // Build a lookup from pod_id to planned service for service readiness on PodRunning.
-    let planned_by_name: std::collections::HashMap<&str, &crate::deployment::PlannedService> = plan
-        .services
-        .iter()
-        .map(|s| (s.name.as_str(), s))
-        .collect();
+    let planned_by_name: std::collections::HashMap<&str, &crate::deployment::PlannedService> =
+        plan.services.iter().map(|s| (s.name.as_str(), s)).collect();
 
     // 4. Event loop: receive events and log lines concurrently.
     let mut exited_count = 0;

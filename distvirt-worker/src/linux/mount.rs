@@ -4,7 +4,7 @@ use std::ffi::CString;
 use std::io;
 use std::path::Path;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// Mount a filesystem.
 ///

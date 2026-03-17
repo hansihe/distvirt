@@ -1,6 +1,6 @@
 use crate::sm::service::{ServiceInput, ServiceStateMachine};
-use crate::types::*;
 use crate::sm::workload::{WorkloadInput, WorkloadStateMachine};
+use crate::types::*;
 
 use super::NamespaceStateMachine;
 
@@ -109,15 +109,19 @@ impl NamespaceStateMachine {
             if let Some(old_wl_spec) = self.spec.workloads.get(wl_id) {
                 if old_wl_spec != new_wl_spec {
                     let image_changed = old_wl_spec.containers != new_wl_spec.containers;
-                    let suspend_changed = old_wl_spec.suspend_on_idle != new_wl_spec.suspend_on_idle;
+                    let suspend_changed =
+                        old_wl_spec.suspend_on_idle != new_wl_spec.suspend_on_idle;
 
                     if image_changed {
                         if let Some(wl) = self.workloads.get_mut(wl_id) {
-                            let wl_outputs = wl.step(
-                                WorkloadInput::SpecChanged,
-                                &self.namespace_id,
+                            let wl_outputs =
+                                wl.step(WorkloadInput::SpecChanged, &self.namespace_id);
+                            self.translate_workload_effects(
+                                wl_id,
+                                wl_outputs,
+                                placement_table,
+                                out,
                             );
-                            self.translate_workload_effects(wl_id, wl_outputs, placement_table, out);
                             self.reconcile_demand(wl_id, placement_table, out);
                         }
                     }
@@ -156,39 +160,48 @@ impl NamespaceStateMachine {
         out.client_events.push((client_id, ClientEvent::Ok));
     }
 
-    pub(super) fn handle_delete(&mut self, client_id: ClientId, placement_table: &mut PlacementTable, out: &mut NamespaceOutput) {
+    pub(super) fn handle_delete(
+        &mut self,
+        client_id: ClientId,
+        placement_table: &mut PlacementTable,
+        out: &mut NamespaceOutput,
+    ) {
         self.status = NamespaceStatus::Destroying;
         let ns_id = self.namespace_id.clone();
 
         // Cancel all active timers and clean up snapshots.
         for wl in self.workloads.values() {
             match &wl.state {
-                WorkloadState::Active { pod: PodSlot { pod_state, .. }, .. } => {
-                    match pod_state {
-                        PodState::Launching { launch_timeout } => {
-                            out.timers_cancel.push(launch_timeout.clone());
-                        }
-                        PodState::Suspending { suspend_timeout, .. } => {
-                            out.timers_cancel.push(suspend_timeout.clone());
-                        }
-                        PodState::Resuming { artifact_id, resume_timeout } => {
-                            out.timers_cancel.push(resume_timeout.clone());
-                            if let Some(placement) = placement_table.remove(artifact_id) {
-                                out.worker_commands.push((
-                                    placement.worker_id,
-                                    WorkerCommand::DeleteArtifact {
-                                        artifact_id: artifact_id.clone(),
-                                        pool_id: placement.pool_id,
-                                    },
-                                ));
-                            }
-                        }
-                        PodState::Running => {}
+                WorkloadState::Active {
+                    pod: PodSlot { pod_state, .. },
+                    ..
+                } => match pod_state {
+                    PodState::Launching { launch_timeout } => {
+                        out.timers_cancel.push(launch_timeout.clone());
                     }
-                }
-                WorkloadState::Suspended {
-                    artifact_id,
-                } => {
+                    PodState::Suspending {
+                        suspend_timeout, ..
+                    } => {
+                        out.timers_cancel.push(suspend_timeout.clone());
+                    }
+                    PodState::Resuming {
+                        artifact_id,
+                        resume_timeout,
+                    } => {
+                        out.timers_cancel.push(resume_timeout.clone());
+                        if let Some(placement) = placement_table.remove(artifact_id) {
+                            out.worker_commands.push((
+                                placement.worker_id,
+                                WorkerCommand::DeleteArtifact {
+                                    artifact_id: artifact_id.clone(),
+                                    pool_id: placement.pool_id,
+                                },
+                            ));
+                        }
+                    }
+                    PodState::Running => {}
+                },
+                WorkloadState::Suspended { artifact_id } => {
                     if let Some(placement) = placement_table.remove(artifact_id) {
                         out.worker_commands.push((
                             placement.worker_id,
@@ -520,74 +533,83 @@ impl NamespaceStateMachine {
         out: &mut NamespaceOutput,
     ) {
         match &wl.state {
-            WorkloadState::Active { pod: PodSlot { pod_id, worker_id, pod_state }, .. } => {
-                match pod_state {
-                    PodState::Launching { launch_timeout } => {
-                        out.timers_cancel.push(launch_timeout.clone());
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: false,
-                            },
-                        ));
-                        self.pod_map.remove(pod_id);
-                    }
-                    PodState::Running => {
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: true,
-                            },
-                        ));
-                        self.pod_map.remove(pod_id);
-                    }
-                    PodState::Suspending { suspend_timeout, .. } => {
-                        out.timers_cancel.push(suspend_timeout.clone());
-                        out.worker_commands.push((
-                            worker_id.clone(),
-                            WorkerCommand::StopPod {
-                                namespace_id: self.namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                graceful: false,
-                            },
-                        ));
-                        self.pod_map.remove(pod_id);
-                    }
-                    PodState::Resuming { artifact_id, resume_timeout } => {
-                        out.timers_cancel.push(resume_timeout.clone());
-                        if let Some(placement) = placement_table.remove(artifact_id) {
-                            out.worker_commands.push((
-                                placement.worker_id.clone(),
-                                WorkerCommand::StopPod {
-                                    namespace_id: self.namespace_id.clone(),
-                                    pod_id: pod_id.clone(),
-                                    graceful: false,
-                                },
-                            ));
-                            out.worker_commands.push((
-                                placement.worker_id,
-                                WorkerCommand::DeleteArtifact {
-                                    artifact_id: artifact_id.clone(),
-                                    pool_id: placement.pool_id,
-                                },
-                            ));
-                        }
-                        self.pod_map.remove(pod_id);
-                    }
+            WorkloadState::Active {
+                pod:
+                    PodSlot {
+                        pod_id,
+                        worker_id,
+                        pod_state,
+                    },
+                ..
+            } => match pod_state {
+                PodState::Launching { launch_timeout } => {
+                    out.timers_cancel.push(launch_timeout.clone());
+                    out.worker_commands.push((
+                        worker_id.clone(),
+                        WorkerCommand::StopPod {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            graceful: false,
+                        },
+                    ));
+                    self.pod_map.remove(pod_id);
                 }
-            }
+                PodState::Running => {
+                    out.worker_commands.push((
+                        worker_id.clone(),
+                        WorkerCommand::StopPod {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            graceful: true,
+                        },
+                    ));
+                    self.pod_map.remove(pod_id);
+                }
+                PodState::Suspending {
+                    suspend_timeout, ..
+                } => {
+                    out.timers_cancel.push(suspend_timeout.clone());
+                    out.worker_commands.push((
+                        worker_id.clone(),
+                        WorkerCommand::StopPod {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            graceful: false,
+                        },
+                    ));
+                    self.pod_map.remove(pod_id);
+                }
+                PodState::Resuming {
+                    artifact_id,
+                    resume_timeout,
+                } => {
+                    out.timers_cancel.push(resume_timeout.clone());
+                    if let Some(placement) = placement_table.remove(artifact_id) {
+                        out.worker_commands.push((
+                            placement.worker_id.clone(),
+                            WorkerCommand::StopPod {
+                                namespace_id: self.namespace_id.clone(),
+                                pod_id: pod_id.clone(),
+                                graceful: false,
+                            },
+                        ));
+                        out.worker_commands.push((
+                            placement.worker_id,
+                            WorkerCommand::DeleteArtifact {
+                                artifact_id: artifact_id.clone(),
+                                pool_id: placement.pool_id,
+                            },
+                        ));
+                    }
+                    self.pod_map.remove(pod_id);
+                }
+            },
             WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed => {}
             WorkloadState::Transitioning => unreachable!("Transitioning in workload removal"),
             WorkloadState::RetryBackoff { backoff_timer } => {
                 out.timers_cancel.push(backoff_timer.clone());
             }
-            WorkloadState::Suspended {
-                artifact_id,
-            } => {
+            WorkloadState::Suspended { artifact_id } => {
                 if let Some(placement) = placement_table.remove(artifact_id) {
                     out.worker_commands.push((
                         placement.worker_id,

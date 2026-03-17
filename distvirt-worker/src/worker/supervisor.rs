@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use distvirt_worker_protocol::{
-    ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId, PodNetworkConfig,
-    PoolId, ArtifactId, WorkerEvent,
+    ArtifactId, ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId,
+    PodNetworkConfig, PoolId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -64,7 +64,11 @@ pub(crate) async fn send_event(tx: &mpsc::Sender<WorkerEvent>, event: WorkerEven
 ///
 /// On launch failure, sends `PodFailed` and returns.
 /// On success, sends `PodRunning` then delegates to `pod_monitor`.
-pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static, F: crate::fs::Fs>(
+pub(crate) async fn pod_supervisor<
+    V: Vmm + 'static,
+    P: ImageProvider + 'static,
+    F: crate::fs::Fs,
+>(
     vmm: Arc<V>,
     image_provider: Arc<P>,
     fabric: Arc<Fabric<FabricPort>>,
@@ -96,7 +100,16 @@ pub(crate) async fn pod_supervisor<V: Vmm + 'static, P: ImageProvider + 'static,
         &cancel,
     )
     .await;
-    run_pod_supervisor::<_, F>(result, cancel, event_tx, namespace_id, pod_id, suspend_rx, "launch").await;
+    run_pod_supervisor::<_, F>(
+        result,
+        cancel,
+        event_tx,
+        namespace_id,
+        pod_id,
+        suspend_rx,
+        "launch",
+    )
+    .await;
 }
 
 /// Top-level resume supervisor: restores a pod from a snapshot and monitors it.
@@ -125,7 +138,16 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static, F: crate::fs::Fs>(
     )
     .await
     .map(|(vm, port_task)| (vm, None, port_task));
-    run_pod_supervisor::<_, F>(result, cancel, event_tx, namespace_id, pod_id, suspend_rx, "resume").await;
+    run_pod_supervisor::<_, F>(
+        result,
+        cancel,
+        event_tx,
+        namespace_id,
+        pod_id,
+        suspend_rx,
+        "resume",
+    )
+    .await;
 }
 
 /// Shared supervisor logic: on success emits `PodRunning` and delegates to `pod_monitor`;
@@ -153,7 +175,17 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
                 },
             )
             .await;
-            pod_monitor::<_, F>(vm, io_session, port_task, cancel, event_tx, namespace_id, pod_id, suspend_rx).await;
+            pod_monitor::<_, F>(
+                vm,
+                io_session,
+                port_task,
+                cancel,
+                event_tx,
+                namespace_id,
+                pod_id,
+                suspend_rx,
+            )
+            .await;
         }
         Err(e) => {
             if cancel.is_cancelled() {
@@ -194,10 +226,7 @@ async fn pod_restore<V: Vmm + 'static>(
     network: PodNetworkConfig,
     snapshot: SnapshotArtifacts,
     cancel: &CancellationToken,
-) -> anyhow::Result<(
-    ManagedVm<V::Instance>,
-    Option<TaskHandle<()>>,
-)> {
+) -> anyhow::Result<(ManagedVm<V::Instance>, Option<TaskHandle<()>>)> {
     let net_config = NetConfig::from(&network);
 
     let instance = tokio::select! {
@@ -261,27 +290,31 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     let (vcpu_count, mem_size_mib) = resources
         .as_ref()
         .and_then(|r| r.limits.as_ref())
-        .map(|l| (
-            if l.vcpus > 0 { l.vcpus } else { 1 },
-            if l.memory_mib > 0 { l.memory_mib as u32 } else { 128u32 },
-        ))
+        .map(|l| {
+            (
+                if l.vcpus > 0 { l.vcpus } else { 1 },
+                if l.memory_mib > 0 {
+                    l.memory_mib as u32
+                } else {
+                    128u32
+                },
+            )
+        })
         .unwrap_or((1, 128));
 
-    let balloon = resources
-        .as_ref()
-        .and_then(|r| {
-            let limits = r.limits.as_ref()?;
-            let requests = r.requests.as_ref()?;
-            if requests.memory_mib < limits.memory_mib && limits.memory_mib > 0 {
-                Some(BalloonConfig {
-                    amount_mib: (limits.memory_mib - requests.memory_mib) as u32,
-                    deflate_on_oom: true,
-                    stats_polling_interval_s: 1,
-                })
-            } else {
-                None
-            }
-        });
+    let balloon = resources.as_ref().and_then(|r| {
+        let limits = r.limits.as_ref()?;
+        let requests = r.requests.as_ref()?;
+        if requests.memory_mib < limits.memory_mib && limits.memory_mib > 0 {
+            Some(BalloonConfig {
+                amount_mib: (limits.memory_mib - requests.memory_mib) as u32,
+                deflate_on_oom: true,
+                stats_polling_interval_s: 1,
+            })
+        } else {
+            None
+        }
+    });
 
     let vm_config = VmConfig {
         kernel_path: kernel_path.clone(),
@@ -483,11 +516,15 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
             // This shouldn't happen, but handle gracefully.
             log::error!("pod '{}': no event dispatch available", pod_id);
             let _ = vm.force_kill().await;
-            send_event(&event_tx, WorkerEvent::PodFailed {
-                namespace_id,
-                pod_id,
-                error: "no event dispatch available".to_string(),
-            }).await;
+            send_event(
+                &event_tx,
+                WorkerEvent::PodFailed {
+                    namespace_id,
+                    pod_id,
+                    error: "no event dispatch available".to_string(),
+                },
+            )
+            .await;
             return;
         }
     };
@@ -511,7 +548,9 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
     let mut port_task = port_task;
     let mut port_task_fut = std::pin::pin!(async {
         match port_task.as_mut() {
-            Some(task) => { let _ = task.await; }
+            Some(task) => {
+                let _ = task.await;
+            }
             None => std::future::pending::<()>().await,
         }
     });
@@ -738,9 +777,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
 
-    use distvirt_worker_protocol::{
-        ContainerConfig, ContainerSpec, PodNetworkConfig,
-    };
+    use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, PodNetworkConfig};
     use tokio::net::UnixStream;
 
     use crate::fabric::{Fabric, FabricPort};
@@ -1115,7 +1152,10 @@ mod tests {
             .expect("timeout waiting for PodRunning")
             .expect("channel closed");
         match event {
-            WorkerEvent::PodRunning { namespace_id, pod_id } => {
+            WorkerEvent::PodRunning {
+                namespace_id,
+                pod_id,
+            } => {
                 assert_eq!(namespace_id, "ns1");
                 assert_eq!(pod_id, "pod1");
             }
@@ -1128,7 +1168,11 @@ mod tests {
             .expect("timeout waiting for PodExited")
             .expect("channel closed");
         match event {
-            WorkerEvent::PodExited { namespace_id, pod_id, exit_code } => {
+            WorkerEvent::PodExited {
+                namespace_id,
+                pod_id,
+                exit_code,
+            } => {
                 assert_eq!(namespace_id, "ns1");
                 assert_eq!(pod_id, "pod1");
                 assert_eq!(exit_code, 0);

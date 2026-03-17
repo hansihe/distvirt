@@ -1,9 +1,9 @@
+pub(crate) mod endpoint;
 pub(crate) mod flow;
 mod forwarding;
 pub(crate) mod gateway;
 pub(crate) mod nat;
 pub(crate) mod port;
-pub(crate) mod endpoint;
 pub(crate) mod tunnel;
 
 // Lock ordering (acquire in this order to prevent deadlocks):
@@ -13,27 +13,31 @@ pub(crate) mod tunnel;
 //   4. tunnel_ports
 // Most paths only hold one lock at a time.
 
-pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
 pub use endpoint::EndpointTable;
-pub use tunnel::{TunnelTransport, TunnelPortHandle};
-pub(crate) use forwarding::FabricContextInner;
 pub(crate) use endpoint::MarkReadyResult;
 pub(crate) use endpoint::ServiceProcessor;
+pub(crate) use forwarding::FabricContextInner;
 pub(crate) use gateway::{DnsRegistry, FabricGateway};
+pub use port::{ChannelPort, FabricPort, FramePort, Port, PortId};
+pub use tunnel::{TunnelPortHandle, TunnelTransport};
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use tokio::sync::mpsc;
+use crate::packet::{
+    FabricPacket, ip_packet_protocol, ip_packet_src, ip_packet_transport_ports, rewrite_ipv4_dst,
+};
 use crate::task_handle::TaskHandle;
 use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
-use crate::packet::{FabricPacket, ip_packet_src, ip_packet_protocol, ip_packet_transport_ports, rewrite_ipv4_dst};
-use forwarding::{FabricContext, port_read_loop, gateway_ingress_task};
+use forwarding::{FabricContext, gateway_ingress_task, port_read_loop};
+use tokio::sync::mpsc;
 
 /// Convert activator BackendNeed to protocol BackendNeed.
-pub(crate) fn convert_backend_need(need: &ActivatorBackendNeed) -> distvirt_worker_protocol::BackendNeed {
+pub(crate) fn convert_backend_need(
+    need: &ActivatorBackendNeed,
+) -> distvirt_worker_protocol::BackendNeed {
     match need {
         ActivatorBackendNeed::None => distvirt_worker_protocol::BackendNeed::None,
         ActivatorBackendNeed::Traffic => distvirt_worker_protocol::BackendNeed::Traffic,
@@ -100,7 +104,11 @@ impl<P: FramePort> Fabric<P> {
     /// determining whether to drop unknown in-subnet IPs vs forwarding to gateway.
     pub fn new(gateway_ip: Ipv4Addr, prefix_len: u8) -> Self {
         // Derive subnet base from gateway IP and prefix length.
-        let mask = if prefix_len >= 32 { u32::MAX } else { !0u32 << (32 - prefix_len) };
+        let mask = if prefix_len >= 32 {
+            u32::MAX
+        } else {
+            !0u32 << (32 - prefix_len)
+        };
         let subnet = Ipv4Addr::from(u32::from(gateway_ip) & mask);
         Fabric {
             ctx: FabricContext {
@@ -169,7 +177,8 @@ impl<P: FramePort> Fabric<P> {
             if !service_flushes.is_empty() {
                 log::info!(
                     "fabric: add_port_inner: flushing {} service(s) for IP {}",
-                    service_flushes.len(), ip
+                    service_flushes.len(),
+                    ip
                 );
             }
             for flush_data in service_flushes {
@@ -190,16 +199,16 @@ impl<P: FramePort> Fabric<P> {
                             break;
                         }
                     }
-                    log::info!("fabric: flushed {} buffered frames to port {}", count, port_id);
+                    log::info!(
+                        "fabric: flushed {} buffered frames to port {}",
+                        count,
+                        port_id
+                    );
                 });
             }
         }
 
-        let task = TaskHandle::spawn(port_read_loop(
-            port_id,
-            Arc::clone(&port),
-            self.ctx.clone(),
-        ));
+        let task = TaskHandle::spawn(port_read_loop(port_id, Arc::clone(&port), self.ctx.clone()));
 
         match pod_ip {
             Some(ip) => log::info!("fabric: added port {} with ip {}", port_id, ip),
@@ -221,10 +230,9 @@ impl<P: FramePort> Fabric<P> {
     ) {
         let _ = self.ctx.inner.gateway_tx.set(egress_tx);
 
-        *self._gateway_ingress_task.lock().expect("poisoned") = Some(TaskHandle::spawn(gateway_ingress_task(
-            ingress_rx,
-            self.ctx.clone(),
-        )));
+        *self._gateway_ingress_task.lock().expect("poisoned") = Some(TaskHandle::spawn(
+            gateway_ingress_task(ingress_rx, self.ctx.clone()),
+        ));
 
         // Spawn periodic NAT + flow tracker GC task.
         {
@@ -279,7 +287,11 @@ impl<P: FramePort> Fabric<P> {
             let mut tp = self.ctx.inner.tunnel_ports.lock().expect("poisoned");
             tp.insert(worker_id.clone(), port_id);
         }
-        log::info!("fabric: registered tunnel port {} for worker {}", port_id, worker_id);
+        log::info!(
+            "fabric: registered tunnel port {} for worker {}",
+            port_id,
+            worker_id
+        );
         (port_id, task)
     }
 
@@ -288,7 +300,11 @@ impl<P: FramePort> Fabric<P> {
     pub fn remove_tunnel_port(&self, worker_id: &str) {
         let mut tp = self.ctx.inner.tunnel_ports.lock().expect("poisoned");
         if let Some(port_id) = tp.remove(worker_id) {
-            log::info!("fabric: removed tunnel port {} for worker {}", port_id, worker_id);
+            log::info!(
+                "fabric: removed tunnel port {} for worker {}",
+                port_id,
+                worker_id
+            );
         }
     }
 
@@ -302,20 +318,14 @@ impl<P: FramePort> Fabric<P> {
     ///
     /// Looks up the service IP from the service table, then delegates to
     /// `forwarding::dispatch_action` for each action.
-    pub async fn dispatch_actions(
-        &self,
-        actions: &[Action],
-        service_id: &str,
-    ) {
+    pub async fn dispatch_actions(&self, actions: &[Action], service_id: &str) {
         let dst_ip = {
             let st = self.ctx.inner.endpoint_table.lock().expect("poisoned");
             st.get_service_ip(service_id)
                 .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
         };
         for action in actions {
-            forwarding::dispatch_action(
-                action, service_id, dst_ip, &self.ctx,
-            ).await;
+            forwarding::dispatch_action(action, service_id, dst_ip, &self.ctx).await;
         }
     }
 
@@ -349,7 +359,8 @@ impl<P: FramePort> Fabric<P> {
                     let ip = fp.ip_packet();
                     if let Some(src_ip) = ip_packet_src(ip) {
                         let protocol = ip_packet_protocol(ip).unwrap_or(0);
-                        let (src_port, dst_port_val) = ip_packet_transport_ports(ip).unwrap_or((0, 0));
+                        let (src_port, dst_port_val) =
+                            ip_packet_transport_ports(ip).unwrap_or((0, 0));
                         let reverse_key = nat::NatFlowKey {
                             src_ip: backend_ip,
                             dst_ip: src_ip,

@@ -1,5 +1,5 @@
 use distvirt_client_protocol::*;
-use tabled::{Tabled, Table, settings::Style};
+use tabled::{Table, Tabled, settings::Style};
 
 // --- Namespace overview ---
 
@@ -172,22 +172,30 @@ pub fn print_service_table(services: &std::collections::HashMap<String, ServiceS
     println!("{}", Table::new(rows).with(Style::blank()));
 }
 
-pub fn services_to_json(services: &std::collections::HashMap<String, ServiceStatusReport>) -> serde_json::Value {
-    serde_json::json!(services
-        .iter()
-        .map(|(id, s)| {
-            let state = s.state.as_ref().map(|st| service_state_label(st)).unwrap_or("unknown");
-            serde_json::json!({
-                "service_id": id,
-                "workload_id": s.workload_id,
-                "ip": s.ip,
-                "mac": s.mac,
-                "state": state,
-                "activation_enabled": s.activation_enabled,
-                "spliced": s.spliced,
+pub fn services_to_json(
+    services: &std::collections::HashMap<String, ServiceStatusReport>,
+) -> serde_json::Value {
+    serde_json::json!(
+        services
+            .iter()
+            .map(|(id, s)| {
+                let state = s
+                    .state
+                    .as_ref()
+                    .map(|st| service_state_label(st))
+                    .unwrap_or("unknown");
+                serde_json::json!({
+                    "service_id": id,
+                    "workload_id": s.workload_id,
+                    "ip": s.ip,
+                    "mac": s.mac,
+                    "state": state,
+                    "activation_enabled": s.activation_enabled,
+                    "spliced": s.spliced,
+                })
             })
-        })
-        .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    )
 }
 
 // --- Events ---
@@ -271,7 +279,9 @@ fn workload_event_description(we: &WorkloadEvent) -> String {
         Some(workload_event::Event::PodRunning(r)) => {
             format!("pod running on {}", r.worker_id)
         }
-        Some(workload_event::Event::PodStopped(s)) => format!("pod stopped: exited with code {}", s.exit_code),
+        Some(workload_event::Event::PodStopped(s)) => {
+            format!("pod stopped: exited with code {}", s.exit_code)
+        }
         Some(workload_event::Event::PodFailed(f)) => format!("pod failed: {}", f.reason),
         Some(workload_event::Event::Spliced(s)) => format!("spliced to {}", s.worker_id),
         Some(workload_event::Event::Unspliced(_)) => "unspliced".to_string(),
@@ -342,47 +352,52 @@ fn format_timestamp(unix_ms: i64) -> String {
 // --- JSON output helpers ---
 
 pub fn namespaces_to_json(namespaces: &[NamespaceStatusReport]) -> serde_json::Value {
-    serde_json::json!(namespaces
-        .iter()
-        .map(|ns| {
-            serde_json::json!({
-                "namespace_id": ns.namespace_id,
-                "state": namespace_state_label(ns.state()),
-                "workloads": ns.workloads.len(),
-                "services": ns.services.len(),
+    serde_json::json!(
+        namespaces
+            .iter()
+            .map(|ns| {
+                serde_json::json!({
+                    "namespace_id": ns.namespace_id,
+                    "state": namespace_state_label(ns.state()),
+                    "workloads": ns.workloads.len(),
+                    "services": ns.services.len(),
+                })
             })
-        })
-        .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    )
 }
 
 pub fn workers_to_json(workers: &[WorkerInfo]) -> serde_json::Value {
-    serde_json::json!(workers
-        .iter()
-        .map(|w| {
-            serde_json::json!({
-                "worker_id": w.worker_id,
-                "active_pods": w.active_pods,
-                "max_pods": w.max_pods,
-                "available_memory_mb": w.available_memory_mb,
+    serde_json::json!(
+        workers
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "worker_id": w.worker_id,
+                    "active_pods": w.active_pods,
+                    "max_pods": w.max_pods,
+                    "available_memory_mb": w.available_memory_mb,
+                })
             })
-        })
-        .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    )
 }
 
 pub fn pods_to_json(pods: &[PodInfo]) -> serde_json::Value {
-    serde_json::json!(pods
-        .iter()
-        .map(|p| {
-            serde_json::json!({
-                "pod_id": p.pod_id,
-                "workload_id": p.workload_id,
-                "worker_id": p.worker_id,
-                "ip": p.ip,
-                "mac": p.mac,
-                "state": pod_state_label(p.state()),
+    serde_json::json!(
+        pods.iter()
+            .map(|p| {
+                serde_json::json!({
+                    "pod_id": p.pod_id,
+                    "workload_id": p.workload_id,
+                    "worker_id": p.worker_id,
+                    "ip": p.ip,
+                    "mac": p.mac,
+                    "state": pod_state_label(p.state()),
+                })
             })
-        })
-        .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    )
 }
 
 pub fn worker_to_json(w: &WorkerInfo) -> serde_json::Value {

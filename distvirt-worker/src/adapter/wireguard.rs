@@ -14,11 +14,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::packet::{FABRIC_HDR_SZ, complete_checksum, ip_packet_dst, with_fabric_header};
 use crate::fabric::ChannelPort;
+use crate::packet::{FABRIC_HDR_SZ, complete_checksum, ip_packet_dst, with_fabric_header};
 
-use async_trait::async_trait;
 use super::{AdapterPortHandle, IngressAdapter};
+use async_trait::async_trait;
 
 /// Maximum UDP datagram size (WireGuard max is ~65535 but typical MTU is much smaller).
 const MAX_UDP_SIZE: usize = 65536;
@@ -73,9 +73,7 @@ impl WireGuardAdapter {
         let public_key = PublicKey::from(&private_key);
         let rate_limiter = Arc::new(RateLimiter::new(&public_key, 100));
 
-        let udp_socket = Arc::new(
-            UdpSocket::bind(format!("0.0.0.0:{}", listen_port)).await?,
-        );
+        let udp_socket = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", listen_port)).await?);
         log::info!(
             "wireguard: listening on UDP port {}",
             udp_socket.local_addr()?
@@ -171,10 +169,7 @@ impl WireGuardAdapter {
     }
 
     /// UDP receive loop: read datagrams and feed them through boringtun.
-    async fn udp_recv_loop(
-        state: Arc<RwLock<WireGuardState>>,
-        socket: Arc<UdpSocket>,
-    ) {
+    async fn udp_recv_loop(state: Arc<RwLock<WireGuardState>>, socket: Arc<UdpSocket>) {
         let mut recv_buf = vec![0u8; MAX_UDP_SIZE];
         let mut dec_buf = vec![0u8; MAX_PACKET_SIZE];
 
@@ -188,7 +183,11 @@ impl WireGuardAdapter {
             };
 
             let datagram = &recv_buf[..n];
-            log::trace!("wireguard: received {} byte UDP packet from {}", n, src_addr);
+            log::trace!(
+                "wireguard: received {} byte UDP packet from {}",
+                n,
+                src_addr
+            );
 
             // Try to find peer by source address (fast path).
             let peer = {
@@ -236,7 +235,10 @@ impl WireGuardAdapter {
     ) {
         let peers: Vec<([u8; 32], Arc<PeerState>)> = {
             let s = state.read().await;
-            s.peers_by_key.iter().map(|(k, v)| (*k, Arc::clone(v))).collect()
+            s.peers_by_key
+                .iter()
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect()
         };
 
         for (_key, peer) in &peers {
@@ -246,7 +248,10 @@ impl WireGuardAdapter {
             };
 
             match &result {
-                TunnResult::Done | TunnResult::WriteToNetwork(_) | TunnResult::WriteToTunnelV4(..) | TunnResult::WriteToTunnelV6(..) => {
+                TunnResult::Done
+                | TunnResult::WriteToNetwork(_)
+                | TunnResult::WriteToTunnelV4(..)
+                | TunnResult::WriteToTunnelV6(..) => {
                     // This peer accepted the packet — update endpoint mapping.
                     Self::update_peer_endpoint(state, peer, src_addr).await;
                     Self::process_tunn_result(state, socket, peer, src_addr, result).await;
@@ -279,7 +284,11 @@ impl WireGuardAdapter {
             }
             TunnResult::WriteToNetwork(data) => {
                 // Response packet (handshake reply, cookie, etc.) — send back.
-                log::debug!("wireguard: sending {} byte response to {} (handshake/cookie)", data.len(), src_addr);
+                log::debug!(
+                    "wireguard: sending {} byte response to {} (handshake/cookie)",
+                    data.len(),
+                    src_addr
+                );
                 let data = data.to_vec();
                 if let Err(e) = socket.send_to(&data, src_addr).await {
                     log::warn!("wireguard: failed to send response to {}: {}", src_addr, e);
@@ -310,7 +319,9 @@ impl WireGuardAdapter {
 
                 log::trace!(
                     "wireguard: decrypted {} byte IP packet from peer ip={}, dst_ip={:?}, injecting into fabric ns={}",
-                    ip_packet.len(), peer.peer_ip, dst_ip,
+                    ip_packet.len(),
+                    peer.peer_ip,
+                    dst_ip,
                     peer.namespace_id,
                 );
 
@@ -321,7 +332,8 @@ impl WireGuardAdapter {
                         let tcp_flags = ip_packet[ihl + 13];
                         let src_port = u16::from_be_bytes([ip_packet[ihl], ip_packet[ihl + 1]]);
                         let dst_port = u16::from_be_bytes([ip_packet[ihl + 2], ip_packet[ihl + 3]]);
-                        let flag_str = format!("{}{}{}{}",
+                        let flag_str = format!(
+                            "{}{}{}{}",
                             if tcp_flags & 0x02 != 0 { "SYN " } else { "" },
                             if tcp_flags & 0x10 != 0 { "ACK " } else { "" },
                             if tcp_flags & 0x04 != 0 { "RST " } else { "" },
@@ -329,9 +341,11 @@ impl WireGuardAdapter {
                         );
                         log::debug!(
                             "wireguard: ingress TCP: {}.{}.*.*:{} -> {}.{}.*.*:{} flags=[{}]",
-                            ip_packet[12], ip_packet[13],
+                            ip_packet[12],
+                            ip_packet[13],
                             src_port,
-                            ip_packet[16], ip_packet[17],
+                            ip_packet[16],
+                            ip_packet[17],
                             dst_port,
                             flag_str.trim(),
                         );
@@ -394,10 +408,7 @@ impl WireGuardAdapter {
     }
 
     /// Timer loop: call update_timers on all peers periodically.
-    async fn timer_loop(
-        state: Arc<RwLock<WireGuardState>>,
-        socket: Arc<UdpSocket>,
-    ) {
+    async fn timer_loop(state: Arc<RwLock<WireGuardState>>, socket: Arc<UdpSocket>) {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
         let mut timer_buf = vec![0u8; MAX_PACKET_SIZE];
 
@@ -418,7 +429,11 @@ impl WireGuardAdapter {
                 match result {
                     TunnResult::Done => {}
                     TunnResult::Err(e) => {
-                        log::debug!("wireguard: timer error for peer ip={}: {:?}", peer.peer_ip, e);
+                        log::debug!(
+                            "wireguard: timer error for peer ip={}: {:?}",
+                            peer.peer_ip,
+                            e
+                        );
                     }
                     TunnResult::WriteToNetwork(data) => {
                         let endpoint = {
@@ -453,14 +468,19 @@ impl WireGuardAdapter {
 
             // Extract IP packet after vnet header.
             if frame.len() <= FABRIC_HDR_SZ {
-                log::trace!("wireguard: egress: frame too short ({} bytes), skipping", frame.len());
+                log::trace!(
+                    "wireguard: egress: frame too short ({} bytes), skipping",
+                    frame.len()
+                );
                 continue;
             }
             let ip_packet = &frame[FABRIC_HDR_SZ..];
 
             log::trace!(
                 "wireguard: egress loop received {} byte frame from fabric ns={} (IP payload {} bytes)",
-                frame.len(), namespace_id, ip_packet.len(),
+                frame.len(),
+                namespace_id,
+                ip_packet.len(),
             );
 
             // Log vnet header + IP/TCP details for debugging.
@@ -477,8 +497,10 @@ impl WireGuardAdapter {
                         let tcp_flags = ip_packet[ihl + 13];
                         let src_port = u16::from_be_bytes([ip_packet[ihl], ip_packet[ihl + 1]]);
                         let dst_port = u16::from_be_bytes([ip_packet[ihl + 2], ip_packet[ihl + 3]]);
-                        let tcp_csum = u16::from_be_bytes([ip_packet[ihl + 16], ip_packet[ihl + 17]]);
-                        let flag_str = format!("{}{}{}{}{}{}",
+                        let tcp_csum =
+                            u16::from_be_bytes([ip_packet[ihl + 16], ip_packet[ihl + 17]]);
+                        let flag_str = format!(
+                            "{}{}{}{}{}{}",
                             if tcp_flags & 0x02 != 0 { "SYN " } else { "" },
                             if tcp_flags & 0x10 != 0 { "ACK " } else { "" },
                             if tcp_flags & 0x04 != 0 { "RST " } else { "" },
@@ -489,9 +511,19 @@ impl WireGuardAdapter {
                         log::debug!(
                             "wireguard: egress TCP: vnet_flags=0x{:02x} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags=[{}] ip_len={} tcp_csum=0x{:04x}",
                             vnet_flags,
-                            src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port,
-                            dst_ip_bytes[0], dst_ip_bytes[1], dst_ip_bytes[2], dst_ip_bytes[3], dst_port,
-                            flag_str.trim(), ip_total_len, tcp_csum,
+                            src_ip[0],
+                            src_ip[1],
+                            src_ip[2],
+                            src_ip[3],
+                            src_port,
+                            dst_ip_bytes[0],
+                            dst_ip_bytes[1],
+                            dst_ip_bytes[2],
+                            dst_ip_bytes[3],
+                            dst_port,
+                            flag_str.trim(),
+                            ip_total_len,
+                            tcp_csum,
                         );
                     }
                 }
@@ -522,7 +554,11 @@ impl WireGuardAdapter {
             let peer = match peer {
                 Some(p) => p,
                 None => {
-                    log::debug!("wireguard: egress: no peer found for dst_ip={} in ns={}", dst_ip, namespace_id);
+                    log::debug!(
+                        "wireguard: egress: no peer found for dst_ip={} in ns={}",
+                        dst_ip,
+                        namespace_id
+                    );
                     continue;
                 }
             };
@@ -535,7 +571,10 @@ impl WireGuardAdapter {
             let endpoint = match endpoint {
                 Some(a) => a,
                 None => {
-                    log::debug!("wireguard: egress: peer ip={} has no endpoint yet", peer.peer_ip);
+                    log::debug!(
+                        "wireguard: egress: peer ip={} has no endpoint yet",
+                        peer.peer_ip
+                    );
                     continue;
                 }
             };
@@ -547,7 +586,11 @@ impl WireGuardAdapter {
 
             match result {
                 TunnResult::WriteToNetwork(data) => {
-                    log::trace!("wireguard: egress: sending {} byte encrypted packet to {}", data.len(), endpoint);
+                    log::trace!(
+                        "wireguard: egress: sending {} byte encrypted packet to {}",
+                        data.len(),
+                        endpoint
+                    );
                     let data = data.to_vec();
                     if let Err(e) = socket.send_to(&data, endpoint).await {
                         log::warn!("wireguard: egress send error: {}", e);
@@ -557,7 +600,10 @@ impl WireGuardAdapter {
                     log::debug!("wireguard: egress: encapsulate error: {:?}", e);
                 }
                 other => {
-                    log::debug!("wireguard: egress: unexpected encapsulate result: {:?}", std::mem::discriminant(&other));
+                    log::debug!(
+                        "wireguard: egress: unexpected encapsulate result: {:?}",
+                        std::mem::discriminant(&other)
+                    );
                 }
             }
         }
@@ -626,10 +672,7 @@ impl Drop for DropGuard {
                 let mut s = state.write().await;
                 if let Some(ch) = s.namespace_channels.remove(&ns_id) {
                     ch._egress_task.abort();
-                    log::info!(
-                        "wireguard: removed namespace channel for '{}'",
-                        ns_id
-                    );
+                    log::info!("wireguard: removed namespace channel for '{}'", ns_id);
                 }
             });
         }
@@ -649,10 +692,10 @@ mod hex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::packet::FABRIC_HDR_SZ;
     use super::super::IngressAdapter;
+    use super::*;
     use crate::fabric::port::FramePort;
+    use crate::packet::FABRIC_HDR_SZ;
     use boringtun::noise::{Tunn, TunnResult};
     use boringtun::x25519::{PublicKey, StaticSecret};
     use std::net::{Ipv4Addr, SocketAddr};
@@ -661,24 +704,21 @@ mod tests {
 
     // Fixed key material (deterministic, no randomness needed).
     const SERVER_PRIVATE_KEY: [u8; 32] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f, 0x20,
     ];
 
     const CLIENT_PRIVATE_KEY: [u8; 32] = [
-        0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
-        0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
-        0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8,
-        0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0,
+        0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe,
+        0xbf, 0xc0,
     ];
 
     const CLIENT2_PRIVATE_KEY: [u8; 32] = [
-        0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
-        0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
-        0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
-        0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0,
+        0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+        0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde,
+        0xdf, 0xe0,
     ];
 
     fn pubkey_bytes(private_key: &[u8; 32]) -> [u8; 32] {
@@ -688,7 +728,9 @@ mod tests {
     }
 
     async fn make_adapter(key: &[u8; 32]) -> WireGuardAdapter {
-        WireGuardAdapter::new(0, key).await.expect("failed to create adapter")
+        WireGuardAdapter::new(0, key)
+            .await
+            .expect("failed to create adapter")
     }
 
     fn adapter_port(adapter: &WireGuardAdapter) -> u16 {
@@ -715,23 +757,12 @@ mod tests {
     fn create_client_tunn(client_key: &[u8; 32], server_pub: &[u8; 32]) -> Tunn {
         let client_secret = StaticSecret::from(*client_key);
         let server_public = PublicKey::from(*server_pub);
-        Tunn::new(
-            client_secret,
-            server_public,
-            None,
-            None,
-            0,
-            None,
-        )
+        Tunn::new(client_secret, server_public, None, None, 0, None)
     }
 
     /// Perform a WireGuard handshake: client initiates, exchanges messages
     /// with the adapter's UDP socket via loopback.
-    async fn perform_handshake(
-        tunn: &Mutex<Tunn>,
-        socket: &UdpSocket,
-        adapter_addr: SocketAddr,
-    ) {
+    async fn perform_handshake(tunn: &Mutex<Tunn>, socket: &UdpSocket, adapter_addr: SocketAddr) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
 
         // Step 1: Client initiates handshake.
@@ -743,7 +774,10 @@ mod tests {
             TunnResult::WriteToNetwork(data) => data.to_vec(),
             _ => panic!("expected handshake initiation WriteToNetwork"),
         };
-        socket.send_to(&init_data, adapter_addr).await.expect("send init failed");
+        socket
+            .send_to(&init_data, adapter_addr)
+            .await
+            .expect("send init failed");
 
         // Step 2: Receive response from adapter.
         let mut recv_buf = vec![0u8; MAX_PACKET_SIZE];
@@ -767,7 +801,10 @@ mod tests {
             TunnResult::Done => {}
             TunnResult::WriteToNetwork(data) => {
                 let data = data.to_vec();
-                socket.send_to(&data, adapter_addr).await.expect("send follow-up failed");
+                socket
+                    .send_to(&data, adapter_addr)
+                    .await
+                    .expect("send follow-up failed");
             }
             _ => panic!("unexpected TunnResult during handshake"),
         }
@@ -885,7 +922,10 @@ mod tests {
         let port = adapter_port(&adapter);
 
         // Create port + add peer.
-        let (_port, _handle) = adapter.create_port("ns1").await.expect("create_port failed");
+        let (_port, _handle) = adapter
+            .create_port("ns1")
+            .await
+            .expect("create_port failed");
         adapter
             .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
@@ -893,9 +933,7 @@ mod tests {
 
         // Client-side Tunn + UDP socket.
         let client_tunn = Mutex::new(create_client_tunn(&CLIENT_PRIVATE_KEY, &server_pub));
-        let client_socket = UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("bind failed");
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind failed");
 
         let adapter_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
@@ -906,7 +944,10 @@ mod tests {
         let state = adapter.state.read().await;
         let peer = state.peers_by_key.get(&client_pub).expect("peer missing");
         let endpoint = peer.endpoint.read().await;
-        assert!(endpoint.is_some(), "peer endpoint should be set after handshake");
+        assert!(
+            endpoint.is_some(),
+            "peer endpoint should be set after handshake"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -916,26 +957,24 @@ mod tests {
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 
-        let (fabric_port, _handle) = adapter.create_port("ns1").await.expect("create_port failed");
+        let (fabric_port, _handle) = adapter
+            .create_port("ns1")
+            .await
+            .expect("create_port failed");
         adapter
             .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add_peer failed");
 
         let client_tunn = Mutex::new(create_client_tunn(&CLIENT_PRIVATE_KEY, &server_pub));
-        let client_socket = UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("bind failed");
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind failed");
         let adapter_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
         // Complete handshake first.
         perform_handshake(&client_tunn, &client_socket, adapter_addr).await;
 
         // Client encrypts an IP packet and sends it.
-        let ip_packet = make_ip_packet(
-            Ipv4Addr::new(10, 0, 0, 2),
-            Ipv4Addr::new(10, 0, 0, 1),
-        );
+        let ip_packet = make_ip_packet(Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(10, 0, 0, 1));
         let mut enc_buf = vec![0u8; MAX_PACKET_SIZE];
         let encrypted = {
             let mut t = client_tunn.lock().await;
@@ -981,16 +1020,17 @@ mod tests {
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 
-        let (fabric_port, _handle) = adapter.create_port("ns1").await.expect("create_port failed");
+        let (fabric_port, _handle) = adapter
+            .create_port("ns1")
+            .await
+            .expect("create_port failed");
         adapter
             .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add_peer failed");
 
         let client_tunn = Mutex::new(create_client_tunn(&CLIENT_PRIVATE_KEY, &server_pub));
-        let client_socket = UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("bind failed");
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind failed");
         let adapter_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
         // Complete handshake first (sets the peer endpoint).
@@ -1028,7 +1068,11 @@ mod tests {
 
         match result {
             TunnResult::WriteToTunnelV4(decrypted, _addr) => {
-                assert_eq!(decrypted, &ip_packet[..], "decrypted IP packet should match original");
+                assert_eq!(
+                    decrypted,
+                    &ip_packet[..],
+                    "decrypted IP packet should match original"
+                );
             }
             _ => panic!("expected WriteToTunnelV4 from decapsulate"),
         }

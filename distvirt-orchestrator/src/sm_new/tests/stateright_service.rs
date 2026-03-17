@@ -101,10 +101,7 @@ enum SvcNewAction {
 // ============================================================================
 
 /// Deliver an input to the SM, apply effects to env state.
-fn apply_svc_input(
-    state: &SvcNewModelState,
-    input: ServiceInput,
-) -> SvcNewModelState {
+fn apply_svc_input(state: &SvcNewModelState, input: ServiceInput) -> SvcNewModelState {
     let mut next = state.clone();
     let mut alloc = SequentialIds::<NodeKind>::new();
     let svc_id = ServiceId(0);
@@ -151,7 +148,6 @@ impl Model for SvcNewModel {
     type Action = SvcNewAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        
         let sm = ServiceSm::new(self.has_activation);
         vec![SvcNewModelState {
             demand_set: !self.has_activation, // always-on starts with demand
@@ -221,18 +217,12 @@ impl Model for SvcNewModel {
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut next = match action {
             SvcNewAction::Activate => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::ActivateService(true),
-                );
+                let mut s = apply_svc_input(state, ServiceInput::ActivateService(true));
                 s.activated = true;
                 s
             }
             SvcNewAction::Deactivate => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::ActivateService(false),
-                );
+                let mut s = apply_svc_input(state, ServiceInput::ActivateService(false));
                 s.activated = false;
                 s
             }
@@ -245,34 +235,25 @@ impl Model for SvcNewModel {
                 s
             }
             SvcNewAction::WorkloadUnready => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::ReadinessInput(vec![None]),
-                );
+                let mut s = apply_svc_input(state, ServiceInput::ReadinessInput(vec![None]));
                 s.readiness_env = ReadinessEnv::None;
                 s
             }
             SvcNewAction::BackendNeedNone => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::BackendNeedInput(BackendNeed::None),
-                );
+                let mut s =
+                    apply_svc_input(state, ServiceInput::BackendNeedInput(BackendNeed::None));
                 s.backend_need = BackendNeed::None;
                 s
             }
             SvcNewAction::BackendNeedTraffic => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::BackendNeedInput(BackendNeed::Traffic),
-                );
+                let mut s =
+                    apply_svc_input(state, ServiceInput::BackendNeedInput(BackendNeed::Traffic));
                 s.backend_need = BackendNeed::Traffic;
                 s
             }
             SvcNewAction::BackendNeedActive => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::BackendNeedInput(BackendNeed::Active),
-                );
+                let mut s =
+                    apply_svc_input(state, ServiceInput::BackendNeedInput(BackendNeed::Active));
                 s.backend_need = BackendNeed::Active;
                 s
             }
@@ -288,10 +269,7 @@ impl Model for SvcNewModel {
                 )
             }
             SvcNewAction::RemoveSpec => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::SvcSpecInput(None),
-                );
+                let mut s = apply_svc_input(state, ServiceInput::SvcSpecInput(None));
                 s.spec_present = false;
                 s
             }
@@ -324,22 +302,27 @@ impl Model for SvcNewModel {
         let mut properties = vec![
             // Safety: idle timer is only active when service is Active + has_activation.
             Property::<Self>::always("idle timer only when active+activation", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if state.sm.idle_timer_active {
-                    matches!(state.sm.state, ServiceState::Active { .. })
-                        && state.sm.has_activation
+                    matches!(state.sm.state, ServiceState::Active { .. }) && state.sm.has_activation
                 } else {
                     true
                 }
             }),
             // Safety: idle timer pending in env matches SM's idle_timer_active.
             Property::<Self>::always("timer env consistent with SM", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 state.timer_pending == state.sm.idle_timer_active
             }),
             // Safety: demand signal matches state expectations.
             Property::<Self>::always("demand consistent with state", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 match &state.sm.state {
                     ServiceState::Idle => !state.demand_set,
                     ServiceState::NeedBackend | ServiceState::Active { .. } => state.demand_set,
@@ -347,7 +330,9 @@ impl Model for SvcNewModel {
             }),
             // Safety: Active state requires readiness to be present.
             Property::<Self>::always("active implies readiness", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if matches!(state.sm.state, ServiceState::Active { .. }) {
                     state.readiness_env == ReadinessEnv::Ready
                 } else {
@@ -356,7 +341,9 @@ impl Model for SvcNewModel {
             }),
             // Safety: Idle state only possible with has_activation.
             Property::<Self>::always("idle only with activation", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if matches!(state.sm.state, ServiceState::Idle) {
                     state.sm.has_activation
                 } else {
@@ -365,14 +352,18 @@ impl Model for SvcNewModel {
             }),
             // Safety: last_readiness cache tracks environment readiness.
             Property::<Self>::always("last_readiness consistent with env", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 state.sm.last_readiness.is_some() == (state.readiness_env == ReadinessEnv::Ready)
             }),
             // Safety: NeedBackend implies readiness is absent. With the
             // last_readiness cache, activate() skips straight to Active when
             // readiness is available, so NeedBackend is unreachable with ready env.
             Property::<Self>::always("NeedBackend implies no readiness", |_model, state| {
-                if state.self_destructed { return true; }
+                if state.self_destructed {
+                    return true;
+                }
                 if matches!(state.sm.state, ServiceState::NeedBackend) {
                     state.readiness_env == ReadinessEnv::None
                 } else {
@@ -400,15 +391,17 @@ impl Model for SvcNewModel {
 
         // Reachability: can return to Idle (activation-based only).
         if self.has_activation {
-            properties.push(Property::<Self>::sometimes("can reach idle", |_model, state| {
-                matches!(state.sm.state, ServiceState::Idle)
-            }));
+            properties.push(Property::<Self>::sometimes(
+                "can reach idle",
+                |_model, state| matches!(state.sm.state, ServiceState::Idle),
+            ));
         }
         // Reachability: can have idle timer active (requires activation + backend need).
         if self.has_activation && self.enable_backend_need {
-            properties.push(Property::<Self>::sometimes("can have idle timer", |_model, state| {
-                state.sm.idle_timer_active
-            }));
+            properties.push(Property::<Self>::sometimes(
+                "can have idle timer",
+                |_model, state| state.sm.idle_timer_active,
+            ));
         }
 
         properties

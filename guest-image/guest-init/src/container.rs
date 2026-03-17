@@ -5,7 +5,7 @@ use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::rc::Rc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_executor::LocalExecutor;
 use async_io::Async;
 
@@ -78,7 +78,12 @@ impl ContainerManager {
     }
 
     /// Mount the block device as ext4 at /containers/<id> and write resolv.conf.
-    pub fn add(&mut self, id: String, device: String, dns_servers: &[String]) -> anyhow::Result<()> {
+    pub fn add(
+        &mut self,
+        id: String,
+        device: String,
+        dns_servers: &[String],
+    ) -> anyhow::Result<()> {
         if self.containers.contains_key(&id) {
             bail!("container {} already exists", id);
         }
@@ -101,7 +106,11 @@ impl ContainerManager {
             }
             std::fs::write(&resolv_path, &content)
                 .with_context(|| format!("writing {}", resolv_path))?;
-            log::info!("wrote {} with {} nameserver(s)", resolv_path, dns_servers.len());
+            log::info!(
+                "wrote {} with {} nameserver(s)",
+                resolv_path,
+                dns_servers.len()
+            );
         }
 
         // Write /etc/hostname with the container id.
@@ -180,13 +189,19 @@ impl ContainerManager {
             .with_context(|| format!("create cgroup for container {}", id))?;
 
         // Open the cgroup directory as an fd for CLONE_INTO_CGROUP.
-        let cgroup_dir_c = CString::new(cgroup_path.as_str())
-            .context("invalid cgroup path")?;
+        let cgroup_dir_c = CString::new(cgroup_path.as_str()).context("invalid cgroup path")?;
         let cgroup_dir_fd = unsafe {
-            libc::open(cgroup_dir_c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY)
+            libc::open(
+                cgroup_dir_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY,
+            )
         };
         if cgroup_dir_fd < 0 {
-            bail!("open cgroup dir {}: {}", cgroup_path, std::io::Error::last_os_error());
+            bail!(
+                "open cgroup dir {}: {}",
+                cgroup_path,
+                std::io::Error::last_os_error()
+            );
         }
         // Ensure the fd is closed in the parent even on error paths.
         let cgroup_dir_fd_owned = unsafe { OwnedFd::from_raw_fd(cgroup_dir_fd) };
@@ -222,14 +237,10 @@ impl ContainerManager {
         if let (Some((stdout_read, _stdout_write)), Some((stderr_read, _stderr_write))) =
             (stdout_pipe, stderr_pipe)
         {
-            let stdout_async = Some(
-                Async::new(PipeFd::new(stdout_read))
-                    .context("wrap stdout pipe in Async")?
-            );
-            let stderr_async = Some(
-                Async::new(PipeFd::new(stderr_read))
-                    .context("wrap stderr pipe in Async")?
-            );
+            let stdout_async =
+                Some(Async::new(PipeFd::new(stdout_read)).context("wrap stdout pipe in Async")?);
+            let stderr_async =
+                Some(Async::new(PipeFd::new(stderr_read)).context("wrap stderr pipe in Async")?);
 
             let buffer = OutputBuffer::new(256);
             let fill_handle = output::spawn_fill_task(
@@ -263,7 +274,11 @@ impl ContainerManager {
             "container {} started with pid {}{}",
             id,
             pid,
-            if capture_output { " (output captured)" } else { "" },
+            if capture_output {
+                " (output captured)"
+            } else {
+                ""
+            },
         );
         Ok(pid as u32)
     }
@@ -282,7 +297,11 @@ impl ContainerManager {
             c.stdin_fd.as_ref().and_then(|fd| {
                 let new_fd = unsafe { libc::dup(fd.as_raw_fd()) };
                 if new_fd < 0 {
-                    log::warn!("dup stdin fd for {}: {}", id, std::io::Error::last_os_error());
+                    log::warn!(
+                        "dup stdin fd for {}: {}",
+                        id,
+                        std::io::Error::last_os_error()
+                    );
                     None
                 } else {
                     Some(unsafe { OwnedFd::from_raw_fd(new_fd) })
@@ -293,23 +312,29 @@ impl ContainerManager {
 
     /// Get the output buffer receiver for a container (for spawning a drain task).
     pub fn output_buffer_receiver(&self, id: &str) -> Option<async_channel::Receiver<Vec<u8>>> {
-        self.containers.get(id).and_then(|c| c.output_buffer.as_ref().map(|b| b.receiver()))
+        self.containers
+            .get(id)
+            .and_then(|c| c.output_buffer.as_ref().map(|b| b.receiver()))
     }
 
     /// Take the fill task handle for a container (for signaling on exit).
     pub fn take_fill_task_handle(&mut self, id: &str) -> Option<FillTaskHandle> {
-        self.containers.get_mut(id).and_then(|c| c.fill_task_handle.take())
+        self.containers
+            .get_mut(id)
+            .and_then(|c| c.fill_task_handle.take())
     }
 
     /// Return containers that have an output buffer (for drain task setup on connect).
     pub fn containers_with_output(&self) -> Vec<(String, async_channel::Receiver<Vec<u8>>)> {
-        self.containers.values()
+        self.containers
+            .values()
             .filter_map(|c| {
-                c.output_buffer.as_ref().map(|b| (c.id.clone(), b.receiver()))
+                c.output_buffer
+                    .as_ref()
+                    .map(|b| (c.id.clone(), b.receiver()))
             })
             .collect()
     }
-
 
     /// Send a signal to all running containers. Logs errors but does not fail.
     pub fn signal_all_running(&self, signal: i32) {
@@ -319,7 +344,9 @@ impl ContainerManager {
                 if ret != 0 {
                     log::warn!(
                         "kill({}, {}) for container {}: {}",
-                        pid, signal, container.id,
+                        pid,
+                        signal,
+                        container.id,
                         std::io::Error::last_os_error()
                     );
                 }
@@ -360,7 +387,11 @@ impl ContainerManager {
             if let Some(mp) = mount_point_c {
                 let ret = unsafe { libc::umount(mp.as_ptr()) };
                 if ret != 0 {
-                    log::warn!("umount {}: {}", container.mount_point, std::io::Error::last_os_error());
+                    log::warn!(
+                        "umount {}: {}",
+                        container.mount_point,
+                        std::io::Error::last_os_error()
+                    );
                 } else {
                     log::info!("unmounted {}", container.mount_point);
                 }
@@ -379,7 +410,6 @@ impl ContainerManager {
             .map(|c| c.id.clone())
             .collect()
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -416,11 +446,7 @@ fn clone3_into_cgroup(cgroup_fd: RawFd) -> anyhow::Result<libc::pid_t> {
 fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedFd> {
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
     if fd < 0 {
-        bail!(
-            "pidfd_open({}): {}",
-            pid,
-            std::io::Error::last_os_error()
-        );
+        bail!("pidfd_open({}): {}", pid, std::io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
@@ -473,8 +499,7 @@ pub async fn container_task(
         unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
     }
 
-    let async_pidfd = Async::new_nonblocking(pidfd)
-        .context("wrap pidfd in Async")?;
+    let async_pidfd = Async::new_nonblocking(pidfd).context("wrap pidfd in Async")?;
 
     // Wait for process exit (pidfd becomes readable).
     async_pidfd.readable().await?;
@@ -492,10 +517,13 @@ pub async fn container_task(
     }
 
     // Push exit event (buffered, survives disconnects).
-    if let Err(e) = event_tx.send(GuestEvent::ContainerExited {
-        id: id.clone(),
-        code,
-    }).await {
+    if let Err(e) = event_tx
+        .send(GuestEvent::ContainerExited {
+            id: id.clone(),
+            code,
+        })
+        .await
+    {
         log::error!("event buffer send failed (closed): {}", e);
     }
 
@@ -520,8 +548,17 @@ fn child_exec(
     stdin_read_fd: Option<RawFd>,
 ) -> ! {
     let result = child_exec_inner(
-        mount_point, entrypoint, args, env, working_dir, uid, gid, hostname,
-        stdout_write_fd, stderr_write_fd, stdin_read_fd,
+        mount_point,
+        entrypoint,
+        args,
+        env,
+        working_dir,
+        uid,
+        gid,
+        hostname,
+        stdout_write_fd,
+        stderr_write_fd,
+        stdin_read_fd,
     );
     if let Err(e) = result {
         eprintln!("container child exec failed: {:#}", e);
@@ -550,7 +587,10 @@ fn child_exec_inner(
     // Isolate mount and UTS namespaces so mounts and hostname changes are
     // scoped to this container and don't affect other containers or guest-init.
     if unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWUTS) } != 0 {
-        bail!("unshare(CLONE_NEWNS|CLONE_NEWUTS): {}", std::io::Error::last_os_error());
+        bail!(
+            "unshare(CLONE_NEWNS|CLONE_NEWUTS): {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     // Set hostname (now scoped to this container's UTS namespace).
@@ -575,10 +615,28 @@ fn child_exec_inner(
     }
 
     // Mount essential filesystems inside the container.
-    util::mount("proc", "/proc", "proc", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None)?;
-    util::mount("sysfs", "/sys", "sysfs", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None)?;
+    util::mount(
+        "proc",
+        "/proc",
+        "proc",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        None,
+    )?;
+    util::mount(
+        "sysfs",
+        "/sys",
+        "sysfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        None,
+    )?;
     util::mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, None)?;
-    util::mount("tmpfs", "/tmp", "tmpfs", libc::MS_NOSUID | libc::MS_NODEV, None)?;
+    util::mount(
+        "tmpfs",
+        "/tmp",
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        None,
+    )?;
 
     // Set up controlling terminal from /dev/console (separate from stdin).
     let console = CString::new("/dev/console").unwrap();
@@ -636,7 +694,9 @@ fn child_exec_inner(
     }
 
     if console_fd >= 0 && console_fd > 2 {
-        unsafe { libc::close(console_fd); }
+        unsafe {
+            libc::close(console_fd);
+        }
     }
 
     // Close all fds > 2 that aren't stdin/stdout/stderr.
@@ -688,18 +748,29 @@ fn child_exec_inner(
     // Build argv for execve.
     let entrypoint_c = CString::new(resolved_entrypoint.as_str())?;
     let args_c: Vec<CString> = std::iter::once(CString::new(entrypoint)?)
-        .chain(args.iter().map(|a| CString::new(a.as_str()).context("invalid argument")).collect::<Result<Vec<_>, _>>()?)
+        .chain(
+            args.iter()
+                .map(|a| CString::new(a.as_str()).context("invalid argument"))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
         .collect();
     let mut argv: Vec<*const libc::c_char> = args_c.iter().map(|a| a.as_ptr()).collect();
     argv.push(ptr::null());
 
     // Build envp for execve — explicit env, no leaking guest-init env.
-    let env_c: Vec<CString> = env.iter().map(|e| CString::new(e.as_str()).context("invalid env var")).collect::<Result<Vec<_>, _>>()?;
+    let env_c: Vec<CString> = env
+        .iter()
+        .map(|e| CString::new(e.as_str()).context("invalid env var"))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut envp: Vec<*const libc::c_char> = env_c.iter().map(|e| e.as_ptr()).collect();
     envp.push(ptr::null());
 
     unsafe { libc::execve(entrypoint_c.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-    bail!("execve {}: {}", resolved_entrypoint, std::io::Error::last_os_error());
+    bail!(
+        "execve {}: {}",
+        resolved_entrypoint,
+        std::io::Error::last_os_error()
+    );
 }
 
 /// Resolve a bare command name by searching PATH from the provided env list.
@@ -722,4 +793,3 @@ fn resolve_in_path(name: &str, env: &[String]) -> Option<String> {
     }
     None
 }
-

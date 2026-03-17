@@ -17,7 +17,13 @@ fn traffic_triggered_activation() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -25,7 +31,9 @@ fn traffic_triggered_activation() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -72,7 +80,13 @@ fn idle_timeout_deactivation() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -80,7 +94,9 @@ fn idle_timeout_deactivation() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -136,7 +152,13 @@ fn traffic_cancels_idle_timer() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -144,7 +166,9 @@ fn traffic_cancels_idle_timer() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -194,7 +218,13 @@ fn idle_timeout_suspend_integration() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), suspend_on_idle: true });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            suspend_on_idle: true,
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -202,7 +232,9 @@ fn idle_timeout_suspend_integration() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -271,7 +303,13 @@ fn worker_loss_removes_backend_need() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -279,7 +317,9 @@ fn worker_loss_removes_backend_need() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 
@@ -330,7 +370,13 @@ fn multiple_workers_one_loses_traffic() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.set_management_to_workload_edges(mgmt, vec![W1]);
-    router.set_management_wl_spec(mgmt, WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     router.create_service(S1, ServiceSm::new(true));
     router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -338,7 +384,9 @@ fn multiple_workers_one_loses_traffic() {
         mgmt,
         ServiceSpec {
             workload: W1,
-            has_activation: true, ..Default::default() },
+            has_activation: true,
+            ..Default::default()
+        },
     );
     router.propagate();
 

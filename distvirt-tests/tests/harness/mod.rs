@@ -34,16 +34,11 @@ use tokio::task::JoinHandle;
 /// Craft a TCP SYN packet wrapped in a fabric header.
 ///
 /// Follows the pattern in `distvirt-worker/src/fabric/tests.rs` (make_tcp_frame).
-pub fn craft_tcp_syn(
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
-    src_port: u16,
-    dst_port: u16,
-) -> Vec<u8> {
+pub fn craft_tcp_syn(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16) -> Vec<u8> {
     use etherparse::PacketBuilder;
 
-    let builder =
-        PacketBuilder::ipv4(src_ip.octets(), dst_ip.octets(), 64).tcp(src_port, dst_port, 1000, 65535);
+    let builder = PacketBuilder::ipv4(src_ip.octets(), dst_ip.octets(), 64)
+        .tcp(src_port, dst_port, 1000, 65535);
 
     let mut ip_packet = Vec::new();
     builder.write(&mut ip_packet, &[]).unwrap();
@@ -73,7 +68,8 @@ impl TestCluster {
     }
 
     pub async fn add_worker(&mut self) -> WorkerId {
-        self.add_worker_with(ContainerBehavior::RunUntilSignaled).await
+        self.add_worker_with(ContainerBehavior::RunUntilSignaled)
+            .await
     }
 
     pub async fn add_worker_with(&mut self, behavior: ContainerBehavior) -> WorkerId {
@@ -88,7 +84,13 @@ impl TestCluster {
 
         let worker_handle = tokio::spawn(async move {
             let conn = WorkerConnection::accept(worker_half).await.unwrap();
-            let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::SyncFs, distvirt_worker::NullResourceMonitor>::new(
+            let worker = distvirt_worker::worker::Worker::<
+                _,
+                _,
+                _,
+                distvirt_worker::SyncFs,
+                distvirt_worker::NullResourceMonitor,
+            >::new(
                 PathBuf::from("/dev/null"),
                 PathBuf::from("/dev/null"),
                 vmm,
@@ -209,9 +211,7 @@ impl TestCluster {
         let svc = ns
             .services
             .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| {
-                panic!("service '{}' not found in namespace '{}'", svc_id, ns_id)
-            });
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
         &svc.state
     }
 
@@ -421,7 +421,9 @@ impl TestCluster {
         assert!(
             state.is_running(),
             "workload '{}/{}': expected Running, got {:?}",
-            ns_id, wl_id, state
+            ns_id,
+            wl_id,
+            state
         );
     }
 
@@ -430,7 +432,9 @@ impl TestCluster {
         assert!(
             matches!(state, WorkloadState::Dormant),
             "workload '{}/{}': expected Dormant, got {:?}",
-            ns_id, wl_id, state
+            ns_id,
+            wl_id,
+            state
         );
     }
 
@@ -439,7 +443,9 @@ impl TestCluster {
         assert!(
             matches!(state, WorkloadState::Suspended { .. }),
             "workload '{}/{}': expected Suspended, got {:?}",
-            ns_id, wl_id, state
+            ns_id,
+            wl_id,
+            state
         );
     }
 
@@ -454,11 +460,18 @@ impl TestCluster {
             assert!(
                 matches!(
                     state,
-                    WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. }
-                    | WorkloadState::Suspended { .. }
+                    WorkloadState::Active {
+                        pod: PodSlot {
+                            pod_state: PodState::Suspending { .. },
+                            ..
+                        },
+                        ..
+                    } | WorkloadState::Suspended { .. }
                 ),
                 "workload '{}/{}': expected Suspending or Suspended, got {:?}",
-                ns_id, wl_id, state
+                ns_id,
+                wl_id,
+                state
             );
             // Give the blocking pool real wall-clock time to complete I/O,
             // then converge to process the resulting events.
@@ -467,7 +480,9 @@ impl TestCluster {
         }
         panic!(
             "workload '{}/{}' did not reach Suspended after retries (still {:?})",
-            ns_id, wl_id, self.workload_state(ns_id, wl_id)
+            ns_id,
+            wl_id,
+            self.workload_state(ns_id, wl_id)
         );
     }
 
@@ -476,7 +491,9 @@ impl TestCluster {
         assert!(
             matches!(state, WorkloadState::WaitingForCapacity),
             "workload '{}/{}': expected WaitingForCapacity, got {:?}",
-            ns_id, wl_id, state
+            ns_id,
+            wl_id,
+            state
         );
     }
 
@@ -485,7 +502,9 @@ impl TestCluster {
         assert!(
             matches!(state, WorkloadState::RetryBackoff { .. }),
             "workload '{}/{}': expected RetryBackoff, got {:?}",
-            ns_id, wl_id, state
+            ns_id,
+            wl_id,
+            state
         );
     }
 
@@ -494,7 +513,9 @@ impl TestCluster {
         assert!(
             matches!(state, ServiceState::Active { .. }),
             "service '{}/{}': expected Active, got {:?}",
-            ns_id, svc_id, state
+            ns_id,
+            svc_id,
+            state
         );
     }
 
@@ -503,7 +524,9 @@ impl TestCluster {
         assert!(
             matches!(state, ServiceState::Idle),
             "service '{}/{}': expected Idle, got {:?}",
-            ns_id, svc_id, state
+            ns_id,
+            svc_id,
+            state
         );
     }
 
@@ -521,17 +544,20 @@ impl TestCluster {
         assert!(
             matches!(state, WorkloadState::Failed),
             "workload '{}/{}': expected Failed, got {:?}",
-            ns_id, wl_id, state
+            ns_id,
+            wl_id,
+            state
         );
     }
-
 
     pub fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
         let state = self.service_state(ns_id, svc_id);
         assert!(
             matches!(state, ServiceState::NeedBackend),
             "service '{}/{}': expected NeedBackend, got {:?}",
-            ns_id, svc_id, state
+            ns_id,
+            svc_id,
+            state
         );
     }
 

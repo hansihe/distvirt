@@ -42,6 +42,8 @@ async fn test_endpoint_flow_status_via_service_id() {
 
     // The workload should have processed the flow status change.
     let ns = cluster.namespace("ns");
-    assert!(!ns.active_flows.contains(&WorkloadId("web".to_string())),
-        "active_flows should not contain workload after EndpointFlowStatus with service_id");
+    assert!(
+        !ns.active_flows.contains(&WorkloadId("web".to_string())),
+        "active_flows should not contain workload after EndpointFlowStatus with service_id"
+    );
 }

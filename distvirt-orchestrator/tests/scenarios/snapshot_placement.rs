@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_worker_protocol::WorkerCommand;
 
 /// Two pool workers. Activate on one worker, suspend (artifact placed on that worker).
@@ -19,7 +19,9 @@ fn test_resume_pinned_to_artifact_worker() {
 
     // Activate → Running (lands on one of the two workers).
     h.activate_service("ns", "web-svc");
-    let running_worker = h.workload_global_worker_id("ns", "web").expect("expected worker_id");
+    let running_worker = h
+        .workload_global_worker_id("ns", "web")
+        .expect("expected worker_id");
 
     // Idle → suspend.
     h.deactivate_service("ns", "web-svc");
@@ -29,14 +31,18 @@ fn test_resume_pinned_to_artifact_worker() {
     // Re-activate → should resume on the same worker (artifact pinning).
     h.activate_service("ns", "web-svc");
 
-    let resume_worker = h.workload_global_worker_id("ns", "web").expect("expected worker_id");
+    let resume_worker = h
+        .workload_global_worker_id("ns", "web")
+        .expect("expected worker_id");
     assert_eq!(
         resume_worker, running_worker,
         "resume should be pinned to the artifact-holding worker, not the other"
     );
 
     // Verify ResumePod was issued (not LaunchPod).
-    let resume_count = h.worker_command_count(&running_worker, |c| matches!(c, WorkerCommand::ResumePod { .. }));
+    let resume_count = h.worker_command_count(&running_worker, |c| {
+        matches!(c, WorkerCommand::ResumePod { .. })
+    });
     assert!(resume_count >= 1, "expected ResumePod for snapshot resume");
 }
 
@@ -67,11 +73,19 @@ fn test_artifact_lost_on_worker_disconnect_cold_launch() {
     // Re-activate on the new worker.
     h.activate_service("ns", "web-svc");
 
-    let new_worker = h.workload_global_worker_id("ns", "web").expect("expected worker_id");
+    let new_worker = h
+        .workload_global_worker_id("ns", "web")
+        .expect("expected worker_id");
     assert_eq!(new_worker, w2, "workload should be on the new worker");
 
     // Verify LaunchPod was used (not ResumePod) — cold launch since artifact is gone.
-    let launch_count = h.worker_command_count(&w2, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
-    assert!(launch_count >= 1, "expected LaunchPod for cold launch after artifact loss");
-    h.assert_worker_command_count(&w2, "ResumePod", 0, |c| matches!(c, WorkerCommand::ResumePod { .. }));
+    let launch_count =
+        h.worker_command_count(&w2, |c| matches!(c, WorkerCommand::LaunchPod { .. }));
+    assert!(
+        launch_count >= 1,
+        "expected LaunchPod for cold launch after artifact loss"
+    );
+    h.assert_worker_command_count(&w2, "ResumePod", 0, |c| {
+        matches!(c, WorkerCommand::ResumePod { .. })
+    });
 }

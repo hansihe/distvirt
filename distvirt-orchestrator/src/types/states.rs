@@ -43,7 +43,10 @@ impl PlacementTable {
         self.placements.iter()
     }
 
-    pub fn remove_by_worker(&mut self, worker_id: &WorkerId) -> Vec<(ArtifactId, ArtifactPlacement)> {
+    pub fn remove_by_worker(
+        &mut self,
+        worker_id: &WorkerId,
+    ) -> Vec<(ArtifactId, ArtifactPlacement)> {
         let to_remove: Vec<ArtifactId> = self
             .placements
             .iter()
@@ -137,7 +140,10 @@ pub struct PressureBands {
 impl PressureBands {
     /// The effective (max) band across all dimensions for scheduling decisions.
     pub fn max_band(&self) -> PressureBand {
-        self.compute.max(self.memory).max(self.storage).max(self.network)
+        self.compute
+            .max(self.memory)
+            .max(self.storage)
+            .max(self.network)
     }
 }
 
@@ -216,7 +222,10 @@ impl WorkerState {
         };
 
         // Static accounting fallback for storage: max pool utilization.
-        let storage_static = self.capabilities.pools.iter()
+        let storage_static = self
+            .capabilities
+            .pools
+            .iter()
             .map(|p| {
                 if p.capacity_bytes > 0 {
                     1.0 - (p.available_bytes as f32 / p.capacity_bytes as f32)
@@ -247,7 +256,12 @@ impl WorkerState {
         // Network pressure: 0.0 (future extension).
         let network = 0.0;
 
-        self.pressure = WorkerPressure { compute, memory, storage, network };
+        self.pressure = WorkerPressure {
+            compute,
+            memory,
+            storage,
+            network,
+        };
         self.pressure_bands = self.pressure.update_bands(&self.pressure_bands);
     }
 }
@@ -258,60 +272,102 @@ mod pressure_tests {
 
     #[test]
     fn test_band_from_zero() {
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Normal, 0.0), PressureBand::Normal);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Normal, 0.0),
+            PressureBand::Normal
+        );
     }
 
     #[test]
     fn test_enter_elevated() {
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Normal, 0.50), PressureBand::Elevated);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Normal, 0.50),
+            PressureBand::Elevated
+        );
         // Below enter threshold stays Normal.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Normal, 0.49), PressureBand::Normal);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Normal, 0.49),
+            PressureBand::Normal
+        );
     }
 
     #[test]
     fn test_enter_high() {
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Normal, 0.80), PressureBand::High);
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Elevated, 0.80), PressureBand::High);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Normal, 0.80),
+            PressureBand::High
+        );
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Elevated, 0.80),
+            PressureBand::High
+        );
     }
 
     #[test]
     fn test_enter_critical() {
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Normal, 0.95), PressureBand::Critical);
-        assert_eq!(compute_band_with_hysteresis(PressureBand::High, 0.95), PressureBand::Critical);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Normal, 0.95),
+            PressureBand::Critical
+        );
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::High, 0.95),
+            PressureBand::Critical
+        );
     }
 
     #[test]
     fn test_hysteresis_elevated_stays() {
         // At 0.45 — above leave (0.40) but below enter (0.50): stays Elevated.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Elevated, 0.45), PressureBand::Elevated);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Elevated, 0.45),
+            PressureBand::Elevated
+        );
     }
 
     #[test]
     fn test_hysteresis_elevated_leaves() {
         // At 0.39 — below leave threshold (0.40): drops to Normal.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Elevated, 0.39), PressureBand::Normal);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Elevated, 0.39),
+            PressureBand::Normal
+        );
     }
 
     #[test]
     fn test_hysteresis_high_stays() {
         // At 0.75 — above leave (0.70) but below enter (0.80): stays High.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::High, 0.75), PressureBand::High);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::High, 0.75),
+            PressureBand::High
+        );
     }
 
     #[test]
     fn test_hysteresis_high_leaves() {
         // At 0.69 — below leave threshold (0.70): drops.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::High, 0.69), PressureBand::Elevated);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::High, 0.69),
+            PressureBand::Elevated
+        );
     }
 
     #[test]
     fn test_hysteresis_critical_leaves() {
         // At 0.84 — below Critical leave (0.85): drops to High.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Critical, 0.84), PressureBand::High);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Critical, 0.84),
+            PressureBand::High
+        );
         // At 0.60 — below High enter too: drops to Elevated.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Critical, 0.60), PressureBand::Elevated);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Critical, 0.60),
+            PressureBand::Elevated
+        );
         // At 0.30 — below Elevated enter: drops to Normal.
-        assert_eq!(compute_band_with_hysteresis(PressureBand::Critical, 0.30), PressureBand::Normal);
+        assert_eq!(
+            compute_band_with_hysteresis(PressureBand::Critical, 0.30),
+            PressureBand::Normal
+        );
     }
 
     #[test]
@@ -572,8 +628,21 @@ pub struct LeaseTable {
 
 impl LeaseTable {
     /// Reserve capacity for a pod operation.
-    pub fn grant(&mut self, pod_id: PodId, worker_id: WorkerId, intent: LeaseIntent, memory_mb: u64) {
-        self.leases.insert(pod_id, Lease { worker_id, intent, memory_mb });
+    pub fn grant(
+        &mut self,
+        pod_id: PodId,
+        worker_id: WorkerId,
+        intent: LeaseIntent,
+        memory_mb: u64,
+    ) {
+        self.leases.insert(
+            pod_id,
+            Lease {
+                worker_id,
+                intent,
+                memory_mb,
+            },
+        );
     }
 
     /// Release a lease. Returns the lease if it existed.
@@ -583,7 +652,8 @@ impl LeaseTable {
 
     /// Release all leases for a given worker. Returns the released leases.
     pub fn release_worker_leases(&mut self, worker_id: &WorkerId) -> Vec<(PodId, Lease)> {
-        let to_remove: Vec<PodId> = self.leases
+        let to_remove: Vec<PodId> = self
+            .leases
             .iter()
             .filter(|(_, l)| l.worker_id == *worker_id)
             .map(|(id, _)| id.clone())
@@ -618,9 +688,9 @@ impl LeaseTable {
 }
 
 // Re-export SM-owned types so `use crate::types::*` still works.
-pub use crate::sm::pod::{PodState, PodSlot};
-pub use crate::sm::workload::{PendingIntent, RetiredPod, WorkloadState};
+pub use crate::sm::pod::{PodSlot, PodState};
 pub use crate::sm::service::ServiceState;
+pub use crate::sm::workload::{PendingIntent, RetiredPod, WorkloadState};
 
 // --- Domain Enums ---
 
@@ -702,7 +772,12 @@ mod lease_tests {
         let pod_id = PodId("pod-1".into());
         let worker_id = WorkerId("w-0".into());
 
-        table.grant(pod_id.clone(), worker_id.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(
+            pod_id.clone(),
+            worker_id.clone(),
+            LeaseIntent::PodLaunch,
+            128,
+        );
         assert_eq!(table.leased_pod_count(&worker_id), 1);
         assert_eq!(table.leased_memory_mb(&worker_id), 128);
 
@@ -717,7 +792,12 @@ mod lease_tests {
     fn test_double_release_returns_none() {
         let mut table = LeaseTable::default();
         let pod_id = PodId("pod-1".into());
-        table.grant(pod_id.clone(), WorkerId("w-0".into()), LeaseIntent::PodLaunch, 128);
+        table.grant(
+            pod_id.clone(),
+            WorkerId("w-0".into()),
+            LeaseIntent::PodLaunch,
+            128,
+        );
         table.release(&pod_id);
         assert!(table.release(&pod_id).is_none());
     }
@@ -761,7 +841,9 @@ mod lease_tests {
         table.grant(
             pod_id.clone(),
             WorkerId("w-0".into()),
-            LeaseIntent::PodResume { artifact_id: artifact_id.clone() },
+            LeaseIntent::PodResume {
+                artifact_id: artifact_id.clone(),
+            },
             128,
         );
 

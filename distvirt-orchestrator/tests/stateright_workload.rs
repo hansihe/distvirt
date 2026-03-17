@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use stateright::*;
 
-use distvirt_orchestrator::types::*;
 use distvirt_orchestrator::sm::workload::{WorkloadInput, WorkloadOutput, WorkloadStateMachine};
+use distvirt_orchestrator::types::*;
 
 /// Must match `WorkloadStateMachine::MAX_RETRIES`.
 const MAX_RETRIES: u32 = 5;
@@ -46,15 +46,33 @@ struct WlModelState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WlModelAction {
-    SetDemand { count: u32 },
+    SetDemand {
+        count: u32,
+    },
     ForceDeactivate,
-    LaunchPod { worker_id: WorkerId, pod_id: PodId },
-    PodRunning { pod_id: PodId },
-    PodGone { pod_id: PodId },
-    PodSuspended { pod_id: PodId, artifact_id: ArtifactId },
-    PodSuspendFailed { pod_id: PodId },
-    WorkerLost { worker_id: WorkerId },
-    TimerFired { timer_key: TimerKey },
+    LaunchPod {
+        worker_id: WorkerId,
+        pod_id: PodId,
+    },
+    PodRunning {
+        pod_id: PodId,
+    },
+    PodGone {
+        pod_id: PodId,
+    },
+    PodSuspended {
+        pod_id: PodId,
+        artifact_id: ArtifactId,
+    },
+    PodSuspendFailed {
+        pod_id: PodId,
+    },
+    WorkerLost {
+        worker_id: WorkerId,
+    },
+    TimerFired {
+        timer_key: TimerKey,
+    },
     SpecChanged,
     ManualRestart,
 }
@@ -80,9 +98,9 @@ fn get_pending(state: &WorkloadState) -> Option<PendingIntent> {
             pod: PodSlot { pod_state, .. },
             pending,
         } => match pod_state {
-            PodState::Launching { .. } | PodState::Suspending { .. } | PodState::Resuming { .. } => {
-                Some(*pending)
-            }
+            PodState::Launching { .. }
+            | PodState::Suspending { .. }
+            | PodState::Resuming { .. } => Some(*pending),
             _ => None,
         },
         _ => None,
@@ -96,7 +114,8 @@ impl Model for WorkloadModel {
     type Action = WlModelAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        let (sm, _init_outputs) = WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
+        let (sm, _init_outputs) =
+            WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
         // The init_outputs (e.g. PodRequest for always-on) are reflected in the initial state.
         vec![WlModelState {
             state: sm.state,
@@ -147,7 +166,12 @@ impl Model for WorkloadModel {
                 }
             }
             WorkloadState::Active {
-                pod: PodSlot { pod_id, worker_id, pod_state },
+                pod:
+                    PodSlot {
+                        pod_id,
+                        worker_id,
+                        pod_state,
+                    },
                 ..
             } => {
                 match pod_state {
@@ -241,7 +265,8 @@ impl Model for WorkloadModel {
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        let (mut sm, _) = WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
+        let (mut sm, _) =
+            WorkloadStateMachine::new(wl_id(), self.enable_suspend, self.has_activation);
         sm.state = state.state.clone();
         sm.current_demand = state.current_demand;
         sm.consecutive_failures = state.consecutive_failures;
@@ -259,10 +284,23 @@ impl Model for WorkloadModel {
                 (WorkloadInput::LaunchPod { worker_id, pod_id }, None)
             }
             WlModelAction::PodRunning { pod_id } => (WorkloadInput::PodRunning { pod_id }, None),
-            WlModelAction::PodGone { pod_id } => (WorkloadInput::PodGone { pod_id, reason: None }, None),
-            WlModelAction::PodSuspended { pod_id, artifact_id } => {
-                (WorkloadInput::PodSuspended { pod_id, artifact_id }, None)
-            }
+            WlModelAction::PodGone { pod_id } => (
+                WorkloadInput::PodGone {
+                    pod_id,
+                    reason: None,
+                },
+                None,
+            ),
+            WlModelAction::PodSuspended {
+                pod_id,
+                artifact_id,
+            } => (
+                WorkloadInput::PodSuspended {
+                    pod_id,
+                    artifact_id,
+                },
+                None,
+            ),
             WlModelAction::PodSuspendFailed { pod_id } => {
                 (WorkloadInput::PodSuspendFailed { pod_id }, None)
             }
@@ -301,7 +339,10 @@ impl Model for WorkloadModel {
         // retiring pods, so we simulate immediate cleanup to avoid unbounded state growth.
         while let Some(retired) = sm.retiring.pop() {
             let drain_outputs = sm.step(
-                WorkloadInput::PodGone { pod_id: retired.pod_id, reason: None },
+                WorkloadInput::PodGone {
+                    pod_id: retired.pod_id,
+                    reason: None,
+                },
                 &ns,
             );
             for dout in &drain_outputs {
@@ -415,7 +456,11 @@ impl Model for WorkloadModel {
             // Safety: Launching state always has a pending launch timeout timer.
             Property::<Self>::always("launching has timeout timer", |_model, state| {
                 if let WorkloadState::Active {
-                    pod: PodSlot { pod_state: PodState::Launching { ref launch_timeout }, .. },
+                    pod:
+                        PodSlot {
+                            pod_state: PodState::Launching { ref launch_timeout },
+                            ..
+                        },
                     ..
                 } = state.state
                 {
@@ -427,9 +472,10 @@ impl Model for WorkloadModel {
             // Safety: Running state has no launch timeout timer.
             Property::<Self>::always("running has no launch timer", |_model, state| {
                 if state.state.is_running() {
-                    !state.pending_timers.iter().any(|tk| {
-                        matches!(tk, TimerKey::LaunchTimeout { .. })
-                    })
+                    !state
+                        .pending_timers
+                        .iter()
+                        .any(|tk| matches!(tk, TimerKey::LaunchTimeout { .. }))
                 } else {
                     true
                 }
@@ -449,7 +495,15 @@ impl Model for WorkloadModel {
             // Safety: Suspending state always has a pending suspend timeout timer.
             Property::<Self>::always("suspending has timeout timer", |_model, state| {
                 if let WorkloadState::Active {
-                    pod: PodSlot { pod_state: PodState::Suspending { ref suspend_timeout, .. }, .. },
+                    pod:
+                        PodSlot {
+                            pod_state:
+                                PodState::Suspending {
+                                    ref suspend_timeout,
+                                    ..
+                                },
+                            ..
+                        },
                     ..
                 } = state.state
                 {
@@ -461,7 +515,14 @@ impl Model for WorkloadModel {
             // Safety: Resuming state always has a pending resume timeout timer.
             Property::<Self>::always("resuming has timeout timer", |_model, state| {
                 if let WorkloadState::Active {
-                    pod: PodSlot { pod_state: PodState::Resuming { ref resume_timeout, .. }, .. },
+                    pod:
+                        PodSlot {
+                            pod_state:
+                                PodState::Resuming {
+                                    ref resume_timeout, ..
+                                },
+                            ..
+                        },
                     ..
                 } = state.state
                 {
@@ -516,8 +577,7 @@ impl Model for WorkloadModel {
                     return true;
                 }
                 // Running after having been through multiple pod attempts.
-                state.state.is_running()
-                    && state.next_pod_id > 5
+                state.state.is_running() && state.next_pod_id > 5
             }),
         ]
     }

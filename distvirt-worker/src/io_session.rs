@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures_lite::io::AsyncReadExt;
 
 use distvirt_guest_protocol::{

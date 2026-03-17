@@ -1,7 +1,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use tokio::io::unix::AsyncFd;
 
 /// A non-persistent TUN device for L3 packet I/O (macOS utun).
@@ -102,7 +102,10 @@ impl TunDevice {
             )
         };
         if ret < 0 {
-            bail!("getsockopt(UTUN_OPT_IFNAME): {}", io::Error::last_os_error());
+            bail!(
+                "getsockopt(UTUN_OPT_IFNAME): {}",
+                io::Error::last_os_error()
+            );
         }
 
         let name = std::ffi::CStr::from_bytes_until_nul(&name_buf)
@@ -117,7 +120,11 @@ impl TunDevice {
             bail!("fcntl F_GETFL: {}", io::Error::last_os_error());
         }
         let ret = unsafe {
-            libc::fcntl(owned_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
+            libc::fcntl(
+                owned_fd.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            )
         };
         if ret < 0 {
             bail!("fcntl F_SETFL O_NONBLOCK: {}", io::Error::last_os_error());

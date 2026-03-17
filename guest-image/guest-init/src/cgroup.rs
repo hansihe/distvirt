@@ -1,30 +1,30 @@
 use std::fs;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_io::Async;
 
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup/containers";
 
 /// Create the parent cgroup for all containers and enable the memory controller.
 pub fn init_container_cgroup_root() -> anyhow::Result<()> {
-    fs::create_dir_all(CGROUP_ROOT)
-        .with_context(|| format!("create {}", CGROUP_ROOT))?;
+    fs::create_dir_all(CGROUP_ROOT).with_context(|| format!("create {}", CGROUP_ROOT))?;
 
     // Enable memory controller in the parent so child cgroups get memory.pressure.
     fs::write("/sys/fs/cgroup/cgroup.subtree_control", "+memory")
         .context("enable memory controller on root cgroup")?;
 
-
-    log::info!("cgroup root {} initialized with memory controller", CGROUP_ROOT);
+    log::info!(
+        "cgroup root {} initialized with memory controller",
+        CGROUP_ROOT
+    );
     Ok(())
 }
 
 /// Create a per-container cgroup directory. Returns the path.
 pub fn setup_container_cgroup(id: &str) -> anyhow::Result<String> {
     let path = format!("{}/{}", CGROUP_ROOT, id);
-    fs::create_dir_all(&path)
-        .with_context(|| format!("create cgroup {}", path))?;
+    fs::create_dir_all(&path).with_context(|| format!("create cgroup {}", path))?;
     log::info!("created cgroup {}", path);
     Ok(path)
 }
@@ -43,8 +43,7 @@ pub struct PsiTriggers {
 /// The fd becomes readable when the PSI threshold is exceeded.
 /// Reading from it re-arms the trigger.
 fn open_psi_trigger(pressure_path: &str, trigger: &[u8]) -> anyhow::Result<OwnedFd> {
-    let path_c = std::ffi::CString::new(pressure_path)
-        .context("invalid pressure path")?;
+    let path_c = std::ffi::CString::new(pressure_path).context("invalid pressure path")?;
     let fd = unsafe { libc::open(path_c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
         bail!(
@@ -55,13 +54,8 @@ fn open_psi_trigger(pressure_path: &str, trigger: &[u8]) -> anyhow::Result<Owned
     }
     let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
-    let written = unsafe {
-        libc::write(
-            fd,
-            trigger.as_ptr() as *const libc::c_void,
-            trigger.len(),
-        )
-    };
+    let written =
+        unsafe { libc::write(fd, trigger.as_ptr() as *const libc::c_void, trigger.len()) };
     if written < 0 {
         bail!(
             "write PSI trigger to {}: {}",
@@ -112,17 +106,38 @@ impl AsyncPsiMonitor {
         let epoll_fd = unsafe { OwnedFd::from_raw_fd(epoll_fd) };
 
         // Register PSI fds with EPOLLPRI (data 0=some, 1=full).
-        let mut ev_some = libc::epoll_event { events: libc::EPOLLPRI as u32, u64: 0 };
-        if unsafe { libc::epoll_ctl(epoll_fd.as_raw_fd(), libc::EPOLL_CTL_ADD, triggers.some_fd.as_raw_fd(), &mut ev_some) } < 0 {
+        let mut ev_some = libc::epoll_event {
+            events: libc::EPOLLPRI as u32,
+            u64: 0,
+        };
+        if unsafe {
+            libc::epoll_ctl(
+                epoll_fd.as_raw_fd(),
+                libc::EPOLL_CTL_ADD,
+                triggers.some_fd.as_raw_fd(),
+                &mut ev_some,
+            )
+        } < 0
+        {
             bail!("epoll_ctl ADD some: {}", std::io::Error::last_os_error());
         }
-        let mut ev_full = libc::epoll_event { events: libc::EPOLLPRI as u32, u64: 1 };
-        if unsafe { libc::epoll_ctl(epoll_fd.as_raw_fd(), libc::EPOLL_CTL_ADD, triggers.full_fd.as_raw_fd(), &mut ev_full) } < 0 {
+        let mut ev_full = libc::epoll_event {
+            events: libc::EPOLLPRI as u32,
+            u64: 1,
+        };
+        if unsafe {
+            libc::epoll_ctl(
+                epoll_fd.as_raw_fd(),
+                libc::EPOLL_CTL_ADD,
+                triggers.full_fd.as_raw_fd(),
+                &mut ev_full,
+            )
+        } < 0
+        {
             bail!("epoll_ctl ADD full: {}", std::io::Error::last_os_error());
         }
 
-        let epoll_fd = Async::new_nonblocking(epoll_fd)
-            .context("wrap epoll fd in Async")?;
+        let epoll_fd = Async::new_nonblocking(epoll_fd).context("wrap epoll fd in Async")?;
 
         Ok(AsyncPsiMonitor { epoll_fd, triggers })
     }
@@ -177,12 +192,16 @@ pub fn set_memory_limits(cgroup_path: &str, high_bytes: u64, max_bytes: u64) -> 
     let high_path = format!("{}/memory.high", cgroup_path);
 
     // Write max first (must be >= high).
-    fs::write(&max_path, max_bytes.to_string())
-        .with_context(|| format!("write {}", max_path))?;
+    fs::write(&max_path, max_bytes.to_string()).with_context(|| format!("write {}", max_path))?;
     fs::write(&high_path, high_bytes.to_string())
         .with_context(|| format!("write {}", high_path))?;
 
-    log::info!("set cgroup {} memory limits: high={}, max={}", cgroup_path, high_bytes, max_bytes);
+    log::info!(
+        "set cgroup {} memory limits: high={}, max={}",
+        cgroup_path,
+        high_bytes,
+        max_bytes
+    );
     Ok(())
 }
 
@@ -190,8 +209,7 @@ pub fn set_memory_limits(cgroup_path: &str, high_bytes: u64, max_bytes: u64) -> 
 /// Returns `u64::MAX` for "max" (no limit).
 pub fn read_cgroup_bytes(cgroup_path: &str, file: &str) -> anyhow::Result<u64> {
     let path = format!("{}/{}", cgroup_path, file);
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path))?;
+    let content = fs::read_to_string(&path).with_context(|| format!("read {}", path))?;
     let trimmed = content.trim();
     if trimmed == "max" {
         Ok(u64::MAX)
@@ -249,8 +267,7 @@ impl MemoryEvents {
 /// Read and parse `memory.events` from a cgroup path.
 pub fn read_memory_events(cgroup_path: &str) -> anyhow::Result<MemoryEvents> {
     let path = format!("{}/memory.events", cgroup_path);
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path))?;
+    let content = fs::read_to_string(&path).with_context(|| format!("read {}", path))?;
     Ok(MemoryEvents::parse(&content))
 }
 
@@ -270,11 +287,9 @@ impl AsyncMemoryEventsMonitor {
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         let events_path = format!("{}/memory.events", cgroup_path);
-        let path_c = std::ffi::CString::new(events_path.as_str())
-            .context("invalid memory.events path")?;
-        let wd = unsafe {
-            libc::inotify_add_watch(fd, path_c.as_ptr(), libc::IN_MODIFY)
-        };
+        let path_c =
+            std::ffi::CString::new(events_path.as_str()).context("invalid memory.events path")?;
+        let wd = unsafe { libc::inotify_add_watch(fd, path_c.as_ptr(), libc::IN_MODIFY) };
         if wd < 0 {
             bail!(
                 "inotify_add_watch {}: {}",
@@ -283,11 +298,9 @@ impl AsyncMemoryEventsMonitor {
             );
         }
 
-        let inotify_fd = Async::new_nonblocking(owned_fd)
-            .context("wrap inotify fd in Async")?;
+        let inotify_fd = Async::new_nonblocking(owned_fd).context("wrap inotify fd in Async")?;
 
-        let previous = read_memory_events(cgroup_path)
-            .unwrap_or_default();
+        let previous = read_memory_events(cgroup_path).unwrap_or_default();
 
         Ok(Self {
             inotify_fd,
@@ -317,8 +330,7 @@ impl AsyncMemoryEventsMonitor {
                 }
             }
 
-            let current = read_memory_events(&self.cgroup_path)
-                .unwrap_or_default();
+            let current = read_memory_events(&self.cgroup_path).unwrap_or_default();
             if current != self.previous {
                 let diff = current.diff(&self.previous);
                 self.previous = current.clone();

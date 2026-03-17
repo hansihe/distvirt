@@ -177,12 +177,18 @@ impl ShellHandle {
                 response_tx: tx,
             })
             .map_err(|_| anyhow::anyhow!("shell closed"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("shell dropped response channel"))
+        rx.await
+            .map_err(|_| anyhow::anyhow!("shell dropped response channel"))
     }
 }
 
 impl OrchestratorShell {
-    pub fn new(wg_listen_port: u16, tunnel_encrypted: bool, worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>, worker_secret: String) -> Self {
+    pub fn new(
+        wg_listen_port: u16,
+        tunnel_encrypted: bool,
+        worker_pool_configs: Vec<distvirt_worker_protocol::PoolInfo>,
+        worker_secret: String,
+    ) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         OrchestratorShell {
             orchestrator: Orchestrator::new(),
@@ -228,7 +234,12 @@ impl OrchestratorShell {
         let mut adapters = vec![];
         let mut wg_config = None;
 
-        if hello.capabilities.available_adapters.iter().any(|a| a == "wireguard") {
+        if hello
+            .capabilities
+            .available_adapters
+            .iter()
+            .any(|a| a == "wireguard")
+        {
             let private_key = StaticSecret::random_from_rng(rand::thread_rng());
             let public_key = PublicKey::from(&private_key);
             let listen_port = self.wg_listen_port;
@@ -276,10 +287,7 @@ impl OrchestratorShell {
 
         // Extract tunnel config from WorkerReady (set after handshake so the
         // worker knows whether to enable encryption).
-        let tunnel_config = match (
-            ready.tunnel_listen_port,
-            ready.tunnel_public_key,
-        ) {
+        let tunnel_config = match (ready.tunnel_listen_port, ready.tunnel_public_key) {
             (Some(port), Some(key)) => Some(WorkerTunnelConfig {
                 listen_port: port,
                 public_key: key,
@@ -323,13 +331,14 @@ impl OrchestratorShell {
         tokio::spawn(async move {
             while let Some(mut stream) = log_streams.recv().await {
                 // Read the log stream header to learn which pod this is for.
-                let header = match distvirt_worker_protocol::codec::recv_log_header(&mut stream).await {
-                    Ok(h) => h,
-                    Err(e) => {
-                        log::warn!("failed to read log stream header: {}", e);
-                        continue;
-                    }
-                };
+                let header =
+                    match distvirt_worker_protocol::codec::recv_log_header(&mut stream).await {
+                        Ok(h) => h,
+                        Err(e) => {
+                            log::warn!("failed to read log stream header: {}", e);
+                            continue;
+                        }
+                    };
 
                 // Resolve pod_id → workload_id via the shell.
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -414,10 +423,9 @@ impl OrchestratorShell {
 
     /// Feed a client command into the orchestrator.
     pub async fn client_command(&mut self, client_id: ClientId, command: ClientCommand) {
-        let output = self.orchestrator.step(OrchestratorInput::ClientCommand {
-            client_id,
-            command,
-        });
+        let output = self
+            .orchestrator
+            .step(OrchestratorInput::ClientCommand { client_id, command });
         self.process_output(output).await;
     }
 
@@ -431,7 +439,8 @@ impl OrchestratorShell {
         service_ids: HashSet<ServiceId>,
     ) -> mpsc::Receiver<EventData> {
         let (tx, rx) = mpsc::channel(256);
-        self.subscriptions.subscribe_events(namespace_id, workload_ids, service_ids, tx);
+        self.subscriptions
+            .subscribe_events(namespace_id, workload_ids, service_ids, tx);
         rx
     }
 
@@ -444,7 +453,8 @@ impl OrchestratorShell {
         service_ids: HashSet<ServiceId>,
         tx: mpsc::Sender<EventData>,
     ) {
-        self.subscriptions.subscribe_events(namespace_id, workload_ids, service_ids, tx);
+        self.subscriptions
+            .subscribe_events(namespace_id, workload_ids, service_ids, tx);
     }
 
     /// Access the orchestrator state (for assertions in tests).
@@ -493,23 +503,19 @@ impl OrchestratorShell {
     async fn handle_msg(&mut self, msg: ShellMsg) {
         match msg {
             ShellMsg::ClientConnected { client_id } => {
-                self.clients.insert(
-                    client_id.clone(),
-                    ClientSender {
-                        pending: None,
-                    },
-                );
-                let output = self.orchestrator.step(OrchestratorInput::ClientConnected {
-                    client_id,
-                });
+                self.clients
+                    .insert(client_id.clone(), ClientSender { pending: None });
+                let output = self
+                    .orchestrator
+                    .step(OrchestratorInput::ClientConnected { client_id });
                 self.process_output(output).await;
                 return;
             }
             ShellMsg::ClientDisconnected { client_id } => {
                 self.clients.remove(&client_id);
-                let output = self.orchestrator.step(OrchestratorInput::ClientDisconnected {
-                    client_id,
-                });
+                let output = self
+                    .orchestrator
+                    .step(OrchestratorInput::ClientDisconnected { client_id });
                 self.process_output(output).await;
                 return;
             }
@@ -543,7 +549,8 @@ impl OrchestratorShell {
                 workload_id,
                 data,
             } => {
-                self.subscriptions.handle_log_data(namespace_id, workload_id, data);
+                self.subscriptions
+                    .handle_log_data(namespace_id, workload_id, data);
                 return;
             }
             ShellMsg::SubscribeLogs {
@@ -551,7 +558,8 @@ impl OrchestratorShell {
                 workload_id,
                 log_tx,
             } => {
-                self.subscriptions.subscribe_logs(namespace_id, workload_id, log_tx);
+                self.subscriptions
+                    .subscribe_logs(namespace_id, workload_id, log_tx);
                 return;
             }
             ShellMsg::ResolvePod {
@@ -574,7 +582,12 @@ impl OrchestratorShell {
                 service_ids,
                 event_tx,
             } => {
-                self.subscriptions.subscribe_events(namespace_id, workload_ids, service_ids, event_tx);
+                self.subscriptions.subscribe_events(
+                    namespace_id,
+                    workload_ids,
+                    service_ids,
+                    event_tx,
+                );
                 return;
             }
             _ => {}

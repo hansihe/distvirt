@@ -151,10 +151,7 @@ impl DistvirtClient for DistvirtClientService {
         let event = self.unary_command(ClientCommand::ListNamespaces).await?;
         match event {
             ClientEvent::NamespaceList { namespaces } => {
-                let proto_namespaces = namespaces
-                    .into_iter()
-                    .map(convert_status_report)
-                    .collect();
+                let proto_namespaces = namespaces.into_iter().map(convert_status_report).collect();
                 Ok(Response::new(proto::ListNamespacesResponse {
                     namespaces: proto_namespaces,
                 }))
@@ -213,12 +210,13 @@ impl DistvirtClient for DistvirtClientService {
             })
             .await?;
         match event {
-            ClientEvent::DeactivateWorkloadResult { deactivated, reason } => {
-                Ok(Response::new(proto::DeactivateWorkloadResponse {
-                    deactivated,
-                    reason,
-                }))
-            }
+            ClientEvent::DeactivateWorkloadResult {
+                deactivated,
+                reason,
+            } => Ok(Response::new(proto::DeactivateWorkloadResponse {
+                deactivated,
+                reason,
+            })),
             ClientEvent::Error { message } => Err(event_to_error_status(message)),
             _ => Err(Status::internal("unexpected response from orchestrator")),
         }
@@ -278,16 +276,14 @@ impl DistvirtClient for DistvirtClientService {
             })
             .await?;
         match event {
-            ClientEvent::WorkerStatus { worker } => {
-                Ok(Response::new(proto::GetWorkerResponse {
-                    worker: Some(proto::WorkerInfo {
-                        worker_id: worker.worker_id.0,
-                        max_pods: worker.max_pods,
-                        available_memory_mb: worker.available_memory_mb,
-                        active_pods: worker.active_pods,
-                    }),
-                }))
-            }
+            ClientEvent::WorkerStatus { worker } => Ok(Response::new(proto::GetWorkerResponse {
+                worker: Some(proto::WorkerInfo {
+                    worker_id: worker.worker_id.0,
+                    max_pods: worker.max_pods,
+                    available_memory_mb: worker.available_memory_mb,
+                    active_pods: worker.active_pods,
+                }),
+            })),
             ClientEvent::Error { message } => Err(event_to_error_status(message)),
             _ => Err(Status::internal("unexpected response from orchestrator")),
         }
@@ -322,17 +318,14 @@ impl DistvirtClient for DistvirtClientService {
                         },
                     })
                     .collect();
-                Ok(Response::new(proto::ListPodsResponse {
-                    pods: proto_pods,
-                }))
+                Ok(Response::new(proto::ListPodsResponse { pods: proto_pods }))
             }
             ClientEvent::Error { message } => Err(event_to_error_status(message)),
             _ => Err(Status::internal("unexpected response from orchestrator")),
         }
     }
 
-    type WatchNamespaceStatusStream =
-        ReceiverStream<Result<proto::NamespaceStatusEvent, Status>>;
+    type WatchNamespaceStatusStream = ReceiverStream<Result<proto::NamespaceStatusEvent, Status>>;
 
     async fn watch_namespace_status(
         &self,
@@ -381,7 +374,9 @@ impl DistvirtClient for DistvirtClientService {
     ) -> Result<Response<proto::ConnectNetworkResponse>, Status> {
         let req = request.into_inner();
         if req.client_public_key.len() != 32 {
-            return Err(Status::invalid_argument("client_public_key must be 32 bytes"));
+            return Err(Status::invalid_argument(
+                "client_public_key must be 32 bytes",
+            ));
         }
         let mut pubkey = [0u8; 32];
         pubkey.copy_from_slice(&req.client_public_key);
@@ -414,7 +409,9 @@ impl DistvirtClient for DistvirtClientService {
     ) -> Result<Response<proto::DisconnectNetworkResponse>, Status> {
         let req = request.into_inner();
         if req.client_public_key.len() != 32 {
-            return Err(Status::invalid_argument("client_public_key must be 32 bytes"));
+            return Err(Status::invalid_argument(
+                "client_public_key must be 32 bytes",
+            ));
         }
         let mut pubkey = [0u8; 32];
         pubkey.copy_from_slice(&req.client_public_key);
@@ -439,12 +436,13 @@ impl DistvirtClient for DistvirtClientService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let req = request.into_inner();
         let namespace_id = NamespaceId(req.namespace_id);
-        let workload_ids: HashSet<WorkloadId> = req.workload_ids.into_iter().map(WorkloadId).collect();
+        let workload_ids: HashSet<WorkloadId> =
+            req.workload_ids.into_iter().map(WorkloadId).collect();
         let service_ids: HashSet<ServiceId> = req.service_ids.into_iter().map(ServiceId).collect();
 
-        let mut event_rx =
-            self.handle
-                .subscribe_events(namespace_id, workload_ids, service_ids);
+        let mut event_rx = self
+            .handle
+            .subscribe_events(namespace_id, workload_ids, service_ids);
 
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {

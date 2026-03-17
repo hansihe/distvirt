@@ -7,11 +7,11 @@
 
 #[path = "sim/common.rs"]
 mod common;
+#[path = "sim/crash.rs"]
+mod crash;
 #[path = "sim/pod_lifecycle.rs"]
 mod pod_lifecycle;
 #[path = "sim/services.rs"]
 mod services;
 #[path = "sim/suspend_resume.rs"]
 mod suspend_resume;
-#[path = "sim/crash.rs"]
-mod crash;

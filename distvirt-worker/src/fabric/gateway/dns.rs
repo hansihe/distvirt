@@ -53,11 +53,7 @@ pub fn parse_qname(query: &[u8]) -> Option<String> {
         pos += label_len;
     }
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// Build a minimal DNS A-record response from a query and an IPv4 address.

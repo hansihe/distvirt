@@ -1,8 +1,8 @@
 use crate::sm::service::ServiceOutput;
-use crate::types::*;
 use crate::sm::workload::{WorkloadInput, WorkloadOutput};
+use crate::types::*;
 
-use super::{prefix_len_to_netmask, NamespaceStateMachine};
+use super::{NamespaceStateMachine, prefix_len_to_netmask};
 
 impl NamespaceStateMachine {
     /// Translate workload outputs into namespace-level actions.
@@ -24,9 +24,9 @@ impl NamespaceStateMachine {
         loop {
             let mut cascade = Vec::new();
             for wl_out in pending {
-                if let Some(extra) = self.translate_single_workload_output(
-                    workload_id, wl_out, placement_table, out,
-                ) {
+                if let Some(extra) =
+                    self.translate_single_workload_output(workload_id, wl_out, placement_table, out)
+                {
                     cascade.extend(extra);
                 }
             }
@@ -66,7 +66,6 @@ impl NamespaceStateMachine {
                 worker_id,
                 artifact_id,
             } => {
-
                 // Resolve pool_id from the worker's primary pool.
                 // If the worker has no pool, we cannot suspend — feed failure
                 // back to the workload SM so it recovers gracefully.
@@ -83,15 +82,14 @@ impl NamespaceStateMachine {
                                 reason: "worker has no storage pool".into(),
                             },
                         });
-                        let wl_outputs =
-                            if let Some(wl) = self.workloads.get_mut(workload_id) {
-                                wl.step(
-                                    WorkloadInput::PodSuspendFailed { pod_id },
-                                    &self.namespace_id,
-                                )
-                            } else {
-                                return None;
-                            };
+                        let wl_outputs = if let Some(wl) = self.workloads.get_mut(workload_id) {
+                            wl.step(
+                                WorkloadInput::PodSuspendFailed { pod_id },
+                                &self.namespace_id,
+                            )
+                        } else {
+                            return None;
+                        };
                         return Some(wl_outputs);
                     }
                 };
@@ -138,13 +136,17 @@ impl NamespaceStateMachine {
                 pod_network.netmask = prefix_len_to_netmask(self.spec.network.prefix_len);
                 let resources = wl_spec.resources.as_ref().map(|r| {
                     distvirt_worker_protocol::ResourceRequirements {
-                        requests: r.requests.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
-                            memory_mib: v.memory_mb,
-                            vcpus: v.vcpus,
+                        requests: r.requests.as_ref().map(|v| {
+                            distvirt_worker_protocol::ResourceValues {
+                                memory_mib: v.memory_mb,
+                                vcpus: v.vcpus,
+                            }
                         }),
-                        limits: r.limits.as_ref().map(|v| distvirt_worker_protocol::ResourceValues {
-                            memory_mib: v.memory_mb,
-                            vcpus: v.vcpus,
+                        limits: r.limits.as_ref().map(|v| {
+                            distvirt_worker_protocol::ResourceValues {
+                                memory_mib: v.memory_mb,
+                                vcpus: v.vcpus,
+                            }
                         }),
                     }
                 });
@@ -165,13 +167,14 @@ impl NamespaceStateMachine {
                 // Emit pod launching event.
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: workload_id.clone(),
-                    event: SmWorkloadEvent::PodLaunching {
-                        pod_id,
-                        worker_id,
-                    },
+                    event: SmWorkloadEvent::PodLaunching { pod_id, worker_id },
                 });
             }
-            WorkloadOutput::ResumeFromArtifact { worker_id, pod_id, artifact_id } => {
+            WorkloadOutput::ResumeFromArtifact {
+                worker_id,
+                pod_id,
+                artifact_id,
+            } => {
                 // Register pod in pod_map.
                 debug_assert!(
                     !self.pod_map.contains(&pod_id),
@@ -215,10 +218,7 @@ impl NamespaceStateMachine {
                 // Emit resume event.
                 out.events.push(SmNamespaceEvent::Workload {
                     workload_id: workload_id.clone(),
-                    event: SmWorkloadEvent::PodResuming {
-                        pod_id,
-                        worker_id,
-                    },
+                    event: SmWorkloadEvent::PodResuming { pod_id, worker_id },
                 });
             }
             WorkloadOutput::DeleteArtifact { artifact_id } => {

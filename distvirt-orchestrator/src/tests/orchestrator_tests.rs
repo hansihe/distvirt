@@ -17,10 +17,11 @@ fn test_create_namespace() {
     });
 
     assert!(orch.namespaces.contains_key(&ns_id("ns1")));
-    assert!(out
-        .client_events
-        .iter()
-        .any(|(cid, ev)| *cid == client_id(1) && *ev == ClientEvent::Ok));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(cid, ev)| *cid == client_id(1) && *ev == ClientEvent::Ok)
+    );
 }
 
 #[test]
@@ -42,10 +43,11 @@ fn test_create_namespace_duplicate() {
         },
     });
 
-    assert!(out.client_events.iter().any(|(_, ev)| matches!(
-        ev,
-        ClientEvent::Error { .. }
-    )));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ClientEvent::Error { .. }))
+    );
 }
 
 #[test]
@@ -90,10 +92,11 @@ fn test_delete_nonexistent_namespace() {
         },
     });
 
-    assert!(out.client_events.iter().any(|(_, ev)| matches!(
-        ev,
-        ClientEvent::Error { .. }
-    )));
+    assert!(
+        out.client_events
+            .iter()
+            .any(|(_, ev)| matches!(ev, ClientEvent::Error { .. }))
+    );
 }
 
 #[test]
@@ -197,9 +200,11 @@ fn test_namespace_step_routing() {
 
     // ns2 should be unchanged.
     let ns2 = orch.namespaces.get(&ns_id("ns2")).unwrap();
-    assert!(ns2.spec.services[&ServiceId("svc1".into())]
-        .activation
-        .is_some());
+    assert!(
+        ns2.spec.services[&ServiceId("svc1".into())]
+            .activation
+            .is_some()
+    );
 }
 
 // --- Orchestrator Integration Tests ---
@@ -234,9 +239,11 @@ fn test_create_namespace_assigns_worker() {
     );
 
     // Worker should know about the namespace.
-    assert!(orch.workers[&worker_id(1)]
-        .namespaces
-        .contains(&ns_id("ns1")));
+    assert!(
+        orch.workers[&worker_id(1)]
+            .namespaces
+            .contains(&ns_id("ns1"))
+    );
 
     // Should have emitted CreateNamespace command with network.
     assert!(out.worker_commands.iter().any(|(wid, cmd)| {
@@ -259,7 +266,13 @@ fn test_worker_connects_assigns_to_workerless_namespace() {
     });
 
     // Namespace should have no workers.
-    assert!(orch.namespaces.get(&ns_id("ns1")).unwrap().workers.is_empty());
+    assert!(
+        orch.namespaces
+            .get(&ns_id("ns1"))
+            .unwrap()
+            .workers
+            .is_empty()
+    );
 
     // Connect a worker.
     let out = orch.step(OrchestratorInput::WorkerConnected {
@@ -279,4 +292,3 @@ fn test_worker_connects_assigns_to_workerless_namespace() {
             && matches!(cmd, WorkerCommand::CreateNamespace { namespace_id, .. } if *namespace_id == ns_id("ns1"))
     }));
 }
-

@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{
-    ArtifactId, DRouter, PodId, PodScheduleRequest, WorkerId, WorkerPortInput,
-};
+use crate::sm_new::{ArtifactId, DRouter, PodId, PodScheduleRequest, WorkerId, WorkerPortInput};
 
 #[cfg(test)]
 mod tests;
@@ -52,8 +50,7 @@ impl PodAssignmentAdapter {
         for (worker_id, input) in inputs {
             match input {
                 WorkerPortInput::AssignedPodsInput(pods) => {
-                    let new_pods: HashMap<PodId, PodScheduleRequest> =
-                        pods.into_iter().collect();
+                    let new_pods: HashMap<PodId, PodScheduleRequest> = pods.into_iter().collect();
 
                     let cached = self.assigned.entry(worker_id).or_default();
 

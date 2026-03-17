@@ -36,14 +36,15 @@ fn registry_host(image_ref: &str) -> &str {
 }
 
 /// Read a Docker config.json and return credentials for the given image's registry, if any.
-pub fn lookup_credentials(
-    config_path: &Path,
-    image_ref: &str,
-) -> Option<RegistryCredential> {
+pub fn lookup_credentials(config_path: &Path, image_ref: &str) -> Option<RegistryCredential> {
     let contents = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("could not read docker config at {}: {}", config_path.display(), e);
+            log::warn!(
+                "could not read docker config at {}: {}",
+                config_path.display(),
+                e
+            );
             return None;
         }
     };
@@ -51,7 +52,11 @@ pub fn lookup_credentials(
     let config: DockerConfig = match serde_json::from_str(&contents) {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("could not parse docker config at {}: {}", config_path.display(), e);
+            log::warn!(
+                "could not parse docker config at {}: {}",
+                config_path.display(),
+                e
+            );
             return None;
         }
     };
@@ -70,9 +75,7 @@ pub fn lookup_credentials(
 }
 
 fn decode_auth(encoded: &str) -> anyhow::Result<RegistryCredential> {
-    let decoded = BASE64_STANDARD
-        .decode(encoded)
-        .context("base64 decode")?;
+    let decoded = BASE64_STANDARD.decode(encoded).context("base64 decode")?;
     let decoded = String::from_utf8(decoded).context("auth is not valid utf-8")?;
     let (username, password) = decoded
         .split_once(':')
@@ -89,7 +92,10 @@ mod tests {
 
     #[test]
     fn test_registry_host() {
-        assert_eq!(registry_host("514443763038.dkr.ecr.us-east-1.amazonaws.com/repo:tag"), "514443763038.dkr.ecr.us-east-1.amazonaws.com");
+        assert_eq!(
+            registry_host("514443763038.dkr.ecr.us-east-1.amazonaws.com/repo:tag"),
+            "514443763038.dkr.ecr.us-east-1.amazonaws.com"
+        );
         assert_eq!(registry_host("docker.io/library/nginx:latest"), "docker.io");
         assert_eq!(registry_host("nginx:latest"), "docker.io");
         assert_eq!(registry_host("localhost:5000/myimage"), "localhost:5000");

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::adapter::timer::TimerConfig;
 use crate::sm_new::PodStatus;
 use crate::task::{ClientCommand, GlobalWorkerId};
-use crate::types::{NamespaceId, NamespaceSpec, WorkloadSpec, ServiceSpec, ActivationSpec};
+use crate::types::{ActivationSpec, NamespaceId, NamespaceSpec, ServiceSpec, WorkloadSpec};
 
 use super::{MockWorkerConfig, SyncShell};
 
@@ -58,9 +58,9 @@ fn ns(name: &str) -> NamespaceId {
 
 /// Always-on spec: 1 workload "echo" + 1 always-on service "echo-svc".
 fn always_on_spec() -> NamespaceSpec {
-    use std::collections::BTreeMap;
     use crate::types::WorkloadId;
     use distvirt_worker_protocol::{ServiceId, ServicePolicy};
+    use std::collections::BTreeMap;
 
     let wl_id = WorkloadId("echo".to_string());
     let svc_id = ServiceId::from("echo-svc");
@@ -113,12 +113,18 @@ fn basic_pod_lifecycle() {
     shell.drain();
 
     // The workload should have been created and launched.
-    let ns_core = shell.namespace(&ns("test")).expect("namespace should exist");
+    let ns_core = shell
+        .namespace(&ns("test"))
+        .expect("namespace should exist");
     let router = ns_core.router();
     let mgmt = ns_core.management();
 
-    let wl_id = mgmt.lookup_workload("echo").expect("workload 'echo' should exist");
-    let wl = router.get_workload(&wl_id).expect("workload should exist in router");
+    let wl_id = mgmt
+        .lookup_workload("echo")
+        .expect("workload 'echo' should exist");
+    let wl = router
+        .get_workload(&wl_id)
+        .expect("workload should exist in router");
 
     // With mock worker auto-responding PodRunning, the workload should be running.
     assert!(wl.pod_running, "workload should have a running pod");
@@ -131,8 +137,13 @@ fn basic_pod_lifecycle() {
 
     // Worker should have received LaunchPod.
     let cmds = shell.worker_commands(&w1);
-    let has_launch = cmds.iter().any(|c| matches!(c, distvirt_worker_protocol::WorkerCommand::LaunchPod { .. }));
-    assert!(has_launch, "worker should have received a LaunchPod command");
+    let has_launch = cmds
+        .iter()
+        .any(|c| matches!(c, distvirt_worker_protocol::WorkerCommand::LaunchPod { .. }));
+    assert!(
+        has_launch,
+        "worker should have received a LaunchPod command"
+    );
 }
 
 #[test]
@@ -157,8 +168,21 @@ fn worker_disconnect_and_recovery() {
     shell.drain();
 
     // Verify running.
-    let wl_id = shell.namespace(&ns("test")).unwrap().management().lookup_workload("echo").unwrap();
-    assert!(shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap().pod_running);
+    let wl_id = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .management()
+        .lookup_workload("echo")
+        .unwrap();
+    assert!(
+        shell
+            .namespace(&ns("test"))
+            .unwrap()
+            .router()
+            .get_workload(&wl_id)
+            .unwrap()
+            .pod_running
+    );
 
     // Disconnect the worker.
     shell.disconnect_worker(w1);
@@ -166,18 +190,43 @@ fn worker_disconnect_and_recovery() {
 
     // Pod displaced (infrastructure loss) — workload immediately reschedules
     // without backoff, but no worker is available so pod stays Pending.
-    let wl = shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap();
-    assert!(!wl.pod_running, "pod should not be running after worker disconnect");
-    assert!(!wl.in_backoff, "workload should not be in backoff for infrastructure loss");
-    assert_eq!(wl.consecutive_failures, 0, "infrastructure loss should not count as failure");
-    assert!(wl.pod_id.is_some(), "workload should have created a new pod immediately");
+    let wl = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .router()
+        .get_workload(&wl_id)
+        .unwrap();
+    assert!(
+        !wl.pod_running,
+        "pod should not be running after worker disconnect"
+    );
+    assert!(
+        !wl.in_backoff,
+        "workload should not be in backoff for infrastructure loss"
+    );
+    assert_eq!(
+        wl.consecutive_failures, 0,
+        "infrastructure loss should not count as failure"
+    );
+    assert!(
+        wl.pod_id.is_some(),
+        "workload should have created a new pod immediately"
+    );
 
     // Add new worker — should pick up the pending pod.
     let _w2 = shell.add_worker_default();
     shell.drain();
 
-    let wl = shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap();
-    assert!(wl.pod_running, "workload should recover after new worker added");
+    let wl = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .router()
+        .get_workload(&wl_id)
+        .unwrap();
+    assert!(
+        wl.pod_running,
+        "workload should recover after new worker added"
+    );
 }
 
 #[test]
@@ -189,27 +238,57 @@ fn launch_hang_triggers_timeout() {
     shell.client_command(&ns("test"), ClientCommand::UpdateSpec(always_on_spec()));
     shell.drain();
 
-    let wl_id = shell.namespace(&ns("test")).unwrap().management().lookup_workload("echo").unwrap();
+    let wl_id = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .management()
+        .lookup_workload("echo")
+        .unwrap();
 
     // Pod should be pending (launched but no PodRunning response).
-    let wl = shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap();
+    let wl = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .router()
+        .get_workload(&wl_id)
+        .unwrap();
     assert!(wl.pod_id.is_some(), "workload should have created a pod");
-    assert!(!wl.pod_running, "pod should not be running (launch is hung)");
+    assert!(
+        !wl.pod_running,
+        "pod should not be running (launch is hung)"
+    );
 
     let pod_id = wl.pod_id.unwrap();
-    let pod = shell.namespace(&ns("test")).unwrap().router().get_pod(&pod_id).unwrap();
-    assert_eq!(pod.status, PodStatus::Pending, "pod should still be Pending");
+    let pod = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .router()
+        .get_pod(&pod_id)
+        .unwrap();
+    assert_eq!(
+        pod.status,
+        PodStatus::Pending,
+        "pod should still be Pending"
+    );
 
     // Advance past launch timeout.
     shell.advance_time(Duration::from_secs(31));
     shell.drain();
 
     // After timeout, the pod should have failed and the workload should be in backoff.
-    let wl = shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap();
+    let wl = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .router()
+        .get_workload(&wl_id)
+        .unwrap();
     assert!(!wl.pod_running, "pod should not be running after timeout");
-    assert!(wl.in_backoff || wl.consecutive_failures > 0,
+    assert!(
+        wl.in_backoff || wl.consecutive_failures > 0,
         "workload should be in backoff or have failures: in_backoff={}, failures={}",
-        wl.in_backoff, wl.consecutive_failures);
+        wl.in_backoff,
+        wl.consecutive_failures
+    );
 }
 
 #[test]
@@ -221,10 +300,23 @@ fn launch_failure_retries() {
     shell.client_command(&ns("test"), ClientCommand::UpdateSpec(always_on_spec()));
     shell.drain();
 
-    let wl_id = shell.namespace(&ns("test")).unwrap().management().lookup_workload("echo").unwrap();
+    let wl_id = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .management()
+        .lookup_workload("echo")
+        .unwrap();
 
     // Pod should have failed and workload should be in backoff.
-    let wl = shell.namespace(&ns("test")).unwrap().router().get_workload(&wl_id).unwrap();
-    assert!(!wl.pod_running, "pod should not be running after launch failure");
+    let wl = shell
+        .namespace(&ns("test"))
+        .unwrap()
+        .router()
+        .get_workload(&wl_id)
+        .unwrap();
+    assert!(
+        !wl.pod_running,
+        "pod should not be running after launch failure"
+    );
     assert!(wl.consecutive_failures > 0, "should have failures recorded");
 }

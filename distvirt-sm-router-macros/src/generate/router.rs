@@ -68,7 +68,8 @@ fn gen_clone_impls(
     // Aggregator output types
     for inp in &def.inputs {
         let agg = &inp.aggregator;
-        router_where_bounds.push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
+        router_where_bounds
+            .push(quote! { <#agg as ::distvirt_sm_router::Aggregator>::Output: Clone });
     }
 
     // SignalState maps
@@ -296,7 +297,9 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         for inp in def.inputs.iter().filter(|i| i.node == *node) {
             let in_f = in_field_name(&inp.input_name);
             let agg = &inp.aggregator;
-            ss_fields.push(quote! { pub #in_f: Option<<#agg as ::distvirt_sm_router::Aggregator>::Output> });
+            ss_fields.push(
+                quote! { pub #in_f: Option<<#agg as ::distvirt_sm_router::Aggregator>::Output> },
+            );
             ss_defaults.push(quote! { #in_f: None });
         }
 

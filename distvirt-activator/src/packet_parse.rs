@@ -70,34 +70,36 @@ pub fn parse_frame_to_packet_info(
         _ => return None,
     };
 
-    let (protocol, src_port, dst_port, tcp_flags, payload_len, ip_proto_num) =
-        match packet.transport {
-            Some(etherparse::TransportSlice::Tcp(ref tcp)) => {
-                let flags = tcp.slice()[13]; // TCP flags byte
-                let payload_len = ip_packet.len()
-                    .saturating_sub(packet.net.as_ref().map_or(0, |n| match n {
-                        etherparse::NetSlice::Ipv4(v4) => v4.header().total_len() as usize,
-                        _ => 0,
-                    }));
-                (
-                    IpProtocol::Tcp,
-                    tcp.source_port(),
-                    tcp.destination_port(),
-                    Some(flags),
-                    payload_len,
-                    6u8,
-                )
-            }
-            Some(etherparse::TransportSlice::Udp(ref udp)) => (
-                IpProtocol::Udp,
-                udp.source_port(),
-                udp.destination_port(),
-                None,
-                0usize,
-                17u8,
-            ),
-            _ => (IpProtocol::Other, 0, 0, None, 0usize, 0u8),
-        };
+    let (protocol, src_port, dst_port, tcp_flags, payload_len, ip_proto_num) = match packet
+        .transport
+    {
+        Some(etherparse::TransportSlice::Tcp(ref tcp)) => {
+            let flags = tcp.slice()[13]; // TCP flags byte
+            let payload_len = ip_packet
+                .len()
+                .saturating_sub(packet.net.as_ref().map_or(0, |n| match n {
+                    etherparse::NetSlice::Ipv4(v4) => v4.header().total_len() as usize,
+                    _ => 0,
+                }));
+            (
+                IpProtocol::Tcp,
+                tcp.source_port(),
+                tcp.destination_port(),
+                Some(flags),
+                payload_len,
+                6u8,
+            )
+        }
+        Some(etherparse::TransportSlice::Udp(ref udp)) => (
+            IpProtocol::Udp,
+            udp.source_port(),
+            udp.destination_port(),
+            None,
+            0usize,
+            17u8,
+        ),
+        _ => (IpProtocol::Other, 0, 0, None, 0usize, 0u8),
+    };
 
     let flow_key = FlowKey {
         src_ip: src_addr,
@@ -136,8 +138,7 @@ mod tests {
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
-            .tcp(src_port, dst_port, 1000, 65535);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).tcp(src_port, dst_port, 1000, 65535);
 
         let mut buf = Vec::new();
         builder.write(&mut buf, &[]).unwrap();
@@ -153,16 +154,10 @@ mod tests {
     }
 
     /// Build a minimal IPv4 + UDP packet.
-    fn build_udp_frame(
-        src_ip: [u8; 4],
-        dst_ip: [u8; 4],
-        src_port: u16,
-        dst_port: u16,
-    ) -> Vec<u8> {
+    fn build_udp_frame(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
-            .udp(src_port, dst_port);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).udp(src_port, dst_port);
 
         let mut buf = Vec::new();
         builder.write(&mut buf, &[1, 2, 3]).unwrap();
@@ -275,8 +270,8 @@ mod tests {
     fn tcp_with_payload() {
         use etherparse::PacketBuilder;
 
-        let builder = PacketBuilder::ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64)
-            .tcp(1234, 80, 1000, 65535);
+        let builder =
+            PacketBuilder::ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).tcp(1234, 80, 1000, 65535);
 
         let payload = b"GET / HTTP/1.1\r\n";
         let mut buf = Vec::new();

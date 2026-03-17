@@ -1,5 +1,5 @@
+use super::pod::{PodInput, PodOutcome, PodOutput, PodSlot, PodState};
 use crate::types::*;
-use super::pod::{PodInput, PodOutput, PodOutcome, PodSlot, PodState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum PendingIntent {
@@ -22,7 +22,10 @@ pub struct RetiredPod {
 pub enum WorkloadState {
     Dormant,
     WaitingForCapacity,
-    Active { pod: PodSlot, pending: PendingIntent },
+    Active {
+        pod: PodSlot,
+        pending: PendingIntent,
+    },
     /// Pod is suspended. Artifact tracked in placement table.
     Suspended {
         artifact_id: ArtifactId,
@@ -53,14 +56,18 @@ impl WorkloadState {
             WorkloadState::Suspended { .. } => "suspended",
             WorkloadState::RetryBackoff { .. } => "retry_backoff",
             WorkloadState::Failed => "failed",
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
+            WorkloadState::Transitioning => {
+                panic!("WorkloadState::Transitioning leaked outside step()")
+            }
         }
     }
 
     pub fn pod_id(&self) -> Option<&PodId> {
         match self {
             WorkloadState::Active { pod, .. } => Some(&pod.pod_id),
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
+            WorkloadState::Transitioning => {
+                panic!("WorkloadState::Transitioning leaked outside step()")
+            }
             _ => None,
         }
     }
@@ -68,7 +75,9 @@ impl WorkloadState {
     pub fn worker_id(&self) -> Option<&WorkerId> {
         match self {
             WorkloadState::Active { pod, .. } => Some(&pod.worker_id),
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
+            WorkloadState::Transitioning => {
+                panic!("WorkloadState::Transitioning leaked outside step()")
+            }
             _ => None,
         }
     }
@@ -76,15 +85,19 @@ impl WorkloadState {
     pub fn artifact_id(&self) -> Option<&ArtifactId> {
         match self {
             WorkloadState::Active {
-                pod: PodSlot {
-                    pod_state: PodState::Suspending { artifact_id, .. }
-                        | PodState::Resuming { artifact_id, .. },
-                    ..
-                },
+                pod:
+                    PodSlot {
+                        pod_state:
+                            PodState::Suspending { artifact_id, .. }
+                            | PodState::Resuming { artifact_id, .. },
+                        ..
+                    },
                 ..
             }
             | WorkloadState::Suspended { artifact_id, .. } => Some(artifact_id),
-            WorkloadState::Transitioning => panic!("WorkloadState::Transitioning leaked outside step()"),
+            WorkloadState::Transitioning => {
+                panic!("WorkloadState::Transitioning leaked outside step()")
+            }
             _ => None,
         }
     }
@@ -93,7 +106,10 @@ impl WorkloadState {
         matches!(
             self,
             WorkloadState::Active {
-                pod: PodSlot { pod_state: PodState::Running, .. },
+                pod: PodSlot {
+                    pod_state: PodState::Running,
+                    ..
+                },
                 ..
             }
         )
@@ -169,17 +185,39 @@ pub enum WorkloadInput {
     /// Initialize the workload. For always-on workloads (!has_activation),
     /// this transitions to WaitingForCapacity and emits PodRequest.
     /// For activation-based workloads, this is a no-op (stays Dormant).
-
-    SetDemand { count: u32 },
-    LaunchPod { worker_id: WorkerId, pod_id: PodId },
+    SetDemand {
+        count: u32,
+    },
+    LaunchPod {
+        worker_id: WorkerId,
+        pod_id: PodId,
+    },
     /// Outer layer has generated a pod_id for resuming from snapshot.
-    ResumePod { worker_id: WorkerId, pod_id: PodId, artifact_id: ArtifactId },
-    PodRunning { pod_id: PodId },
-    PodGone { pod_id: PodId, reason: Option<PodGoneReason> },
-    PodSuspended { pod_id: PodId, artifact_id: ArtifactId },
-    PodSuspendFailed { pod_id: PodId },
-    WorkerLost { worker_id: WorkerId },
-    TimerFired { timer_key: TimerKey },
+    ResumePod {
+        worker_id: WorkerId,
+        pod_id: PodId,
+        artifact_id: ArtifactId,
+    },
+    PodRunning {
+        pod_id: PodId,
+    },
+    PodGone {
+        pod_id: PodId,
+        reason: Option<PodGoneReason>,
+    },
+    PodSuspended {
+        pod_id: PodId,
+        artifact_id: ArtifactId,
+    },
+    PodSuspendFailed {
+        pod_id: PodId,
+    },
+    WorkerLost {
+        worker_id: WorkerId,
+    },
+    TimerFired {
+        timer_key: TimerKey,
+    },
     /// Admin override: deactivate the workload regardless of demand.
     ForceDeactivate,
     /// Spec has changed — restart with new config (resets failure counter).
@@ -194,26 +232,49 @@ pub enum WorkloadOutput {
     /// Workload needs a pod suspended. The namespace output forwarding layer
     /// resolves the pool_id from the worker state, creates a placement table entry,
     /// and emits the actual WorkerCommand.
-    SuspendRequest { pod_id: PodId, worker_id: WorkerId, artifact_id: ArtifactId },
+    SuspendRequest {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        artifact_id: ArtifactId,
+    },
     /// Workload needs a pod resumed from snapshot. The namespace layer
     /// looks up the placement table and generates a new pod_id.
-    ResumeRequest { artifact_id: ArtifactId },
+    ResumeRequest {
+        artifact_id: ArtifactId,
+    },
     /// SM accepted a LaunchPod input. The namespace layer registers the pod,
     /// builds the WorkerCommand, and emits endpoint/event updates.
-    LaunchRequest { worker_id: WorkerId, pod_id: PodId },
+    LaunchRequest {
+        worker_id: WorkerId,
+        pod_id: PodId,
+    },
     /// SM accepted a ResumePod input. The namespace layer registers the pod,
     /// builds the WorkerCommand from placement table, and emits endpoint/event updates.
-    ResumeFromArtifact { worker_id: WorkerId, pod_id: PodId, artifact_id: ArtifactId },
+    ResumeFromArtifact {
+        worker_id: WorkerId,
+        pod_id: PodId,
+        artifact_id: ArtifactId,
+    },
     /// Artifact should be deleted. The namespace layer resolves placement
     /// and emits the actual WorkerCommand::DeleteArtifact.
-    DeleteArtifact { artifact_id: ArtifactId },
+    DeleteArtifact {
+        artifact_id: ArtifactId,
+    },
     WorkerCommand(WorkerId, WorkerCommand),
     TimerSet(TimerKey, std::time::Duration),
     TimerCancel(TimerKey),
-    ConditionSet { key: String, message: String },
-    ConditionClear { key: String },
+    ConditionSet {
+        key: String,
+        message: String,
+    },
+    ConditionClear {
+        key: String,
+    },
     /// Workload just entered Running state and is ready to serve traffic.
-    BecameReady { pod_id: PodId, worker_id: WorkerId },
+    BecameReady {
+        pod_id: PodId,
+        worker_id: WorkerId,
+    },
     /// Workload left Running state and is no longer ready.
     BecameUnready,
 }
@@ -226,7 +287,11 @@ fn backoff_delay(failures: u32) -> std::time::Duration {
 }
 
 impl WorkloadStateMachine {
-    pub fn new(workload_id: WorkloadId, suspend_on_idle: bool, has_activation: bool) -> (Self, Vec<WorkloadOutput>) {
+    pub fn new(
+        workload_id: WorkloadId,
+        suspend_on_idle: bool,
+        has_activation: bool,
+    ) -> (Self, Vec<WorkloadOutput>) {
         let mut sm = WorkloadStateMachine {
             workload_id,
             state: WorkloadState::Dormant,
@@ -283,7 +348,9 @@ impl WorkloadStateMachine {
                         delay,
                     ),
                 });
-                self.state = WorkloadState::RetryBackoff { backoff_timer: timer_key };
+                self.state = WorkloadState::RetryBackoff {
+                    backoff_timer: timer_key,
+                };
             } else {
                 self.state = WorkloadState::WaitingForCapacity;
                 outputs.push(WorkloadOutput::PodRequest);
@@ -317,12 +384,14 @@ impl WorkloadStateMachine {
     fn upgrade_pending(&mut self, intent: PendingIntent) -> bool {
         match &mut self.state {
             WorkloadState::Active {
-                pod: PodSlot {
-                    pod_state: PodState::Launching { .. }
-                        | PodState::Suspending { .. }
-                        | PodState::Resuming { .. },
-                    ..
-                },
+                pod:
+                    PodSlot {
+                        pod_state:
+                            PodState::Launching { .. }
+                            | PodState::Suspending { .. }
+                            | PodState::Resuming { .. },
+                        ..
+                    },
                 pending,
             } => {
                 *pending = (*pending).max(intent);
@@ -383,10 +452,17 @@ impl WorkloadStateMachine {
     }
 
     pub fn is_preemptable(&self) -> bool {
-        !matches!(self.state, WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed)
+        !matches!(
+            self.state,
+            WorkloadState::Dormant | WorkloadState::WaitingForCapacity | WorkloadState::Failed
+        )
     }
 
-    pub fn step(&mut self, input: WorkloadInput, namespace_id: &NamespaceId) -> Vec<WorkloadOutput> {
+    pub fn step(
+        &mut self,
+        input: WorkloadInput,
+        namespace_id: &NamespaceId,
+    ) -> Vec<WorkloadOutput> {
         let mut outputs = Vec::new();
 
         match input {
@@ -409,12 +485,14 @@ impl WorkloadStateMachine {
                             });
                         }
                         WorkloadState::Active {
-                            pod: PodSlot {
-                                pod_state: PodState::Launching { .. }
-                                    | PodState::Suspending { .. }
-                                    | PodState::Resuming { .. },
-                                ..
-                            },
+                            pod:
+                                PodSlot {
+                                    pod_state:
+                                        PodState::Launching { .. }
+                                        | PodState::Suspending { .. }
+                                        | PodState::Resuming { .. },
+                                    ..
+                                },
                             ..
                         } => {
                             self.upgrade_pending(PendingIntent::Demand);
@@ -426,7 +504,10 @@ impl WorkloadStateMachine {
                         // Always-on workload: update counter for observability but
                         // don't transition state. ForceDeactivate is the only way to shut down.
                         // Clear any Demand pending since we won't act on it.
-                        if let WorkloadState::Active { ref mut pending, .. } = self.state {
+                        if let WorkloadState::Active {
+                            ref mut pending, ..
+                        } = self.state
+                        {
                             if *pending == PendingIntent::Demand {
                                 *pending = PendingIntent::None;
                             }
@@ -443,75 +524,100 @@ impl WorkloadStateMachine {
                             self.state = WorkloadState::Dormant;
                         }
                         mut state @ WorkloadState::Active {
-                            pod: PodSlot { pod_state: PodState::Launching { .. }, .. },
+                            pod:
+                                PodSlot {
+                                    pod_state: PodState::Launching { .. },
+                                    ..
+                                },
                             ..
                         } if self.needs_successful_boot => {
                             // Committed to booting — let launch complete.
                             // Clear Demand pending since demand is now 0.
-                            if let WorkloadState::Active { ref mut pending, .. } = state {
+                            if let WorkloadState::Active {
+                                ref mut pending, ..
+                            } = state
+                            {
                                 if *pending == PendingIntent::Demand {
                                     *pending = PendingIntent::None;
                                 }
                             }
                             self.state = state;
                         }
-                        WorkloadState::Active {
-                            mut pod,
-                            ..
-                        } if matches!(pod.pod_state, PodState::Launching { .. }) => {
+                        WorkloadState::Active { mut pod, .. }
+                            if matches!(pod.pod_state, PodState::Launching { .. }) =>
+                        {
                             // Cancel launch timer via pod SM, then retire.
-                            let (_, pod_outputs) = pod.step(PodInput::PodGone { worker_lost: false });
+                            let (_, pod_outputs) =
+                                pod.step(PodInput::PodGone { worker_lost: false });
                             Self::collect_pod_outputs(pod_outputs, &mut outputs);
-                            self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, false, &mut outputs);
+                            self.retire_pod(
+                                pod.pod_id,
+                                pod.worker_id,
+                                namespace_id,
+                                false,
+                                &mut outputs,
+                            );
                             self.state = WorkloadState::Dormant;
                         }
-                        WorkloadState::Active {
-                            mut pod,
-                            ..
-                        } if matches!(pod.pod_state, PodState::Running) => {
+                        WorkloadState::Active { mut pod, .. }
+                            if matches!(pod.pod_state, PodState::Running) =>
+                        {
                             outputs.push(WorkloadOutput::BecameUnready);
                             if self.suspend_on_idle {
                                 let artifact_id = ArtifactId::from(format!(
                                     "{}-{}-{}",
                                     namespace_id.0, self.workload_id.0, pod.pod_id.0
                                 ));
-                                let pod_outs = pod.initiate_suspend(
-                                    &self.workload_id,
-                                    artifact_id,
-                                );
+                                let pod_outs = pod.initiate_suspend(&self.workload_id, artifact_id);
                                 Self::collect_pod_outputs(pod_outs, &mut outputs);
                                 self.state = WorkloadState::Active {
                                     pod,
                                     pending: PendingIntent::None,
                                 };
                             } else {
-                                self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, true, &mut outputs);
+                                self.retire_pod(
+                                    pod.pod_id,
+                                    pod.worker_id,
+                                    namespace_id,
+                                    true,
+                                    &mut outputs,
+                                );
                                 self.state = WorkloadState::Dormant;
                             }
                         }
                         WorkloadState::Dormant => {
                             self.state = WorkloadState::Dormant;
                         }
-                        state @ WorkloadState::RetryBackoff { .. } if self.needs_successful_boot => {
+                        state @ WorkloadState::RetryBackoff { .. }
+                            if self.needs_successful_boot =>
+                        {
                             // Committed to booting — keep retrying.
                             self.state = state;
                         }
                         WorkloadState::RetryBackoff { backoff_timer } => {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
-                            outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
+                            outputs.push(WorkloadOutput::ConditionClear {
+                                key: "retry-backoff".into(),
+                            });
                             self.consecutive_failures = 0;
                             self.state = WorkloadState::Dormant;
                         }
                         WorkloadState::Failed => {
-                            outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
+                            outputs.push(WorkloadOutput::ConditionClear {
+                                key: "failed".into(),
+                            });
                             self.consecutive_failures = 0;
                             self.state = WorkloadState::Dormant;
                         }
                         // Remaining Active states (Suspending/Resuming) and Suspended
-                        other @ (WorkloadState::Active { .. } | WorkloadState::Suspended { .. }) => {
+                        other
+                        @ (WorkloadState::Active { .. } | WorkloadState::Suspended { .. }) => {
                             self.state = other;
                             // Clear Demand pending if demand dropped to 0
-                            if let WorkloadState::Active { ref mut pending, .. } = self.state {
+                            if let WorkloadState::Active {
+                                ref mut pending, ..
+                            } = self.state
+                            {
                                 if *pending == PendingIntent::Demand {
                                     *pending = PendingIntent::None;
                                 }
@@ -529,21 +635,26 @@ impl WorkloadStateMachine {
                 let (pod, pod_outputs) =
                     PodSlot::new_launching(pod_id.clone(), worker_id.clone(), &self.workload_id);
                 Self::collect_pod_outputs(pod_outputs, &mut outputs);
-                outputs.push(WorkloadOutput::LaunchRequest {
-                    worker_id,
-                    pod_id,
-                });
+                outputs.push(WorkloadOutput::LaunchRequest { worker_id, pod_id });
                 self.state = WorkloadState::Active {
                     pod,
                     pending: PendingIntent::None,
                 };
             }
-            WorkloadInput::ResumePod { worker_id, pod_id, artifact_id } => {
+            WorkloadInput::ResumePod {
+                worker_id,
+                pod_id,
+                artifact_id,
+            } => {
                 if !matches!(self.state, WorkloadState::Suspended { .. }) {
                     return outputs;
                 }
-                let (pod, pod_outputs) =
-                    PodSlot::new_resuming(pod_id.clone(), worker_id.clone(), &self.workload_id, artifact_id.clone());
+                let (pod, pod_outputs) = PodSlot::new_resuming(
+                    pod_id.clone(),
+                    worker_id.clone(),
+                    &self.workload_id,
+                    artifact_id.clone(),
+                );
                 Self::collect_pod_outputs(pod_outputs, &mut outputs);
                 outputs.push(WorkloadOutput::ResumeFromArtifact {
                     worker_id,
@@ -571,7 +682,10 @@ impl WorkloadStateMachine {
                 let was_resuming = matches!(
                     &self.state,
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Resuming { .. }, .. },
+                        pod: PodSlot {
+                            pod_state: PodState::Resuming { .. },
+                            ..
+                        },
                         ..
                     }
                 );
@@ -587,17 +701,31 @@ impl WorkloadStateMachine {
                             self.consecutive_failures = 0;
                             self.last_failure_reason = None;
                             self.needs_successful_boot = false;
-                            outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
+                            outputs.push(WorkloadOutput::ConditionClear {
+                                key: "retry-backoff".into(),
+                            });
 
                             match pending {
                                 PendingIntent::Deactivate => {
                                     // Pod is immediately retired — never actually "became ready".
-                                    self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, false, &mut outputs);
+                                    self.retire_pod(
+                                        pod.pod_id,
+                                        pod.worker_id,
+                                        namespace_id,
+                                        false,
+                                        &mut outputs,
+                                    );
                                     self.state = WorkloadState::Dormant;
                                 }
                                 PendingIntent::Restart => {
                                     // Pod is immediately retired — never actually "became ready".
-                                    self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, false, &mut outputs);
+                                    self.retire_pod(
+                                        pod.pod_id,
+                                        pod.worker_id,
+                                        namespace_id,
+                                        false,
+                                        &mut outputs,
+                                    );
                                     self.transition_on_demand(&mut outputs);
                                 }
                                 PendingIntent::Demand => {
@@ -626,10 +754,8 @@ impl WorkloadStateMachine {
                                             "{}-{}-{}",
                                             namespace_id.0, self.workload_id.0, pod.pod_id.0
                                         ));
-                                        let pod_outs = pod.initiate_suspend(
-                                            &self.workload_id,
-                                            artifact_id,
-                                        );
+                                        let pod_outs =
+                                            pod.initiate_suspend(&self.workload_id, artifact_id);
                                         Self::collect_pod_outputs(pod_outs, &mut outputs);
                                         self.state = WorkloadState::Active {
                                             pod,
@@ -637,7 +763,13 @@ impl WorkloadStateMachine {
                                         };
                                     } else {
                                         // Resumed with no demand, no suspend — retire immediately.
-                                        self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, true, &mut outputs);
+                                        self.retire_pod(
+                                            pod.pod_id,
+                                            pod.worker_id,
+                                            namespace_id,
+                                            true,
+                                            &mut outputs,
+                                        );
                                         self.state = WorkloadState::Dormant;
                                     }
                                 }
@@ -649,7 +781,10 @@ impl WorkloadStateMachine {
                     }
                 }
             }
-            WorkloadInput::PodSuspended { pod_id, artifact_id } => {
+            WorkloadInput::PodSuspended {
+                pod_id,
+                artifact_id,
+            } => {
                 let pod_matches = matches!(
                     &self.state,
                     WorkloadState::Active { pod, .. } if pod.pod_id == pod_id
@@ -665,29 +800,31 @@ impl WorkloadStateMachine {
                     Self::collect_pod_outputs(pod_outputs, &mut outputs);
 
                     match outcome {
-                        PodOutcome::Suspended { artifact_id } => {
-                            match pending {
-                                PendingIntent::Deactivate => {
+                        PodOutcome::Suspended { artifact_id } => match pending {
+                            PendingIntent::Deactivate => {
+                                self.state = WorkloadState::Suspended { artifact_id };
+                            }
+                            PendingIntent::Restart => {
+                                outputs.push(WorkloadOutput::DeleteArtifact { artifact_id });
+                                self.transition_on_demand(&mut outputs);
+                            }
+                            PendingIntent::Demand => {
+                                self.state = WorkloadState::Suspended {
+                                    artifact_id: artifact_id.clone(),
+                                };
+                                outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
+                            }
+                            PendingIntent::None => {
+                                if self.current_demand > 0 {
+                                    self.state = WorkloadState::Suspended {
+                                        artifact_id: artifact_id.clone(),
+                                    };
+                                    outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
+                                } else {
                                     self.state = WorkloadState::Suspended { artifact_id };
                                 }
-                                PendingIntent::Restart => {
-                                    outputs.push(WorkloadOutput::DeleteArtifact { artifact_id });
-                                    self.transition_on_demand(&mut outputs);
-                                }
-                                PendingIntent::Demand => {
-                                    self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() };
-                                    outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
-                                }
-                                PendingIntent::None => {
-                                    if self.current_demand > 0 {
-                                        self.state = WorkloadState::Suspended { artifact_id: artifact_id.clone() };
-                                        outputs.push(WorkloadOutput::ResumeRequest { artifact_id });
-                                    } else {
-                                        self.state = WorkloadState::Suspended { artifact_id };
-                                    }
-                                }
                             }
-                        }
+                        },
                         PodOutcome::Noop => {
                             self.state = WorkloadState::Active { pod, pending };
                         }
@@ -722,7 +859,9 @@ impl WorkloadStateMachine {
                         PodOutcome::Noop => {
                             self.state = WorkloadState::Active { pod, pending };
                         }
-                        _ => unreachable!("PodSuspendFailed can only produce SuspendFailed or Noop"),
+                        _ => {
+                            unreachable!("PodSuspendFailed can only produce SuspendFailed or Noop")
+                        }
                     }
                 }
             }
@@ -749,14 +888,20 @@ impl WorkloadStateMachine {
                 let in_suspending = matches!(
                     &self.state,
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Suspending { .. }, .. },
+                        pod: PodSlot {
+                            pod_state: PodState::Suspending { .. },
+                            ..
+                        },
                         ..
                     }
                 );
                 let was_running = matches!(
                     &self.state,
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Running, .. },
+                        pod: PodSlot {
+                            pod_state: PodState::Running,
+                            ..
+                        },
                         ..
                     }
                 );
@@ -798,7 +943,10 @@ impl WorkloadStateMachine {
                 let was_running = matches!(
                     &self.state,
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Running, .. },
+                        pod: PodSlot {
+                            pod_state: PodState::Running,
+                            ..
+                        },
                         ..
                     }
                 );
@@ -808,7 +956,10 @@ impl WorkloadStateMachine {
                     let in_suspending = matches!(
                         &self.state,
                         WorkloadState::Active {
-                            pod: PodSlot { pod_state: PodState::Suspending { .. }, .. },
+                            pod: PodSlot {
+                                pod_state: PodState::Suspending { .. },
+                                ..
+                            },
                             ..
                         }
                     );
@@ -819,7 +970,8 @@ impl WorkloadStateMachine {
                     if let WorkloadState::Active { mut pod, pending } =
                         std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                     {
-                        let (outcome, pod_outputs) = pod.step(PodInput::PodGone { worker_lost: true });
+                        let (outcome, pod_outputs) =
+                            pod.step(PodInput::PodGone { worker_lost: true });
                         Self::collect_pod_outputs(pod_outputs, &mut outputs);
 
                         match outcome {
@@ -846,7 +998,9 @@ impl WorkloadStateMachine {
                 // Non-pod timer: RetryBackoff.
                 if let WorkloadState::RetryBackoff { backoff_timer } = &self.state {
                     if *backoff_timer == timer_key {
-                        outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
+                        outputs.push(WorkloadOutput::ConditionClear {
+                            key: "retry-backoff".into(),
+                        });
                         self.state = WorkloadState::WaitingForCapacity;
                         outputs.push(WorkloadOutput::PodRequest);
                         return outputs;
@@ -866,7 +1020,13 @@ impl WorkloadStateMachine {
 
                     match outcome {
                         PodOutcome::TimedOut => {
-                            self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, false, &mut outputs);
+                            self.retire_pod(
+                                pod.pod_id,
+                                pod.worker_id,
+                                namespace_id,
+                                false,
+                                &mut outputs,
+                            );
                             self.transition_on_intent(pending, &mut outputs);
                         }
                         PodOutcome::Noop => {
@@ -885,7 +1045,11 @@ impl WorkloadStateMachine {
                         // Already inactive, no-op.
                     }
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Running, .. },
+                        pod:
+                            PodSlot {
+                                pod_state: PodState::Running,
+                                ..
+                            },
                         ..
                     } => {
                         if let WorkloadState::Active { mut pod, .. } =
@@ -897,28 +1061,33 @@ impl WorkloadStateMachine {
                                     "{}-{}-{}",
                                     namespace_id.0, self.workload_id.0, pod.pod_id.0
                                 ));
-                                let pod_outs = pod.initiate_suspend(
-                                    &self.workload_id,
-                                    artifact_id,
-                                );
+                                let pod_outs = pod.initiate_suspend(&self.workload_id, artifact_id);
                                 Self::collect_pod_outputs(pod_outs, &mut outputs);
                                 self.state = WorkloadState::Active {
                                     pod,
                                     pending: PendingIntent::Deactivate,
                                 };
                             } else {
-                                self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, true, &mut outputs);
+                                self.retire_pod(
+                                    pod.pod_id,
+                                    pod.worker_id,
+                                    namespace_id,
+                                    true,
+                                    &mut outputs,
+                                );
                                 self.state = WorkloadState::Dormant;
                             }
                         }
                     }
                     WorkloadState::Active {
-                        pod: PodSlot {
-                            pod_state: PodState::Launching { .. }
-                                | PodState::Suspending { .. }
-                                | PodState::Resuming { .. },
-                            ..
-                        },
+                        pod:
+                            PodSlot {
+                                pod_state:
+                                    PodState::Launching { .. }
+                                    | PodState::Suspending { .. }
+                                    | PodState::Resuming { .. },
+                                ..
+                            },
                         ..
                     } => {
                         self.upgrade_pending(PendingIntent::Deactivate);
@@ -936,15 +1105,21 @@ impl WorkloadStateMachine {
                             std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
-                            outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
+                            outputs.push(WorkloadOutput::ConditionClear {
+                                key: "retry-backoff".into(),
+                            });
                             self.state = WorkloadState::Dormant;
                         }
                     }
                     WorkloadState::Failed => {
-                        outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
+                        outputs.push(WorkloadOutput::ConditionClear {
+                            key: "failed".into(),
+                        });
                         self.state = WorkloadState::Dormant;
                     }
-                    WorkloadState::Transitioning => unreachable!("Transitioning in ForceDeactivate"),
+                    WorkloadState::Transitioning => {
+                        unreachable!("Transitioning in ForceDeactivate")
+                    }
                 }
             }
             WorkloadInput::SpecChanged => {
@@ -954,25 +1129,37 @@ impl WorkloadStateMachine {
                         // No-op: will launch with new spec next time.
                     }
                     WorkloadState::Active {
-                        pod: PodSlot {
-                            pod_state: PodState::Launching { .. }
-                                | PodState::Suspending { .. }
-                                | PodState::Resuming { .. },
-                            ..
-                        },
+                        pod:
+                            PodSlot {
+                                pod_state:
+                                    PodState::Launching { .. }
+                                    | PodState::Suspending { .. }
+                                    | PodState::Resuming { .. },
+                                ..
+                            },
                         ..
                     } => {
                         self.upgrade_pending(PendingIntent::Restart);
                     }
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Running, .. },
+                        pod:
+                            PodSlot {
+                                pod_state: PodState::Running,
+                                ..
+                            },
                         ..
                     } => {
                         if let WorkloadState::Active { pod, .. } =
                             std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::BecameUnready);
-                            self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, false, &mut outputs);
+                            self.retire_pod(
+                                pod.pod_id,
+                                pod.worker_id,
+                                namespace_id,
+                                false,
+                                &mut outputs,
+                            );
                             self.consecutive_failures = 0;
                             self.transition_on_demand(&mut outputs);
                         }
@@ -991,14 +1178,18 @@ impl WorkloadStateMachine {
                             std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
-                            outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
+                            outputs.push(WorkloadOutput::ConditionClear {
+                                key: "retry-backoff".into(),
+                            });
                             self.consecutive_failures = 0;
                             self.transition_on_demand(&mut outputs);
                         }
                     }
                     WorkloadState::Failed => {
                         self.consecutive_failures = 0;
-                        outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
+                        outputs.push(WorkloadOutput::ConditionClear {
+                            key: "failed".into(),
+                        });
                         self.transition_on_demand(&mut outputs);
                     }
                     WorkloadState::Transitioning => unreachable!("Transitioning in SpecChanged"),
@@ -1007,14 +1198,24 @@ impl WorkloadStateMachine {
             WorkloadInput::ManualRestart => {
                 match &self.state {
                     WorkloadState::Active {
-                        pod: PodSlot { pod_state: PodState::Running, .. },
+                        pod:
+                            PodSlot {
+                                pod_state: PodState::Running,
+                                ..
+                            },
                         ..
                     } => {
                         if let WorkloadState::Active { pod, .. } =
                             std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::BecameUnready);
-                            self.retire_pod(pod.pod_id, pod.worker_id, namespace_id, false, &mut outputs);
+                            self.retire_pod(
+                                pod.pod_id,
+                                pod.worker_id,
+                                namespace_id,
+                                false,
+                                &mut outputs,
+                            );
 
                             self.consecutive_failures = 0;
                             self.transition_on_demand(&mut outputs);
@@ -1025,14 +1226,18 @@ impl WorkloadStateMachine {
                             std::mem::replace(&mut self.state, WorkloadState::Transitioning)
                         {
                             outputs.push(WorkloadOutput::TimerCancel(backoff_timer));
-                            outputs.push(WorkloadOutput::ConditionClear { key: "retry-backoff".into() });
+                            outputs.push(WorkloadOutput::ConditionClear {
+                                key: "retry-backoff".into(),
+                            });
                             self.consecutive_failures = 0;
                             self.transition_on_demand(&mut outputs);
                         }
                     }
                     WorkloadState::Failed => {
                         self.consecutive_failures = 0;
-                        outputs.push(WorkloadOutput::ConditionClear { key: "failed".into() });
+                        outputs.push(WorkloadOutput::ConditionClear {
+                            key: "failed".into(),
+                        });
                         self.transition_on_demand(&mut outputs);
                     }
                     _ => {

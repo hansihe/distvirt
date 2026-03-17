@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use crate::sm_new::{AdminCmd, DRouter, SCHEDULE_REQUEST, TIMER};
-use crate::types::{NamespaceSpec, WorkloadSpec, ServiceSpec, ActivationSpec};
+use crate::types::{ActivationSpec, NamespaceSpec, ServiceSpec, WorkloadSpec};
 
 use super::ManagementAdapter;
 
@@ -85,16 +85,17 @@ fn create_workload_from_spec() {
     let mut router = make_router();
     let mut adapter = ManagementAdapter::new();
 
-    let spec = make_namespace_spec(
-        vec![("web", simple_workload_spec())],
-        vec![],
-    );
+    let spec = make_namespace_spec(vec![("web", simple_workload_spec())], vec![]);
 
     adapter.apply_namespace_spec(&mut router, None, &spec);
     router.propagate();
 
-    let wl_id = adapter.lookup_workload("web").expect("workload should be mapped");
-    let wl = router.get_workload(&wl_id).expect("workload should exist in router");
+    let wl_id = adapter
+        .lookup_workload("web")
+        .expect("workload should be mapped");
+    let wl = router
+        .get_workload(&wl_id)
+        .expect("workload should exist in router");
     assert!(wl.has_spec, "workload should have spec after apply");
 }
 
@@ -107,10 +108,7 @@ fn update_workload_spec() {
     let mut router = make_router();
     let mut adapter = ManagementAdapter::new();
 
-    let spec1 = make_namespace_spec(
-        vec![("web", simple_workload_spec())],
-        vec![],
-    );
+    let spec1 = make_namespace_spec(vec![("web", simple_workload_spec())], vec![]);
     adapter.apply_namespace_spec(&mut router, None, &spec1);
     router.propagate();
 
@@ -120,10 +118,7 @@ fn update_workload_spec() {
     // Update the spec (different image)
     let mut spec2_wl = simple_workload_spec();
     spec2_wl.containers[0].image_ref = "app:v2".into();
-    let spec2 = make_namespace_spec(
-        vec![("web", spec2_wl)],
-        vec![],
-    );
+    let spec2 = make_namespace_spec(vec![("web", spec2_wl)], vec![]);
     adapter.apply_namespace_spec(&mut router, Some(&spec1), &spec2);
     router.propagate();
 
@@ -143,10 +138,7 @@ fn remove_workload_destroys_management() {
     let mut router = make_router();
     let mut adapter = ManagementAdapter::new();
 
-    let spec1 = make_namespace_spec(
-        vec![("web", simple_workload_spec())],
-        vec![],
-    );
+    let spec1 = make_namespace_spec(vec![("web", simple_workload_spec())], vec![]);
     adapter.apply_namespace_spec(&mut router, None, &spec1);
     router.propagate();
 
@@ -179,7 +171,9 @@ fn create_service_linked_to_workload() {
 
     let _wl_id = adapter.lookup_workload("web").expect("workload mapped");
     let svc_id = adapter.lookup_service("web-svc").expect("service mapped");
-    let svc = router.get_service(&svc_id).expect("service exists in router");
+    let svc = router
+        .get_service(&svc_id)
+        .expect("service exists in router");
 
     assert!(!svc.has_activation);
 }
@@ -203,7 +197,10 @@ fn admin_command_dispatched() {
 
     let wl_id = adapter.lookup_workload("web").unwrap();
     let wl = router.get_workload(&wl_id).unwrap();
-    assert!(wl.pod_id.is_some(), "should have created a pod from demand+spec");
+    assert!(
+        wl.pod_id.is_some(),
+        "should have created a pod from demand+spec"
+    );
 
     adapter.send_admin_command(&mut router, "web", AdminCmd::Restart);
     router.propagate();
@@ -243,7 +240,10 @@ fn activate_service_command() {
 
     let wl_id = adapter.lookup_workload("web").unwrap();
     let wl = router.get_workload(&wl_id).unwrap();
-    assert!(wl.has_demand, "workload should have demand after service activation");
+    assert!(
+        wl.has_demand,
+        "workload should have demand after service activation"
+    );
 }
 
 // ============================================================================

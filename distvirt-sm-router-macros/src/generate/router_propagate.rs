@@ -1,6 +1,6 @@
 use crate::parse::*;
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote, ToTokens};
+use quote::{ToTokens, format_ident, quote};
 
 use super::helpers::*;
 
@@ -123,8 +123,7 @@ pub(super) fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream
             .iter()
             .filter(|s| s.node == sm.name)
             .map(|sig| {
-                let ctx_field =
-                    format_ident!("{}", to_snake_case(&sig.signal.to_string()));
+                let ctx_field = format_ident!("{}", to_snake_case(&sig.signal.to_string()));
                 let setter = format_ident!(
                     "set_{}_{}",
                     to_snake_case(&sm.name.to_string()),
@@ -229,7 +228,11 @@ pub(super) fn gen_apply_effects(def: &TopologyDef, methods: &mut Vec<TokenStream
     }
 }
 
-pub(super) fn gen_propagate(def: &TopologyDef, methods: &mut Vec<TokenStream>, internal_methods: &mut Vec<TokenStream>) {
+pub(super) fn gen_propagate(
+    def: &TopologyDef,
+    methods: &mut Vec<TokenStream>,
+    internal_methods: &mut Vec<TokenStream>,
+) {
     // Generate match arms for process_dirty_input (uses `return` instead of `continue`)
     let dirty_match_arms: Vec<_> = def
         .inputs

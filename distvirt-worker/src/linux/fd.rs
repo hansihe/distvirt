@@ -15,4 +15,3 @@ pub(super) fn set_nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     }
     Ok(())
 }
-

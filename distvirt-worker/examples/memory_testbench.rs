@@ -272,7 +272,9 @@ async fn main() -> Result<()> {
     eprintln!("  [testbench] waiting for guest balloon requests, container exit, or Ctrl+C...");
 
     // Take the event dispatch and subscribe for state changes.
-    let _dispatch = vm.take_event_dispatch().expect("event dispatch not available");
+    let _dispatch = vm
+        .take_event_dispatch()
+        .expect("event dispatch not available");
     let mut rx = _dispatch.subscribe();
     let mut last_balloon: Option<u32> = None;
 

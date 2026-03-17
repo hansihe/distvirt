@@ -4,7 +4,7 @@ use std::time::Duration;
 use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::core::namespace::NamespaceCore;
 use distvirt_orchestrator::shell_new::sync::{MockWorkerConfig, SyncShell};
-use distvirt_orchestrator::sm_new::{WlStatus, SvcStatus, WorkloadSm, ServiceSm, ServiceState};
+use distvirt_orchestrator::sm_new::{ServiceSm, ServiceState, SvcStatus, WlStatus, WorkloadSm};
 use distvirt_orchestrator::task::{ClientCommand, GlobalWorkerId};
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{PsiMetrics, WorkerCommand, WorkerEvent};
@@ -131,32 +131,36 @@ impl TestHarness {
         let svc_id = ns
             .management()
             .lookup_service(svc_name)
-            .unwrap_or_else(|| {
-                panic!("service '{}' not found in namespace '{}'", svc_name, ns_id)
-            });
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_name, ns_id));
         ns.router()
             .get_service(&svc_id)
             .unwrap_or_else(|| panic!("service SM '{}' not found in router", svc_name))
     }
 
     /// Get the protocol PodId for a workload (maps from router-internal PodId).
-    pub fn workload_proto_pod_id(&self, ns_id: &str, wl_name: &str) -> Option<distvirt_worker_protocol::PodId> {
+    pub fn workload_proto_pod_id(
+        &self,
+        ns_id: &str,
+        wl_name: &str,
+    ) -> Option<distvirt_worker_protocol::PodId> {
         let wl = self.workload_state(ns_id, wl_name);
         let ns = self.namespace(ns_id);
-        wl.pod_id.and_then(|pid| ns.router_pod_to_proto(&pid).cloned())
+        wl.pod_id
+            .and_then(|pid| ns.router_pod_to_proto(&pid).cloned())
     }
 
     /// Get the GlobalWorkerId for the worker hosting a workload.
     pub fn workload_global_worker_id(&self, ns_id: &str, wl_name: &str) -> Option<GlobalWorkerId> {
         let wl = self.workload_state(ns_id, wl_name);
         let ns = self.namespace(ns_id);
-        wl.pod_worker_id.and_then(|wid| ns.router_worker_to_global(&wid))
+        wl.pod_worker_id
+            .and_then(|wid| ns.router_worker_to_global(&wid))
     }
 
     pub fn workload_status(&self, ns_id: &str, wl_name: &str) -> WlStatus {
         let wl = self.workload_state(ns_id, wl_name);
-        let is_failed = wl.consecutive_failures >= wl.max_retries
-            && (wl.has_demand || wl.committed_to_boot);
+        let is_failed =
+            wl.consecutive_failures >= wl.max_retries && (wl.has_demand || wl.committed_to_boot);
         if is_failed {
             WlStatus::Failed
         } else if wl.in_backoff {
@@ -186,14 +190,22 @@ impl TestHarness {
     }
 
     /// Stub: workload conditions not tracked in the new system.
-    pub fn workload_conditions(&self, _ns_id: &str, _wl_id: &str) -> std::collections::BTreeMap<String, String> {
+    pub fn workload_conditions(
+        &self,
+        _ns_id: &str,
+        _wl_id: &str,
+    ) -> std::collections::BTreeMap<String, String> {
         // New system doesn't have workload conditions. Return empty.
         // Tests depending on this will fail their assertions.
         std::collections::BTreeMap::new()
     }
 
     /// Stub: service conditions not tracked in the new system.
-    pub fn service_conditions(&self, _ns_id: &str, _svc_id: &str) -> std::collections::BTreeMap<String, String> {
+    pub fn service_conditions(
+        &self,
+        _ns_id: &str,
+        _svc_id: &str,
+    ) -> std::collections::BTreeMap<String, String> {
         std::collections::BTreeMap::new()
     }
 
@@ -203,22 +215,24 @@ impl TestHarness {
 
     pub fn service_ip(&self, ns_id: &str, svc_id: &str) -> std::net::Ipv4Addr {
         let ns = self.namespace(ns_id);
-        let spec = ns.current_spec().unwrap_or_else(|| {
-            panic!("namespace '{}' has no spec", ns_id)
-        });
+        let spec = ns
+            .current_spec()
+            .unwrap_or_else(|| panic!("namespace '{}' has no spec", ns_id));
         spec.services
             .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}' spec", svc_id, ns_id))
+            .unwrap_or_else(|| {
+                panic!(
+                    "service '{}' not found in namespace '{}' spec",
+                    svc_id, ns_id
+                )
+            })
             .ip
     }
 
     fn workload_for_service(&self, ns_id: &str, svc_id: &str) -> String {
         let ns = self.namespace(ns_id);
         let spec = ns.current_spec().unwrap();
-        let svc_spec = spec
-            .services
-            .get(&ServiceId::from(svc_id))
-            .unwrap();
+        let svc_spec = spec.services.get(&ServiceId::from(svc_id)).unwrap();
         svc_spec.workload_id.0.clone()
     }
 
@@ -272,7 +286,12 @@ impl TestHarness {
         let svc_spec = spec
             .services
             .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}' spec", svc_id, ns_id));
+            .unwrap_or_else(|| {
+                panic!(
+                    "service '{}' not found in namespace '{}' spec",
+                    svc_id, ns_id
+                )
+            });
         let timeout = svc_spec
             .activation
             .as_ref()
@@ -375,7 +394,9 @@ pub struct WorkerProxy<'a> {
 
 impl<'a> WorkerProxy<'a> {
     pub fn send_event(&self, event: WorkerEvent) {
-        self.pending_events.borrow_mut().push((self.worker_id, event));
+        self.pending_events
+            .borrow_mut()
+            .push((self.worker_id, event));
     }
 
     pub fn commands(&self) -> Vec<WorkerCommand> {

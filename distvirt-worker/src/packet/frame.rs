@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 use zerocopy::Ref;
 
 use super::checksum::{incremental_csum_update, incremental_partial_update};
-use super::{FabricHeader, FABRIC_HDR_SZ, FLAG_NEEDS_CSUM, IP_PROTO_TCP, IP_PROTO_UDP};
+use super::{FABRIC_HDR_SZ, FLAG_NEEDS_CSUM, FabricHeader, IP_PROTO_TCP, IP_PROTO_UDP};
 
 // ---------------------------------------------------------------------------
 // FabricPacket (immutable)
@@ -85,8 +85,10 @@ impl<'a> FabricPacket<'a> {
         if self.raw.len() < transport_start + 4 {
             return None;
         }
-        let src_port = u16::from_be_bytes([self.raw[transport_start], self.raw[transport_start + 1]]);
-        let dst_port = u16::from_be_bytes([self.raw[transport_start + 2], self.raw[transport_start + 3]]);
+        let src_port =
+            u16::from_be_bytes([self.raw[transport_start], self.raw[transport_start + 1]]);
+        let dst_port =
+            u16::from_be_bytes([self.raw[transport_start + 2], self.raw[transport_start + 3]]);
         Some((src_port, dst_port))
     }
 
@@ -164,8 +166,10 @@ impl<'a> FabricPacketMut<'a> {
         if self.raw.len() < transport_start + 4 {
             return None;
         }
-        let src_port = u16::from_be_bytes([self.raw[transport_start], self.raw[transport_start + 1]]);
-        let dst_port = u16::from_be_bytes([self.raw[transport_start + 2], self.raw[transport_start + 3]]);
+        let src_port =
+            u16::from_be_bytes([self.raw[transport_start], self.raw[transport_start + 1]]);
+        let dst_port =
+            u16::from_be_bytes([self.raw[transport_start + 2], self.raw[transport_start + 3]]);
         Some((src_port, dst_port))
     }
 
@@ -194,7 +198,9 @@ pub fn ip_packet_dst(packet: &[u8]) -> Option<Ipv4Addr> {
     if packet.len() < 20 {
         return None;
     }
-    Some(Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]))
+    Some(Ipv4Addr::new(
+        packet[16], packet[17], packet[18], packet[19],
+    ))
 }
 
 /// Extract the source IPv4 address from a raw IP packet (no fabric/eth headers).
@@ -202,7 +208,9 @@ pub fn ip_packet_src(packet: &[u8]) -> Option<Ipv4Addr> {
     if packet.len() < 20 {
         return None;
     }
-    Some(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]))
+    Some(Ipv4Addr::new(
+        packet[12], packet[13], packet[14], packet[15],
+    ))
 }
 
 /// Extract the IP protocol number from a raw IP packet (no fabric/eth headers).
@@ -236,12 +244,24 @@ pub fn ip_packet_transport_ports(packet: &[u8]) -> Option<(u16, u16)> {
 /// Format TCP flags byte as human-readable string (e.g. "[SYN ACK]").
 pub fn format_tcp_flags(flags: u8) -> String {
     let mut parts = Vec::new();
-    if flags & 0x02 != 0 { parts.push("SYN"); }
-    if flags & 0x10 != 0 { parts.push("ACK"); }
-    if flags & 0x08 != 0 { parts.push("PSH"); }
-    if flags & 0x01 != 0 { parts.push("FIN"); }
-    if flags & 0x04 != 0 { parts.push("RST"); }
-    if flags & 0x20 != 0 { parts.push("URG"); }
+    if flags & 0x02 != 0 {
+        parts.push("SYN");
+    }
+    if flags & 0x10 != 0 {
+        parts.push("ACK");
+    }
+    if flags & 0x08 != 0 {
+        parts.push("PSH");
+    }
+    if flags & 0x01 != 0 {
+        parts.push("FIN");
+    }
+    if flags & 0x04 != 0 {
+        parts.push("RST");
+    }
+    if flags & 0x20 != 0 {
+        parts.push("URG");
+    }
     format!("[{}]", parts.join(" "))
 }
 
@@ -495,8 +515,7 @@ mod tests {
         payload: &[u8],
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
-        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
-            .tcp(src_port, dst_port, 1000, 65535);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).tcp(src_port, dst_port, 1000, 65535);
         let mut ip_frame = Vec::new();
         builder.write(&mut ip_frame, payload).unwrap();
         with_fabric_header(0, 0, &ip_frame)
@@ -524,8 +543,7 @@ mod tests {
         payload: &[u8],
     ) -> Vec<u8> {
         use etherparse::PacketBuilder;
-        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
-            .tcp(src_port, dst_port, 1000, 65535);
+        let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).tcp(src_port, dst_port, 1000, 65535);
         let mut ip_frame = Vec::new();
         builder.write(&mut ip_frame, payload).unwrap();
 
@@ -584,11 +602,7 @@ mod tests {
         let new_dst = [10, 0, 0, 99];
         let mut frame = build_tcp_fabric_packet(src_ip, old_dst, 12345, 80, &[]);
 
-        rewrite_ipv4_dst(
-            &mut frame,
-            Ipv4Addr::from(old_dst),
-            Ipv4Addr::from(new_dst),
-        );
+        rewrite_ipv4_dst(&mut frame, Ipv4Addr::from(old_dst), Ipv4Addr::from(new_dst));
 
         let ip_start = FABRIC_HDR_SZ;
         assert!(verify_ip_header_checksum(&frame[ip_start..]));
@@ -601,11 +615,7 @@ mod tests {
         let dst_ip = [10, 0, 0, 2];
         let mut frame = build_tcp_fabric_packet(old_src, dst_ip, 12345, 80, &[]);
 
-        rewrite_ipv4_src(
-            &mut frame,
-            Ipv4Addr::from(old_src),
-            Ipv4Addr::from(new_src),
-        );
+        rewrite_ipv4_src(&mut frame, Ipv4Addr::from(old_src), Ipv4Addr::from(new_src));
 
         let ip_start = FABRIC_HDR_SZ;
         assert!(verify_ip_header_checksum(&frame[ip_start..]));
@@ -618,14 +628,9 @@ mod tests {
         let src_ip = [172, 16, 0, 5];
         let old_dst = [172, 16, 0, 10];
         let new_dst = [172, 16, 0, 99];
-        let mut frame =
-            build_tcp_fabric_packet_needs_csum(src_ip, old_dst, 9000, 443, b"hello");
+        let mut frame = build_tcp_fabric_packet_needs_csum(src_ip, old_dst, 9000, 443, b"hello");
 
-        rewrite_ipv4_dst(
-            &mut frame,
-            Ipv4Addr::from(old_dst),
-            Ipv4Addr::from(new_dst),
-        );
+        rewrite_ipv4_dst(&mut frame, Ipv4Addr::from(old_dst), Ipv4Addr::from(new_dst));
         complete_checksum(&mut frame);
 
         let ip_start = FABRIC_HDR_SZ;
@@ -644,16 +649,8 @@ mod tests {
         let mut frame =
             build_tcp_fabric_packet_needs_csum(old_src, old_dst, 5555, 8080, b"test data");
 
-        rewrite_ipv4_src(
-            &mut frame,
-            Ipv4Addr::from(old_src),
-            Ipv4Addr::from(new_src),
-        );
-        rewrite_ipv4_dst(
-            &mut frame,
-            Ipv4Addr::from(old_dst),
-            Ipv4Addr::from(new_dst),
-        );
+        rewrite_ipv4_src(&mut frame, Ipv4Addr::from(old_src), Ipv4Addr::from(new_src));
+        rewrite_ipv4_dst(&mut frame, Ipv4Addr::from(old_dst), Ipv4Addr::from(new_dst));
         complete_checksum(&mut frame);
 
         let ip_start = FABRIC_HDR_SZ;
@@ -666,16 +663,11 @@ mod tests {
         let src_ip = [10, 0, 0, 3];
         let old_dst = [10, 0, 0, 99];
         let new_dst = [10, 0, 0, 2];
-        let mut frame =
-            build_tcp_fabric_packet(src_ip, old_dst, 45678, 80, b"hello-buffered");
+        let mut frame = build_tcp_fabric_packet(src_ip, old_dst, 45678, 80, b"hello-buffered");
 
         assert!(verify_tcp_checksum(&frame));
 
-        rewrite_ipv4_dst(
-            &mut frame,
-            Ipv4Addr::from(old_dst),
-            Ipv4Addr::from(new_dst),
-        );
+        rewrite_ipv4_dst(&mut frame, Ipv4Addr::from(old_dst), Ipv4Addr::from(new_dst));
 
         let ip_start = FABRIC_HDR_SZ;
         assert!(verify_ip_header_checksum(&frame[ip_start..]));
@@ -691,11 +683,7 @@ mod tests {
 
         assert!(verify_tcp_checksum(&frame));
 
-        rewrite_ipv4_src(
-            &mut frame,
-            Ipv4Addr::from(old_src),
-            Ipv4Addr::from(new_src),
-        );
+        rewrite_ipv4_src(&mut frame, Ipv4Addr::from(old_src), Ipv4Addr::from(new_src));
 
         let ip_start = FABRIC_HDR_SZ;
         assert!(verify_ip_header_checksum(&frame[ip_start..]));
@@ -777,14 +765,9 @@ mod tests {
         let src_ip = [10, 0, 0, 3];
         let old_dst = [10, 0, 0, 99];
         let new_dst = [10, 0, 0, 2];
-        let mut frame =
-            build_tcp_fabric_packet_needs_csum(src_ip, old_dst, 45678, 80, b"payload");
+        let mut frame = build_tcp_fabric_packet_needs_csum(src_ip, old_dst, 45678, 80, b"payload");
 
-        rewrite_ipv4_dst(
-            &mut frame,
-            Ipv4Addr::from(old_dst),
-            Ipv4Addr::from(new_dst),
-        );
+        rewrite_ipv4_dst(&mut frame, Ipv4Addr::from(old_dst), Ipv4Addr::from(new_dst));
 
         let ip_start = FABRIC_HDR_SZ;
         let ihl = (frame[ip_start] & 0x0f) as usize * 4;

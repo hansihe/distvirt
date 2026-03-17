@@ -1,12 +1,12 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::packet::FabricPacket;
-use crate::fabric::flow::FlowKey;
 use super::{
-    Endpoint, EndpointAction, EndpointBackend, EndpointState, EndpointTable,
-    FlowStatusChange, ServiceProcessor,
+    Endpoint, EndpointAction, EndpointBackend, EndpointState, EndpointTable, FlowStatusChange,
+    ServiceProcessor,
 };
+use crate::fabric::flow::FlowKey;
+use crate::packet::FabricPacket;
 
 /// Internal result of the buffer acceptance helper.
 enum BufferResult {
@@ -35,8 +35,7 @@ impl EndpointTable {
         dst_ip: Ipv4Addr,
         frame: &[u8],
         skip_flow_tracking: bool,
-    ) -> (EndpointAction, bool, Option<FlowStatusChange>)
-    {
+    ) -> (EndpointAction, bool, Option<FlowStatusChange>) {
         let endpoint = match self.by_ip.get_mut(&dst_ip) {
             Some(ep) => ep,
             None => return (EndpointAction::NotFound, false, None),
@@ -53,13 +52,27 @@ impl EndpointTable {
         // Fast path: stateless endpoint types return immediately.
         let dispatch = match &endpoint.backend {
             EndpointBackend::RemoteSegment { worker_id } => {
-                return (EndpointAction::RemoteWorker { worker_id: worker_id.clone() }, false, None);
+                return (
+                    EndpointAction::RemoteWorker {
+                        worker_id: worker_id.clone(),
+                    },
+                    false,
+                    None,
+                );
             }
             EndpointBackend::LocalAdapter { port_id } => {
-                return (EndpointAction::LocalAdapter { port_id: *port_id }, false, flow_change);
+                return (
+                    EndpointAction::LocalAdapter { port_id: *port_id },
+                    false,
+                    flow_change,
+                );
             }
             EndpointBackend::LocalPod { port_id: Some(pid) } => {
-                return (EndpointAction::LocalPod { port_id: *pid }, false, flow_change);
+                return (
+                    EndpointAction::LocalPod { port_id: *pid },
+                    false,
+                    flow_change,
+                );
             }
             // Complex cases need table-level access (debounce, reachability).
             EndpointBackend::Service { .. } => BackendDispatch::Service,
@@ -69,8 +82,12 @@ impl EndpointTable {
 
         match dispatch {
             BackendDispatch::Service => self.dispatch_service(dst_ip, frame, flow_change, now),
-            BackendDispatch::UnplacedPod => self.dispatch_unplaced_pod(dst_ip, frame, flow_change, now),
-            BackendDispatch::LocalPodPending => self.dispatch_local_pod_pending(dst_ip, frame, flow_change, now),
+            BackendDispatch::UnplacedPod => {
+                self.dispatch_unplaced_pod(dst_ip, frame, flow_change, now)
+            }
+            BackendDispatch::LocalPodPending => {
+                self.dispatch_local_pod_pending(dst_ip, frame, flow_change, now)
+            }
         }
     }
 
@@ -115,7 +132,11 @@ impl EndpointTable {
     ///
     /// Takes `&mut Endpoint` instead of `&mut self` so that only the endpoint's
     /// own data is needed — enabling per-entry locking in the future.
-    fn check_activation_debounce(endpoint: &mut Endpoint, debounce: Duration, now: Instant) -> bool {
+    fn check_activation_debounce(
+        endpoint: &mut Endpoint,
+        debounce: Duration,
+        now: Instant,
+    ) -> bool {
         match endpoint.last_activation {
             Some(last) if now.duration_since(last) < debounce => false,
             _ => {
@@ -186,10 +207,7 @@ impl EndpointTable {
         // Phase 1: Read service endpoint state (single endpoint).
         let (state, backend_ip, svc_ip) = {
             let endpoint = self.by_ip.get(&dst_ip).unwrap();
-            let EndpointBackend::Service {
-                ref backend_ip,
-                ..
-            } = endpoint.backend else {
+            let EndpointBackend::Service { ref backend_ip, .. } = endpoint.backend else {
                 unreachable!();
             };
             (endpoint.state, *backend_ip, endpoint.ip)
@@ -201,23 +219,33 @@ impl EndpointTable {
         if state == EndpointState::Ready {
             if let Some(pod_ip) = backend_ip {
                 let reachable = if pod_ip != dst_ip {
-                    self.by_ip.get(&pod_ip).map_or(false, |ep| match &ep.backend {
-                        EndpointBackend::LocalPod { port_id } => port_id.is_some(),
-                        EndpointBackend::RemoteSegment { .. } => true,
-                        EndpointBackend::LocalAdapter { .. } => true,
-                        _ => false,
-                    })
+                    self.by_ip
+                        .get(&pod_ip)
+                        .map_or(false, |ep| match &ep.backend {
+                            EndpointBackend::LocalPod { port_id } => port_id.is_some(),
+                            EndpointBackend::RemoteSegment { .. } => true,
+                            EndpointBackend::LocalAdapter { .. } => true,
+                            _ => false,
+                        })
                 } else {
                     false
                 };
 
                 if reachable {
-                    return (EndpointAction::ServiceForward { pod_ip, service_ip: svc_ip }, false, flow_change);
+                    return (
+                        EndpointAction::ServiceForward {
+                            pod_ip,
+                            service_ip: svc_ip,
+                        },
+                        false,
+                        flow_change,
+                    );
                 }
 
                 log::debug!(
                     "service endpoint {}: ready but backend IP {} not reachable, falling through to buffer",
-                    dst_ip, pod_ip
+                    dst_ip,
+                    pod_ip
                 );
 
                 return self.dispatch_service_buffer(dst_ip, frame, flow_change, now);
@@ -246,18 +274,15 @@ impl EndpointTable {
             ref mut processor,
             ref policy,
             ..
-        } = endpoint.backend else {
+        } = endpoint.backend
+        else {
             unreachable!();
         };
 
         // Try L4/L3 activator path.
         if !matches!(processor, ServiceProcessor::Passthrough) {
             if let Some(fp) = FabricPacket::new(frame) {
-                if let Some(result) = processor.process_frame(
-                    service_id,
-                    fp.ip_packet(),
-                    frame,
-                ) {
+                if let Some(result) = processor.process_frame(service_id, fp.ip_packet(), frame) {
                     return (result, false, None);
                 }
             }
@@ -271,8 +296,16 @@ impl EndpointTable {
         let action = Self::try_buffer_frame(endpoint, frame, buffer_frames, timeout_ms, now);
         let service_id = Some(svc_id);
         match action {
-            BufferResult::Buffered => (EndpointAction::Buffered { service_id }, should_activate, flow_change),
-            BufferResult::Dropped => (EndpointAction::Drop { service_id }, should_activate, flow_change),
+            BufferResult::Buffered => (
+                EndpointAction::Buffered { service_id },
+                should_activate,
+                flow_change,
+            ),
+            BufferResult::Dropped => (
+                EndpointAction::Drop { service_id },
+                should_activate,
+                flow_change,
+            ),
         }
     }
 
@@ -294,8 +327,16 @@ impl EndpointTable {
         let should_activate = Self::check_activation_debounce(endpoint, debounce, now);
         let action = Self::try_buffer_frame(endpoint, frame, buffer_frames, timeout_ms, now);
         match action {
-            BufferResult::Buffered => (EndpointAction::Buffered { service_id: None }, should_activate, flow_change),
-            BufferResult::Dropped => (EndpointAction::Drop { service_id: None }, should_activate, flow_change),
+            BufferResult::Buffered => (
+                EndpointAction::Buffered { service_id: None },
+                should_activate,
+                flow_change,
+            ),
+            BufferResult::Dropped => (
+                EndpointAction::Drop { service_id: None },
+                should_activate,
+                flow_change,
+            ),
         }
     }
 
@@ -312,8 +353,16 @@ impl EndpointTable {
         let should_activate = Self::check_activation_debounce(endpoint, debounce, now);
         let action = Self::try_buffer_frame(endpoint, frame, 64, 30_000, now);
         match action {
-            BufferResult::Buffered => (EndpointAction::Buffered { service_id: None }, should_activate, flow_change),
-            BufferResult::Dropped => (EndpointAction::Drop { service_id: None }, should_activate, flow_change),
+            BufferResult::Buffered => (
+                EndpointAction::Buffered { service_id: None },
+                should_activate,
+                flow_change,
+            ),
+            BufferResult::Dropped => (
+                EndpointAction::Drop { service_id: None },
+                should_activate,
+                flow_change,
+            ),
         }
     }
 }

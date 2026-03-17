@@ -82,7 +82,10 @@ impl Orchestrator {
             return;
         }
 
-        let worker_endpoint = format!("{}:{}", ws.capabilities.public_endpoint, wg_config.listen_port);
+        let worker_endpoint = format!(
+            "{}:{}",
+            ws.capabilities.public_endpoint, wg_config.listen_port
+        );
 
         self.route_namespace_input(
             namespace_id,
@@ -148,9 +151,7 @@ impl Orchestrator {
                 let segments: Vec<u16> = ws
                     .namespaces
                     .iter()
-                    .filter_map(|ns_id| {
-                        self.namespaces.get(ns_id).map(|ns| ns.segment_id)
-                    })
+                    .filter_map(|ns_id| self.namespaces.get(ns_id).map(|ns| ns.segment_id))
                     .collect();
                 Some(WorkerPeerInfo {
                     worker_id: wid.clone(),

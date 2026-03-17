@@ -200,11 +200,14 @@ pub(super) fn step_with_scheduling_pt(
         if let Some(wid) = wid {
             let pod_id = PodId(format!("pod-{}", *pod_counter));
             *pod_counter += 1;
-            let launch_out = ns.step(NamespaceInput::LaunchPod {
-                workload_id: req.workload_id,
-                worker_id: wid,
-                pod_id,
-            }, pt);
+            let launch_out = ns.step(
+                NamespaceInput::LaunchPod {
+                    workload_id: req.workload_id,
+                    worker_id: wid,
+                    pod_id,
+                },
+                pt,
+            );
             out.worker_commands.extend(launch_out.worker_commands);
             out.timers_set.extend(launch_out.timers_set);
             out.timers_cancel.extend(launch_out.timers_cancel);
@@ -237,11 +240,14 @@ pub(super) fn launch_workload(
     let mut pt = PlacementTable::default();
     let pod_id = PodId(format!("pod-{}", *pod_counter));
     *pod_counter += 1;
-    ns.step(NamespaceInput::LaunchPod {
-        workload_id: wl_id(),
-        worker_id: worker_id(1),
-        pod_id,
-    }, &mut pt)
+    ns.step(
+        NamespaceInput::LaunchPod {
+            workload_id: wl_id(),
+            worker_id: worker_id(1),
+            pod_id,
+        },
+        &mut pt,
+    )
 }
 
 /// Helper to get the workload state for the default service.
@@ -257,8 +263,15 @@ pub(super) fn get_service_state(ns: &NamespaceStateMachine) -> &ServiceState {
 /// Helper to extract pod_id from a workload in Launching state.
 pub(super) fn get_launching_pod_id(ns: &NamespaceStateMachine) -> PodId {
     match get_workload_state(ns) {
-        WorkloadState::Active { pod: PodSlot { pod_id, pod_state: PodState::Launching { .. }, .. }, .. } => pod_id.clone(),
+        WorkloadState::Active {
+            pod:
+                PodSlot {
+                    pod_id,
+                    pod_state: PodState::Launching { .. },
+                    ..
+                },
+            ..
+        } => pod_id.clone(),
         other => panic!("expected Launching, got {:?}", other),
     }
 }
-

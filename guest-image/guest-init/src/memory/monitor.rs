@@ -1,6 +1,6 @@
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_io::Async;
 
 /// A change in balloon page count observed via sysfs.
@@ -23,7 +23,10 @@ fn find_num_pages_path() -> anyhow::Result<String> {
             return Ok(candidate);
         }
     }
-    bail!("no virtio device with num_pages attribute found under {}", virtio_devices);
+    bail!(
+        "no virtio device with num_pages attribute found under {}",
+        virtio_devices
+    );
 }
 
 /// Monitor the virtio_balloon `num_pages` sysfs attribute for changes.
@@ -74,8 +77,7 @@ pub async fn run(tx: async_channel::Sender<BalloonChange>) -> anyhow::Result<()>
     }
 
     // Wrap the epoll fd in Async so the smol reactor can drive it.
-    let async_epoll = Async::new_nonblocking(epoll_fd)
-        .context("wrap epoll fd in Async")?;
+    let async_epoll = Async::new_nonblocking(epoll_fd).context("wrap epoll fd in Async")?;
 
     loop {
         // Wait until the epoll fd is readable (i.e. EPOLLPRI fired).
@@ -149,7 +151,8 @@ fn read_sysfs_u32(fd: &OwnedFd) -> anyhow::Result<u32> {
     let s = std::str::from_utf8(&buf[..n as usize])
         .context("sysfs value not utf8")?
         .trim();
-    s.parse::<u32>().with_context(|| format!("parse '{}' as u32", s))
+    s.parse::<u32>()
+        .with_context(|| format!("parse '{}' as u32", s))
 }
 
 /// Virtio balloon pages are always 4K per the virtio spec,

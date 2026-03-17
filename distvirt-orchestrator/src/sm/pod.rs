@@ -12,10 +12,16 @@ pub enum PodInput {
     PodRunning,
     /// Pod is gone. `worker_lost` suppresses artifact deletion for Resuming pods
     /// (the artifact may be on a different worker; namespace layer handles cleanup).
-    PodGone { worker_lost: bool },
-    PodSuspended { artifact_id: ArtifactId },
+    PodGone {
+        worker_lost: bool,
+    },
+    PodSuspended {
+        artifact_id: ArtifactId,
+    },
     PodSuspendFailed,
-    TimerFired { timer_key: TimerKey },
+    TimerFired {
+        timer_key: TimerKey,
+    },
 }
 
 /// Side-effect outputs from pod lifecycle transitions.
@@ -23,8 +29,14 @@ pub enum PodInput {
 pub enum PodOutput {
     TimerSet(TimerKey, Duration),
     TimerCancel(TimerKey),
-    DeleteArtifact { artifact_id: ArtifactId },
-    SuspendRequest { pod_id: PodId, worker_id: WorkerId, artifact_id: ArtifactId },
+    DeleteArtifact {
+        artifact_id: ArtifactId,
+    },
+    SuspendRequest {
+        pod_id: PodId,
+        worker_id: WorkerId,
+        artifact_id: ArtifactId,
+    },
 }
 
 /// Result of a pod lifecycle step, consumed by the workload coordinator.
@@ -46,10 +58,18 @@ pub enum PodOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PodState {
-    Launching { launch_timeout: TimerKey },
+    Launching {
+        launch_timeout: TimerKey,
+    },
     Running,
-    Suspending { artifact_id: ArtifactId, suspend_timeout: TimerKey },
-    Resuming { artifact_id: ArtifactId, resume_timeout: TimerKey },
+    Suspending {
+        artifact_id: ArtifactId,
+        suspend_timeout: TimerKey,
+    },
+    Resuming {
+        artifact_id: ArtifactId,
+        resume_timeout: TimerKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -131,10 +151,7 @@ impl PodSlot {
             suspend_timeout: suspend_timeout.clone(),
         };
         vec![
-            PodOutput::TimerSet(
-                suspend_timeout,
-                Duration::from_secs(SUSPEND_TIMEOUT_SECS),
-            ),
+            PodOutput::TimerSet(suspend_timeout, Duration::from_secs(SUSPEND_TIMEOUT_SECS)),
             PodOutput::SuspendRequest {
                 pod_id: self.pod_id.clone(),
                 worker_id: self.worker_id.clone(),
@@ -215,10 +232,13 @@ impl PodSlot {
             },
             PodInput::PodSuspendFailed => match &self.pod_state {
                 PodState::Suspending {
-                    artifact_id, suspend_timeout,
+                    artifact_id,
+                    suspend_timeout,
                 } => {
                     outputs.push(PodOutput::TimerCancel(suspend_timeout.clone()));
-                    outputs.push(PodOutput::DeleteArtifact { artifact_id: artifact_id.clone() });
+                    outputs.push(PodOutput::DeleteArtifact {
+                        artifact_id: artifact_id.clone(),
+                    });
                     PodOutcome::SuspendFailed
                 }
                 _ => PodOutcome::Noop,
@@ -227,9 +247,9 @@ impl PodSlot {
                 PodState::Launching { launch_timeout } if *launch_timeout == timer_key => {
                     PodOutcome::TimedOut
                 }
-                PodState::Suspending { suspend_timeout, .. } if *suspend_timeout == timer_key => {
-                    PodOutcome::TimedOut
-                }
+                PodState::Suspending {
+                    suspend_timeout, ..
+                } if *suspend_timeout == timer_key => PodOutcome::TimedOut,
                 PodState::Resuming {
                     artifact_id,
                     resume_timeout,

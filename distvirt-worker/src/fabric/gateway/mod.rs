@@ -16,7 +16,7 @@ pub use dns::DnsRegistry;
 
 use crate::packet::{FabricPacket, with_fabric_header};
 use dns::DnsForwarder;
-pub use tun::{EgressPort, TunEgress, ChannelEgress};
+pub use tun::{ChannelEgress, EgressPort, TunEgress};
 
 use distvirt_worker_protocol::NamespaceId;
 
@@ -106,10 +106,19 @@ impl ChannelDevice {
 }
 
 impl Device for ChannelDevice {
-    type RxToken<'a> = ChannelRxToken where Self: 'a;
-    type TxToken<'a> = ChannelTxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = ChannelRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = ChannelTxToken<'a>
+    where
+        Self: 'a;
 
-    fn receive(&mut self, _timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        _timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let pkt = self.rx_queue.pop_front()?;
         Some((ChannelRxToken(pkt), ChannelTxToken(&mut self.tx_queue)))
     }
@@ -171,12 +180,22 @@ impl FabricGateway<ChannelEgress> {
         registry: DnsRegistry,
         pod_gateway_ip: [u8; 4],
         pod_prefix_len: u8,
-    ) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>, mpsc::Sender<Vec<u8>>)> {
+    ) -> anyhow::Result<(
+        Self,
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+        mpsc::Sender<Vec<u8>>,
+    )> {
         let (channel_egress, internet_rx, internet_tx) = ChannelEgress::new(CHANNEL_BUF);
-        let (gw, egress_tx, ingress_rx) = Self::new_with_egress(channel_egress, registry, pod_gateway_ip, pod_prefix_len)?;
+        let (gw, egress_tx, ingress_rx) =
+            Self::new_with_egress(channel_egress, registry, pod_gateway_ip, pod_prefix_len)?;
         log::info!(
             "gateway: created channel egress with smoltcp interface at {}.{}.{}.{}/{}",
-            pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3],
+            pod_gateway_ip[0],
+            pod_gateway_ip[1],
+            pod_gateway_ip[2],
+            pod_gateway_ip[3],
             pod_prefix_len,
         );
         Ok((gw, egress_tx, ingress_rx, internet_rx, internet_tx))
@@ -184,7 +203,12 @@ impl FabricGateway<ChannelEgress> {
 }
 
 impl<E: EgressPort> FabricGateway<E> {
-    pub fn new_with_egress(egress: E, registry: DnsRegistry, pod_gateway_ip: [u8; 4], pod_prefix_len: u8) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
+    pub fn new_with_egress(
+        egress: E,
+        registry: DnsRegistry,
+        pod_gateway_ip: [u8; 4],
+        pod_prefix_len: u8,
+    ) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create DNS forwarder sub-component.
         let dns = DnsForwarder::new(registry)?;
 
@@ -196,7 +220,12 @@ impl<E: EgressPort> FabricGateway<E> {
         iface.update_ip_addrs(|addrs| {
             addrs
                 .push(IpCidr::new(
-                    IpAddress::v4(pod_gateway_ip[0], pod_gateway_ip[1], pod_gateway_ip[2], pod_gateway_ip[3]),
+                    IpAddress::v4(
+                        pod_gateway_ip[0],
+                        pod_gateway_ip[1],
+                        pod_gateway_ip[2],
+                        pod_gateway_ip[3],
+                    ),
                     pod_prefix_len,
                 ))
                 .ok();
@@ -219,7 +248,11 @@ impl<E: EgressPort> FabricGateway<E> {
         let (egress_tx, egress_rx) = mpsc::channel(CHANNEL_BUF);
         let (ingress_tx, ingress_rx) = mpsc::channel(CHANNEL_BUF);
 
-        let pod_subnet_mask = if pod_prefix_len >= 32 { u32::MAX } else { !0u32 << (32 - pod_prefix_len) };
+        let pod_subnet_mask = if pod_prefix_len >= 32 {
+            u32::MAX
+        } else {
+            !0u32 << (32 - pod_prefix_len)
+        };
         let pod_subnet_bits = u32::from_be_bytes(pod_gateway_ip) & pod_subnet_mask;
 
         Ok((
@@ -363,4 +396,3 @@ impl<E: EgressPort> FabricGateway<E> {
         );
     }
 }
-

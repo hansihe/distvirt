@@ -14,11 +14,7 @@ pub fn broadcast_to_active_workers(
     }
 }
 
-pub fn send_to_worker(
-    worker_id: &WorkerId,
-    out: &mut NamespaceOutput,
-    cmd: WorkerCommand,
-) {
+pub fn send_to_worker(worker_id: &WorkerId, out: &mut NamespaceOutput, cmd: WorkerCommand) {
     out.worker_commands.push((worker_id.clone(), cmd));
 }
 
@@ -100,9 +96,13 @@ mod tests {
     #[test]
     fn send_to_worker_appends_one() {
         let mut out = NamespaceOutput::default();
-        send_to_worker(&wid("w1"), &mut out, WorkerCommand::DestroyNamespace {
-            namespace_id: NamespaceId::from("test-ns"),
-        });
+        send_to_worker(
+            &wid("w1"),
+            &mut out,
+            WorkerCommand::DestroyNamespace {
+                namespace_id: NamespaceId::from("test-ns"),
+            },
+        );
         assert_eq!(out.worker_commands.len(), 1);
         assert_eq!(out.worker_commands[0].0, wid("w1"));
     }
@@ -117,7 +117,8 @@ mod tests {
         let mut out = NamespaceOutput::default();
         broadcast_to_active_workers(&workers, &mut out, dummy_cmd);
         // Verify that only Active workers received commands.
-        let cmd_worker_ids: HashSet<_> = out.worker_commands.iter().map(|(w, _)| w.clone()).collect();
+        let cmd_worker_ids: HashSet<_> =
+            out.worker_commands.iter().map(|(w, _)| w.clone()).collect();
         assert!(cmd_worker_ids.contains(&wid("w1")));
         assert!(cmd_worker_ids.contains(&wid("w2")));
         assert!(!cmd_worker_ids.contains(&wid("w3")));

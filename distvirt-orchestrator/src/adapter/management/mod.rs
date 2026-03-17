@@ -27,7 +27,6 @@ pub struct ManagementAdapter {
     workload_mgmt: HashMap<WorkloadId, ManagementId>,
     /// Management port per service
     service_mgmt: HashMap<crate::sm_new::ServiceId, ManagementId>,
-
 }
 
 impl ManagementAdapter {
@@ -105,10 +104,7 @@ impl ManagementAdapter {
             if let Some(&router_id) = self.proto_to_router_svc.get(name_str) {
                 // Update: re-set the spec signal
                 let mgmt_id = self.service_mgmt[&router_id];
-                router.set_management_svc_spec(
-                    mgmt_id,
-                    self.to_sm_service_spec(spec),
-                );
+                router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(spec));
             } else {
                 // Create new service
                 let router_id = crate::sm_new::ServiceId(self.next_service_id);
@@ -118,13 +114,12 @@ impl ManagementAdapter {
                 let has_activation = spec.activation.is_some();
                 router.create_service(router_id, ServiceSm::new(has_activation));
                 router.set_management_to_service_edges(mgmt_id, vec![router_id]);
-                router.set_management_svc_spec(
-                    mgmt_id,
-                    self.to_sm_service_spec(spec),
-                );
+                router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(spec));
 
-                self.proto_to_router_svc.insert(name_str.to_owned(), router_id);
-                self.router_to_proto_svc.insert(router_id, name_str.to_owned());
+                self.proto_to_router_svc
+                    .insert(name_str.to_owned(), router_id);
+                self.router_to_proto_svc
+                    .insert(router_id, name_str.to_owned());
                 self.service_mgmt.insert(router_id, mgmt_id);
             }
         }

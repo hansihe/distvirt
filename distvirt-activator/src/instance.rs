@@ -1,8 +1,8 @@
 //! ActivatorInstance: per-service WASM instance with event queue.
 
 use anyhow::{Context, Result};
-use wasmtime::component::{Component, Linker};
 use wasmtime::Store;
+use wasmtime::component::{Component, Linker};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::bindings;
@@ -43,11 +43,12 @@ impl ActivatorInstance {
         let wasi = WasiCtxBuilder::new().build();
         let table = ResourceTable::new();
         let mut store = Store::new(engine, HostState { wasi, table });
-        store.set_fuel(FUEL_PER_CALL).context("setting initial fuel")?;
+        store
+            .set_fuel(FUEL_PER_CALL)
+            .context("setting initial fuel")?;
 
         let mut linker = Linker::new(engine);
-        wasmtime_wasi::add_to_linker_sync(&mut linker)
-            .context("adding WASI to linker")?;
+        wasmtime_wasi::add_to_linker_sync(&mut linker).context("adding WASI to linker")?;
         let bindings = bindings::Activator::instantiate(&mut store, component, &linker)
             .context("instantiating activator component")?;
 
@@ -194,9 +195,7 @@ fn action_from_wit(action: bindings::Action) -> Action {
         },
         bindings::Action::PacketReply((flow, data)) => Action::PacketReply { flow, data },
         bindings::Action::ReplayPacket(data) => Action::ReplayPacket(data),
-        bindings::Action::DownstreamSend((stream, data)) => {
-            Action::DownstreamSend { stream, data }
-        }
+        bindings::Action::DownstreamSend((stream, data)) => Action::DownstreamSend { stream, data },
         bindings::Action::DownstreamClose(s) => Action::DownstreamClose(s),
         bindings::Action::PauseDownstream(s) => Action::PauseDownstream(s),
         bindings::Action::ResumeDownstream(s) => Action::ResumeDownstream(s),

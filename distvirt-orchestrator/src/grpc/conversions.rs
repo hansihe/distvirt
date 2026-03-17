@@ -76,7 +76,14 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
     let ip_octets = ip.octets();
     let pod_network = PodNetworkConfig {
         ip,
-        mac: [0x02, 0x00, ip_octets[0], ip_octets[1], ip_octets[2], ip_octets[3]],
+        mac: [
+            0x02,
+            0x00,
+            ip_octets[0],
+            ip_octets[1],
+            ip_octets[2],
+            ip_octets[3],
+        ],
         gateway: Ipv4Addr::new(0, 0, 0, 0),
         netmask: String::new(),
     };
@@ -203,9 +210,7 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
                         max_flows: 1024,
                     }
                 }
-                proto::activator_config::Activator::Http2(_) => {
-                    ActivatorConfig::Http2 {}
-                }
+                proto::activator_config::Activator::Http2(_) => ActivatorConfig::Http2 {},
                 proto::activator_config::Activator::Passthrough(_) => {
                     // Passthrough on a service: no protocol-specific activator config.
                     // The service will activate on any traffic.
@@ -273,8 +278,15 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
 
     for (wl_id, wl) in &report.workloads {
         // Look up pod/worker info from the pods collection if this workload has a pod.
-        let (pod_id_ref, worker_id_ref) = wl.pod_id.as_ref()
-            .and_then(|pid| report.pods.get(pid).map(|p| (Some(&p.pod_id), Some(&p.worker_id))))
+        let (pod_id_ref, worker_id_ref) = wl
+            .pod_id
+            .as_ref()
+            .and_then(|pid| {
+                report
+                    .pods
+                    .get(pid)
+                    .map(|p| (Some(&p.pod_id), Some(&p.worker_id)))
+            })
             .unwrap_or((wl.pod_id.as_ref(), None));
 
         workloads.insert(
@@ -292,9 +304,16 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
 
     for (svc_id, svc) in &report.services {
         // Look up pod/worker from the linked workload's pod.
-        let (pod_id, worker_id) = report.workloads.get(&svc.workload_id)
+        let (pod_id, worker_id) = report
+            .workloads
+            .get(&svc.workload_id)
             .and_then(|wl| wl.pod_id.as_ref())
-            .and_then(|pid| report.pods.get(pid).map(|p| (Some(p.pod_id.clone()), Some(p.worker_id.clone()))))
+            .and_then(|pid| {
+                report
+                    .pods
+                    .get(pid)
+                    .map(|p| (Some(p.pod_id.clone()), Some(p.worker_id.clone())))
+            })
             .unwrap_or((None, None));
 
         services.insert(
@@ -373,9 +392,7 @@ fn convert_service_state_from_strings(
 ) -> proto::ServiceState {
     let state = match state {
         "idle" => proto::service_state::State::Idle(proto::ServiceIdle {}),
-        "need_backend" => {
-            proto::service_state::State::NeedBackend(proto::ServiceNeedBackend {})
-        }
+        "need_backend" => proto::service_state::State::NeedBackend(proto::ServiceNeedBackend {}),
         "active" => proto::service_state::State::Active(proto::ServiceActive {
             pod_id: pod_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
             worker_id: worker_id.as_ref().map(|w| w.0.clone()).unwrap_or_default(),
@@ -409,13 +426,11 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
             event: wl_event,
         } => {
             let inner = match wl_event {
-                SmWorkloadEvent::DemandChanged {
-                    demanding_services,
-                } => proto::workload_event::Event::DemandChanged(
-                    proto::WorkloadDemandChanged {
+                SmWorkloadEvent::DemandChanged { demanding_services } => {
+                    proto::workload_event::Event::DemandChanged(proto::WorkloadDemandChanged {
                         demanding_services,
-                    },
-                ),
+                    })
+                }
                 SmWorkloadEvent::PodLaunching { pod_id, worker_id } => {
                     proto::workload_event::Event::PodLaunching(proto::WorkloadPodLaunching {
                         pod_id: pod_id.0,
@@ -442,14 +457,17 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
                         worker_id: worker_id.0,
                     })
                 }
-                SmWorkloadEvent::PodSuspended { worker_id, artifact_id } => {
-                    proto::workload_event::Event::PodSuspended(proto::WorkloadPodSuspended {
-                        worker_id: worker_id.0,
-                        snapshot_id: artifact_id.0,
-                    })
-                }
+                SmWorkloadEvent::PodSuspended {
+                    worker_id,
+                    artifact_id,
+                } => proto::workload_event::Event::PodSuspended(proto::WorkloadPodSuspended {
+                    worker_id: worker_id.0,
+                    snapshot_id: artifact_id.0,
+                }),
                 SmWorkloadEvent::PodSuspendFailed { reason } => {
-                    proto::workload_event::Event::PodSuspendFailed(proto::WorkloadPodSuspendFailed { reason })
+                    proto::workload_event::Event::PodSuspendFailed(
+                        proto::WorkloadPodSuspendFailed { reason },
+                    )
                 }
                 SmWorkloadEvent::PodResuming { pod_id, worker_id } => {
                     proto::workload_event::Event::PodResuming(proto::WorkloadPodResuming {
@@ -476,7 +494,9 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
             let inner = match svc_event {
                 SmServiceEvent::Activated { trigger } => {
                     let proto_trigger = match trigger {
-                        ServiceActivationTrigger::Traffic => proto::ServiceActivationTrigger::Traffic,
+                        ServiceActivationTrigger::Traffic => {
+                            proto::ServiceActivationTrigger::Traffic
+                        }
                     };
                     proto::service_event::Event::Activated(proto::ServiceActivated {
                         trigger: proto_trigger.into(),
@@ -486,29 +506,33 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
                     proto::service_event::Event::BackendReady(proto::ServiceBackendReady {})
                 }
                 SmServiceEvent::IdleTimerStarted { timeout } => {
-                    proto::service_event::Event::IdleTimerStarted(
-                        proto::ServiceIdleTimerStarted {
-                            timeout_ms: timeout.as_millis() as u64,
-                        },
-                    )
+                    proto::service_event::Event::IdleTimerStarted(proto::ServiceIdleTimerStarted {
+                        timeout_ms: timeout.as_millis() as u64,
+                    })
                 }
                 SmServiceEvent::IdleTimerCancelled { reason } => {
                     let proto_reason = match reason {
-                        IdleTimerCancelReason::NewTraffic => proto::IdleTimerCancelReason::NewTraffic,
+                        IdleTimerCancelReason::NewTraffic => {
+                            proto::IdleTimerCancelReason::NewTraffic
+                        }
                     };
                     proto::service_event::Event::IdleTimerCancelled(
-                        proto::ServiceIdleTimerCancelled { reason: proto_reason.into() },
+                        proto::ServiceIdleTimerCancelled {
+                            reason: proto_reason.into(),
+                        },
                     )
                 }
                 SmServiceEvent::IdleTimeoutFired => {
-                    proto::service_event::Event::IdleTimeoutFired(
-                        proto::ServiceIdleTimeoutFired {},
-                    )
+                    proto::service_event::Event::IdleTimeoutFired(proto::ServiceIdleTimeoutFired {})
                 }
                 SmServiceEvent::Deactivated { reason } => {
                     let proto_reason = match reason {
-                        ServiceDeactivationReason::IdleTimeout => proto::ServiceDeactivationReason::IdleTimeout,
-                        ServiceDeactivationReason::ForceDeactivate => proto::ServiceDeactivationReason::ForceDeactivate,
+                        ServiceDeactivationReason::IdleTimeout => {
+                            proto::ServiceDeactivationReason::IdleTimeout
+                        }
+                        ServiceDeactivationReason::ForceDeactivate => {
+                            proto::ServiceDeactivationReason::ForceDeactivate
+                        }
                     };
                     proto::service_event::Event::Deactivated(proto::ServiceDeactivated {
                         reason: proto_reason.into(),

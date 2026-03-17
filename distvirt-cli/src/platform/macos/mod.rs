@@ -1,5 +1,5 @@
-mod tun;
 mod net;
+mod tun;
 
+pub use net::{add_route, configure_interface, remove_route};
 pub use tun::TunDevice;
-pub use net::{configure_interface, add_route, remove_route};

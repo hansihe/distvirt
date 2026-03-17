@@ -14,8 +14,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
-use crate::adapter::timer::TimerConfig;
-use crate::core::{GlobalWorkerId, SchedulerDecision};
 use super::namespace::NamespaceCore;
 use super::scheduler::SchedulerCore;
 use super::timer_wheel::TimerWheel;
@@ -25,6 +23,8 @@ use super::types::{
     WorkerStateCoreEvent,
 };
 use super::worker_state::WorkerStateCore;
+use crate::adapter::timer::TimerConfig;
+use crate::core::{GlobalWorkerId, SchedulerDecision};
 use crate::sm_new::WorkerInfo;
 use crate::types::NamespaceId;
 
@@ -204,12 +204,12 @@ impl OrchestratorCore {
                 self.route_namespace_effects(&ns_id, ns_effects, &mut effects, now);
             }
 
-            let ws_effects =
-                self.worker_state
-                    .process(WorkerStateCoreEvent::NamespaceAssigned {
-                        worker_id,
-                        namespace_id: ns_id,
-                    });
+            let ws_effects = self
+                .worker_state
+                .process(WorkerStateCoreEvent::NamespaceAssigned {
+                    worker_id,
+                    namespace_id: ns_id,
+                });
             self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
@@ -245,12 +245,12 @@ impl OrchestratorCore {
                 self.route_namespace_effects(&ns_id, ns_effects, &mut effects, now);
             }
 
-            let ws_effects =
-                self.worker_state
-                    .process(WorkerStateCoreEvent::NamespaceUnassigned {
-                        worker_id,
-                        namespace_id: ns_id,
-                    });
+            let ws_effects = self
+                .worker_state
+                .process(WorkerStateCoreEvent::NamespaceUnassigned {
+                    worker_id,
+                    namespace_id: ns_id,
+                });
             self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
@@ -314,12 +314,12 @@ impl OrchestratorCore {
                 self.route_namespace_effects(&info.namespace_id, ns_effects, &mut effects, now);
             }
 
-            let ws_effects =
-                self.worker_state
-                    .process(WorkerStateCoreEvent::NamespaceAssigned {
-                        worker_id,
-                        namespace_id: info.namespace_id.clone(),
-                    });
+            let ws_effects = self
+                .worker_state
+                .process(WorkerStateCoreEvent::NamespaceAssigned {
+                    worker_id,
+                    namespace_id: info.namespace_id.clone(),
+                });
             self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
@@ -329,10 +329,7 @@ impl OrchestratorCore {
     /// Destroy a namespace.
     ///
     /// Fans out NamespaceUnassigned, unregisters segment, removes namespace core.
-    pub fn destroy_namespace(
-        &mut self,
-        namespace_id: &NamespaceId,
-    ) -> OrchestratorEffects {
+    pub fn destroy_namespace(&mut self, namespace_id: &NamespaceId) -> OrchestratorEffects {
         let mut effects = OrchestratorEffects::default();
 
         if self.namespaces.remove(namespace_id).is_none() {
@@ -348,12 +345,12 @@ impl OrchestratorCore {
 
         let worker_ids: Vec<_> = self.connected_workers.keys().copied().collect();
         for worker_id in worker_ids {
-            let ws_effects =
-                self.worker_state
-                    .process(WorkerStateCoreEvent::NamespaceUnassigned {
-                        worker_id,
-                        namespace_id: namespace_id.clone(),
-                    });
+            let ws_effects = self
+                .worker_state
+                .process(WorkerStateCoreEvent::NamespaceUnassigned {
+                    worker_id,
+                    namespace_id: namespace_id.clone(),
+                });
             // destroy_namespace doesn't need `now` since it can't produce new timers
             // (the namespace is already removed).
             self.route_worker_state_effects(ws_effects, &mut effects, Duration::ZERO);
@@ -388,9 +385,7 @@ impl OrchestratorCore {
         effects.worker_commands.extend(ns_effects.worker_commands);
 
         for cmd in ns_effects.broadcast_commands {
-            effects
-                .broadcast_commands
-                .push((namespace_id.clone(), cmd));
+            effects.broadcast_commands.push((namespace_id.clone(), cmd));
         }
 
         for msg in ns_effects.scheduler_messages {
@@ -474,17 +469,14 @@ impl OrchestratorCore {
             };
 
             if let Some(ns) = self.namespaces.get_mut(&target_ns_id) {
-                let ns_effects =
-                    ns.process_event(NamespaceCoreEvent::SchedulerDecision(decision));
+                let ns_effects = ns.process_event(NamespaceCoreEvent::SchedulerDecision(decision));
                 if !ns_effects.timer_actions.is_empty() {
                     self.timer_wheel
                         .absorb(&target_ns_id, ns_effects.timer_actions, now);
                 }
                 effects.worker_commands.extend(ns_effects.worker_commands);
                 for cmd in ns_effects.broadcast_commands {
-                    effects
-                        .broadcast_commands
-                        .push((target_ns_id.clone(), cmd));
+                    effects.broadcast_commands.push((target_ns_id.clone(), cmd));
                 }
                 debug_assert!(
                     ns_effects.scheduler_messages.is_empty(),
@@ -672,7 +664,10 @@ mod tests {
                     distvirt_worker_protocol::WorkerCommand::CreateNamespace { .. }
                 )
         });
-        assert!(has_create_ns, "existing worker should receive CreateNamespace");
+        assert!(
+            has_create_ns,
+            "existing worker should receive CreateNamespace"
+        );
     }
 
     #[test]

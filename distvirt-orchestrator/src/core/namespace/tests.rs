@@ -2,9 +2,7 @@ use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
 use crate::core::types::{NamespaceCoreEvent, SchedulerDecision, WorkerNamespaceEventKind};
-use crate::sm_new::{
-    ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm,
-};
+use crate::sm_new::{ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm};
 use crate::task::{GlobalWorkerId, WorkerNamespaceEvent};
 use crate::types::NamespaceId;
 
@@ -38,8 +36,13 @@ fn create_configured_core() -> (NamespaceCore, GlobalWorkerId, PodId) {
     let mgmt = core.router.create_management();
     core.router.create_workload(W1, WorkloadSm::new());
     core.router.set_management_to_workload_edges(mgmt, vec![W1]);
-    core.router
-        .set_management_wl_spec(mgmt, crate::sm_new::WorkloadSpec { image: "app:v1".into(), ..Default::default() });
+    core.router.set_management_wl_spec(
+        mgmt,
+        crate::sm_new::WorkloadSpec {
+            image: "app:v1".into(),
+            ..Default::default()
+        },
+    );
 
     core.router.create_service(S1, ServiceSm::new(false));
     core.router.set_management_to_service_edges(mgmt, vec![S1]);
@@ -103,9 +106,9 @@ fn schedule_request_produced_for_new_pod() {
         .chain(effects2.scheduler_messages.iter())
         .collect();
 
-    let has_request = all_scheduler_msgs.iter().any(|m| {
-        matches!(m, SchedulerMessage::RequestLease { .. })
-    });
+    let has_request = all_scheduler_msgs
+        .iter()
+        .any(|m| matches!(m, SchedulerMessage::RequestLease { .. }));
     assert!(has_request, "expected a RequestLease scheduler message");
 }
 

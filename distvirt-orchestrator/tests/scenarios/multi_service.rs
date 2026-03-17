@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 #[allow(unused_imports)]
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
@@ -122,13 +122,15 @@ fn test_always_on_multi_service_both_get_create_service() {
     h.assert_worker_received_command_matching(
         &w1,
         "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+            ) || matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            )
+        },
     );
 
     // Both services should be Active (always-on with running workload).
@@ -172,13 +174,15 @@ fn test_add_service_to_running_workload() {
     h.assert_worker_received_command_matching(
         &w1,
         "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+            ) || matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            )
+        },
     );
 
     // New service should be Active (workload is already Running).
@@ -247,13 +251,15 @@ fn test_add_service_to_suspended_workload() {
     h.assert_worker_received_command_matching(
         &w1,
         "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+            ) || matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            )
+        },
     );
 
     // Activating the new service should resume the workload.
@@ -285,13 +291,15 @@ fn test_late_joining_worker_receives_create_service() {
     h.assert_worker_received_command_matching(
         &w2,
         "EndpointSync or EndpointUpdate with endpoints on w2",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-        ) || matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
+            ) || matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
+            )
+        },
     );
 }
 
@@ -335,10 +343,12 @@ fn test_remove_service_updates_demand() {
     h.assert_worker_received_command_matching(
         &w1,
         "EndpointUpdate with removed_ips for svc-b",
-        |cmd| matches!(
-            cmd,
-            WorkerCommand::EndpointUpdate { removed_ips, .. } if !removed_ips.is_empty()
-        ),
+        |cmd| {
+            matches!(
+                cmd,
+                WorkerCommand::EndpointUpdate { removed_ips, .. } if !removed_ips.is_empty()
+            )
+        },
     );
 
     // svc-b should no longer exist in the namespace.
@@ -381,7 +391,9 @@ fn test_remove_only_active_service_drops_demand() {
     // suspend_on_idle=true → workload should begin suspending/suspended immediately.
     let state = h.workload_state("ns", "shared");
     assert!(
-        state.awaiting_suspend || state.suspended_artifact.is_some() || (!state.has_demand && !state.pod_running),
+        state.awaiting_suspend
+            || state.suspended_artifact.is_some()
+            || (!state.has_demand && !state.pod_running),
         "workload should begin deactivation immediately after service removal, got {:?}",
         state,
     );

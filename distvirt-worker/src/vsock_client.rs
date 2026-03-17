@@ -1,6 +1,6 @@
 use std::future::poll_fn;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -66,15 +66,14 @@ impl GuestSession {
     /// Opens the control stream, sends `StreamHeader::Control`, and spawns
     /// a background task that drives the yamux connection and collects
     /// incoming streams from the guest.
-    pub async fn new(socket: tokio::net::UnixStream) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>, DriverExitSignal)> {
+    pub async fn new(
+        socket: tokio::net::UnixStream,
+    ) -> anyhow::Result<(Self, TaskHandle<anyhow::Result<()>>, DriverExitSignal)> {
         // Convert tokio socket to futures-io compatible.
         let compat_socket = socket.compat();
 
-        let mut conn = yamux::Connection::new(
-            compat_socket,
-            yamux::Config::default(),
-            yamux::Mode::Client,
-        );
+        let mut conn =
+            yamux::Connection::new(compat_socket, yamux::Config::default(), yamux::Mode::Client);
 
         // Open the control stream while driving the connection.
         //
@@ -93,12 +92,12 @@ impl GuestSession {
                 match conn.poll_next_inbound(cx) {
                     std::task::Poll::Ready(Some(Ok(stream))) => early_inbound.push(stream),
                     std::task::Poll::Ready(Some(Err(e))) => {
-                        return std::task::Poll::Ready(Err(anyhow::Error::from(e)))
+                        return std::task::Poll::Ready(Err(anyhow::Error::from(e)));
                     }
                     std::task::Poll::Ready(None) => {
                         return std::task::Poll::Ready(Err(anyhow::anyhow!(
                             "yamux connection closed"
-                        )))
+                        )));
                     }
                     std::task::Poll::Pending => break,
                 }
@@ -167,11 +166,15 @@ impl GuestSession {
             .context("write header payload")?;
         control.flush().await.context("flush header")?;
 
-        Ok((GuestSession {
-            control,
-            events: None,
-            incoming_rx,
-        }, yamux_driver, exit_rx))
+        Ok((
+            GuestSession {
+                control,
+                events: None,
+                incoming_rx,
+            },
+            yamux_driver,
+            exit_rx,
+        ))
     }
 
     /// Send a length-prefixed JSON message on the control stream.

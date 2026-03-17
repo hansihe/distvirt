@@ -1,12 +1,12 @@
 use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
 
+mod pod;
 mod service;
 mod workload;
-mod pod;
 
+pub use pod::*;
 pub use service::*;
 pub use workload::*;
-pub use pod::*;
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct ServiceId(pub u64);
@@ -29,7 +29,9 @@ pub enum PodStatus {
     Running,
     Suspending,
     /// Terminal: pod successfully suspended, artifact available for resume.
-    Suspended { artifact_id: ArtifactId },
+    Suspended {
+        artifact_id: ArtifactId,
+    },
     /// Terminal: pod exited gracefully (exit code 0). Not counted as failure.
     Finished,
     /// Terminal: pod failed (non-zero exit, error, timeout, abandoned).
@@ -42,10 +44,12 @@ impl PodStatus {
     fn is_terminal(&self) -> bool {
         matches!(
             self,
-            PodStatus::Suspended { .. } | PodStatus::Failed | PodStatus::Finished | PodStatus::Displaced
+            PodStatus::Suspended { .. }
+                | PodStatus::Failed
+                | PodStatus::Finished
+                | PodStatus::Displaced
         )
     }
-
 }
 
 /// Intent signal from workload to pod via ownership edge.
@@ -101,7 +105,9 @@ pub struct LeaseInfo {
 
 impl Default for LeaseInfo {
     fn default() -> Self {
-        LeaseInfo { worker_id: WorkerId(0) }
+        LeaseInfo {
+            worker_id: WorkerId(0),
+        }
     }
 }
 
@@ -275,7 +281,10 @@ impl Aggregator for SpecAggregator {
     type Input = (ManagementId, WorkloadSpec);
     type Output = Option<(ManagementId, WorkloadSpec)>;
 
-    fn aggregate(&self, inputs: &[(ManagementId, WorkloadSpec)]) -> Option<(ManagementId, WorkloadSpec)> {
+    fn aggregate(
+        &self,
+        inputs: &[(ManagementId, WorkloadSpec)],
+    ) -> Option<(ManagementId, WorkloadSpec)> {
         inputs.first().cloned()
     }
 }

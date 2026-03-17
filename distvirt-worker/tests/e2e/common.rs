@@ -29,13 +29,19 @@ pub struct WorkerSetup {
 
 /// Spawn a worker on one half of a duplex and return the orchestrator connection
 /// along with the worker task handle.
-pub async fn setup() -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+pub async fn setup() -> anyhow::Result<(
+    OrchestratorConnection,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     let ws = setup_full(None, None, vec![]).await?;
     Ok((ws.conn, ws.handle))
 }
 
 /// Like `setup()`, but with a WASM component directory for activator support.
-pub async fn setup_with_activators() -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+pub async fn setup_with_activators() -> anyhow::Result<(
+    OrchestratorConnection,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let component_dir = manifest_dir.join("../activators/target/components");
     assert!(
@@ -51,7 +57,10 @@ pub async fn setup_with_activators() -> anyhow::Result<(OrchestratorConnection, 
 pub async fn setup_with_pools(
     worker_id: &str,
     pushed_pools: Vec<PoolInfo>,
-) -> anyhow::Result<(OrchestratorConnection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+) -> anyhow::Result<(
+    OrchestratorConnection,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     let ws = setup_full(None, Some(worker_id), pushed_pools).await?;
     Ok((ws.conn, ws.handle))
 }
@@ -83,17 +92,26 @@ async fn setup_full(
 
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
-    let image_provider = distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
-        socket: containerd_socket,
-        namespace: "default".into(),
-        docker_config: None,
-    };
+    let image_provider =
+        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
+            socket: containerd_socket,
+            namespace: "default".into(),
+            docker_config: None,
+        };
 
     let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
-        let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs>::new(kernel, rootfs, vmm, image_provider, component_dir, String::new(), distvirt_worker::TunGatewayProvider);
+        let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs>::new(
+            kernel,
+            rootfs,
+            vmm,
+            image_provider,
+            component_dir,
+            String::new(),
+            distvirt_worker::TunGatewayProvider,
+        );
         worker.run(conn, "test-secret".to_string()).await
     });
 
@@ -102,7 +120,10 @@ async fn setup_full(
 
     // Perform handshake
     let hello = conn.recv_hello().await?;
-    eprintln!("e2e: worker '{}' capabilities: {:?}", wid, hello.capabilities);
+    eprintln!(
+        "e2e: worker '{}' capabilities: {:?}",
+        wid, hello.capabilities
+    );
 
     conn.send_accepted(&WorkerAccepted {
         worker_id: WorkerId::from(wid),
@@ -113,7 +134,10 @@ async fn setup_full(
     .await?;
 
     let ready = conn.recv_ready().await?;
-    eprintln!("e2e: worker '{}' handshake complete (transfer_port: {:?})", wid, ready.transfer_listen_port);
+    eprintln!(
+        "e2e: worker '{}' handshake complete (transfer_port: {:?})",
+        wid, ready.transfer_listen_port
+    );
 
     Ok(WorkerSetup {
         conn,
@@ -126,12 +150,9 @@ async fn setup_full(
 /// collected output as a string. Useful for tests that want to print container
 /// output without necessarily asserting on it.
 pub async fn drain_log_stream(conn: &mut OrchestratorConnection) -> anyhow::Result<String> {
-    let (header, mut log_stream) = tokio::time::timeout(
-        EVENT_TIMEOUT,
-        conn.accept_log_stream(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
+    let (header, mut log_stream) = tokio::time::timeout(EVENT_TIMEOUT, conn.accept_log_stream())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for log stream"))??;
 
     let prefix = format!("[{}/{}]", header.pod_id, header.container_id);
     let mut log_data = Vec::new();
@@ -175,7 +196,10 @@ pub async fn shutdown_worker(
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(e))) => panic!("worker exited with error: {:#}", e),
         Ok(Err(e)) => panic!("worker task panicked: {}", e),
-        Err(_) => panic!("worker did not shut down within {:?} — VM process likely stuck", SHUTDOWN_TIMEOUT),
+        Err(_) => panic!(
+            "worker did not shut down within {:?} — VM process likely stuck",
+            SHUTDOWN_TIMEOUT
+        ),
     }
 }
 
@@ -183,9 +207,7 @@ pub async fn shutdown_worker(
 ///
 /// Use this in tests that don't need to validate the shutdown path and want
 /// fast teardown (e.g. when pods are running long-lived processes like `sleep`).
-pub async fn force_shutdown_worker(
-    worker_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
-) {
+pub async fn force_shutdown_worker(worker_handle: tokio::task::JoinHandle<anyhow::Result<()>>) {
     worker_handle.abort();
     let _ = worker_handle.await;
 }

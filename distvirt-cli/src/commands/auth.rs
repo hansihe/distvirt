@@ -1,10 +1,8 @@
 use crate::config;
 
 pub fn login(server: Option<&str>, token: Option<&str>) -> anyhow::Result<()> {
-    let server = server
-        .ok_or_else(|| anyhow::anyhow!("--server is required for login"))?;
-    let token = token
-        .ok_or_else(|| anyhow::anyhow!("--token is required for login"))?;
+    let server = server.ok_or_else(|| anyhow::anyhow!("--server is required for login"))?;
+    let token = token.ok_or_else(|| anyhow::anyhow!("--token is required for login"))?;
 
     let mut creds = config::load()?;
 
@@ -58,7 +56,11 @@ pub fn context_list() -> anyhow::Result<()> {
     }
 
     for (name, ctx) in &creds.contexts {
-        let marker = if name == &creds.current_context { "*" } else { " " };
+        let marker = if name == &creds.current_context {
+            "*"
+        } else {
+            " "
+        };
         println!("{} {:<20} {}", marker, name, ctx.server);
     }
     Ok(())

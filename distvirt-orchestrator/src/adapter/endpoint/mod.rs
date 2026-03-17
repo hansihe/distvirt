@@ -22,9 +22,7 @@ pub(crate) enum EndpointAction {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RegistryAction {
     /// Full replacement of the registry (sent on first update or to new workers).
-    Sync {
-        entries: Vec<RegistryEntry>,
-    },
+    Sync { entries: Vec<RegistryEntry> },
     /// Incremental update: added and removed entries.
     Update {
         added: Vec<RegistryEntry>,

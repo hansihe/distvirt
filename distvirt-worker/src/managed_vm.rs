@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use tokio::sync::watch;
 
 use distvirt_guest_protocol::{GuestEvent, GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 use distvirt_worker_protocol::ContainerConfig;
 
 use crate::io_session::IoSession;
-use crate::vmm::{NetConfig, SnapshotArtifacts, VmInstance};
 use crate::task_handle::TaskHandle;
+use crate::vmm::{NetConfig, SnapshotArtifacts, VmInstance};
 use crate::vsock_client::{DriverExitSignal, GuestEventStream, GuestSession};
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,11 @@ impl EventDispatch {
                         });
                     }
                     Ok(Some(GuestEvent::TaskError { task, message })) => {
-                        log::error!("EventDispatch: task error: task={}, message={}", task, message);
+                        log::error!(
+                            "EventDispatch: task error: task={}, message={}",
+                            task,
+                            message
+                        );
                         state_tx.send_modify(|s| {
                             if s.task_error.is_none() {
                                 s.task_error = Some((task, message));
@@ -86,7 +90,10 @@ impl EventDispatch {
             }
         });
 
-        Self { state_rx, _task: task }
+        Self {
+            state_rx,
+            _task: task,
+        }
     }
 
     /// Get an independent receiver for watching state changes.
@@ -140,14 +147,24 @@ impl<I: VmInstance> ManagedVm<I> {
 
         let msg: GuestMessage = session.recv().await.context("receive Ready")?;
         let started_containers = match msg {
-            GuestMessage::Ready { running_containers, pre_config_responses } => {
+            GuestMessage::Ready {
+                running_containers,
+                pre_config_responses,
+            } => {
                 if running_containers.is_empty() {
                     log::info!("guest is ready");
                 } else {
-                    log::info!("guest is ready (resumed, running containers: {:?})", running_containers);
+                    log::info!(
+                        "guest is ready (resumed, running containers: {:?})",
+                        running_containers
+                    );
                 }
                 if !pre_config_responses.is_empty() {
-                    log::info!("guest executed {} config drive command(s): {:?}", pre_config_responses.len(), pre_config_responses);
+                    log::info!(
+                        "guest executed {} config drive command(s): {:?}",
+                        pre_config_responses.len(),
+                        pre_config_responses
+                    );
                 }
                 running_containers
             }
@@ -156,14 +173,25 @@ impl<I: VmInstance> ManagedVm<I> {
 
         // Accept the event stream — the guest opens it before sending Ready,
         // so it is the first item in the incoming stream queue.
-        session.accept_event_stream().await.context("accept event stream")?;
+        session
+            .accept_event_stream()
+            .await
+            .context("accept event stream")?;
 
         // Take the event stream and spawn the background dispatch task.
-        let event_stream = session.take_event_stream()
+        let event_stream = session
+            .take_event_stream()
             .context("event stream not available after accept")?;
         let event_dispatch = EventDispatch::spawn(event_stream);
 
-        let mut vm = Self { instance, session, yamux_driver: Some(yamux_driver), driver_exit_signal: Some(driver_exit_signal), started_containers, event_dispatch: Some(event_dispatch) };
+        let mut vm = Self {
+            instance,
+            session,
+            yamux_driver: Some(yamux_driver),
+            driver_exit_signal: Some(driver_exit_signal),
+            started_containers,
+            event_dispatch: Some(event_dispatch),
+        };
         vm.set_clock().await.context("set guest clock")?;
         Ok(vm)
     }
@@ -263,7 +291,11 @@ impl<I: VmInstance> ManagedVm<I> {
             .await
             .context("send AddContainer")?;
 
-        let msg: GuestMessage = self.session.recv().await.context("receive ContainerAdded")?;
+        let msg: GuestMessage = self
+            .session
+            .recv()
+            .await
+            .context("receive ContainerAdded")?;
         match msg {
             GuestMessage::ContainerAdded { id } => log::info!("container added: {}", id),
             GuestMessage::Error { message } => bail!("AddContainer failed: {}", message),
@@ -391,7 +423,10 @@ impl<I: VmInstance> ManagedVm<I> {
             .context("snapshot VM")?;
 
         // 4. Kill the VM process.
-        self.instance.kill().await.context("kill VM after snapshot")?;
+        self.instance
+            .kill()
+            .await
+            .context("kill VM after snapshot")?;
 
         // 5. Abort the yamux driver now that the VM is dead.
         self.drain_yamux_driver();
@@ -416,12 +451,19 @@ impl<I: VmInstance> ManagedVm<I> {
     ) -> anyhow::Result<()> {
         // Signal all started containers with SIGTERM (best-effort).
         for id in self.started_containers.clone() {
-            let _ = self.session.send(&HostMessage::SignalContainer {
-                id,
-                signal: libc::SIGTERM,
-            }).await;
+            let _ = self
+                .session
+                .send(&HostMessage::SignalContainer {
+                    id,
+                    signal: libc::SIGTERM,
+                })
+                .await;
             // Drain the ContainerSignaled ack (best-effort).
-            let _ = tokio::time::timeout(Duration::from_millis(500), self.session.recv::<GuestMessage>()).await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                self.session.recv::<GuestMessage>(),
+            )
+            .await;
         }
 
         // Wait until all started containers appear in the exited map.
@@ -430,9 +472,11 @@ impl<I: VmInstance> ManagedVm<I> {
             // Map the result to a simple enum so we drop the watch::Ref
             // before potentially re-borrowing rx.
             let timed_out = {
-                let result = tokio::time::timeout(timeout, rx.wait_for(|s| {
-                    started.iter().all(|c| s.exited.contains_key(c))
-                })).await;
+                let result = tokio::time::timeout(
+                    timeout,
+                    rx.wait_for(|s| started.iter().all(|c| s.exited.contains_key(c))),
+                )
+                .await;
                 match result {
                     Ok(Ok(_ref)) => {
                         drop(_ref);
@@ -449,10 +493,15 @@ impl<I: VmInstance> ManagedVm<I> {
                 log::info!("all containers exited during graceful shutdown");
             } else {
                 let state = rx.borrow();
-                let remaining: Vec<_> = started.iter()
+                let remaining: Vec<_> = started
+                    .iter()
                     .filter(|c| !state.exited.contains_key(*c))
                     .collect();
-                log::warn!("{} container(s) did not exit within timeout: {:?}", remaining.len(), remaining);
+                log::warn!(
+                    "{} container(s) did not exit within timeout: {:?}",
+                    remaining.len(),
+                    remaining
+                );
             }
         }
 

@@ -1,7 +1,7 @@
-use super::*;
 use super::ServiceProcessor;
 use super::endpoint::EndpointTable;
-use crate::packet::{FabricPacket, FABRIC_HDR_SZ, with_fabric_header};
+use super::*;
+use crate::packet::{FABRIC_HDR_SZ, FabricPacket, with_fabric_header};
 use distvirt_worker_protocol::{
     EndpointKind, EndpointPlacement, EndpointPodBackend, EndpointSpec, ServiceId, ServicePolicy,
     WorkerId,
@@ -72,7 +72,10 @@ async fn try_recv(handle: &TestPortHandle) -> Option<Vec<u8>> {
 
 /// Helper: assert no frame arrives within timeout.
 async fn assert_no_frame(handle: &TestPortHandle) {
-    assert!(try_recv(handle).await.is_none(), "expected no frame but got one");
+    assert!(
+        try_recv(handle).await.is_none(),
+        "expected no frame but got one"
+    );
 }
 
 // Test subnet
@@ -141,8 +144,7 @@ fn make_tcp_frame(
 ) -> Vec<u8> {
     use etherparse::PacketBuilder;
 
-    let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64)
-        .tcp(src_port, dst_port, 1000, 65535);
+    let builder = PacketBuilder::ipv4(src_ip, dst_ip, 64).tcp(src_port, dst_port, 1000, 65535);
 
     let mut ip_packet = Vec::new();
     builder.write(&mut ip_packet, &[]).unwrap();
@@ -189,7 +191,10 @@ async fn ipv4_frame_routes_to_correct_port_by_ip() {
     handle0.inject_tx.send(frame).await.unwrap();
 
     let received = try_recv(&handle1).await;
-    assert!(received.is_some(), "port 1 should receive frame destined to IP_B");
+    assert!(
+        received.is_some(),
+        "port 1 should receive frame destined to IP_B"
+    );
 
     // Verify it's a valid fabric packet with the right dst IP.
     let received = received.unwrap();
@@ -234,7 +239,10 @@ async fn frame_to_own_port_ip_is_delivered() {
 
     // In L3 mode, this is delivered to port 0 since IP_A resolves there.
     let received = try_recv(&handle0).await;
-    assert!(received.is_some(), "frame should be delivered back to port 0 (hairpin)");
+    assert!(
+        received.is_some(),
+        "frame should be delivered back to port 0 (hairpin)"
+    );
 }
 
 // --- Gateway routing tests ---
@@ -258,12 +266,11 @@ async fn external_ip_sent_to_gateway() {
     let frame = make_ipv4_frame(EXTERNAL_IP);
     handle0.inject_tx.send(frame).await.unwrap();
 
-    let gw_frame = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        gw_rx.recv(),
-    )
-    .await;
-    assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get frame");
+    let gw_frame = tokio::time::timeout(std::time::Duration::from_millis(100), gw_rx.recv()).await;
+    assert!(
+        gw_frame.is_ok() && gw_frame.unwrap().is_some(),
+        "gateway should get frame"
+    );
 
     // Port 1 should NOT receive it.
     assert_no_frame(&handle1).await;
@@ -288,7 +295,10 @@ async fn gateway_ingress_routes_to_port_by_ip() {
     let gw_frame = make_ipv4_frame(IP_A);
     ingress_tx.send(gw_frame).await.unwrap();
 
-    assert!(try_recv(&handle0).await.is_some(), "port 0 should receive gateway ingress");
+    assert!(
+        try_recv(&handle0).await.is_some(),
+        "port 0 should receive gateway ingress"
+    );
     assert_no_frame(&handle1).await;
 }
 
@@ -329,10 +339,15 @@ async fn placeholder_route_buffers_instead_of_flooding() {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
         let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
-        et.apply_endpoint_sync(vec![EndpointSpec {
-            ip: pod_ip,
-            kind: EndpointKind::Pod { placement: None },
-        }], "local-worker", &mut noop, None);
+        et.apply_endpoint_sync(
+            vec![EndpointSpec {
+                ip: pod_ip,
+                kind: EndpointKind::Pod { placement: None },
+            }],
+            "local-worker",
+            &mut noop,
+            None,
+        );
     }
 
     let (port0, handle0) = make_test_port();
@@ -352,7 +367,9 @@ async fn placeholder_route_buffers_instead_of_flooding() {
 
     // An endpoint activation event (route miss) should have been emitted.
     let event = try_recv_event(&mut event_rx).await;
-    assert!(matches!(event, Some(FabricEvent::EndpointActivation { dst_ip: ip, service_id: None, .. }) if ip == pod_ip));
+    assert!(
+        matches!(event, Some(FabricEvent::EndpointActivation { dst_ip: ip, service_id: None, .. }) if ip == pod_ip)
+    );
 }
 
 #[tokio::test]
@@ -377,12 +394,11 @@ async fn no_route_external_ip_goes_to_gateway() {
     handle0.inject_tx.send(frame).await.unwrap();
 
     // Gateway should receive it (external IP → gateway egress).
-    let gw_frame = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        gw_rx.recv(),
-    )
-    .await;
-    assert!(gw_frame.is_ok() && gw_frame.unwrap().is_some(), "gateway should get frame");
+    let gw_frame = tokio::time::timeout(std::time::Duration::from_millis(100), gw_rx.recv()).await;
+    assert!(
+        gw_frame.is_ok() && gw_frame.unwrap().is_some(),
+        "gateway should get frame"
+    );
 
     // Other ports should NOT receive it.
     assert_no_frame(&handle1).await;
@@ -401,10 +417,15 @@ async fn buffered_frames_flushed_to_new_port() {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
         let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
-        et.apply_endpoint_sync(vec![EndpointSpec {
-            ip: pod_ip,
-            kind: EndpointKind::Pod { placement: None },
-        }], "local-worker", &mut noop, None);
+        et.apply_endpoint_sync(
+            vec![EndpointSpec {
+                ip: pod_ip,
+                kind: EndpointKind::Pod { placement: None },
+            }],
+            "local-worker",
+            &mut noop,
+            None,
+        );
     }
 
     let (port0, handle0) = make_test_port();
@@ -430,7 +451,11 @@ async fn buffered_frames_flushed_to_new_port() {
     // The new port should receive the 3 buffered frames.
     for i in 0..3 {
         let frame = try_recv(&handle_new).await;
-        assert!(frame.is_some(), "new port should receive buffered frame {}", i);
+        assert!(
+            frame.is_some(),
+            "new port should receive buffered frame {}",
+            i
+        );
     }
 }
 
@@ -448,10 +473,15 @@ async fn route_miss_debounced_on_rapid_frames() {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
         let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
-        et.apply_endpoint_sync(vec![EndpointSpec {
-            ip: pod_ip,
-            kind: EndpointKind::Pod { placement: None },
-        }], "local-worker", &mut noop, None);
+        et.apply_endpoint_sync(
+            vec![EndpointSpec {
+                ip: pod_ip,
+                kind: EndpointKind::Pod { placement: None },
+            }],
+            "local-worker",
+            &mut noop,
+            None,
+        );
     }
 
     let (port0, handle0) = make_test_port();
@@ -477,9 +507,12 @@ async fn route_miss_debounced_on_rapid_frames() {
 
 /// Try to load the TCP activator component. Returns None if WASM components
 /// haven't been built (allows tests to skip gracefully).
-fn try_load_tcp_activator() -> Option<(distvirt_activator::ActivatorRuntime, distvirt_activator::ActivatorInstance)> {
-    let component_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../activators/target/components");
+fn try_load_tcp_activator() -> Option<(
+    distvirt_activator::ActivatorRuntime,
+    distvirt_activator::ActivatorInstance,
+)> {
+    let component_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../activators/target/components");
     let runtime = distvirt_activator::ActivatorRuntime::new(&component_dir).ok()?;
     let component = runtime.get_component("tcp")?;
     let instance = distvirt_activator::ActivatorInstance::new(runtime.engine(), component).ok()?;
@@ -571,8 +604,8 @@ fn table_update_backend(
 #[tokio::test]
 #[ignore = "requires WASM activators — run with --include-ignored"]
 async fn activator_tcp_syn_emits_backend_need() {
-    let (_runtime, instance) = try_load_tcp_activator()
-        .expect("TCP activator WASM not built — run activators/build.sh");
+    let (_runtime, instance) =
+        try_load_tcp_activator().expect("TCP activator WASM not built — run activators/build.sh");
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -603,8 +636,10 @@ async fn activator_tcp_syn_emits_backend_need() {
 
     // Inject TCP SYN addressed to service IP from port 0.
     let syn_frame = make_tcp_frame(
-        [10, 0, 0, 1], SVC_IP.octets(),
-        12345, 80,
+        [10, 0, 0, 1],
+        SVC_IP.octets(),
+        12345,
+        80,
         0x02, // SYN
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
@@ -617,7 +652,10 @@ async fn activator_tcp_syn_emits_backend_need() {
             got_backend_need = true;
         }
     }
-    assert!(got_backend_need, "should emit ServiceBackendNeed(Traffic) on TCP SYN");
+    assert!(
+        got_backend_need,
+        "should emit ServiceBackendNeed(Traffic) on TCP SYN"
+    );
 
     // Frame should NOT be forwarded to other ports (no backend).
     assert_no_frame(&handle1).await;
@@ -626,8 +664,8 @@ async fn activator_tcp_syn_emits_backend_need() {
 #[tokio::test]
 #[ignore = "requires WASM activators — run with --include-ignored"]
 async fn activator_tcp_rst_dropped() {
-    let (_runtime, instance) = try_load_tcp_activator()
-        .expect("TCP activator WASM not built — run activators/build.sh");
+    let (_runtime, instance) =
+        try_load_tcp_activator().expect("TCP activator WASM not built — run activators/build.sh");
 
     let fabric = make_test_fabric();
     let (event_tx, mut event_rx) = tokio_mpsc::channel(64);
@@ -657,8 +695,10 @@ async fn activator_tcp_rst_dropped() {
 
     // Inject TCP RST.
     let rst_frame = make_tcp_frame(
-        [10, 0, 0, 1], SVC_IP.octets(),
-        12345, 80,
+        [10, 0, 0, 1],
+        SVC_IP.octets(),
+        12345,
+        80,
         0x04, // RST
     );
     handle0.inject_tx.send(rst_frame).await.unwrap();
@@ -680,8 +720,8 @@ async fn activator_tcp_rst_dropped() {
 #[tokio::test]
 #[ignore = "requires WASM activators — run with --include-ignored"]
 async fn activator_forwards_when_ready() {
-    let (_runtime, instance) = try_load_tcp_activator()
-        .expect("TCP activator WASM not built — run activators/build.sh");
+    let (_runtime, instance) =
+        try_load_tcp_activator().expect("TCP activator WASM not built — run activators/build.sh");
 
     let fabric = make_test_fabric();
 
@@ -699,7 +739,14 @@ async fn activator_forwards_when_ready() {
             }
         };
         table_create_service(&mut st, "svc-tcp", SVC_IP, l4_tcp_policy(), &mut make_l3);
-        table_update_backend(&mut st, "svc-tcp", SVC_IP, l4_tcp_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_update_backend(
+            &mut st,
+            "svc-tcp",
+            SVC_IP,
+            l4_tcp_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-tcp");
     }
 
@@ -713,18 +760,27 @@ async fn activator_forwards_when_ready() {
 
     // Inject TCP SYN to service IP from port 0.
     let syn_frame = make_tcp_frame(
-        [10, 0, 0, 1], SVC_IP.octets(),
-        12345, 80,
+        [10, 0, 0, 1],
+        SVC_IP.octets(),
+        12345,
+        80,
         0x02, // SYN
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
 
     // Should be forwarded to port 1 (backend) with DNAT applied.
     let received = try_recv(&handle1).await;
-    assert!(received.is_some(), "frame should be forwarded to backend port");
+    assert!(
+        received.is_some(),
+        "frame should be forwarded to backend port"
+    );
     let received = received.unwrap();
     let fp = FabricPacket::new(&received).unwrap();
-    assert_eq!(fp.ipv4_dst(), POD_IP, "dst IP should be DNAT'd to backend IP");
+    assert_eq!(
+        fp.ipv4_dst(),
+        POD_IP,
+        "dst IP should be DNAT'd to backend IP"
+    );
 }
 
 // --- NAT tests ---
@@ -738,8 +794,21 @@ async fn service_forward_without_registered_backend_port() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-fwd", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-fwd", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-fwd",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-fwd",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-fwd");
     }
 
@@ -750,8 +819,10 @@ async fn service_forward_without_registered_backend_port() {
 
     // Send TCP SYN from client (port 0) to service VIP.
     let syn_frame = make_tcp_frame(
-        [10, 0, 0, 1], SVC_IP.octets(),
-        12345, 80,
+        [10, 0, 0, 1],
+        SVC_IP.octets(),
+        12345,
+        80,
         0x02, // SYN
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
@@ -774,7 +845,11 @@ async fn service_forward_without_registered_backend_port() {
 
     // Verify DNAT was applied.
     let fp = FabricPacket::new(&received).unwrap();
-    assert_eq!(fp.ipv4_dst(), POD_IP, "dst IP should be DNAT'd to backend IP");
+    assert_eq!(
+        fp.ipv4_dst(),
+        POD_IP,
+        "dst IP should be DNAT'd to backend IP"
+    );
 
     // Client port should not receive anything.
     assert_no_frame(&handle0).await;
@@ -790,8 +865,21 @@ async fn service_nat_dnat_rewrites_dst_ip() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-nat",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-nat",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-nat");
     }
 
@@ -804,20 +892,29 @@ async fn service_nat_dnat_rewrites_dst_ip() {
 
     // Send TCP SYN from client to service IP.
     let syn_frame = make_tcp_frame(
-        CLIENT_IP.octets(), SVC_IP.octets(),
-        12345, 80,
+        CLIENT_IP.octets(),
+        SVC_IP.octets(),
+        12345,
+        80,
         0x02, // SYN
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
 
     // Frame should arrive at port 1 (backend) with DNAT applied.
     let received = try_recv(&handle1).await;
-    assert!(received.is_some(), "frame should be forwarded to backend port");
+    assert!(
+        received.is_some(),
+        "frame should be forwarded to backend port"
+    );
     let received = received.unwrap();
 
     let fp = FabricPacket::new(&received).unwrap();
     // dst IP should be rewritten from SVC_IP to POD_IP.
-    assert_eq!(fp.ipv4_dst(), POD_IP, "dst IP should be DNAT'd to backend IP");
+    assert_eq!(
+        fp.ipv4_dst(),
+        POD_IP,
+        "dst IP should be DNAT'd to backend IP"
+    );
     // src IP should be unchanged.
     assert_eq!(fp.ipv4_src(), CLIENT_IP, "src IP should be unchanged");
 }
@@ -830,8 +927,21 @@ async fn service_nat_snat_rewrites_return_traffic() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-nat",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-nat",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-nat");
     }
 
@@ -844,32 +954,46 @@ async fn service_nat_snat_rewrites_return_traffic() {
 
     // Step 1: Send forward traffic (client→service) to install NAT entry.
     let syn_frame = make_tcp_frame(
-        CLIENT_IP.octets(), SVC_IP.octets(),
-        12345, 80,
+        CLIENT_IP.octets(),
+        SVC_IP.octets(),
+        12345,
+        80,
         0x02, // SYN
     );
     handle0.inject_tx.send(syn_frame).await.unwrap();
 
     // Drain the DNAT'd frame from port 1.
     let dnat_frame = try_recv(&handle1).await;
-    assert!(dnat_frame.is_some(), "DNAT'd frame should arrive at backend");
+    assert!(
+        dnat_frame.is_some(),
+        "DNAT'd frame should arrive at backend"
+    );
 
     // Step 2: Send return traffic (backend→client) — should be SNAT'd.
     let syn_ack_frame = make_tcp_frame(
-        POD_IP.octets(), CLIENT_IP.octets(),
-        80, 12345,
+        POD_IP.octets(),
+        CLIENT_IP.octets(),
+        80,
+        12345,
         0x12, // SYN+ACK
     );
     handle1.inject_tx.send(syn_ack_frame).await.unwrap();
 
     // Frame should arrive at port 0 with SNAT applied.
     let received = try_recv(&handle0).await;
-    assert!(received.is_some(), "return frame should arrive at client port");
+    assert!(
+        received.is_some(),
+        "return frame should arrive at client port"
+    );
     let received = received.unwrap();
 
     let fp = FabricPacket::new(&received).unwrap();
     // src IP should be rewritten from POD_IP to SVC_IP.
-    assert_eq!(fp.ipv4_src(), SVC_IP, "src IP should be SNAT'd to service IP");
+    assert_eq!(
+        fp.ipv4_src(),
+        SVC_IP,
+        "src IP should be SNAT'd to service IP"
+    );
     // dst should be unchanged.
     assert_eq!(fp.ipv4_dst(), CLIENT_IP, "dst IP should be unchanged");
 }
@@ -891,11 +1015,7 @@ async fn non_natted_unicast_ip_unchanged() {
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, src_ip);
 
     // Port 1 sends unicast to port 0's IP — not NAT'd.
-    let frame = make_tcp_frame(
-        src_ip.octets(), dst_ip.octets(),
-        5000, 8080,
-        0x02,
-    );
+    let frame = make_tcp_frame(src_ip.octets(), dst_ip.octets(), 5000, 8080, 0x02);
     handle1.inject_tx.send(frame).await.unwrap();
 
     let received = try_recv(&handle0).await;
@@ -916,8 +1036,21 @@ async fn service_nat_ip_checksum_valid() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-nat",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-nat",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-nat");
     }
 
@@ -928,11 +1061,7 @@ async fn service_nat_ip_checksum_valid() {
     let (_id0, _task0) = fabric.add_port_raw_with_ip(port0, CLIENT_IP);
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
-    let syn = make_tcp_frame(
-        CLIENT_IP.octets(), SVC_IP.octets(),
-        12345, 80,
-        0x02,
-    );
+    let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
     handle0.inject_tx.send(syn).await.unwrap();
 
     let received = try_recv(&handle1).await.unwrap();
@@ -948,7 +1077,10 @@ async fn service_nat_ip_checksum_valid() {
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    assert_eq!(!sum as u16, 0, "IP header checksum should be valid after DNAT");
+    assert_eq!(
+        !sum as u16, 0,
+        "IP header checksum should be valid after DNAT"
+    );
 }
 
 // --- Tunnel routing tests ---
@@ -972,14 +1104,19 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
         let mut noop = |_: &str, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
-        et.apply_endpoint_sync(vec![EndpointSpec {
-            ip: remote_pod_ip,
-            kind: EndpointKind::Pod {
-                placement: Some(EndpointPlacement {
-                    worker_id: WorkerId::from(worker_id),
-                }),
-            },
-        }], "local-worker", &mut noop, None);
+        et.apply_endpoint_sync(
+            vec![EndpointSpec {
+                ip: remote_pod_ip,
+                kind: EndpointKind::Pod {
+                    placement: Some(EndpointPlacement {
+                        worker_id: WorkerId::from(worker_id),
+                    }),
+                },
+            }],
+            "local-worker",
+            &mut noop,
+            None,
+        );
     }
 
     // Add a local port that sends a frame to the remote pod IP.
@@ -1023,7 +1160,10 @@ async fn port_guard_drop_returns_endpoint_to_buffering() {
     let frame = make_ipv4_frame(pod_ip);
     sender_handle.inject_tx.send(frame).await.unwrap();
     let received = try_recv(&handle0).await;
-    assert!(received.is_some(), "frame should reach pod port before drop");
+    assert!(
+        received.is_some(),
+        "frame should reach pod port before drop"
+    );
 
     // Drop the TaskHandle — this aborts the port read loop, which drops
     // the PortGuard, which calls detach_port.
@@ -1048,7 +1188,10 @@ async fn port_guard_drop_returns_endpoint_to_buffering() {
     let (_new_id, _new_task) = fabric.add_port_raw_with_ip(port_new, pod_ip);
 
     let flushed = try_recv(&handle_new).await;
-    assert!(flushed.is_some(), "new port should receive the buffered frame from after drop");
+    assert!(
+        flushed.is_some(),
+        "new port should receive the buffered frame from after drop"
+    );
 }
 
 // --- UDP frame helper ---
@@ -1127,7 +1270,11 @@ async fn flow_event_on_tcp_syn_to_local_pod() {
 
     // Opening flows don't count as active, so no event.
     let event = try_recv_event(&mut event_rx).await;
-    assert!(event.is_none(), "SYN-only (Opening) should not produce a flow event, got {:?}", event);
+    assert!(
+        event.is_none(),
+        "SYN-only (Opening) should not produce a flow event, got {:?}",
+        event
+    );
 
     // Send ACK to transition to Established.
     let ack = make_tcp_frame(IP_A.octets(), IP_B.octets(), 12345, 80, 0x10);
@@ -1168,7 +1315,13 @@ async fn flow_event_inactive_after_rst() {
 
     let event = try_recv_event(&mut event_rx).await;
     assert!(
-        matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: true, .. })),
+        matches!(
+            event,
+            Some(FabricEvent::EndpointFlowStatus {
+                has_active_flows: true,
+                ..
+            })
+        ),
         "first event should be active=true"
     );
 
@@ -1179,8 +1332,13 @@ async fn flow_event_inactive_after_rst() {
 
     let event = try_recv_event(&mut event_rx).await;
     assert!(
-        matches!(event, Some(FabricEvent::EndpointFlowStatus { has_active_flows: false, .. })),
-
+        matches!(
+            event,
+            Some(FabricEvent::EndpointFlowStatus {
+                has_active_flows: false,
+                ..
+            })
+        ),
         "second event should be active=false"
     );
 }
@@ -1210,7 +1368,6 @@ async fn no_flow_event_on_non_tcp() {
     let event = try_recv_event(&mut event_rx).await;
     assert!(
         !matches!(event, Some(FabricEvent::EndpointFlowStatus { .. })),
-
         "UDP traffic should not produce flow status events"
     );
 }
@@ -1225,8 +1382,21 @@ async fn dnat_rewrite_does_not_double_count_flows() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-flow", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-flow", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-flow",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-flow",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-flow");
     }
 
@@ -1271,8 +1441,21 @@ async fn service_ready_backend_unreachable_buffers() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-unreach", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-unreach", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-unreach",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-unreach",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-unreach");
     }
 
@@ -1297,7 +1480,10 @@ async fn service_ready_backend_unreachable_buffers() {
     let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
 
     let received = try_recv(&handle1).await;
-    assert!(received.is_some(), "buffered frame should flush to newly added backend port");
+    assert!(
+        received.is_some(),
+        "buffered frame should flush to newly added backend port"
+    );
 }
 
 #[tokio::test]
@@ -1314,7 +1500,13 @@ async fn service_buffer_capacity_drops_excess() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-cap", SVC_IP, small_policy.clone(), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-cap",
+            SVC_IP,
+            small_policy.clone(),
+            &mut passthrough_processor,
+        );
     }
 
     let (port0, handle0) = make_test_port();
@@ -1323,10 +1515,7 @@ async fn service_buffer_capacity_drops_excess() {
 
     // Send 5 frames — only first 2 should be buffered.
     for i in 0..5u16 {
-        let frame = make_tcp_frame(
-            CLIENT_IP.octets(), SVC_IP.octets(),
-            10000 + i, 80, 0x02,
-        );
+        let frame = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 10000 + i, 80, 0x02);
         handle0.inject_tx.send(frame).await.unwrap();
     }
 
@@ -1342,12 +1531,25 @@ async fn service_buffer_capacity_drops_excess() {
     let flush_data = {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_update_backend(&mut st, "svc-cap", SVC_IP, small_policy, Some(POD_IP), &mut passthrough_processor);
+        table_update_backend(
+            &mut st,
+            "svc-cap",
+            SVC_IP,
+            small_policy,
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-cap")
     };
 
     // Manually flush the frames through the fabric (as worker code does).
-    if let Some(super::MarkReadyResult::Passthrough { frames, backend_ip, service_ip, .. }) = flush_data {
+    if let Some(super::MarkReadyResult::Passthrough {
+        frames,
+        backend_ip,
+        service_ip,
+        ..
+    }) = flush_data
+    {
         fabric.flush_service_frames(frames, backend_ip, service_ip);
     }
 
@@ -1359,7 +1561,10 @@ async fn service_buffer_capacity_drops_excess() {
     while try_recv(&handle1).await.is_some() {
         count += 1;
     }
-    assert_eq!(count, 2, "only 2 frames should be buffered (capacity limit)");
+    assert_eq!(
+        count, 2,
+        "only 2 frames should be buffered (capacity limit)"
+    );
 }
 
 #[tokio::test]
@@ -1375,7 +1580,13 @@ async fn service_buffer_timeout_clears() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-timeout", SVC_IP, short_timeout_policy.clone(), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-timeout",
+            SVC_IP,
+            short_timeout_policy.clone(),
+            &mut passthrough_processor,
+        );
     }
 
     let (port0, handle0) = make_test_port();
@@ -1401,7 +1612,14 @@ async fn service_buffer_timeout_clears() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_update_backend(&mut st, "svc-timeout", SVC_IP, short_timeout_policy, Some(POD_IP), &mut passthrough_processor);
+        table_update_backend(
+            &mut st,
+            "svc-timeout",
+            SVC_IP,
+            short_timeout_policy,
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-timeout");
     }
     let (port1, handle1) = make_test_port();
@@ -1443,7 +1661,9 @@ async fn gateway_dns_local_resolve() {
 
     // Create registry with a local name.
     let registry: DnsRegistry = std::sync::Arc::new(RwLock::new(
-        [("myservice".to_string(), Ipv4Addr::new(10, 0, 0, 99))].into_iter().collect(),
+        [("myservice".to_string(), Ipv4Addr::new(10, 0, 0, 99))]
+            .into_iter()
+            .collect(),
     ));
 
     let gw_ip = [10, 0, 0, 1];
@@ -1476,16 +1696,16 @@ async fn gateway_dns_local_resolve() {
 
     // Wait for DNS response to arrive back at pod port.
     // The gateway needs to process: fabric→egress_rx→smoltcp→DNS forwarder→smoltcp→ingress_tx→fabric→pod_port.
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        async {
-            let mut rx = handle0.capture_rx.lock().await;
-            rx.recv().await.unwrap()
-        },
-    )
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut rx = handle0.capture_rx.lock().await;
+        rx.recv().await.unwrap()
+    })
     .await;
 
-    assert!(response.is_ok(), "should receive DNS response within timeout");
+    assert!(
+        response.is_ok(),
+        "should receive DNS response within timeout"
+    );
     let response = response.unwrap();
 
     // Parse the response: skip fabric header + IP + UDP headers to get DNS payload.
@@ -1501,7 +1721,11 @@ async fn gateway_dns_local_resolve() {
 
     // Last 4 bytes of the answer section should be the IP 10.0.0.99.
     let len = udp_payload.len();
-    assert_eq!(&udp_payload[len - 4..], &[10, 0, 0, 99], "DNS A record should be 10.0.0.99");
+    assert_eq!(
+        &udp_payload[len - 4..],
+        &[10, 0, 0, 99],
+        "DNS A record should be 10.0.0.99"
+    );
 
     gw_handle.abort();
 }
@@ -1520,34 +1744,27 @@ async fn gateway_subnet_filter_drops_external_dst() {
     let gw_handle = tokio::spawn(async move { gateway.run().await });
 
     // Inject packet with dst IP outside pod subnet (8.8.8.8) from internet side.
-    let external_frame = make_ipv4_frame_full(
-        Ipv4Addr::new(1, 2, 3, 4),
-        Ipv4Addr::new(8, 8, 8, 8),
-    );
+    let external_frame = make_ipv4_frame_full(Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(8, 8, 8, 8));
     inet_tx.send(external_frame).await.unwrap();
 
     // Should NOT arrive on fabric ingress.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        fab_rx.recv(),
-    )
-    .await;
-    assert!(result.is_err() || result.unwrap().is_none(), "external dst should be filtered out");
+    let result = tokio::time::timeout(std::time::Duration::from_millis(200), fab_rx.recv()).await;
+    assert!(
+        result.is_err() || result.unwrap().is_none(),
+        "external dst should be filtered out"
+    );
 
     // Inject packet with dst IP inside pod subnet (10.0.0.50).
-    let internal_frame = make_ipv4_frame_full(
-        Ipv4Addr::new(1, 2, 3, 4),
-        Ipv4Addr::new(10, 0, 0, 50),
-    );
+    let internal_frame =
+        make_ipv4_frame_full(Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(10, 0, 0, 50));
     inet_tx.send(internal_frame).await.unwrap();
 
     // Should arrive on fabric ingress.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        fab_rx.recv(),
-    )
-    .await;
-    assert!(result.is_ok() && result.unwrap().is_some(), "in-subnet dst should pass through");
+    let result = tokio::time::timeout(std::time::Duration::from_millis(500), fab_rx.recv()).await;
+    assert!(
+        result.is_ok() && result.unwrap().is_some(),
+        "in-subnet dst should pass through"
+    );
 
     gw_handle.abort();
 }
@@ -1564,8 +1781,21 @@ async fn flush_populates_nat_for_return_traffic() {
     {
         let tables = fabric.tables();
         let mut st = tables.endpoint_table.lock().unwrap();
-        table_create_service(&mut st, "svc-flush-nat", SVC_IP, default_service_policy(), &mut passthrough_processor);
-        table_update_backend(&mut st, "svc-flush-nat", SVC_IP, default_service_policy(), Some(POD_IP), &mut passthrough_processor);
+        table_create_service(
+            &mut st,
+            "svc-flush-nat",
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            "svc-flush-nat",
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
         st.mark_service_ready("svc-flush-nat");
     }
 
@@ -1596,12 +1826,20 @@ async fn flush_populates_nat_for_return_traffic() {
     handle1.inject_tx.send(syn_ack).await.unwrap();
 
     let return_frame = try_recv(&handle0).await;
-    assert!(return_frame.is_some(), "return frame should arrive at client");
+    assert!(
+        return_frame.is_some(),
+        "return frame should arrive at client"
+    );
     let return_frame = return_frame.unwrap();
     let fp = FabricPacket::new(&return_frame).unwrap();
     assert_eq!(
-        fp.ipv4_src(), SVC_IP,
+        fp.ipv4_src(),
+        SVC_IP,
         "return traffic src should be SNAT'd from backend IP to service VIP"
     );
-    assert_eq!(fp.ipv4_dst(), CLIENT_IP, "return traffic dst should be unchanged");
+    assert_eq!(
+        fp.ipv4_dst(),
+        CLIENT_IP,
+        "return traffic dst should be unchanged"
+    );
 }

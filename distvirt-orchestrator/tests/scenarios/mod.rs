@@ -1,7 +1,7 @@
 mod activation;
 mod drain;
-mod failure_recovery;
 mod fabric_routing;
+mod failure_recovery;
 mod multi_service;
 mod preemption;
 mod pressure;

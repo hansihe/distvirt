@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use crate::harness::TestCluster;
-use crate::harness::spec_builders::{activation_spec, always_on_spec, two_activation_workloads_spec};
+use crate::harness::spec_builders::{
+    activation_spec, always_on_spec, two_activation_workloads_spec,
+};
 
 /// Create then immediately delete before pod fully starts.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -54,9 +56,7 @@ async fn test_namespace_delete_while_suspended() {
     cluster.assert_workload_running("ns-del", "web");
 
     cluster.deactivate_service("ns-del", "web-svc", &w1).await;
-    cluster
-        .advance_past_idle_timeout("ns-del", "web-svc")
-        .await;
+    cluster.advance_past_idle_timeout("ns-del", "web-svc").await;
     cluster.wait_workload_suspended("ns-del", "web").await;
 
     // Delete the namespace while workload is suspended.
@@ -99,8 +99,10 @@ async fn test_worker_disconnect_during_suspend() {
         state,
         distvirt_orchestrator::types::WorkloadState::Active {
             pod: distvirt_orchestrator::types::PodSlot {
-                pod_state: distvirt_orchestrator::types::PodState::Suspending { .. }, ..
-            }, ..
+                pod_state: distvirt_orchestrator::types::PodState::Suspending { .. },
+                ..
+            },
+            ..
         }
     );
 
@@ -191,9 +193,7 @@ async fn test_preemption_is_namespace_scoped() {
     let w1 = cluster.add_worker().await;
 
     // ns-other: single always-on workload (no idle, can't be preempted by ns-main).
-    cluster
-        .create_namespace("ns-other", always_on_spec())
-        .await;
+    cluster.create_namespace("ns-other", always_on_spec()).await;
     cluster.converge().await;
     cluster.assert_workload_running("ns-other", "echo");
 
@@ -242,22 +242,18 @@ async fn test_preemption_is_namespace_scoped() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[should_panic(expected = "expected Running")]
 async fn test_many_namespaces_competing_for_capacity() {
-    eprintln!("BROKEN: not all WaitingForCapacity workloads rescheduled after pressure drop — schedule_waiting_pods() may need to iterate all waiting namespaces");
+    eprintln!(
+        "BROKEN: not all WaitingForCapacity workloads rescheduled after pressure drop — schedule_waiting_pods() may need to iterate all waiting namespaces"
+    );
     let mut cluster = TestCluster::new();
     let w1 = cluster.add_worker().await;
 
     // High pressure — blocks all scheduling.
     cluster.inject_pressure(&w1, 85.0).await;
 
-    cluster
-        .create_namespace("ns-1", always_on_spec())
-        .await;
-    cluster
-        .create_namespace("ns-2", always_on_spec())
-        .await;
-    cluster
-        .create_namespace("ns-3", always_on_spec())
-        .await;
+    cluster.create_namespace("ns-1", always_on_spec()).await;
+    cluster.create_namespace("ns-2", always_on_spec()).await;
+    cluster.create_namespace("ns-3", always_on_spec()).await;
     cluster.converge().await;
 
     // All should be waiting.

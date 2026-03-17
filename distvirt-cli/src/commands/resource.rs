@@ -20,7 +20,10 @@ pub async fn get(
             match output {
                 OutputFormat::Text => format::print_namespace_table(namespaces),
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&format::namespaces_to_json(namespaces))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::namespaces_to_json(namespaces))?
+                    );
                 }
             }
         }
@@ -33,14 +36,16 @@ pub async fn get(
             match output {
                 OutputFormat::Text => format::print_worker_table(workers),
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&format::workers_to_json(workers))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::workers_to_json(workers))?
+                    );
                 }
             }
         }
         "pods" => {
-            let ns = namespace.ok_or_else(|| {
-                anyhow::anyhow!("--namespace is required for listing pods")
-            })?;
+            let ns = namespace
+                .ok_or_else(|| anyhow::anyhow!("--namespace is required for listing pods"))?;
             let resp = client
                 .list_pods(ListPodsRequest {
                     namespace_id: ns.to_string(),
@@ -51,14 +56,16 @@ pub async fn get(
             match output {
                 OutputFormat::Text => format::print_pod_table(pods),
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&format::pods_to_json(pods))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::pods_to_json(pods))?
+                    );
                 }
             }
         }
         "services" => {
-            let ns = namespace.ok_or_else(|| {
-                anyhow::anyhow!("--namespace is required for listing services")
-            })?;
+            let ns = namespace
+                .ok_or_else(|| anyhow::anyhow!("--namespace is required for listing services"))?;
             let resp = client
                 .get_namespace_status(GetNamespaceStatusRequest {
                     namespace_id: ns.to_string(),
@@ -72,12 +79,18 @@ pub async fn get(
             match output {
                 OutputFormat::Text => format::print_service_table(&report.services),
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&format::services_to_json(&report.services))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::services_to_json(&report.services))?
+                    );
                 }
             }
         }
         other => {
-            anyhow::bail!("unknown resource type: '{}'. Try: namespaces, workers, pods, services", other);
+            anyhow::bail!(
+                "unknown resource type: '{}'. Try: namespaces, workers, pods, services",
+                other
+            );
         }
     }
     Ok(())
@@ -104,7 +117,10 @@ pub async fn describe(
             match output {
                 OutputFormat::Text => format::print_namespace_overview(&report),
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&format::namespace_status_to_json(&report))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::namespace_status_to_json(&report))?
+                    );
                 }
             }
         }
@@ -122,7 +138,10 @@ pub async fn describe(
             match output {
                 OutputFormat::Text => format::print_worker_detail(&worker),
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&format::worker_to_json(&worker))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::worker_to_json(&worker))?
+                    );
                 }
             }
         }
@@ -148,10 +167,7 @@ pub async fn delete(mut client: Client, resource: &str, name: &str) -> anyhow::R
             eprintln!("namespace '{}' deleted", name);
         }
         other => {
-            anyhow::bail!(
-                "delete not supported for '{}'. Try: namespaces",
-                other
-            );
+            anyhow::bail!("delete not supported for '{}'. Try: namespaces", other);
         }
     }
     Ok(())

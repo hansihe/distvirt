@@ -18,7 +18,7 @@ pub(crate) mod bindings {
 }
 
 pub use instance::ActivatorInstance;
-pub use packet_parse::{parse_frame_to_packet_info, FlowTracker};
+pub use packet_parse::{FlowTracker, parse_frame_to_packet_info};
 pub use runtime::ActivatorRuntime;
 pub use stream_manager::{StreamManager, StreamManagerConfig, StreamManagerOutput, is_l4_action};
 pub use types::{Action, Activator, BackendNeed, Event, PacketInfo};

@@ -3,7 +3,9 @@ use std::time::Duration;
 use distvirt_orchestrator::types::*;
 
 use crate::harness::TestCluster;
-use crate::harness::spec_builders::{activation_spec, always_on_spec, two_activation_workloads_spec};
+use crate::harness::spec_builders::{
+    activation_spec, always_on_spec, two_activation_workloads_spec,
+};
 
 /// Pod goes to lower-pressure worker.
 ///
@@ -33,10 +35,7 @@ async fn test_pressure_based_scheduling() {
     cluster.assert_workload_running("ns", "web");
 
     let hosting = cluster.worker_id_for_workload("ns", "web");
-    assert_ne!(
-        hosting, w1,
-        "workload should avoid pressured worker w1"
-    );
+    assert_ne!(hosting, w1, "workload should avoid pressured worker w1");
 }
 
 /// Elevated memory pressure reduces idle timeout.
@@ -77,8 +76,17 @@ async fn test_pressure_shortens_idle_timeout() {
     // Should be suspended or suspending since pressure shortening fired.
     let state = cluster.workload_state("ns", "web");
     assert!(
-        matches!(state, WorkloadState::Suspended { .. }
-            | WorkloadState::Active { pod: PodSlot { pod_state: PodState::Suspending { .. }, .. }, .. }),
+        matches!(
+            state,
+            WorkloadState::Suspended { .. }
+                | WorkloadState::Active {
+                    pod: PodSlot {
+                        pod_state: PodState::Suspending { .. },
+                        ..
+                    },
+                    ..
+                }
+        ),
         "expected Suspended/Suspending after pressure-shortened idle timeout, got {:?}",
         state
     );

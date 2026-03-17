@@ -19,15 +19,38 @@ pub enum SmNamespaceEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SmWorkloadEvent {
-    DemandChanged { demanding_services: u32 },
-    PodLaunching { pod_id: PodId, worker_id: WorkerId },
-    PodRunning { pod_id: PodId, worker_id: WorkerId },
-    PodStopped { exit_code: i32 },
-    PodFailed { reason: String },
-    PodSuspending { pod_id: PodId, worker_id: WorkerId },
-    PodSuspended { worker_id: WorkerId, artifact_id: ArtifactId },
-    PodSuspendFailed { reason: String },
-    PodResuming { pod_id: PodId, worker_id: WorkerId },
+    DemandChanged {
+        demanding_services: u32,
+    },
+    PodLaunching {
+        pod_id: PodId,
+        worker_id: WorkerId,
+    },
+    PodRunning {
+        pod_id: PodId,
+        worker_id: WorkerId,
+    },
+    PodStopped {
+        exit_code: i32,
+    },
+    PodFailed {
+        reason: String,
+    },
+    PodSuspending {
+        pod_id: PodId,
+        worker_id: WorkerId,
+    },
+    PodSuspended {
+        worker_id: WorkerId,
+        artifact_id: ArtifactId,
+    },
+    PodSuspendFailed {
+        reason: String,
+    },
+    PodResuming {
+        pod_id: PodId,
+        worker_id: WorkerId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

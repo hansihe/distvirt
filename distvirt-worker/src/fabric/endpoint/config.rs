@@ -3,12 +3,10 @@ use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{BufferPolicy, EndpointKind, EndpointSpec, ServicePolicy};
 
+use super::ServiceProcessor;
+use super::{Endpoint, EndpointBackend, EndpointState, EndpointSyncEffect, EndpointTable};
 use crate::fabric::flow::FlowTracker;
 use crate::fabric::port::PortId;
-use super::ServiceProcessor;
-use super::{
-    Endpoint, EndpointBackend, EndpointState, EndpointSyncEffect, EndpointTable,
-};
 
 // -----------------------------------------------------------------------
 // Unified endpoint sync/update
@@ -31,7 +29,9 @@ impl EndpointTable {
         let new_ips: HashSet<Ipv4Addr> = specs.iter().map(|s| s.ip).collect();
 
         // Remove endpoints whose IP is not in the new set.
-        let to_remove: Vec<Ipv4Addr> = self.by_ip.keys()
+        let to_remove: Vec<Ipv4Addr> = self
+            .by_ip
+            .keys()
             .filter(|ip| !new_ips.contains(ip))
             .copied()
             .collect();
@@ -47,7 +47,12 @@ impl EndpointTable {
 
         // Upsert each spec.
         for spec in specs {
-            effects.extend(self.apply_single_spec(spec, my_worker_id, make_processor, adapter_port_id));
+            effects.extend(self.apply_single_spec(
+                spec,
+                my_worker_id,
+                make_processor,
+                adapter_port_id,
+            ));
         }
 
         effects
@@ -74,7 +79,12 @@ impl EndpointTable {
         }
 
         for spec in upserted {
-            effects.extend(self.apply_single_spec(spec, my_worker_id, make_processor, adapter_port_id));
+            effects.extend(self.apply_single_spec(
+                spec,
+                my_worker_id,
+                make_processor,
+                adapter_port_id,
+            ));
         }
 
         effects
@@ -104,8 +114,13 @@ impl EndpointTable {
                             }
                         });
                         // Preserve buffer from prior UnplacedPod if transitioning.
-                        let old_buffer: VecDeque<Vec<u8>> = self.by_ip.get_mut(&ip)
-                            .filter(|ep| matches!(ep.backend, EndpointBackend::UnplacedPod { .. }) && !ep.buffer.is_empty())
+                        let old_buffer: VecDeque<Vec<u8>> = self
+                            .by_ip
+                            .get_mut(&ip)
+                            .filter(|ep| {
+                                matches!(ep.backend, EndpointBackend::UnplacedPod { .. })
+                                    && !ep.buffer.is_empty()
+                            })
                             .map(|ep| ep.buffer.drain(..).collect())
                             .unwrap_or_default();
                         // Clean up old service mapping if needed.
@@ -119,38 +134,46 @@ impl EndpointTable {
                         } else {
                             (EndpointState::Pending, None)
                         };
-                        self.by_ip.insert(ip, Endpoint {
+                        self.by_ip.insert(
                             ip,
-                            state,
-                            buffer: old_buffer,
-                            buffer_start: None,
-                            backend: EndpointBackend::LocalPod {
-                                port_id: existing_port_id,
+                            Endpoint {
+                                ip,
+                                state,
+                                buffer: old_buffer,
+                                buffer_start: None,
+                                backend: EndpointBackend::LocalPod {
+                                    port_id: existing_port_id,
+                                },
+                                flow_tracker,
+                                last_activation: None,
                             },
-                            flow_tracker,
-                            last_activation: None,
-                        });
+                        );
                     }
                     Some(ref p) => {
                         // Remote pod.
-                        let was_buffering = self.by_ip.get(&ip)
+                        let was_buffering = self
+                            .by_ip
+                            .get(&ip)
                             .map(|ep| ep.state == EndpointState::Buffering && !ep.buffer.is_empty())
                             .unwrap_or(false);
                         // RemoteSegment endpoints start Ready with no buffer.
                         // This is intentional: they are dumb forwarders that relay
                         // frames to the remote worker; flow-control and buffer
                         // tracking only happens on the host worker that owns the pod.
-                        self.by_ip.insert(ip, Endpoint {
+                        self.by_ip.insert(
                             ip,
-                            state: EndpointState::Ready,
-                            buffer: VecDeque::new(),
-                            buffer_start: None,
-                            backend: EndpointBackend::RemoteSegment {
-                                worker_id: p.worker_id.0.clone(),
+                            Endpoint {
+                                ip,
+                                state: EndpointState::Ready,
+                                buffer: VecDeque::new(),
+                                buffer_start: None,
+                                backend: EndpointBackend::RemoteSegment {
+                                    worker_id: p.worker_id.0.clone(),
+                                },
+                                flow_tracker: None,
+                                last_activation: None,
                             },
-                            flow_tracker: None,
-                            last_activation: None,
-                        });
+                        );
                         if was_buffering {
                             effects.push(EndpointSyncEffect::FlushPodBuffer { ip });
                         }
@@ -158,20 +181,23 @@ impl EndpointTable {
                     None => {
                         // Unplaced pod — buffer.
                         if !self.by_ip.contains_key(&ip) {
-                            self.by_ip.insert(ip, Endpoint {
+                            self.by_ip.insert(
                                 ip,
-                                state: EndpointState::Buffering,
-                                buffer: VecDeque::new(),
-                                buffer_start: None,
-                                backend: EndpointBackend::UnplacedPod {
-                                    buffer_policy: BufferPolicy {
-                                        buffer_frames: 64,
-                                        timeout_ms: 30_000,
+                                Endpoint {
+                                    ip,
+                                    state: EndpointState::Buffering,
+                                    buffer: VecDeque::new(),
+                                    buffer_start: None,
+                                    backend: EndpointBackend::UnplacedPod {
+                                        buffer_policy: BufferPolicy {
+                                            buffer_frames: 64,
+                                            timeout_ms: 30_000,
+                                        },
                                     },
+                                    flow_tracker: None,
+                                    last_activation: None,
                                 },
-                                flow_tracker: None,
-                                last_activation: None,
-                            });
+                            );
                         }
                         // If already exists as UnplacedPod, keep buffer intact.
                     }
@@ -192,7 +218,9 @@ impl EndpointTable {
                             }
                         };
                         // Drain buffer from old endpoint if it was buffering.
-                        let old_frames: Vec<Vec<u8>> = self.by_ip.get_mut(&ip)
+                        let old_frames: Vec<Vec<u8>> = self
+                            .by_ip
+                            .get_mut(&ip)
                             .filter(|ep| !ep.buffer.is_empty())
                             .map(|ep| ep.buffer.drain(..).collect())
                             .unwrap_or_default();
@@ -202,15 +230,18 @@ impl EndpointTable {
                                 self.service_id_to_ip.remove(service_id);
                             }
                         }
-                        self.by_ip.insert(ip, Endpoint {
+                        self.by_ip.insert(
                             ip,
-                            state: EndpointState::Ready,
-                            buffer: VecDeque::new(),
-                            buffer_start: None,
-                            backend: EndpointBackend::LocalAdapter { port_id },
-                            flow_tracker: None,
-                            last_activation: None,
-                        });
+                            Endpoint {
+                                ip,
+                                state: EndpointState::Ready,
+                                buffer: VecDeque::new(),
+                                buffer_start: None,
+                                backend: EndpointBackend::LocalAdapter { port_id },
+                                flow_tracker: None,
+                                last_activation: None,
+                            },
+                        );
                         if !old_frames.is_empty() {
                             effects.push(EndpointSyncEffect::FlushAdapterBuffer {
                                 ip,
@@ -221,7 +252,9 @@ impl EndpointTable {
                     }
                     Some(ref p) => {
                         // Remote peer — same as remote pod.
-                        let was_buffering = self.by_ip.get(&ip)
+                        let was_buffering = self
+                            .by_ip
+                            .get(&ip)
                             .map(|ep| ep.state == EndpointState::Buffering && !ep.buffer.is_empty())
                             .unwrap_or(false);
                         if let Some(old) = self.by_ip.get(&ip) {
@@ -229,17 +262,20 @@ impl EndpointTable {
                                 self.service_id_to_ip.remove(service_id);
                             }
                         }
-                        self.by_ip.insert(ip, Endpoint {
+                        self.by_ip.insert(
                             ip,
-                            state: EndpointState::Ready,
-                            buffer: VecDeque::new(),
-                            buffer_start: None,
-                            backend: EndpointBackend::RemoteSegment {
-                                worker_id: p.worker_id.0.clone(),
+                            Endpoint {
+                                ip,
+                                state: EndpointState::Ready,
+                                buffer: VecDeque::new(),
+                                buffer_start: None,
+                                backend: EndpointBackend::RemoteSegment {
+                                    worker_id: p.worker_id.0.clone(),
+                                },
+                                flow_tracker: None,
+                                last_activation: None,
                             },
-                            flow_tracker: None,
-                            last_activation: None,
-                        });
+                        );
                         if was_buffering {
                             effects.push(EndpointSyncEffect::FlushPodBuffer { ip });
                         }
@@ -247,25 +283,32 @@ impl EndpointTable {
                     None => {
                         // Unplaced peer — buffer.
                         if !self.by_ip.contains_key(&ip) {
-                            self.by_ip.insert(ip, Endpoint {
+                            self.by_ip.insert(
                                 ip,
-                                state: EndpointState::Buffering,
-                                buffer: VecDeque::new(),
-                                buffer_start: None,
-                                backend: EndpointBackend::UnplacedPod {
-                                    buffer_policy: BufferPolicy {
-                                        buffer_frames: 64,
-                                        timeout_ms: 30_000,
+                                Endpoint {
+                                    ip,
+                                    state: EndpointState::Buffering,
+                                    buffer: VecDeque::new(),
+                                    buffer_start: None,
+                                    backend: EndpointBackend::UnplacedPod {
+                                        buffer_policy: BufferPolicy {
+                                            buffer_frames: 64,
+                                            timeout_ms: 30_000,
+                                        },
                                     },
+                                    flow_tracker: None,
+                                    last_activation: None,
                                 },
-                                flow_tracker: None,
-                                last_activation: None,
-                            });
+                            );
                         }
                     }
                 }
             }
-            EndpointKind::Service { service_id, policy, backend } => {
+            EndpointKind::Service {
+                service_id,
+                policy,
+                backend,
+            } => {
                 let svc_id_str = service_id.0.clone();
 
                 // Determine new state and backend_ip from the backend field.
@@ -277,13 +320,21 @@ impl EndpointTable {
 
                 // Check if service already exists and can keep its processor.
                 let existing = self.by_ip.get(&ip);
-                let can_reuse_processor = existing.map(|ep| {
-                    if let EndpointBackend::Service { service_id: ref existing_id, policy: ref existing_policy, .. } = ep.backend {
-                        existing_id == &svc_id_str && existing_policy.activator == policy.activator
-                    } else {
-                        false
-                    }
-                }).unwrap_or(false);
+                let can_reuse_processor = existing
+                    .map(|ep| {
+                        if let EndpointBackend::Service {
+                            service_id: ref existing_id,
+                            policy: ref existing_policy,
+                            ..
+                        } = ep.backend
+                        {
+                            existing_id == &svc_id_str
+                                && existing_policy.activator == policy.activator
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
 
                 if can_reuse_processor {
                     // Update existing service endpoint in place.
@@ -294,7 +345,8 @@ impl EndpointTable {
                         ref mut processor,
                         policy: ref mut existing_policy,
                         ..
-                    } = endpoint.backend else {
+                    } = endpoint.backend
+                    else {
                         unreachable!();
                     };
 
@@ -329,14 +381,13 @@ impl EndpointTable {
                         endpoint.flow_tracker = None;
                     }
 
-                    processor.on_backend_update(
-                        new_backend_ip.is_some(),
-                        new_backend_ip,
-                    );
+                    processor.on_backend_update(new_backend_ip.is_some(), new_backend_ip);
 
                     // Check if transitioning to Ready.
                     if new_state == EndpointState::Ready && old_state != EndpointState::Ready {
-                        effects.push(EndpointSyncEffect::ServiceReady { service_id: svc_id_str.clone() });
+                        effects.push(EndpointSyncEffect::ServiceReady {
+                            service_id: svc_id_str.clone(),
+                        });
                     }
                 } else {
                     // Create new service endpoint.
@@ -353,31 +404,40 @@ impl EndpointTable {
 
                     // Remove old service_id mapping if different service was at this IP.
                     if let Some(old_ep) = self.by_ip.get(&ip) {
-                        if let EndpointBackend::Service { service_id: ref old_id, .. } = old_ep.backend {
+                        if let EndpointBackend::Service {
+                            service_id: ref old_id,
+                            ..
+                        } = old_ep.backend
+                        {
                             if old_id != &svc_id_str {
                                 self.service_id_to_ip.remove(old_id);
                             }
                         }
                     }
 
-                    self.by_ip.insert(ip, Endpoint {
+                    self.by_ip.insert(
                         ip,
-                        state: new_state,
-                        buffer: VecDeque::new(),
-                        buffer_start: None,
-                        backend: EndpointBackend::Service {
-                            service_id: svc_id_str.clone(),
-                            policy,
-                            backend_ip: new_backend_ip,
-                            processor,
+                        Endpoint {
+                            ip,
+                            state: new_state,
+                            buffer: VecDeque::new(),
+                            buffer_start: None,
+                            backend: EndpointBackend::Service {
+                                service_id: svc_id_str.clone(),
+                                policy,
+                                backend_ip: new_backend_ip,
+                                processor,
+                            },
+                            flow_tracker,
+                            last_activation: None,
                         },
-                        flow_tracker,
-                        last_activation: None,
-                    });
+                    );
                     self.service_id_to_ip.insert(svc_id_str.clone(), ip);
 
                     if new_state == EndpointState::Ready {
-                        effects.push(EndpointSyncEffect::ServiceReady { service_id: svc_id_str });
+                        effects.push(EndpointSyncEffect::ServiceReady {
+                            service_id: svc_id_str,
+                        });
                     }
                 }
             }

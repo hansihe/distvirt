@@ -99,7 +99,10 @@ struct AlphaSm {
 
 impl Clone for AlphaSm {
     fn clone(&self) -> Self {
-        AlphaSm { deliveries: self.deliveries.clone(), on_handle: None }
+        AlphaSm {
+            deliveries: self.deliveries.clone(),
+            on_handle: None,
+        }
     }
 }
 
@@ -130,7 +133,10 @@ struct BetaSm {
 
 impl Clone for BetaSm {
     fn clone(&self) -> Self {
-        BetaSm { deliveries: self.deliveries.clone(), on_handle: None }
+        BetaSm {
+            deliveries: self.deliveries.clone(),
+            on_handle: None,
+        }
     }
 }
 
@@ -280,16 +286,18 @@ fn cascading_signal_to_edge_to_signal() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
 
     let a1 = router.get_alpha(&A1).unwrap();
-    assert!(a1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == AlphaInput::StatusInput(vec![42])));
+    assert!(
+        a1.deliveries
+            .iter()
+            .any(|inp| *inp == AlphaInput::StatusInput(vec![42]))
+    );
 }
 
 #[test]
@@ -428,10 +436,11 @@ fn port_removal_cleans_edges_and_reaggregates() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::ConfigInput(vec![])));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::ConfigInput(vec![]))
+    );
 }
 
 #[test]
@@ -465,11 +474,7 @@ fn dangling_edges_target_dies_source_unaffected() {
 
     // expose_internals_for_testing allows direct field access
     // Dangling edge remains — source is unaffected.
-    assert!(router
-        .alpha_to_beta_fwd
-        .get(&A1)
-        .unwrap()
-        .contains(&B1));
+    assert!(router.alpha_to_beta_fwd.get(&A1).unwrap().contains(&B1));
 }
 
 #[test]
@@ -517,14 +522,16 @@ fn round_semantics_multiple_inputs_delivered_independently() {
     assert_eq!(demand_count, 1);
     assert_eq!(config_count, 1);
 
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::ConfigInput(vec![99])));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::ConfigInput(vec![99]))
+    );
 }
 
 #[test]
@@ -681,10 +688,11 @@ fn event_delivery_along_forward_edge() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::Command("restart".to_string())));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::Command("restart".to_string()))
+    );
 }
 
 #[test]
@@ -703,10 +711,11 @@ fn event_delivery_with_reverse_edge_only() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::Command("hello".to_string())));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::Command("hello".to_string()))
+    );
 }
 
 #[test]
@@ -754,10 +763,11 @@ fn event_sent_from_sm_handler() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::SmEvent(42)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::SmEvent(42))
+    );
 }
 
 // ---- Edge-case tests ----
@@ -836,10 +846,11 @@ fn edge_retargeting_updates_both_old_and_new() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
 
     // Retarget A1 from B1 to B2
     router.set_alpha_to_beta_edges(A1, vec![B2]);
@@ -847,17 +858,19 @@ fn edge_retargeting_updates_both_old_and_new() {
 
     // B1 should get DemandInput(0) — no more edges pointing to it from A1
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(0)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(0))
+    );
 
     // B2 should get DemandInput(1) — now has edge from A1
     let b2 = router.get_beta(&B2).unwrap();
-    assert!(b2
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
+    assert!(
+        b2.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
 }
 
 #[test]
@@ -886,16 +899,18 @@ fn reactive_edge_creation_delivers_in_same_round() {
     router.propagate();
 
     let a1 = router.get_alpha(&A1).unwrap();
-    assert!(a1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == AlphaInput::StatusInput(vec![77])));
+    assert!(
+        a1.deliveries
+            .iter()
+            .any(|inp| *inp == AlphaInput::StatusInput(vec![77]))
+    );
 
     let a2 = router.get_alpha(&A2).unwrap();
-    assert!(a2
-        .deliveries
-        .iter()
-        .any(|inp| *inp == AlphaInput::StatusInput(vec![77])));
+    assert!(
+        a2.deliveries
+            .iter()
+            .any(|inp| *inp == AlphaInput::StatusInput(vec![77]))
+    );
 }
 
 #[test]
@@ -937,20 +952,22 @@ fn empty_aggregation_on_last_edge_removal() {
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
 
     // Remove the only edge
     router.set_alpha_to_beta_edges(A1, vec![]);
     router.propagate();
 
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(0)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(0))
+    );
 }
 
 #[test]
@@ -1142,24 +1159,22 @@ fn sm_handler_sets_edges_and_signals_atomically() {
 
     // B1 should have received DemandInput
     let b1 = router.get_beta(&B1).unwrap();
-    assert!(b1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == BetaInput::DemandInput(1)));
+    assert!(
+        b1.deliveries
+            .iter()
+            .any(|inp| *inp == BetaInput::DemandInput(1))
+    );
 
     // A1 should have received StatusInput from the cascade
     let a1 = router.get_alpha(&A1).unwrap();
-    assert!(a1
-        .deliveries
-        .iter()
-        .any(|inp| *inp == AlphaInput::StatusInput(vec![99])));
+    assert!(
+        a1.deliveries
+            .iter()
+            .any(|inp| *inp == AlphaInput::StatusInput(vec![99]))
+    );
 
     // Verify the edge was actually created
-    assert!(router
-        .beta_to_alpha_fwd
-        .get(&B1)
-        .unwrap()
-        .contains(&A1));
+    assert!(router.beta_to_alpha_fwd.get(&B1).unwrap().contains(&A1));
 }
 
 // ---- Port input tests ----
@@ -1297,17 +1312,23 @@ fn tracer_captures_basic_propagation() {
     )));
 
     // Should have propagate start/end
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e, TraceEvent::PropagateStart)));
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e, TraceEvent::PropagateEnd { .. })));
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e, TraceEvent::PropagateStart))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e, TraceEvent::PropagateEnd { .. }))
+    );
 
     // Should have at least one round
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e, TraceEvent::RoundStart { depth: 1 })));
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e, TraceEvent::RoundStart { depth: 1 }))
+    );
 
     // Should have delivered DemandInput to Beta
     assert!(entries.iter().any(|e| matches!(
@@ -1360,15 +1381,33 @@ fn tracer_captures_effects_bracketing() {
         .expect("should have EffectsEnd for Beta");
 
     // Signal change and edge change should be between effects_start and effects_end
-    let has_signal_in_effects = entries[effects_start_idx..effects_end_idx]
-        .iter()
-        .any(|e| matches!(e, TraceEvent::SignalChanged { signal: "Status", .. }));
-    assert!(has_signal_in_effects, "signal change should be within effects bracket");
+    let has_signal_in_effects = entries[effects_start_idx..effects_end_idx].iter().any(|e| {
+        matches!(
+            e,
+            TraceEvent::SignalChanged {
+                signal: "Status",
+                ..
+            }
+        )
+    });
+    assert!(
+        has_signal_in_effects,
+        "signal change should be within effects bracket"
+    );
 
-    let has_edge_in_effects = entries[effects_start_idx..effects_end_idx]
-        .iter()
-        .any(|e| matches!(e, TraceEvent::EdgeChanged { edge: "BetaToAlpha", .. }));
-    assert!(has_edge_in_effects, "edge change should be within effects bracket");
+    let has_edge_in_effects = entries[effects_start_idx..effects_end_idx].iter().any(|e| {
+        matches!(
+            e,
+            TraceEvent::EdgeChanged {
+                edge: "BetaToAlpha",
+                ..
+            }
+        )
+    });
+    assert!(
+        has_edge_in_effects,
+        "edge change should be within effects bracket"
+    );
 }
 
 #[test]
@@ -1552,7 +1591,10 @@ mod auto_id {
 
     impl Clone for WorkerSm {
         fn clone(&self) -> Self {
-            WorkerSm { deliveries: self.deliveries.clone(), on_handle: None }
+            WorkerSm {
+                deliveries: self.deliveries.clone(),
+                on_handle: None,
+            }
         }
     }
 
@@ -1606,10 +1648,12 @@ mod auto_id {
         router.propagate();
 
         let worker = router.get_worker(&w1).unwrap();
-        assert!(worker
-            .deliveries
-            .iter()
-            .any(|inp| *inp == WorkerInput::DemandInput(1)));
+        assert!(
+            worker
+                .deliveries
+                .iter()
+                .any(|inp| *inp == WorkerInput::DemandInput(1))
+        );
     }
 
     #[test]
@@ -1623,10 +1667,12 @@ mod auto_id {
         router.propagate();
 
         let worker = router.get_worker(&w1).unwrap();
-        assert!(worker
-            .deliveries
-            .iter()
-            .any(|inp| *inp == WorkerInput::ConfigInput(vec![42])));
+        assert!(
+            worker
+                .deliveries
+                .iter()
+                .any(|inp| *inp == WorkerInput::ConfigInput(vec![42]))
+        );
     }
 
     #[test]
@@ -1655,23 +1701,27 @@ mod auto_id {
 
         // Worker should have received demand
         let worker = router.get_worker(&w1_id).unwrap();
-        assert!(worker
-            .deliveries
-            .iter()
-            .any(|inp| *inp == WorkerInput::DemandInput(1)));
+        assert!(
+            worker
+                .deliveries
+                .iter()
+                .any(|inp| *inp == WorkerInput::DemandInput(1))
+        );
 
         // Both services should have received status via cascade
         let s1 = router.get_service(&S1).unwrap();
-        assert!(s1
-            .deliveries
-            .iter()
-            .any(|inp| *inp == ServiceInput::StatusInput(vec![99])));
+        assert!(
+            s1.deliveries
+                .iter()
+                .any(|inp| *inp == ServiceInput::StatusInput(vec![99]))
+        );
 
         let s2 = router.get_service(&S2).unwrap();
-        assert!(s2
-            .deliveries
-            .iter()
-            .any(|inp| *inp == ServiceInput::StatusInput(vec![99])));
+        assert!(
+            s2.deliveries
+                .iter()
+                .any(|inp| *inp == ServiceInput::StatusInput(vec![99]))
+        );
     }
 
     #[test]
@@ -1731,7 +1781,11 @@ mod auto_id {
 
         // W1 should have received DemandInput(1)
         let w1 = router.get_worker(&w1_id).unwrap();
-        assert!(w1.deliveries.iter().any(|inp| *inp == WorkerInput::DemandInput(1)));
+        assert!(
+            w1.deliveries
+                .iter()
+                .any(|inp| *inp == WorkerInput::DemandInput(1))
+        );
 
         // W1's handler created a new worker; the status signal contains the new ID
 
@@ -1741,7 +1795,11 @@ mod auto_id {
 
         // S1 should have received status from w1 (via the edge w1 set)
         let s1 = router.get_service(&S1).unwrap();
-        assert!(s1.deliveries.iter().any(|inp| *inp == ServiceInput::StatusInput(vec![w2_id.0 as u32])));
+        assert!(
+            s1.deliveries
+                .iter()
+                .any(|inp| *inp == ServiceInput::StatusInput(vec![w2_id.0 as u32]))
+        );
     }
 
     #[test]
@@ -1806,7 +1864,11 @@ mod auto_id {
 
         // S1 should have received empty status (w1's edges cleaned up)
         let s1 = router.get_service(&S1).unwrap();
-        assert!(s1.deliveries.iter().any(|inp| *inp == ServiceInput::StatusInput(vec![])));
+        assert!(
+            s1.deliveries
+                .iter()
+                .any(|inp| *inp == ServiceInput::StatusInput(vec![]))
+        );
     }
 
     #[test]
@@ -1819,9 +1881,18 @@ mod auto_id {
         w1.on_handle = Some(Box::new(|input, ctx| {
             if let WorkerInput::DemandInput(count) = input {
                 if *count > 0 {
-                    let a = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
-                    let b = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
-                    let c = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
+                    let a = ctx.create_worker(WorkerSm {
+                        deliveries: Vec::new(),
+                        on_handle: None,
+                    });
+                    let b = ctx.create_worker(WorkerSm {
+                        deliveries: Vec::new(),
+                        on_handle: None,
+                    });
+                    let c = ctx.create_worker(WorkerSm {
+                        deliveries: Vec::new(),
+                        on_handle: None,
+                    });
                     // All IDs must be different
                     assert_ne!(a, b);
                     assert_ne!(b, c);
@@ -1856,7 +1927,10 @@ mod auto_id {
         w1_sm.on_handle = Some(Box::new(|input, ctx| {
             if let WorkerInput::DemandInput(count) = input {
                 if *count > 0 {
-                    let new_id = ctx.create_worker(WorkerSm { deliveries: Vec::new(), on_handle: None });
+                    let new_id = ctx.create_worker(WorkerSm {
+                        deliveries: Vec::new(),
+                        on_handle: None,
+                    });
                     ctx.set_status(new_id.0 as u32);
                 }
             }
@@ -2062,7 +2136,11 @@ mod invariant_tests {
             .iter()
             .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
             .collect();
-        assert!(violations.is_empty(), "expected no violations, got: {:?}", violations);
+        assert!(
+            violations.is_empty(),
+            "expected no violations, got: {:?}",
+            violations
+        );
     }
 
     #[test]
@@ -2086,7 +2164,12 @@ mod invariant_tests {
             .iter()
             .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
             .collect();
-        assert_eq!(violations.len(), 3, "expected 3 violations, got: {:?}", violations);
+        assert_eq!(
+            violations.len(),
+            3,
+            "expected 3 violations, got: {:?}",
+            violations
+        );
 
         // Check specific fields
         assert!(violations.iter().any(|e| matches!(
@@ -2145,7 +2228,11 @@ mod invariant_tests {
             .iter()
             .filter(|e| matches!(e, TraceEvent::InvariantViolation { .. }))
             .collect();
-        assert!(violations.is_empty(), "expected resolved state, got: {:?}", violations);
+        assert!(
+            violations.is_empty(),
+            "expected resolved state, got: {:?}",
+            violations
+        );
     }
 
     #[test]
@@ -2190,8 +2277,8 @@ mod invariant_tests {
 // ============================================================================
 
 mod initialize_tests {
-    use crate::{Aggregator, SmHandler};
     use crate::trace::{RecordingTracer, TraceEvent};
+    use crate::{Aggregator, SmHandler};
 
     #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
     struct ParentId(u64);
@@ -2247,7 +2334,10 @@ mod initialize_tests {
 
     impl Clone for ParentSm {
         fn clone(&self) -> Self {
-            ParentSm { on_init: None, on_handle: None }
+            ParentSm {
+                on_init: None,
+                on_handle: None,
+            }
         }
     }
 
@@ -2265,7 +2355,10 @@ mod initialize_tests {
         }
 
         #[allow(dead_code)]
-        fn with_handle(mut self, f: impl FnMut(&ParentInput, &mut dyn ParentCtx) + 'static) -> Self {
+        fn with_handle(
+            mut self,
+            f: impl FnMut(&ParentInput, &mut dyn ParentCtx) + 'static,
+        ) -> Self {
             self.on_handle = Some(Box::new(f));
             self
         }
@@ -2296,7 +2389,10 @@ mod initialize_tests {
 
     impl Clone for ChildSm {
         fn clone(&self) -> Self {
-            ChildSm { on_init: None, deliveries: self.deliveries.clone() }
+            ChildSm {
+                on_init: None,
+                deliveries: self.deliveries.clone(),
+            }
         }
     }
 
@@ -2342,7 +2438,10 @@ mod initialize_tests {
         router.propagate();
 
         // Signal should be set after propagate materializes the SM
-        assert_eq!(router.parent_signal_state.get(&P1).map(|s| &s.out_flag), Some(&true));
+        assert_eq!(
+            router.parent_signal_state.get(&P1).map(|s| &s.out_flag),
+            Some(&true)
+        );
     }
 
     #[test]
@@ -2365,10 +2464,11 @@ mod initialize_tests {
         router.propagate();
 
         let c1 = router.get_child(&C1).unwrap();
-        assert!(c1
-            .deliveries
-            .iter()
-            .any(|inp| matches!(inp, ChildInput::FlagInput(1))));
+        assert!(
+            c1.deliveries
+                .iter()
+                .any(|inp| matches!(inp, ChildInput::FlagInput(1)))
+        );
     }
 
     #[test]
@@ -2490,5 +2590,5 @@ mod initialize_tests {
     }
 }
 
-mod model_checkable;
 mod manual_propagate;
+mod model_checkable;

@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use activator_types::test_helpers::{
-    collect_frames, h2_data, h2_headers, h2_ping, h2_settings, parse_settings_payload, H2_PREFACE,
+    H2_PREFACE, collect_frames, h2_data, h2_headers, h2_ping, h2_settings, parse_settings_payload,
 };
 use distvirt_activator::types::{
     Action, BackendNeed, Event, IpProtocol, LogLevel, PacketDecision, PacketInfo,
@@ -105,7 +105,9 @@ fn instance_packet_roundtrip() {
         &actions[1],
         Action::SetBackendNeed(BackendNeed::Traffic)
     ));
-    assert!(matches!(&actions[2], Action::Log(log) if log.level == LogLevel::Info && log.message == "packet:42"));
+    assert!(
+        matches!(&actions[2], Action::Log(log) if log.level == LogLevel::Info && log.message == "packet:42")
+    );
 }
 
 #[test]
@@ -151,7 +153,9 @@ fn instance_tick() {
     let actions = inst.process_events().unwrap();
 
     assert_eq!(actions.len(), 1);
-    assert!(matches!(&actions[0], Action::Log(log) if log.level == LogLevel::Debug && log.message == "tick"));
+    assert!(
+        matches!(&actions[0], Action::Log(log) if log.level == LogLevel::Debug && log.message == "tick")
+    );
 }
 
 #[test]
@@ -184,9 +188,7 @@ fn instance_stream_data_echo() {
     let actions = inst.process_events().unwrap();
 
     assert_eq!(actions.len(), 1);
-    assert!(
-        matches!(&actions[0], Action::DownstreamSend { stream: 5, data: d } if d == &data)
-    );
+    assert!(matches!(&actions[0], Action::DownstreamSend { stream: 5, data: d } if d == &data));
 }
 
 #[test]
@@ -215,9 +217,7 @@ fn instance_upstream_connect_ok() {
     let actions = inst.process_events().unwrap();
 
     assert_eq!(actions.len(), 1);
-    assert!(
-        matches!(&actions[0], Action::UpstreamSend { stream: 10, data } if data == b"hello")
-    );
+    assert!(matches!(&actions[0], Action::UpstreamSend { stream: 10, data } if data == b"hello"));
 }
 
 #[test]
@@ -233,7 +233,9 @@ fn instance_upstream_connect_refused() {
     let actions = inst.process_events().unwrap();
 
     assert_eq!(actions.len(), 1);
-    assert!(matches!(&actions[0], Action::Log(log) if log.level == LogLevel::Warn && log.message == "upstream-failed:10"));
+    assert!(
+        matches!(&actions[0], Action::Log(log) if log.level == LogLevel::Warn && log.message == "upstream-failed:10")
+    );
 }
 
 #[test]
@@ -250,9 +252,7 @@ fn instance_upstream_data_proxy() {
     let actions = inst.process_events().unwrap();
 
     assert_eq!(actions.len(), 1);
-    assert!(
-        matches!(&actions[0], Action::DownstreamSend { stream: 8, data: d } if d == &data)
-    );
+    assert!(matches!(&actions[0], Action::DownstreamSend { stream: 8, data: d } if d == &data));
 }
 
 #[test]
@@ -376,7 +376,10 @@ fn instance_fuel_does_not_accumulate() {
     let mut spin_inst = ActivatorInstance::new(runtime.engine(), spin_component).unwrap();
     spin_inst.push_event(Event::Tick);
     let result = spin_inst.process_events();
-    assert!(result.is_err(), "spin should still trap after idle calls on another instance");
+    assert!(
+        result.is_err(),
+        "spin should still trap after idle calls on another instance"
+    );
 }
 
 // --- TCP activator tests ---
@@ -571,11 +574,7 @@ fn get_http2_instance() -> ActivatorInstance {
 fn downstream_data_for(actions: &[Action], stream: u64) -> Vec<u8> {
     let mut result = Vec::new();
     for action in actions {
-        if let Action::DownstreamSend {
-            stream: s,
-            data,
-        } = action
-        {
+        if let Action::DownstreamSend { stream: s, data } = action {
             if *s == stream {
                 result.extend_from_slice(data);
             }
@@ -593,10 +592,7 @@ fn do_h2_handshake(inst: &mut ActivatorInstance, stream: u64) -> Vec<Action> {
     // Send preface + empty SETTINGS
     let mut data = H2_PREFACE.to_vec();
     data.extend_from_slice(&h2_settings(&[]));
-    inst.push_event(Event::StreamData {
-        stream,
-        data,
-    });
+    inst.push_event(Event::StreamData { stream, data });
     let actions = inst.process_events().unwrap();
     actions
 }
@@ -690,13 +686,17 @@ fn h2_buffering_while_no_backend() {
 
     // Should NOT have any UpstreamSend (no backend connected)
     assert!(
-        !actions.iter().any(|a| matches!(a, Action::UpstreamSend { .. })),
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::UpstreamSend { .. })),
         "should not send upstream without backend"
     );
 
     // Should NOT have UpstreamConnect (backend not available yet)
     assert!(
-        !actions.iter().any(|a| matches!(a, Action::UpstreamConnect { .. })),
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::UpstreamConnect { .. })),
         "should not connect upstream without backend available"
     );
 }

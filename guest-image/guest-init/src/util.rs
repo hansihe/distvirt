@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::ptr;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// Mount a filesystem. Creates the target directory if it doesn't exist.
 pub fn mount(
@@ -91,4 +91,3 @@ pub fn read_pipe(fd: i32) -> io::Result<ReadPipeResult> {
         }
     }
 }
-

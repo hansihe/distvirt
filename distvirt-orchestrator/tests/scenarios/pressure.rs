@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::harness::*;
 use crate::harness::mock_worker::MockWorkerConfig;
+use crate::harness::*;
 use distvirt_orchestrator::types::ServiceId;
 use distvirt_worker_protocol::BackendNeed;
 
@@ -37,9 +37,16 @@ fn test_pod_scheduled_on_lower_pressure_worker() {
     h.converge();
     h.assert_workload_running("ns2", "echo");
 
-    let ns1_worker = h.workload_global_worker_id("ns1", "echo").expect("expected worker_id");
-    let ns2_worker = h.workload_global_worker_id("ns2", "echo").expect("expected worker_id");
-    assert_eq!(ns1_worker, w1, "ns1 pod should be on w1 (only worker at time of creation)");
+    let ns1_worker = h
+        .workload_global_worker_id("ns1", "echo")
+        .expect("expected worker_id");
+    let ns2_worker = h
+        .workload_global_worker_id("ns2", "echo")
+        .expect("expected worker_id");
+    assert_eq!(
+        ns1_worker, w1,
+        "ns1 pod should be on w1 (only worker at time of creation)"
+    );
     assert_eq!(
         ns2_worker, w2,
         "ns2 pod should be scheduled on the Normal-pressure worker, not the Elevated one"
@@ -67,8 +74,12 @@ fn test_pod_count_tiebreaker_at_same_pressure() {
     h.assert_workload_running("ns", "echo-b");
 
     // The two workloads should be on different workers (pod count tiebreaker).
-    let worker_a = h.workload_global_worker_id("ns", "echo-a").expect("expected worker_id");
-    let worker_b = h.workload_global_worker_id("ns", "echo-b").expect("expected worker_id");
+    let worker_a = h
+        .workload_global_worker_id("ns", "echo-a")
+        .expect("expected worker_id");
+    let worker_b = h
+        .workload_global_worker_id("ns", "echo-b")
+        .expect("expected worker_id");
     assert_ne!(
         worker_a, worker_b,
         "two workloads at same pressure should be spread across workers (pod count tiebreaker)"
@@ -410,7 +421,9 @@ fn test_workload_reschedules_to_lower_pressure_worker_after_disconnect() {
     h.converge();
     h.assert_workload_running("ns", "echo");
 
-    let initial_worker = h.workload_global_worker_id("ns", "echo").expect("expected worker_id");
+    let initial_worker = h
+        .workload_global_worker_id("ns", "echo")
+        .expect("expected worker_id");
 
     // Disconnect the worker that has the workload.
     h.disconnect_worker(&initial_worker);
@@ -419,7 +432,9 @@ fn test_workload_reschedules_to_lower_pressure_worker_after_disconnect() {
     // After converge the scheduler should have placed it on the remaining worker.
     h.assert_workload_running("ns", "echo");
 
-    let new_worker = h.workload_global_worker_id("ns", "echo").expect("expected worker_id");
+    let new_worker = h
+        .workload_global_worker_id("ns", "echo")
+        .expect("expected worker_id");
     assert_ne!(
         new_worker, initial_worker,
         "workload should have moved to a different worker after disconnect"

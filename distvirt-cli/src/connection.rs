@@ -63,9 +63,7 @@ impl tonic::service::Interceptor for AuthInterceptor {
             let value = format!("Bearer {}", token)
                 .parse()
                 .map_err(|_| tonic::Status::internal("invalid auth token"))?;
-            request
-                .metadata_mut()
-                .insert("authorization", value);
+            request.metadata_mut().insert("authorization", value);
         }
         Ok(request)
     }
@@ -75,7 +73,8 @@ pub type AuthChannel = InterceptedService<Channel, AuthInterceptor>;
 
 pub async fn connect(params: &ConnectionParams) -> anyhow::Result<AuthChannel> {
     // Ensure the server address has a scheme
-    let endpoint = if params.server.starts_with("http://") || params.server.starts_with("https://") {
+    let endpoint = if params.server.starts_with("http://") || params.server.starts_with("https://")
+    {
         params.server.clone()
     } else {
         format!("http://{}", params.server)

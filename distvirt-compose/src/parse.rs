@@ -17,15 +17,12 @@ pub fn parse(path: &Path) -> anyhow::Result<Deployment> {
         .from_yaml_str(&contents)
         .context("failed to parse compose file")?;
 
-    let name = compose
-        .name
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| {
-            path.parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unnamed".to_string())
-        });
+    let name = compose.name.map(|n| n.to_string()).unwrap_or_else(|| {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unnamed".to_string())
+    });
 
     let mut services = HashMap::new();
 
@@ -190,7 +187,12 @@ services:
         .unwrap();
         let d = parse(&file_path).unwrap();
         // Name should be derived from parent directory
-        let expected = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let expected = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert_eq!(d.name, expected);
     }
 
@@ -208,7 +210,11 @@ services:
         .unwrap();
         assert_eq!(
             d.services["app"].command.as_ref().unwrap(),
-            &vec!["/bin/sh".to_string(), "-c".to_string(), "echo hello".to_string()]
+            &vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hello".to_string()
+            ]
         );
     }
 
@@ -329,8 +335,14 @@ services:
         assert_eq!(d.name, "full");
         let app = &d.services["app"];
         assert_eq!(app.image, "myapp:v1");
-        assert_eq!(app.command.as_ref().unwrap(), &vec!["run".to_string(), "--flag".to_string()]);
-        assert_eq!(app.entrypoint.as_ref().unwrap(), &vec!["/entrypoint.sh".to_string()]);
+        assert_eq!(
+            app.command.as_ref().unwrap(),
+            &vec!["run".to_string(), "--flag".to_string()]
+        );
+        assert_eq!(
+            app.entrypoint.as_ref().unwrap(),
+            &vec!["/entrypoint.sh".to_string()]
+        );
         assert_eq!(app.environment.len(), 2);
         assert_eq!(app.environment["DB_HOST"], "localhost");
         assert_eq!(app.environment["DB_PORT"], "5432");

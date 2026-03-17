@@ -1,6 +1,6 @@
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{braced, bracketed, parenthesized, Ident, Token, Type};
+use syn::{Ident, Token, Type, braced, bracketed, parenthesized};
 
 mod kw {
     syn::custom_keyword!(state_machines);
@@ -110,56 +110,49 @@ impl Parse for TopologyDef {
                 let content;
                 braced!(content in input);
                 state_machines.extend(
-                    Punctuated::<SmDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<SmDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else if lookahead.peek(kw::ports) {
                 input.parse::<kw::ports>()?;
                 let content;
                 braced!(content in input);
                 ports.extend(
-                    Punctuated::<PortDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<PortDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else if lookahead.peek(kw::signals) {
                 input.parse::<kw::signals>()?;
                 let content;
                 braced!(content in input);
                 signals.extend(
-                    Punctuated::<SignalDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<SignalDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else if lookahead.peek(kw::edges) {
                 input.parse::<kw::edges>()?;
                 let content;
                 braced!(content in input);
                 edges.extend(
-                    Punctuated::<EdgeDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<EdgeDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else if lookahead.peek(kw::events) {
                 input.parse::<kw::events>()?;
                 let content;
                 braced!(content in input);
                 events.extend(
-                    Punctuated::<EventDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<EventDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else if lookahead.peek(kw::inputs) {
                 input.parse::<kw::inputs>()?;
                 let content;
                 braced!(content in input);
                 inputs.extend(
-                    Punctuated::<InputDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<InputDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else if lookahead.peek(kw::invariants) {
                 input.parse::<kw::invariants>()?;
                 let content;
                 braced!(content in input);
                 invariants.extend(
-                    Punctuated::<InvariantDef, Token![,]>::parse_terminated(&content)?
-                        .into_iter(),
+                    Punctuated::<InvariantDef, Token![,]>::parse_terminated(&content)?.into_iter(),
                 );
             } else {
                 return Err(lookahead.error());
@@ -318,11 +311,7 @@ impl Parse for InvariantDef {
         let content;
         parenthesized!(content in input);
         let expr: syn::Expr = content.parse()?;
-        Ok(InvariantDef {
-            node,
-            signal,
-            expr,
-        })
+        Ok(InvariantDef { node, signal, expr })
     }
 }
 
@@ -336,10 +325,6 @@ impl Parse for SourcePair {
         let node: Ident = content.parse()?;
         content.parse::<Token![::]>()?;
         let signal: Ident = content.parse()?;
-        Ok(SourcePair {
-            edge,
-            node,
-            signal,
-        })
+        Ok(SourcePair { edge, node, signal })
     }
 }

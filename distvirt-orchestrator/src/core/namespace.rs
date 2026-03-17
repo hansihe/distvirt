@@ -18,8 +18,8 @@ use crate::core::GlobalWorkerId;
 use distvirt_sm_router::trace::PanicTracer;
 
 use crate::sm_new::{
-    AdminCmd, DRouter, LeaseInfo, PodId, PodStatus, Router, ScheduleLeaseId, WorkerId, ENDPOINT,
-    SCHEDULE_REQUEST, TIMER,
+    AdminCmd, DRouter, ENDPOINT, LeaseInfo, PodId, PodStatus, Router, SCHEDULE_REQUEST,
+    ScheduleLeaseId, TIMER, WorkerId,
 };
 use crate::types::{NamespaceId, NamespaceSpec};
 
@@ -94,10 +94,7 @@ impl IdMaps {
         self.router_to_proto_pod.insert(router, proto);
     }
 
-    fn remove_pod_by_router(
-        &mut self,
-        router: &PodId,
-    ) -> Option<distvirt_worker_protocol::PodId> {
+    fn remove_pod_by_router(&mut self, router: &PodId) -> Option<distvirt_worker_protocol::PodId> {
         if let Some(proto) = self.router_to_proto_pod.remove(router) {
             self.proto_to_router_pod.remove(&proto);
             Some(proto)
@@ -280,8 +277,7 @@ impl NamespaceCore {
                         if let Some(pending) = self.pending_workers.remove(&wne.worker_id) {
                             let router_worker_id = self.router.create_worker();
                             self.ids.insert_worker(wne.worker_id, router_worker_id);
-                            self.router
-                                .set_worker_info(router_worker_id, pending.info);
+                            self.router.set_worker_info(router_worker_id, pending.info);
                             self.active_workers.insert(wne.worker_id);
                             self.proto_worker_ids
                                 .insert(wne.worker_id, pending.proto_worker_id);
@@ -300,8 +296,7 @@ impl NamespaceCore {
                                 .filter(|(_, w)| *w == wne.worker_id)
                                 .map(|(p, _)| *p)
                                 .collect();
-                            self.deferred_grants
-                                .retain(|(_, w)| *w != wne.worker_id);
+                            self.deferred_grants.retain(|(_, w)| *w != wne.worker_id);
                             for pod_id in deferred {
                                 self.apply_grant(router_worker_id, pod_id);
                             }
@@ -316,8 +311,7 @@ impl NamespaceCore {
                             );
                         }
                         // Discard any deferred grants for this worker.
-                        self.deferred_grants
-                            .retain(|(_, w)| *w != wne.worker_id);
+                        self.deferred_grants.retain(|(_, w)| *w != wne.worker_id);
                         return;
                     }
                     _ => {}
@@ -425,8 +419,10 @@ impl NamespaceCore {
                         service_id: Some(ref proto_svc_id),
                         ..
                     } => {
-                        if let Some(_router_svc_id) =
-                            self.adapters.management.lookup_service(proto_svc_id.as_ref())
+                        if let Some(_router_svc_id) = self
+                            .adapters
+                            .management
+                            .lookup_service(proto_svc_id.as_ref())
                         {
                             self.adapters.management.send_activate_service(
                                 &mut self.router,
@@ -443,8 +439,10 @@ impl NamespaceCore {
                         has_active_flows,
                         ..
                     } => {
-                        if let Some(router_svc_id) =
-                            self.adapters.management.lookup_service(proto_svc_id.as_ref())
+                        if let Some(router_svc_id) = self
+                            .adapters
+                            .management
+                            .lookup_service(proto_svc_id.as_ref())
                         {
                             if has_active_flows {
                                 self.adapters.flow_demand.set_active(
@@ -565,15 +563,12 @@ impl NamespaceCore {
                     }
                 }
 
-                let registry_action = self
-                    .adapters
-                    .endpoint
-                    .update_registry(
-                        new_spec
-                            .services
-                            .iter()
-                            .map(|(name, spec)| (name.as_ref().to_owned(), spec.ip)),
-                    );
+                let registry_action = self.adapters.endpoint.update_registry(
+                    new_spec
+                        .services
+                        .iter()
+                        .map(|(name, spec)| (name.as_ref().to_owned(), spec.ip)),
+                );
                 if let Some(action) = registry_action {
                     if let Some(cmd) = self.build_registry_command(&action) {
                         effects.broadcast_commands.push(cmd);
@@ -676,17 +671,21 @@ impl NamespaceCore {
                         .resume_artifact
                         .as_ref()
                         .map(|art_id| self.ids.get_proto_artifact(art_id).clone());
-                    effects.scheduler_messages.push(SchedulerMessage::RequestLease {
-                        namespace_id: self.namespace_id.clone(),
-                        pod_id,
-                        proto_resume_artifact,
-                    });
+                    effects
+                        .scheduler_messages
+                        .push(SchedulerMessage::RequestLease {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id,
+                            proto_resume_artifact,
+                        });
                 }
                 ScheduleRequestDelta::Drop { pod_id } => {
-                    effects.scheduler_messages.push(SchedulerMessage::DropRequest {
-                        namespace_id: self.namespace_id.clone(),
-                        pod_id,
-                    });
+                    effects
+                        .scheduler_messages
+                        .push(SchedulerMessage::DropRequest {
+                            namespace_id: self.namespace_id.clone(),
+                            pod_id,
+                        });
                 }
             }
         }
@@ -736,8 +735,7 @@ impl NamespaceCore {
                 }
                 PodAssignmentAction::Suspend { worker_id, pod_id } => {
                     if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
-                        let proto_pod_id =
-                            self.ids.router_to_proto_pod.get(&pod_id).cloned();
+                        let proto_pod_id = self.ids.router_to_proto_pod.get(&pod_id).cloned();
                         if let Some(proto_pod_id) = proto_pod_id {
                             let (proto_artifact_id, _router_artifact_id) =
                                 self.ids.create_artifact_id();
@@ -954,12 +952,18 @@ impl NamespaceCore {
     }
 
     /// Map a router-internal WorkerId to a GlobalWorkerId (for test use).
-    pub fn router_worker_to_global(&self, router_wid: &crate::sm_new::WorkerId) -> Option<GlobalWorkerId> {
+    pub fn router_worker_to_global(
+        &self,
+        router_wid: &crate::sm_new::WorkerId,
+    ) -> Option<GlobalWorkerId> {
         self.ids.router_to_global_worker.get(router_wid).copied()
     }
 
     /// Map a router-internal PodId to a protocol PodId (for test use).
-    pub fn router_pod_to_proto(&self, router_pid: &crate::sm_new::PodId) -> Option<&distvirt_worker_protocol::PodId> {
+    pub fn router_pod_to_proto(
+        &self,
+        router_pid: &crate::sm_new::PodId,
+    ) -> Option<&distvirt_worker_protocol::PodId> {
         self.ids.router_to_proto_pod.get(router_pid)
     }
 }
@@ -968,12 +972,13 @@ fn convert_resources(
     r: &crate::types::ResourceRequirements,
 ) -> distvirt_worker_protocol::ResourceRequirements {
     distvirt_worker_protocol::ResourceRequirements {
-        requests: r.requests.as_ref().map(|v| {
-            distvirt_worker_protocol::ResourceValues {
+        requests: r
+            .requests
+            .as_ref()
+            .map(|v| distvirt_worker_protocol::ResourceValues {
                 memory_mib: v.memory_mb,
                 vcpus: v.vcpus,
-            }
-        }),
+            }),
         limits: r
             .limits
             .as_ref()

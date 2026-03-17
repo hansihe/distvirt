@@ -49,22 +49,24 @@ pub fn validate(def: &TopologyDef) -> syn::Result<()> {
     // 2. Duplicate port names
     check_duplicates(
         &mut errors,
-        def.ports.iter().map(|p| (p.name.to_string(), p.name.span())),
+        def.ports
+            .iter()
+            .map(|p| (p.name.to_string(), p.name.span())),
         "port",
     );
 
     // 3. SM/port name collision
     {
-        let sm_names: HashSet<String> =
-            def.state_machines.iter().map(|s| s.name.to_string()).collect();
+        let sm_names: HashSet<String> = def
+            .state_machines
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect();
         for port in &def.ports {
             if sm_names.contains(&port.name.to_string()) {
                 errors.push(syn::Error::new(
                     port.name.span(),
-                    format!(
-                        "port `{}` has the same name as a state machine",
-                        port.name
-                    ),
+                    format!("port `{}` has the same name as a state machine", port.name),
                 ));
             }
         }
@@ -73,7 +75,9 @@ pub fn validate(def: &TopologyDef) -> syn::Result<()> {
     // 4. Duplicate edge names
     check_duplicates(
         &mut errors,
-        def.edges.iter().map(|e| (e.name.to_string(), e.name.span())),
+        def.edges
+            .iter()
+            .map(|e| (e.name.to_string(), e.name.span())),
         "edge",
     );
 
@@ -90,7 +94,9 @@ pub fn validate(def: &TopologyDef) -> syn::Result<()> {
     // 6. Duplicate event names
     check_duplicates(
         &mut errors,
-        def.events.iter().map(|e| (e.name.to_string(), e.name.span())),
+        def.events
+            .iter()
+            .map(|e| (e.name.to_string(), e.name.span())),
         "event",
     );
 
@@ -167,10 +173,7 @@ pub fn validate(def: &TopologyDef) -> syn::Result<()> {
         if !def.state_machines.iter().any(|s| s.name == ev.receiver) {
             errors.push(syn::Error::new(
                 ev.receiver.span(),
-                format!(
-                    "event receiver `{}` must be a state machine",
-                    ev.receiver
-                ),
+                format!("event receiver `{}` must be a state machine", ev.receiver),
             ));
         }
         let has_connecting_edge = def.edges.iter().any(|e| {

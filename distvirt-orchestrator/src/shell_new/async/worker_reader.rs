@@ -8,7 +8,7 @@ use distvirt_worker_protocol::OrchestratorReader;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::core::worker_event::{classify, ClassifiedWorkerEvent};
+use crate::core::worker_event::{ClassifiedWorkerEvent, classify};
 use crate::task::GlobalWorkerId;
 
 use super::ShellEvent;
@@ -41,9 +41,7 @@ async fn run(
                     ClassifiedWorkerEvent::WorkerState(event) => {
                         ShellEvent::WorkerStateEvent(event)
                     }
-                    ClassifiedWorkerEvent::Scheduler(input) => {
-                        ShellEvent::SchedulerInput(input)
-                    }
+                    ClassifiedWorkerEvent::Scheduler(input) => ShellEvent::SchedulerInput(input),
                     ClassifiedWorkerEvent::Ignored => continue,
                 };
                 if shell_tx.send(shell_event).await.is_err() {
@@ -51,10 +49,7 @@ async fn run(
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "worker reader error for {:?}: {}",
-                    global_worker_id, e
-                );
+                eprintln!("worker reader error for {:?}: {}", global_worker_id, e);
                 break;
             }
         }

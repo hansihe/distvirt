@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
-use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, WorkerCommand, WorkerEvent,
-};
+use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, WorkerCommand, WorkerEvent};
 
 use super::common::*;
 
@@ -45,7 +43,13 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
     );
 
     // Register pod endpoint before launch
-    register_pod_endpoint(&mut conn, "ns-sim", &test_pod_network_config(), "sim-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-sim",
+        &test_pod_network_config(),
+        "sim-worker",
+    )
+    .await?;
 
     // Launch pod
     conn.send_command(&WorkerCommand::LaunchPod {
@@ -102,7 +106,8 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup_with_behavior(ContainerBehavior::ExitImmediately(42)).await?;
+    let (mut conn, worker_handle) =
+        setup_with_behavior(ContainerBehavior::ExitImmediately(42)).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: "ns-sim".into(),
@@ -115,7 +120,13 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
     })
     .await?;
 
-    register_pod_endpoint(&mut conn, "ns-sim", &test_pod_network_config(), "sim-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-sim",
+        &test_pod_network_config(),
+        "sim-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
@@ -156,7 +167,8 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
+    let (mut conn, worker_handle) =
+        setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: "ns-sim".into(),
@@ -169,7 +181,13 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
     })
     .await?;
 
-    register_pod_endpoint(&mut conn, "ns-sim", &test_pod_network_config(), "sim-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-sim",
+        &test_pod_network_config(),
+        "sim-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
@@ -223,7 +241,8 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
+    let (mut conn, worker_handle) =
+        setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: "ns-sim".into(),
@@ -236,7 +255,13 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
     })
     .await?;
 
-    register_pod_endpoint(&mut conn, "ns-sim", &test_pod_network_config(), "sim-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-sim",
+        &test_pod_network_config(),
+        "sim-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
@@ -281,7 +306,8 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
+    let (mut conn, worker_handle) =
+        setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: "ns-sim".into(),
@@ -294,7 +320,13 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
     })
     .await?;
 
-    register_pod_endpoint(&mut conn, "ns-sim", &test_pod_network_config(), "sim-worker").await?;
+    register_pod_endpoint(
+        &mut conn,
+        "ns-sim",
+        &test_pod_network_config(),
+        "sim-worker",
+    )
+    .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
@@ -331,7 +363,10 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
 
     // Expect pod termination (PodExited or PodFailed)
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { .. } | WorkerEvent::PodFailed { .. })
+        matches!(
+            e,
+            WorkerEvent::PodExited { .. } | WorkerEvent::PodFailed { .. }
+        )
     })
     .await?;
 
@@ -393,7 +428,9 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
             WorkerEvent::PodRunning { pod_id, .. } => {
                 running_pods.insert(pod_id.to_string());
             }
-            WorkerEvent::PodExited { pod_id, exit_code, .. } => {
+            WorkerEvent::PodExited {
+                pod_id, exit_code, ..
+            } => {
                 assert_eq!(*exit_code, 0, "expected exit_code 0, got {:?}", event);
                 exited_pods.insert(pod_id.to_string());
             }
@@ -438,9 +475,11 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
     .await?;
 
     // Expect NamespaceDestroyed for ns-a
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id == "ns-a")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id == "ns-a"),
+    )
     .await?;
 
     // ns-b pod should still be running — stop it gracefully
@@ -451,9 +490,11 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
     })
     .await?;
 
-    recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { namespace_id, .. } if namespace_id == "ns-b")
-    })
+    recv_until(
+        &mut conn,
+        EVENT_TIMEOUT,
+        |e| matches!(e, WorkerEvent::PodExited { namespace_id, .. } if namespace_id == "ns-b"),
+    )
     .await?;
 
     shutdown_worker(&mut conn, worker_handle).await?;
@@ -487,7 +528,10 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
 
     // Should eventually get pod termination and namespace destroyed
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::PodExited { .. } | WorkerEvent::PodFailed { .. })
+        matches!(
+            e,
+            WorkerEvent::PodExited { .. } | WorkerEvent::PodFailed { .. }
+        )
     })
     .await?;
 

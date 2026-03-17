@@ -4,7 +4,6 @@ use distvirt_worker_protocol::PsiMetrics;
 
 use crate::worker::resources::read_all_psi;
 
-
 /// Pluggable resource monitoring trait.
 ///
 /// Production workers read real PSI data from `/proc/pressure/*`.
