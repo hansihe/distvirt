@@ -253,7 +253,7 @@ mod tests {
 
     fn ws_connected(id: u64) -> WorkerStateCoreEvent {
         WorkerStateCoreEvent::Connected {
-            worker_id: GlobalWorkerId::test(id),
+            worker_id: GlobalWorkerId::from(id),
             capabilities: distvirt_worker_protocol::WorkerCapabilities {
                 has_kvm: false,
                 has_containerd: false,
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(effects.scheduler_updates.len(), 1);
         assert!(matches!(
             &effects.scheduler_updates[0],
-            SchedulerCoreInput::WorkerUpdate(id, _) if *id == GlobalWorkerId::test(1)
+            SchedulerCoreInput::WorkerUpdate(id, _) if *id == GlobalWorkerId::from(1)
         ));
     }
 
@@ -284,12 +284,12 @@ mod tests {
         let mut ws = WorkerStateCore::new();
         ws.process(ws_connected(1));
         let effects = ws.process(WorkerStateCoreEvent::Disconnected {
-            worker_id: GlobalWorkerId::test(1),
+            worker_id: GlobalWorkerId::from(1),
         });
         assert_eq!(effects.scheduler_updates.len(), 1);
         assert!(matches!(
             &effects.scheduler_updates[0],
-            SchedulerCoreInput::WorkerRemoved(id) if *id == GlobalWorkerId::test(1)
+            SchedulerCoreInput::WorkerRemoved(id) if *id == GlobalWorkerId::from(1)
         ));
     }
 

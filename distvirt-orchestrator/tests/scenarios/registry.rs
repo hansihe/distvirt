@@ -103,7 +103,7 @@ fn test_registry_update_on_service_change() {
     // Also remove the workload for svc-b since it's no longer needed.
     updated_spec
         .workloads
-        .remove(&WorkloadId("echo-b".to_string()));
+        .remove(&WorkloadName("echo-b".to_string()));
     h.update_namespace("ns1", updated_spec);
     h.converge();
 

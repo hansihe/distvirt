@@ -92,7 +92,7 @@ impl EndpointTable {
     }
 
     /// Feed a frame's TCP info to the endpoint's flow tracker (if present).
-    /// Returns a `FlowStatusChange` if `has_active_flows` transitioned.
+    /// Returns a `FlowStatusChange` if `active` transitioned.
     ///
     /// Endpoint-scoped (takes `&mut Endpoint`) to enable per-entry locking.
     fn track_flow(endpoint: &mut Endpoint, frame: &[u8]) -> Option<FlowStatusChange> {
@@ -121,7 +121,7 @@ impl EndpointTable {
             Some(FlowStatusChange {
                 ip: endpoint.ip,
                 service_id: endpoint.backend.service_id(),
-                has_active_flows: has_active,
+                active: has_active,
             })
         } else {
             None
@@ -270,7 +270,7 @@ impl EndpointTable {
         let debounce = self.activation_debounce;
         let endpoint = self.by_ip.get_mut(&dst_ip).unwrap();
         let EndpointBackend::Service {
-            ref service_id,
+            service_id,
             ref mut processor,
             ref policy,
             ..

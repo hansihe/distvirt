@@ -27,6 +27,10 @@ pub struct ServiceSm {
     pub last_readiness: Option<ReadyInfo>,
     /// DNS entry info from spec, signaled to the DnsRegistry port.
     pub dns_entry: Option<DnsEntryInfo>,
+    /// Service VIP from spec, used to construct ServiceEndpointInfo.
+    pub service_ip: std::net::Ipv4Addr,
+    /// Service policy from spec, used to construct ServiceEndpointInfo.
+    pub service_policy: distvirt_worker_protocol::ServicePolicy,
 }
 
 impl ServiceSm {
@@ -43,6 +47,12 @@ impl ServiceSm {
             idle_timeout: std::time::Duration::ZERO,
             last_readiness: None,
             dns_entry: None,
+            service_ip: std::net::Ipv4Addr::UNSPECIFIED,
+            service_policy: distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 0,
+                timeout_ms: 0,
+                activator: None,
+            },
         }
     }
 
@@ -80,7 +90,12 @@ impl ServiceSm {
         ctx.set_idle_timer_active(self.idle_timer_active);
 
         let endpoint_info = match &self.state {
-            ServiceState::Active { ready } => Some(ready.clone()),
+            ServiceState::Active { ready } => Some(ServiceEndpointInfo {
+                service_ip: self.service_ip,
+                policy: self.service_policy.clone(),
+                pod_ip: ready.pod_ip,
+                worker_id: ready.worker_id,
+            }),
             _ => None,
         };
         ctx.set_endpoint_info(endpoint_info);
@@ -124,6 +139,8 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                 if let Some((_, spec)) = spec_opt {
                     self.has_activation = spec.has_activation;
                     self.idle_timeout = spec.idle_timeout;
+                    self.service_ip = spec.ip;
+                    self.service_policy = spec.policy;
                     // Update DNS entry from spec.
                     self.dns_entry = match (spec.dns_name, spec.dns_ip) {
                         (Some(name), Some(ip)) => Some(DnsEntryInfo { name, ip }),

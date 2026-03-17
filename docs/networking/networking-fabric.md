@@ -283,11 +283,10 @@ Key methods:
 Owns the shared context (`FabricContextInner`) and manages port/gateway lifecycle.
 
 `FabricEvent` enum:
-- `EndpointActivation { dst_ip, service_id }` — frame hit endpoint needing activation (replaces former `RouteMiss` and `ServiceActivation`)
-- `EndpointFlowStatus { ip, has_active_flows }` — flow tracking status changed
-- `ServiceBackendNeed { service_id, dst_ip, need }` — activator signaled backend need change
+- `EndpointActivation { dst_ip, service_id }` — pulse: frame hit endpoint needing activation. Covers both traffic-based activation (buffer miss) and activator `BackendNeed::Traffic` signals.
+- `EndpointDemand { ip, service_id, active }` — level: demand changed for an endpoint. Covers both flow tracking transitions (TCP flows started/stopped) and activator `BackendNeed::Active`/`BackendNeed::None` signals.
 
-Events forwarded to worker via `mpsc::Sender<FabricEvent>`. Uses `try_send` — these are hints, silent drop under backpressure is acceptable.
+Events forwarded to worker via `mpsc::Sender<FabricEvent>`. `EndpointActivation` uses `try_send` (lossy pulse). `EndpointDemand` uses `send` for activator-sourced signals (reliable) and `try_send` for flow-tracking signals.
 
 Key methods:
 - `new(gateway_ip, prefix_len)` — create fabric with subnet config
@@ -408,25 +407,23 @@ enum WorkerCommand {
 
 ```rust
 enum WorkerEvent {
-    /// Endpoint received traffic but has no backend.
+    /// Pulse: endpoint received traffic but has no backend.
     /// Replaces both former FabricRouteMiss and ServiceActivation.
+    /// Activator BackendNeed::Traffic also maps to this event.
     EndpointActivation {
         namespace_id: NamespaceId,
         ip: Ipv4Addr,
         service_id: Option<ServiceId>,
     },
-    /// Flow tracking status changed for an endpoint.
-    /// Provides "is this pod in use?" signal for direct pod traffic.
-    EndpointFlowStatus {
+    /// Level: demand changed for an endpoint.
+    /// Replaces both former EndpointFlowStatus and ServiceBackendNeed.
+    /// Emitted by flow tracking (TCP flow transitions) and activator
+    /// BackendNeed::Active/None signals.
+    EndpointDemand {
         namespace_id: NamespaceId,
         ip: Ipv4Addr,
-        has_active_flows: bool,
-    },
-    /// Activator-driven backend need (services with activators only).
-    ServiceBackendNeed {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-        need: BackendNeed,
+        service_id: Option<ServiceId>,
+        active: bool,
     },
 }
 ```
@@ -455,9 +452,9 @@ effective_demand = services_wanting_backend_count
                  + (has_active_flows ? 1 : 0)
 ```
 
-`EndpointActivation` replaces both former `FabricRouteMiss` and `ServiceActivation` as the wake signal. The orchestrator routes it to the correct workload/service based on whether `service_id` is present.
+`EndpointActivation` is the pulse wake signal. The orchestrator routes it to the correct workload/service based on whether `service_id` is present.
 
-`EndpointFlowStatus` provides the idle signal for direct pod traffic. When `has_active_flows` transitions false, the orchestrator knows the pod has no active connections.
+`EndpointDemand` is the level signal. When `active` transitions false, the orchestrator knows the endpoint has no active demand (no TCP flows, or activator signals idle).
 
 ### DNS Registry
 
@@ -494,8 +491,7 @@ Backend pod → Pod IP (SNAT to Service IP) → Client pod
 7. Create ingress adapter virtual ports (`ChannelPort`) and plug into fabric
 8. Spawn event bridge task: maps `FabricEvent` to `WorkerEvent`:
    - `FabricEvent::EndpointActivation` → `WorkerEvent::EndpointActivation`
-   - `FabricEvent::EndpointFlowStatus` → `WorkerEvent::EndpointFlowStatus`
-   - `FabricEvent::ServiceBackendNeed` → `WorkerEvent::ServiceBackendNeed`
+   - `FabricEvent::EndpointDemand` → `WorkerEvent::EndpointDemand`
 9. Store in `NamespaceState` (includes `tables`, `registry`, adapter tasks/ports, `pods`)
 
 **Endpoint management** (`worker/namespace.rs`):
@@ -550,7 +546,7 @@ From the fabric's perspective, nothing is special — the WireGuard `ChannelPort
 
 ## Known Issues & Remaining Work
 
-1. ~~`route_miss_wake` demand leak~~ — **Fixed**. `EndpointActivation` with no `service_id` now sets `has_active_flows = true` instead, which is naturally cleared by `EndpointFlowStatus`.
+1. ~~`route_miss_wake` demand leak~~ — **Fixed**. `EndpointActivation` with no `service_id` now sets demand, which is naturally cleared by `EndpointDemand { active: false }`.
 2. **Hardcoded buffer policy** — UnplacedPod buffer policy (64 frames, 30s) should be configurable.
 3. **Lock ordering** — consider type-safe enforcement for fabric locks.
 4. **Flow tracker memory bounds** — with many concurrent connections the flow tracker could grow large. Per-endpoint flow limits or LRU eviction may be needed for production.

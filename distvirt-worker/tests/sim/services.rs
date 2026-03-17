@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    EndpointKind, EndpointPlacement, EndpointSpec, RegistryEntry, ServicePolicy, WorkerCommand,
-    WorkerEvent,
+    EndpointKind, EndpointPlacement, EndpointSpec, PodId, RegistryEntry, ServiceId, ServicePolicy,
+    WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -58,7 +58,7 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
         endpoints: vec![EndpointSpec {
             ip: vip,
             kind: EndpointKind::Service {
-                service_id: "svc-sim".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 0,
                     timeout_ms: 0,
@@ -88,7 +88,7 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
 /// Validates the worker-level EndpointSync → ServiceReady → mark_service_ready plumbing.
 #[tokio::test]
 async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
-    use distvirt_worker_protocol::{EndpointPodBackend, WorkerId};
+    use distvirt_worker_protocol::EndpointPodBackend;
 
     let (mut conn, worker_handle) = setup().await?;
 
@@ -105,7 +105,7 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
         endpoints: vec![EndpointSpec {
             ip: vip,
             kind: EndpointKind::Service {
-                service_id: "svc-ready-test".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -118,7 +118,7 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
     .await?;
 
     // Step 2: Register backend pod endpoint and launch it.
-    launch_pod(&mut conn, ns_id, "pod-backend", &backend_pod_net).await?;
+    launch_pod(&mut conn, ns_id, PodId(1), &backend_pod_net).await?;
 
     // Step 3: Update service endpoint with ready backend.
     conn.send_command(&WorkerCommand::EndpointUpdate {
@@ -126,7 +126,7 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
         upserted: vec![EndpointSpec {
             ip: vip,
             kind: EndpointKind::Service {
-                service_id: "svc-ready-test".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -135,7 +135,7 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
                 backend: Some(EndpointPodBackend {
                     pod_ip: backend_ip,
                     placement: Some(EndpointPlacement {
-                        worker_id: WorkerId::from("sim-worker"),
+                        worker_id: WorkerId(1),
                     }),
                     ready: true,
                 }),

@@ -10,13 +10,13 @@ const LOG_BUFFER_CAP: usize = 500;
 #[derive(Clone)]
 pub struct LogChunkData {
     pub namespace_id: NamespaceId,
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub data: Vec<u8>,
 }
 
 pub(super) struct LogSubscriber {
     pub namespace_id: NamespaceId,
-    pub workload_id: Option<WorkloadId>,
+    pub workload_id: Option<WorkloadName>,
     pub tx: mpsc::Sender<LogChunkData>,
 }
 
@@ -28,14 +28,14 @@ pub struct EventData {
 
 pub(super) struct EventSubscriber {
     pub namespace_id: NamespaceId,
-    pub workload_ids: HashSet<WorkloadId>,
+    pub workload_ids: HashSet<WorkloadName>,
     pub service_ids: HashSet<ServiceId>,
     pub tx: mpsc::Sender<EventData>,
 }
 
 pub(super) struct Subscriptions {
     pub log_subscribers: Vec<LogSubscriber>,
-    pub log_buffers: HashMap<(NamespaceId, WorkloadId), VecDeque<LogChunkData>>,
+    pub log_buffers: HashMap<(NamespaceId, WorkloadName), VecDeque<LogChunkData>>,
     pub event_subscribers: Vec<EventSubscriber>,
 }
 
@@ -51,7 +51,7 @@ impl Subscriptions {
     pub fn handle_log_data(
         &mut self,
         namespace_id: NamespaceId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         data: Vec<u8>,
     ) {
         let chunk = LogChunkData {
@@ -92,7 +92,7 @@ impl Subscriptions {
     pub fn subscribe_logs(
         &mut self,
         namespace_id: NamespaceId,
-        workload_id: Option<WorkloadId>,
+        workload_id: Option<WorkloadName>,
         log_tx: mpsc::Sender<LogChunkData>,
     ) {
         // Replay buffered history to the new subscriber.
@@ -165,7 +165,7 @@ impl Subscriptions {
     pub fn subscribe_events(
         &mut self,
         namespace_id: NamespaceId,
-        workload_ids: HashSet<WorkloadId>,
+        workload_ids: HashSet<WorkloadName>,
         service_ids: HashSet<ServiceId>,
         event_tx: mpsc::Sender<EventData>,
     ) {

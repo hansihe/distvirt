@@ -19,7 +19,7 @@ impl NamespaceStateMachine {
     }
 
     /// Compute effective demand for a workload: count of services with wants_backend() + active_flows.
-    pub fn effective_demand(&self, workload_id: &WorkloadId) -> u32 {
+    pub fn effective_demand(&self, workload_id: &WorkloadName) -> u32 {
         let service_demand: u32 = self
             .service_workload
             .iter()
@@ -45,7 +45,7 @@ impl NamespaceStateMachine {
     /// send SetDemand if different.
     pub(crate) fn reconcile_demand(
         &mut self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
@@ -83,7 +83,7 @@ impl NamespaceStateMachine {
     /// - Ready: service in NeedBackend → send WorkloadReady
     /// - Not ready: service Active → send WorkloadUnready
     ///   (service SM handles Active → NeedBackend directly when has_activation is true)
-    fn reconcile_readiness(&mut self, workload_id: &WorkloadId, out: &mut NamespaceOutput) {
+    fn reconcile_readiness(&mut self, workload_id: &WorkloadName, out: &mut NamespaceOutput) {
         let ready_info = self.workload_readiness.get(workload_id).cloned();
 
         // Collect service IDs mapped to this workload.
@@ -145,7 +145,7 @@ impl NamespaceStateMachine {
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
-        let wl_ids: Vec<WorkloadId> = self.workloads.keys().cloned().collect();
+        let wl_ids: Vec<WorkloadName> = self.workloads.keys().cloned().collect();
         for wl_id in wl_ids {
             self.reconcile_demand(&wl_id, placement_table, out);
         }

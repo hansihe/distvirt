@@ -593,7 +593,7 @@ mod tests {
 
         let effects = orch.worker_connected(
             WorkerConnectedInfo {
-                worker_id: GlobalWorkerId::test(1),
+                worker_id: GlobalWorkerId::from(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
                 proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
@@ -618,7 +618,7 @@ mod tests {
 
         let effects = orch.worker_connected(
             WorkerConnectedInfo {
-                worker_id: GlobalWorkerId::test(1),
+                worker_id: GlobalWorkerId::from(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
                 proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
@@ -644,7 +644,7 @@ mod tests {
 
         orch.worker_connected(
             WorkerConnectedInfo {
-                worker_id: GlobalWorkerId::test(1),
+                worker_id: GlobalWorkerId::from(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
                 proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
@@ -661,7 +661,7 @@ mod tests {
         );
 
         let has_create_ns = effects.direct_worker_commands.iter().any(|d| {
-            d.worker_id == GlobalWorkerId::test(1)
+            d.worker_id == GlobalWorkerId::from(1)
                 && matches!(
                     &d.command,
                     distvirt_worker_protocol::WorkerCommand::CreateNamespace { .. }
@@ -687,7 +687,7 @@ mod tests {
 
         orch.worker_connected(
             WorkerConnectedInfo {
-                worker_id: GlobalWorkerId::test(1),
+                worker_id: GlobalWorkerId::from(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
                 proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
@@ -699,7 +699,7 @@ mod tests {
             OrchestratorInput::NamespaceEvent {
                 namespace_id: ns("test"),
                 event: NamespaceCoreEvent::WorkerEvent(WorkerNamespaceEvent {
-                    worker_id: GlobalWorkerId::test(1),
+                    worker_id: GlobalWorkerId::from(1),
                     event: WorkerNamespaceEventKind::NamespaceCreated,
                 }),
             },
@@ -707,7 +707,7 @@ mod tests {
         );
         let _ = effects;
 
-        let effects = orch.worker_disconnected(GlobalWorkerId::test(1), Duration::ZERO);
+        let effects = orch.worker_disconnected(GlobalWorkerId::from(1), Duration::ZERO);
         let _ = effects;
 
         let effects = orch.destroy_namespace(&ns("test"));

@@ -171,35 +171,19 @@ impl NamespaceState {
                             log::warn!("worker: dropped EndpointActivation event: {}", e);
                         }
                     }
-                    FabricEvent::EndpointFlowStatus {
+                    FabricEvent::EndpointDemand {
                         ip,
                         service_id,
-                        has_active_flows,
+                        active,
                     } => {
                         let svc_id = service_id.map(ServiceId::from);
-                        if let Err(e) = bridge_event_tx.try_send(WorkerEvent::EndpointFlowStatus {
+                        if let Err(e) = bridge_event_tx.try_send(WorkerEvent::EndpointDemand {
                             namespace_id: bridge_ns_id.clone(),
                             ip,
                             service_id: svc_id,
-                            has_active_flows,
+                            active,
                         }) {
-                            log::warn!("worker: dropped EndpointFlowStatus event: {}", e);
-                        }
-                    }
-                    FabricEvent::ServiceBackendNeed {
-                        service_id,
-                        dst_ip: _,
-                        need,
-                    } => {
-                        if let Err(e) = bridge_event_tx
-                            .send(WorkerEvent::ServiceBackendNeed {
-                                namespace_id: bridge_ns_id.clone(),
-                                service_id: ServiceId::from(service_id),
-                                need,
-                            })
-                            .await
-                        {
-                            log::warn!("worker: failed to send ServiceBackendNeed event: {}", e);
+                            log::warn!("worker: dropped EndpointDemand event: {}", e);
                         }
                     }
                 }
@@ -367,7 +351,7 @@ impl NamespaceState {
                                 e
                             ))
                         })?;
-                        st.mark_service_ready(service_id.as_str())
+                        st.mark_service_ready(service_id)
                     };
                     if let Some(result) = flush_data {
                         match result {
@@ -382,9 +366,8 @@ impl NamespaceState {
                                         .flush_service_frames(frames, backend_ip, service_ip);
                                 }
                                 let fabric = Arc::clone(&self.fabric);
-                                let svc_id_str = service_id.clone();
                                 tokio::spawn(async move {
-                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
+                                    fabric.dispatch_actions(&actions, service_id).await;
                                 });
                             }
                             MarkReadyResult::L4(EndpointAction::L4Result {
@@ -394,9 +377,8 @@ impl NamespaceState {
                             }) => {
                                 self.fabric.send_l4_frames(frames);
                                 let fabric = Arc::clone(&self.fabric);
-                                let svc_id_str = service_id.clone();
                                 tokio::spawn(async move {
-                                    fabric.dispatch_actions(&actions, &svc_id_str).await;
+                                    fabric.dispatch_actions(&actions, service_id).await;
                                 });
                             }
                             other => {
@@ -450,13 +432,13 @@ impl NamespaceState {
                 EndpointSyncEffect::FlowStatusChange {
                     ip,
                     service_id,
-                    has_active_flows,
+                    active,
                 } => {
-                    pending_events.push(WorkerEvent::EndpointFlowStatus {
+                    pending_events.push(WorkerEvent::EndpointDemand {
                         namespace_id: namespace_id.clone(),
                         ip,
-                        service_id: service_id.map(|s| distvirt_worker_protocol::ServiceId(s)),
-                        has_active_flows,
+                        service_id,
+                        active,
                     });
                 }
                 EndpointSyncEffect::FlushAdapterBuffer {
@@ -514,7 +496,7 @@ impl NamespaceState {
         &mut self,
         namespace_id: &NamespaceId,
         endpoints: Vec<distvirt_worker_protocol::EndpointSpec>,
-        my_worker_id: &distvirt_worker_protocol::WorkerId,
+        my_worker_id: distvirt_worker_protocol::WorkerId,
         activator_runtime: Option<&ActivatorRuntime>,
     ) -> Result<Vec<WorkerEvent>, FatalError> {
         let effects = {
@@ -522,7 +504,7 @@ impl NamespaceState {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
             })?;
 
-            let mut make_processor = |_svc_id: &str,
+            let mut make_processor = |_svc_id: ServiceId,
                                       policy: &ServicePolicy,
                                       ip: std::net::Ipv4Addr|
              -> ServiceProcessor {
@@ -531,7 +513,7 @@ impl NamespaceState {
 
             et.apply_endpoint_sync(
                 endpoints,
-                my_worker_id.as_ref(),
+                my_worker_id,
                 &mut make_processor,
                 self.adapter_port_id,
             )
@@ -548,7 +530,7 @@ impl NamespaceState {
         namespace_id: &NamespaceId,
         upserted: Vec<distvirt_worker_protocol::EndpointSpec>,
         removed_ips: Vec<std::net::Ipv4Addr>,
-        my_worker_id: &distvirt_worker_protocol::WorkerId,
+        my_worker_id: distvirt_worker_protocol::WorkerId,
         activator_runtime: Option<&ActivatorRuntime>,
     ) -> Result<Vec<WorkerEvent>, FatalError> {
         let effects = {
@@ -556,7 +538,7 @@ impl NamespaceState {
                 FatalError::InternalInvariant(format!("endpoint table lock poisoned: {}", e))
             })?;
 
-            let mut make_processor = |_svc_id: &str,
+            let mut make_processor = |_svc_id: ServiceId,
                                       policy: &ServicePolicy,
                                       ip: std::net::Ipv4Addr|
              -> ServiceProcessor {
@@ -566,7 +548,7 @@ impl NamespaceState {
             et.apply_endpoint_update(
                 upserted,
                 removed_ips,
-                my_worker_id.as_ref(),
+                my_worker_id,
                 &mut make_processor,
                 self.adapter_port_id,
             )

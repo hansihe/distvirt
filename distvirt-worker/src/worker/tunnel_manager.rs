@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::fabric::{Fabric, FabricPort, TunnelPortHandle, TunnelTransport};
 use crate::task_handle::TaskHandle;
-use distvirt_worker_protocol::{NamespaceId, WorkerPeerInfo};
+use distvirt_worker_protocol::{NamespaceId, WorkerId, WorkerPeerInfo};
 
 /// Info about a namespace registered with the tunnel manager.
 struct NamespaceInfo {
@@ -31,7 +31,7 @@ struct PeerState {
 pub(crate) struct TunnelManager {
     transport: TunnelTransport,
     /// worker_id → peer state
-    peers: HashMap<String, PeerState>,
+    peers: HashMap<WorkerId, PeerState>,
     /// segment_id → namespace info
     namespaces: HashMap<u16, NamespaceInfo>,
 }
@@ -66,25 +66,23 @@ impl TunnelManager {
     /// Handle a `WorkerRegistrySync` command: diff peers and reconcile tunnel ports.
     pub(crate) fn handle_registry_sync(&mut self, workers: Vec<WorkerPeerInfo>) {
         // Build set of incoming worker IDs.
-        let incoming: HashMap<String, &WorkerPeerInfo> = workers
-            .iter()
-            .map(|w| (w.worker_id.as_ref().to_string(), w))
-            .collect();
+        let incoming: HashMap<WorkerId, &WorkerPeerInfo> =
+            workers.iter().map(|w| (w.worker_id, w)).collect();
 
         // Remove peers that are no longer in the registry.
-        let stale: Vec<String> = self
+        let stale: Vec<WorkerId> = self
             .peers
             .keys()
-            .filter(|id| !incoming.contains_key(id.as_str()))
+            .filter(|id| !incoming.contains_key(id))
             .cloned()
             .collect();
         for id in stale {
-            self.remove_peer(&id);
+            self.remove_peer(id);
         }
 
         // Add/update peers.
         for info in &workers {
-            let worker_id = info.worker_id.as_ref().to_string();
+            let worker_id = info.worker_id;
             let endpoint: SocketAddr = match info.endpoint.parse() {
                 Ok(addr) => addr,
                 Err(e) => {
@@ -106,7 +104,7 @@ impl TunnelManager {
 
             if segments_changed {
                 // Remove old state if exists, then re-add.
-                self.remove_peer(&worker_id);
+                self.remove_peer(worker_id);
 
                 // Determine initiator by comparing our public key with
                 // the remote peer's. The lexicographically lesser key initiates.
@@ -116,7 +114,7 @@ impl TunnelManager {
                     .map_or(false, |our_key| our_key < &info.public_key[..]);
 
                 if let Err(e) = self.transport.add_peer(
-                    worker_id.clone(),
+                    worker_id,
                     endpoint,
                     Some(&info.public_key),
                     is_initiator,
@@ -136,7 +134,7 @@ impl TunnelManager {
                 for &seg in &peer.segments {
                     if let Some(ns_info) = self.namespaces.get(&seg) {
                         if let Some((handle, task)) =
-                            self.create_port(&worker_id, seg, &ns_info.fabric)
+                            self.create_port(worker_id, seg, &ns_info.fabric)
                         {
                             peer.namespace_ports.insert(seg, (handle, task));
                         }
@@ -174,7 +172,7 @@ impl TunnelManager {
                 && !peer.namespace_ports.contains_key(&segment_id)
             {
                 if let Some((handle, task)) =
-                    Self::create_port_static(&self.transport, worker_id, segment_id, fabric)
+                    Self::create_port_static(&self.transport, *worker_id, segment_id, fabric)
                 {
                     peer.namespace_ports.insert(segment_id, (handle, task));
                 }
@@ -210,8 +208,8 @@ impl TunnelManager {
     }
 
     /// Remove a peer and all its tunnel ports.
-    fn remove_peer(&mut self, worker_id: &str) {
-        if self.peers.remove(worker_id).is_some() {
+    fn remove_peer(&mut self, worker_id: WorkerId) {
+        if self.peers.remove(&worker_id).is_some() {
             self.transport.remove_peer(worker_id);
             log::info!("tunnel_manager: removed peer {}", worker_id);
         }
@@ -220,7 +218,7 @@ impl TunnelManager {
     /// Create a tunnel port and register it with the fabric.
     fn create_port(
         &self,
-        worker_id: &str,
+        worker_id: WorkerId,
         segment_id: u16,
         fabric: &Arc<Fabric<FabricPort>>,
     ) -> Option<(TunnelPortHandle, TaskHandle<()>)> {
@@ -229,14 +227,14 @@ impl TunnelManager {
 
     fn create_port_static(
         transport: &TunnelTransport,
-        worker_id: &str,
+        worker_id: WorkerId,
         segment_id: u16,
         fabric: &Arc<Fabric<FabricPort>>,
     ) -> Option<(TunnelPortHandle, TaskHandle<()>)> {
         match transport.create_namespace_port(worker_id, segment_id) {
             Ok((channel_port, handle)) => {
-                let (_port_id, task) = fabric
-                    .add_tunnel_port(worker_id.to_string(), FabricPort::Virtual(channel_port));
+                let (_port_id, task) =
+                    fabric.add_tunnel_port(worker_id, FabricPort::Virtual(channel_port));
                 log::info!(
                     "tunnel_manager: created tunnel port for worker {} segment {}",
                     worker_id,
@@ -261,6 +259,10 @@ impl TunnelManager {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    const WORKER_A: WorkerId = WorkerId(1);
+    const WORKER_B: WorkerId = WorkerId(2);
+    const WORKER_BAD: WorkerId = WorkerId(3);
 
     #[tokio::test]
     async fn listen_port_after_new() {
@@ -305,7 +307,7 @@ mod tests {
             .await
             .unwrap();
         let peers = vec![WorkerPeerInfo {
-            worker_id: "w1".into(),
+            worker_id: WORKER_A,
             endpoint: "127.0.0.1:9999".into(),
             segments: vec![1],
             public_key: [0u8; 32],
@@ -323,13 +325,13 @@ mod tests {
             .unwrap();
         let peers_ab = vec![
             WorkerPeerInfo {
-                worker_id: "w-a".into(),
+                worker_id: WORKER_A,
                 endpoint: "127.0.0.1:9998".into(),
                 segments: vec![1],
                 public_key: [0u8; 32],
             },
             WorkerPeerInfo {
-                worker_id: "w-b".into(),
+                worker_id: WORKER_B,
                 endpoint: "127.0.0.1:9999".into(),
                 segments: vec![1],
                 public_key: [0u8; 32],
@@ -340,15 +342,15 @@ mod tests {
 
         // Sync with only A — B should be removed.
         let peers_a = vec![WorkerPeerInfo {
-            worker_id: "w-a".into(),
+            worker_id: WORKER_A,
             endpoint: "127.0.0.1:9998".into(),
             segments: vec![1],
             public_key: [0u8; 32],
         }];
         mgr.handle_registry_sync(peers_a);
         assert_eq!(mgr.peers.len(), 1);
-        assert!(mgr.peers.contains_key("w-a"));
-        assert!(!mgr.peers.contains_key("w-b"));
+        assert!(mgr.peers.contains_key(&WORKER_A));
+        assert!(!mgr.peers.contains_key(&WORKER_B));
     }
 
     #[tokio::test]
@@ -357,7 +359,7 @@ mod tests {
             .await
             .unwrap();
         let peers = vec![WorkerPeerInfo {
-            worker_id: "w-bad".into(),
+            worker_id: WORKER_BAD,
             endpoint: "not-a-valid-address".into(),
             segments: vec![1],
             public_key: [0u8; 32],
@@ -394,13 +396,13 @@ mod tests {
 
         // Then sync peers — ports should be created.
         mgr_a.handle_registry_sync(vec![WorkerPeerInfo {
-            worker_id: "worker-b".into(),
+            worker_id: WORKER_B,
             endpoint: addr_b.to_string(),
             segments: vec![segment_id],
             public_key: [0u8; 32],
         }]);
         mgr_b.handle_registry_sync(vec![WorkerPeerInfo {
-            worker_id: "worker-a".into(),
+            worker_id: WORKER_A,
             endpoint: addr_a.to_string(),
             segments: vec![segment_id],
             public_key: [0u8; 32],
@@ -410,7 +412,7 @@ mod tests {
         assert!(
             mgr_a
                 .peers
-                .get("worker-b")
+                .get(&WORKER_B)
                 .unwrap()
                 .namespace_ports
                 .contains_key(&segment_id)
@@ -418,7 +420,7 @@ mod tests {
         assert!(
             mgr_b
                 .peers
-                .get("worker-a")
+                .get(&WORKER_A)
                 .unwrap()
                 .namespace_ports
                 .contains_key(&segment_id)
@@ -447,13 +449,13 @@ mod tests {
 
         // Sync peers first (before namespace exists).
         mgr_a.handle_registry_sync(vec![WorkerPeerInfo {
-            worker_id: "worker-b".into(),
+            worker_id: WORKER_B,
             endpoint: addr_b.to_string(),
             segments: vec![segment_id],
             public_key: [0u8; 32],
         }]);
         mgr_b.handle_registry_sync(vec![WorkerPeerInfo {
-            worker_id: "worker-a".into(),
+            worker_id: WORKER_A,
             endpoint: addr_a.to_string(),
             segments: vec![segment_id],
             public_key: [0u8; 32],
@@ -463,7 +465,7 @@ mod tests {
         assert!(
             mgr_a
                 .peers
-                .get("worker-b")
+                .get(&WORKER_B)
                 .unwrap()
                 .namespace_ports
                 .is_empty()
@@ -476,7 +478,7 @@ mod tests {
         assert!(
             mgr_a
                 .peers
-                .get("worker-b")
+                .get(&WORKER_B)
                 .unwrap()
                 .namespace_ports
                 .contains_key(&segment_id)
@@ -484,7 +486,7 @@ mod tests {
         assert!(
             mgr_b
                 .peers
-                .get("worker-a")
+                .get(&WORKER_A)
                 .unwrap()
                 .namespace_ports
                 .contains_key(&segment_id)
@@ -505,7 +507,7 @@ mod tests {
 
         mgr.on_namespace_created(&ns_id, segment_id, &fabric);
         mgr.handle_registry_sync(vec![WorkerPeerInfo {
-            worker_id: "w1".into(),
+            worker_id: WORKER_A,
             endpoint: "127.0.0.1:9999".into(),
             segments: vec![segment_id],
             public_key: [0u8; 32],
@@ -513,7 +515,7 @@ mod tests {
 
         assert!(
             mgr.peers
-                .get("w1")
+                .get(&WORKER_A)
                 .unwrap()
                 .namespace_ports
                 .contains_key(&segment_id)
@@ -523,7 +525,7 @@ mod tests {
 
         assert!(
             !mgr.peers
-                .get("w1")
+                .get(&WORKER_A)
                 .unwrap()
                 .namespace_ports
                 .contains_key(&segment_id)

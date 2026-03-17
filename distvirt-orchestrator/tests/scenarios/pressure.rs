@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-use distvirt_worker_protocol::BackendNeed;
+use distvirt_worker_protocol::WorkerEvent;
 
 // ---------------------------------------------------------------------------
 // pressure_scheduling tests
@@ -313,10 +313,11 @@ fn test_reactivation_cancels_shortened_idle_timer() {
     h.send_event_to_service_worker(
         "ns",
         "web-svc",
-        distvirt_worker_protocol::WorkerEvent::ServiceBackendNeed {
+        WorkerEvent::EndpointDemand {
             namespace_id: "ns".into(),
-            service_id: h.proto_service_id("ns", "web-svc"),
-            need: BackendNeed::Active,
+            ip: std::net::Ipv4Addr::UNSPECIFIED,
+            service_id: Some(h.proto_service_id("ns", "web-svc")),
+            active: true,
         },
     );
     h.converge();

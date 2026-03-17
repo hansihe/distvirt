@@ -7,7 +7,6 @@
 //! - Protocol command building (LaunchPod, StopPod, etc.) still lives here
 
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
 
 use crate::adapter::dns_registry::DnsRegistryAction;
 use crate::adapter::endpoint::EndpointAction;
@@ -35,17 +34,7 @@ fn router_pod_id(proto_id: &distvirt_worker_protocol::PodId) -> PodId {
     PodId(proto_id.0)
 }
 
-fn proto_artifact_id(router_id: ArtifactId) -> distvirt_worker_protocol::ArtifactId {
-    distvirt_worker_protocol::ArtifactId(router_id.0)
-}
 
-fn router_artifact_id(proto_id: &distvirt_worker_protocol::ArtifactId) -> ArtifactId {
-    ArtifactId(proto_id.0)
-}
-
-fn proto_worker_id(router_id: WorkerId) -> distvirt_worker_protocol::WorkerId {
-    distvirt_worker_protocol::WorkerId(router_id.0)
-}
 
 // =============================================================================
 // Pending worker (pure — no writer handle)
@@ -154,6 +143,24 @@ impl NamespaceWithBoundary {
                                         .collect(),
                                 };
                                 effects.worker_commands.push((wne.worker_id, cmd));
+                            }
+
+                            // Send initial endpoint state to the new worker.
+                            let endpoint_entries = self.core.adapters.endpoint.build_sync();
+                            if !endpoint_entries.is_empty() {
+                                let endpoints: Vec<_> = endpoint_entries
+                                    .iter()
+                                    .map(|(service_id, info)| {
+                                        Self::build_endpoint_spec_from_info(service_id, info)
+                                    })
+                                    .collect();
+                                if !endpoints.is_empty() {
+                                    let cmd = distvirt_worker_protocol::WorkerCommand::EndpointSync {
+                                        namespace_id: self.core.namespace_id().clone(),
+                                        endpoints,
+                                    };
+                                    effects.worker_commands.push((wne.worker_id, cmd));
+                                }
                             }
 
                             // Activate worker in core.
@@ -290,35 +297,18 @@ impl NamespaceWithBoundary {
             WorkerNamespaceEventKind::PodSuspended { pod_id, artifact_id } => {
                 Some(InternalWorkerEvent::PodSuspended {
                     pod_id: router_pod_id(&pod_id),
-                    artifact_id: router_artifact_id(&artifact_id),
+                    artifact_id,
                 })
             }
             WorkerNamespaceEventKind::PodSuspendFailed { pod_id } => {
                 Some(InternalWorkerEvent::PodSuspendFailed { pod_id: router_pod_id(&pod_id) })
             }
-            WorkerNamespaceEventKind::ServiceBackendNeed { service_id, need } => {
-                let router_svc_id = crate::sm::ServiceId(service_id.0);
-                let sm_need = match need {
-                    distvirt_worker_protocol::BackendNeed::None => crate::sm::BackendNeed::None,
-                    distvirt_worker_protocol::BackendNeed::Traffic => {
-                        crate::sm::BackendNeed::Traffic
-                    }
-                    distvirt_worker_protocol::BackendNeed::Active => {
-                        crate::sm::BackendNeed::Active
-                    }
-                };
-                Some(InternalWorkerEvent::ServiceBackendNeed {
-                    service_id: router_svc_id,
-                    need: sm_need,
-                })
-            }
             WorkerNamespaceEventKind::EndpointActivation {
                 service_id: Some(ref proto_svc_id),
                 ..
             } => {
-                let router_svc_id = crate::sm::ServiceId(proto_svc_id.0);
                 // Look up the service name from the router ID for the core.
-                if let Some(svc_name) = self.core.management().service_proto_name(&router_svc_id) {
+                if let Some(svc_name) = self.core.management().service_proto_name(proto_svc_id) {
                     Some(InternalWorkerEvent::EndpointActivation {
                         service_name: svc_name.to_string(),
                     })
@@ -329,19 +319,17 @@ impl NamespaceWithBoundary {
             WorkerNamespaceEventKind::EndpointActivation {
                 service_id: None, ..
             } => None,
-            WorkerNamespaceEventKind::EndpointFlowStatus {
+            WorkerNamespaceEventKind::EndpointDemand {
                 service_id: Some(ref proto_svc_id),
-                has_active_flows,
+                active,
                 ..
             } => {
-                let router_svc_id = crate::sm::ServiceId(proto_svc_id.0);
-                Some(InternalWorkerEvent::EndpointFlowStatus {
-                    worker_id,
-                    service_id: router_svc_id,
-                    has_active_flows,
+                Some(InternalWorkerEvent::EndpointDemand {
+                    service_id: *proto_svc_id,
+                    active,
                 })
             }
-            WorkerNamespaceEventKind::EndpointFlowStatus {
+            WorkerNamespaceEventKind::EndpointDemand {
                 service_id: None, ..
             } => None,
             WorkerNamespaceEventKind::NamespaceCreated
@@ -392,8 +380,7 @@ impl NamespaceWithBoundary {
                     pod_id,
                     resume_artifact,
                 } => {
-                    let proto_resume_artifact = resume_artifact
-                        .map(proto_artifact_id);
+                    let proto_resume_artifact = resume_artifact;
                     effects
                         .scheduler_messages
                         .push(SchedulerMessage::RequestLease {
@@ -436,7 +423,7 @@ impl NamespaceWithBoundary {
                     spec,
                 } => {
                     let cmd =
-                        self.build_resume_command(&proto_pod_id(pod_id), &proto_artifact_id(artifact_id), &spec);
+                        self.build_resume_command(&proto_pod_id(pod_id), &artifact_id, &spec);
                     effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Stop { worker_id, pod_id } => {
@@ -452,7 +439,7 @@ impl NamespaceWithBoundary {
                     let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
                         namespace_id: self.core.namespace_id().clone(),
                         pod_id: proto_pod_id(pod_id),
-                        artifact_id: proto_artifact_id(artifact_id),
+                        artifact_id,
                         pool_id: distvirt_worker_protocol::PoolId::from("default"),
                     };
                     effects.worker_commands.push((worker_id, cmd));
@@ -462,9 +449,8 @@ impl NamespaceWithBoundary {
 
         // Translate endpoint actions → broadcast commands.
         for action in internal.endpoint_actions {
-            if let Some(cmd) = self.build_endpoint_command(&action) {
-                effects.broadcast_commands.push(cmd);
-            }
+            let cmd = self.build_endpoint_command(&action);
+            effects.broadcast_commands.push(cmd);
         }
 
         // Translate DNS registry actions → broadcast commands.
@@ -495,7 +481,7 @@ impl NamespaceWithBoundary {
 
     /// Allocate a new artifact ID for suspend operations.
     fn alloc_artifact_id(&mut self) -> ArtifactId {
-        let id = ArtifactId(self.next_artifact_counter);
+        let id = ArtifactId(self.next_artifact_counter.to_string());
         self.next_artifact_counter += 1;
         id
     }
@@ -542,86 +528,55 @@ impl NamespaceWithBoundary {
         distvirt_worker_protocol::WorkerCommand::ResumePod {
             namespace_id: self.core.namespace_id().clone(),
             pod_id: *proto_pod_id,
-            artifact_id: *proto_artifact_id,
+            artifact_id: proto_artifact_id.clone(),
             network,
             pool_id: distvirt_worker_protocol::PoolId::from("default"),
         }
     }
 
-    fn lookup_service_spec(
-        &self,
+    /// Build an EndpointSpec from self-contained ServiceEndpointInfo.
+    fn build_endpoint_spec_from_info(
         service_id: &crate::sm::ServiceId,
-    ) -> Option<(&str, &crate::types::ServiceSpec)> {
-        let proto_name = self.core.management().service_proto_name(service_id)?;
-        let spec = self
-            .core
-            .current_spec()
-            .as_ref()?
-            .services
-            .iter()
-            .find(|(k, _)| k.as_str() == proto_name)
-            .map(|(_, spec)| spec)?;
-        Some((proto_name, spec))
+        info: &crate::sm::ServiceEndpointInfo,
+    ) -> distvirt_worker_protocol::EndpointSpec {
+        distvirt_worker_protocol::EndpointSpec {
+            ip: info.service_ip,
+            kind: distvirt_worker_protocol::EndpointKind::Service {
+                service_id: *service_id,
+                policy: info.policy.clone(),
+                backend: Some(distvirt_worker_protocol::EndpointPodBackend {
+                    pod_ip: info.pod_ip,
+                    placement: Some(distvirt_worker_protocol::EndpointPlacement {
+                        worker_id: info.worker_id,
+                    }),
+                    ready: true,
+                }),
+            },
+        }
     }
 
     fn build_endpoint_command(
         &self,
         action: &EndpointAction,
-    ) -> Option<distvirt_worker_protocol::WorkerCommand> {
+    ) -> distvirt_worker_protocol::WorkerCommand {
         match action {
-            EndpointAction::Update { service_id, ready } => {
-                let (proto_name, svc_spec) = self.lookup_service_spec(service_id)?;
-
-                let pod_ip = self
-                    .core
-                    .current_spec()
-                    .as_ref()
-                    .and_then(|ns| ns.workloads.get(&svc_spec.workload_id))
-                    .map(|wl| wl.network.ip)
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED);
-
-                let endpoint_spec = distvirt_worker_protocol::EndpointSpec {
-                    ip: svc_spec.ip,
-                    kind: distvirt_worker_protocol::EndpointKind::Service {
-                        service_id: distvirt_worker_protocol::ServiceId::from(
-                            self.core.management().lookup_service(proto_name)?.0
-                        ),
-                        policy: svc_spec.policy.clone(),
-                        backend: Some(distvirt_worker_protocol::EndpointPodBackend {
-                            pod_ip,
-                            placement: Some(distvirt_worker_protocol::EndpointPlacement {
-                                worker_id: proto_worker_id(ready.worker_id),
-                            }),
-                            ready: true,
-                        }),
-                    },
-                };
-
-                Some(distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
+            EndpointAction::Update { service_id, info } => {
+                let endpoint_spec = Self::build_endpoint_spec_from_info(service_id, info);
+                distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
                     namespace_id: self.core.namespace_id().clone(),
                     upserted: vec![endpoint_spec],
                     removed_ips: vec![],
-                })
+                }
             }
-            EndpointAction::Remove { service_id } => {
-                let (proto_name, svc_spec) = self.lookup_service_spec(service_id)?;
-
-                let endpoint_spec = distvirt_worker_protocol::EndpointSpec {
-                    ip: svc_spec.ip,
-                    kind: distvirt_worker_protocol::EndpointKind::Service {
-                        service_id: distvirt_worker_protocol::ServiceId::from(
-                            self.core.management().lookup_service(proto_name)?.0
-                        ),
-                        policy: svc_spec.policy.clone(),
-                        backend: None,
-                    },
-                };
-
-                Some(distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
+            EndpointAction::Remove {
+                service_id: _,
+                old_info,
+            } => {
+                distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
                     namespace_id: self.core.namespace_id().clone(),
-                    upserted: vec![endpoint_spec],
-                    removed_ips: vec![],
-                })
+                    upserted: vec![],
+                    removed_ips: vec![old_info.service_ip],
+                }
             }
         }
     }

@@ -99,7 +99,7 @@
 //!
 //! With a **protocol activator** (e.g., TCP), the activation is smarter — only
 //! meaningful traffic (TCP SYN) triggers activation, and RSTs/noise are filtered.
-//! The activator also signals [`WorkerEvent::ServiceBackendNeed`] so the
+//! The activator also signals [`WorkerEvent::EndpointDemand`] so the
 //! orchestrator knows when all sessions have ended and it can release the backend.
 //!
 //! ```text
@@ -108,14 +108,14 @@
 //!   |── EndpointSync(activator: Tcp) ────>|  // TCP-aware service endpoint
 //!   |                                      |
 //!   |                                      |  // TCP SYN arrives
-//!   |<───────────── ServiceBackendNeed    |  // need=Traffic
+//!   |<───────────── EndpointActivation    |  // pulse: traffic detected
 //!   |                                      |  // (RSTs are dropped silently)
 //!   |── LaunchPod ──────────────────────>|
 //!   |<──────────────────────── PodRunning |
 //!   |── EndpointUpdate ──────────────────>|  // assign backend
 //!   |        ...traffic flows...           |
 //!   |                                      |  // no new SYNs for a while
-//!   |<───────────── ServiceBackendNeed    |  // need=None
+//!   |<───────────── EndpointDemand        |  // active=false
 //!   |── EndpointUpdate(backend: None) ───>|  // release backend
 //!   |── StopPod ────────────────────────>|  // scale to zero
 //! ```

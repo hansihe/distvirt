@@ -5,6 +5,7 @@ use distvirt_activator::{
     ActivatorInstance, FlowTracker, StreamManager, StreamManagerOutput, is_l4_action,
     parse_frame_to_packet_info,
 };
+use distvirt_worker_protocol::ServiceId;
 
 use super::EndpointAction;
 
@@ -30,7 +31,7 @@ impl ServiceProcessor {
     /// Returns `None` for `Passthrough` (caller falls through to buffering).
     pub fn process_frame(
         &mut self,
-        service_id: &str,
+        service_id: ServiceId,
         ip_packet: &[u8],
         raw_frame: &[u8],
     ) -> Option<EndpointAction> {
@@ -75,7 +76,7 @@ impl ServiceProcessor {
     /// Handle mark_ready: push BackendAvailable and process pending events.
     ///
     /// Returns `None` for `Passthrough`.
-    pub fn on_mark_ready(&mut self, service_id: &str) -> Option<EndpointAction> {
+    pub fn on_mark_ready(&mut self, service_id: ServiceId) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::Passthrough => None,
             ServiceProcessor::L4 {
@@ -130,7 +131,7 @@ impl ServiceProcessor {
     }
 
     /// Handle a smoltcp timeout (L4 only).
-    pub fn handle_timeout(&mut self, service_id: &str) -> Option<EndpointAction> {
+    pub fn handle_timeout(&mut self, service_id: ServiceId) -> Option<EndpointAction> {
         match self {
             ServiceProcessor::L4 {
                 activator,
@@ -156,7 +157,7 @@ impl ServiceProcessor {
 
 /// Process StreamManagerOutput through the activator event loop (bounded to 4 rounds).
 fn process_l4_output(
-    service_id: &str,
+    service_id: ServiceId,
     activator: Option<&mut ActivatorInstance>,
     stream_manager: &mut StreamManager,
     mut sm_output: StreamManagerOutput,

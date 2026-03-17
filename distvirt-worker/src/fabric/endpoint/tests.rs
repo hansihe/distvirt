@@ -7,7 +7,8 @@ use distvirt_worker_protocol::{
 const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 2);
 const POD_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 130);
 const FRAME: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
-const OWN_WORKER: &str = "test-worker";
+const OWN_WORKER: WorkerId = WorkerId(11);
+const OTHER_WORKER: WorkerId = WorkerId(12);
 
 fn default_policy() -> ServicePolicy {
     ServicePolicy {
@@ -18,23 +19,23 @@ fn default_policy() -> ServicePolicy {
 }
 
 /// Default make_processor that returns Passthrough for all services.
-fn passthrough_processor(_: &str, _: &ServicePolicy, _: Ipv4Addr) -> ServiceProcessor {
+fn passthrough_processor(_: ServiceId, _: &ServicePolicy, _: Ipv4Addr) -> ServiceProcessor {
     ServiceProcessor::Passthrough
 }
 
 /// Create a service endpoint with no backend (Buffering state) via apply_endpoint_sync.
 fn sync_create_service(
     table: &mut EndpointTable,
-    service_id: &str,
+    service_id: ServiceId,
     ip: Ipv4Addr,
     policy: ServicePolicy,
-    make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    make_processor: &mut dyn FnMut(ServiceId, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
 ) -> Vec<EndpointSyncEffect> {
     table.apply_endpoint_sync(
         vec![EndpointSpec {
             ip,
             kind: EndpointKind::Service {
-                service_id: ServiceId::from(service_id),
+                service_id: service_id,
                 policy,
                 backend: None,
             },
@@ -48,11 +49,11 @@ fn sync_create_service(
 /// Update a service's backend via apply_endpoint_update (sets Pending or Buffering).
 fn sync_update_backend(
     table: &mut EndpointTable,
-    service_id: &str,
+    service_id: ServiceId,
     ip: Ipv4Addr,
     policy: ServicePolicy,
     backend_ip: Option<Ipv4Addr>,
-    make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    make_processor: &mut dyn FnMut(ServiceId, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
 ) -> Vec<EndpointSyncEffect> {
     let backend = backend_ip.map(|pod_ip| EndpointPodBackend {
         pod_ip,
@@ -63,7 +64,7 @@ fn sync_update_backend(
         vec![EndpointSpec {
             ip,
             kind: EndpointKind::Service {
-                service_id: ServiceId::from(service_id),
+                service_id: service_id,
                 policy,
                 backend,
             },
@@ -79,7 +80,7 @@ fn sync_update_backend(
 fn sync_remove_service(
     table: &mut EndpointTable,
     ip: Ipv4Addr,
-    make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+    make_processor: &mut dyn FnMut(ServiceId, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
 ) -> Vec<EndpointSyncEffect> {
     table.apply_endpoint_update(vec![], vec![ip], OWN_WORKER, make_processor, None)
 }
@@ -96,7 +97,7 @@ fn buffers_when_not_ready() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
@@ -122,7 +123,7 @@ fn forwards_when_ready() {
             EndpointSpec {
                 ip: SVC_IP,
                 kind: EndpointKind::Service {
-                    service_id: ServiceId::from("svc1"),
+                    service_id: ServiceId(1),
                     policy: default_policy(),
                     backend: Some(EndpointPodBackend {
                         pod_ip: POD_IP,
@@ -163,7 +164,7 @@ fn mark_ready_returns_buffered_frames() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
@@ -177,14 +178,14 @@ fn mark_ready_returns_buffered_frames() {
     // Set backend (Pending) — preserves buffer since None→Some.
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         Some(POD_IP),
         &mut passthrough_processor,
     );
 
-    let result = table.mark_service_ready("svc1");
+    let result = table.mark_service_ready(ServiceId(1));
     match result.unwrap() {
         MarkReadyResult::Passthrough {
             frames, service_ip, ..
@@ -201,25 +202,25 @@ fn update_backend_clears_ready_and_buffer() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
     );
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         Some(POD_IP),
         &mut passthrough_processor,
     );
-    table.mark_service_ready("svc1");
+    table.mark_service_ready(ServiceId(1));
 
     // Service is ready — now remove backend (Buffering state).
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         None,
@@ -235,7 +236,7 @@ fn destroy_removes_service() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
@@ -250,7 +251,7 @@ fn activation_debounced() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
@@ -273,7 +274,7 @@ fn buffer_capacity_drops_excess() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         policy,
         &mut passthrough_processor,
@@ -291,7 +292,7 @@ fn update_backend_preserves_buffered_frames() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
@@ -306,7 +307,7 @@ fn update_backend_preserves_buffered_frames() {
     // Set the backend — this should NOT clear the buffer.
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         Some(POD_IP),
@@ -314,7 +315,7 @@ fn update_backend_preserves_buffered_frames() {
     );
 
     // Mark ready — should return the 3 buffered frames.
-    let result = table.mark_service_ready("svc1");
+    let result = table.mark_service_ready(ServiceId(1));
     match result.unwrap() {
         MarkReadyResult::Passthrough { frames, .. } => {
             assert_eq!(
@@ -393,14 +394,20 @@ fn l4_mark_ready_processes_backend_available() {
     let mut make_l4 = {
         let mut instance_opt = Some(instance);
         let mut sm_opt = Some(sm);
-        move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+        move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
             ServiceProcessor::L4 {
                 activator: Some(instance_opt.take().unwrap()),
                 stream_manager: sm_opt.take().unwrap(),
             }
         }
     };
-    sync_create_service(&mut table, "svc1", SVC_IP, l4_tcp_policy(), &mut make_l4);
+    sync_create_service(
+        &mut table,
+        ServiceId(1),
+        SVC_IP,
+        l4_tcp_policy(),
+        &mut make_l4,
+    );
 
     // Feed a TCP SYN to the L4 path (after vnet header).
     let syn_frame = make_tcp_frame_for_service([10, 0, 0, 1], SVC_IP.octets(), 12345, 80);
@@ -413,13 +420,13 @@ fn l4_mark_ready_processes_backend_available() {
     // Set backend and mark ready.
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         l4_tcp_policy(),
         Some(POD_IP),
         &mut passthrough_processor,
     );
-    let ready_result = table.mark_service_ready("svc1");
+    let ready_result = table.mark_service_ready(ServiceId(1));
     assert!(
         ready_result.is_some(),
         "mark_service_ready should return Some"
@@ -449,14 +456,20 @@ fn handle_timeout_for_ip_returns_l4_result() {
     let mut table = EndpointTable::new();
     let mut make_l4 = {
         let mut sm_opt = Some(sm);
-        move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+        move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
             ServiceProcessor::L4 {
                 activator: None,
                 stream_manager: sm_opt.take().unwrap(),
             }
         }
     };
-    sync_create_service(&mut table, "svc1", SVC_IP, default_policy(), &mut make_l4);
+    sync_create_service(
+        &mut table,
+        ServiceId(1),
+        SVC_IP,
+        default_policy(),
+        &mut make_l4,
+    );
 
     // handle_timeout_for_ip on a service with a StreamManager should return Some(L4Result).
     let result = table.handle_timeout_for_ip(SVC_IP);
@@ -475,7 +488,7 @@ fn handle_timeout_for_ip_returns_none_for_l3() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
@@ -498,14 +511,20 @@ fn activator_mark_ready_returns_replay_actions() {
     let mut table = EndpointTable::new();
     let mut make_l3 = {
         let mut instance_opt = Some(instance);
-        move |_: &str, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
+        move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
             ServiceProcessor::L3 {
                 activator: instance_opt.take().unwrap(),
                 flow_tracker: distvirt_activator::FlowTracker::new(),
             }
         }
     };
-    sync_create_service(&mut table, "svc1", SVC_IP, l4_tcp_policy(), &mut make_l3);
+    sync_create_service(
+        &mut table,
+        ServiceId(1),
+        SVC_IP,
+        l4_tcp_policy(),
+        &mut make_l3,
+    );
 
     // Feed a TCP SYN frame via lookup_and_buffer.
     let syn_frame = make_tcp_frame_for_service([10, 0, 0, 1], SVC_IP.octets(), 12345, 80);
@@ -518,13 +537,13 @@ fn activator_mark_ready_returns_replay_actions() {
     // Set backend and mark ready.
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         l4_tcp_policy(),
         Some(POD_IP),
         &mut passthrough_processor,
     );
-    let ready_result = table.mark_service_ready("svc1");
+    let ready_result = table.mark_service_ready(ServiceId(1));
     assert!(
         ready_result.is_some(),
         "mark_service_ready should return Some"
@@ -594,7 +613,7 @@ fn wg_peer_remote_creates_remote_segment() {
             ip: WG_PEER_IP,
             kind: EndpointKind::WireGuardPeer {
                 placement: Some(EndpointPlacement {
-                    worker_id: WorkerId::from("other-worker"),
+                    worker_id: OTHER_WORKER,
                 }),
             },
         }],
@@ -605,7 +624,7 @@ fn wg_peer_remote_creates_remote_segment() {
 
     let (action, _, _) = table.lookup_and_buffer(WG_PEER_IP, FRAME, false);
     assert!(
-        matches!(action, EndpointAction::RemoteWorker { ref worker_id } if worker_id == "other-worker"),
+        matches!(action, EndpointAction::RemoteWorker { worker_id } if worker_id == OTHER_WORKER),
         "expected RemoteWorker action, got {:?}",
         action
     );
@@ -863,7 +882,7 @@ fn gc_flow_trackers_reports_no_active_flows_after_closed_linger() {
     let (_, _, flow_change) = table.lookup_and_buffer(LOCAL_POD_IP, &ack_frame, false);
     // Established counts as active: transition from false→true.
     assert!(flow_change.is_some());
-    assert!(flow_change.unwrap().has_active_flows);
+    assert!(flow_change.unwrap().active);
 
     // Feed a RST to close the flow.
     let rst_frame = {
@@ -878,7 +897,7 @@ fn gc_flow_trackers_reports_no_active_flows_after_closed_linger() {
     let (_, _, flow_change) = table.lookup_and_buffer(LOCAL_POD_IP, &rst_frame, false);
     // RST closes the flow: transition from true→false.
     assert!(flow_change.is_some());
-    assert!(!flow_change.unwrap().has_active_flows);
+    assert!(!flow_change.unwrap().active);
 
     // GC before CLOSED_LINGER — no change (flow still in Closed state, lingering).
     let changes = table.gc_flow_trackers();
@@ -1018,7 +1037,7 @@ fn unplaced_pod_to_remote_segment_emits_flush() {
             ip: LOCAL_POD_IP,
             kind: EndpointKind::Pod {
                 placement: Some(EndpointPlacement {
-                    worker_id: distvirt_worker_protocol::WorkerId::from("other-worker"),
+                    worker_id: OTHER_WORKER,
                 }),
             },
         }],
@@ -1043,14 +1062,14 @@ fn service_backend_ip_change_clears_buffer_and_resets_to_pending() {
     // Create service with backend A.
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
     );
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         Some(POD_IP),
@@ -1066,7 +1085,7 @@ fn service_backend_ip_change_clears_buffer_and_resets_to_pending() {
     let new_pod_ip = Ipv4Addr::new(172, 16, 0, 131);
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         Some(new_pod_ip),
@@ -1074,7 +1093,7 @@ fn service_backend_ip_change_clears_buffer_and_resets_to_pending() {
     );
 
     // Mark ready — buffer should have been cleared by the IP change.
-    let result = table.mark_service_ready("svc1");
+    let result = table.mark_service_ready(ServiceId(1));
     match result.unwrap() {
         MarkReadyResult::Passthrough { frames, .. } => {
             assert_eq!(
@@ -1093,14 +1112,14 @@ fn service_remove_backend_clears_buffer_and_resets() {
 
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         &mut passthrough_processor,
     );
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         Some(POD_IP),
@@ -1115,7 +1134,7 @@ fn service_remove_backend_clears_buffer_and_resets() {
     // Remove backend (set to None).
     sync_update_backend(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         default_policy(),
         None,
@@ -1140,7 +1159,7 @@ fn service_created_with_ready_backend_emits_service_ready() {
         vec![EndpointSpec {
             ip: SVC_IP,
             kind: EndpointKind::Service {
-                service_id: ServiceId::from("svc-ready"),
+                service_id: ServiceId(2),
                 policy: default_policy(),
                 backend: Some(EndpointPodBackend {
                     pod_ip: POD_IP,
@@ -1155,7 +1174,7 @@ fn service_created_with_ready_backend_emits_service_ready() {
     );
 
     assert!(
-        effects.iter().any(|e| matches!(e, EndpointSyncEffect::ServiceReady { service_id } if service_id == "svc-ready")),
+        effects.iter().any(|e| matches!(e, EndpointSyncEffect::ServiceReady { service_id } if *service_id == ServiceId(2))),
         "creating a service with ready: true should emit ServiceReady"
     );
 }
@@ -1172,7 +1191,7 @@ fn buffer_timeout_drops_frames_after_expiry() {
     let mut table = EndpointTable::new();
     sync_create_service(
         &mut table,
-        "svc1",
+        ServiceId(1),
         SVC_IP,
         policy.clone(),
         &mut passthrough_processor,

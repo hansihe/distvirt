@@ -97,7 +97,7 @@ impl PodMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::WorkloadId;
+    use crate::types::WorkloadName;
 
     fn wid(n: u64) -> WorkerId {
         WorkerId(n)
@@ -110,7 +110,7 @@ mod tests {
     fn info(worker: u64, workload: &str) -> PodInfo {
         PodInfo {
             worker_id: wid(worker),
-            workload_id: WorkloadId(workload.into()),
+            workload_id: WorkloadName(workload.into()),
         }
     }
 

@@ -79,22 +79,22 @@ enum ShellMsg {
     },
     LogData {
         namespace_id: NamespaceId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         data: Vec<u8>,
     },
     SubscribeLogs {
         namespace_id: NamespaceId,
-        workload_id: Option<WorkloadId>,
+        workload_id: Option<WorkloadName>,
         log_tx: mpsc::Sender<LogChunkData>,
     },
     ResolvePod {
         namespace_id: NamespaceId,
         pod_id: PodId,
-        reply: oneshot::Sender<Option<WorkloadId>>,
+        reply: oneshot::Sender<Option<WorkloadName>>,
     },
     SubscribeEvents {
         namespace_id: NamespaceId,
-        workload_ids: HashSet<WorkloadId>,
+        workload_ids: HashSet<WorkloadName>,
         service_ids: HashSet<ServiceId>,
         event_tx: mpsc::Sender<EventData>,
     },
@@ -134,7 +134,7 @@ impl ShellHandle {
     pub fn subscribe_logs(
         &self,
         namespace_id: NamespaceId,
-        workload_id: Option<WorkloadId>,
+        workload_id: Option<WorkloadName>,
     ) -> mpsc::Receiver<LogChunkData> {
         let (tx, rx) = mpsc::channel(256);
         let _ = self.msg_tx.send(ShellMsg::SubscribeLogs {
@@ -150,7 +150,7 @@ impl ShellHandle {
     pub fn subscribe_events(
         &self,
         namespace_id: NamespaceId,
-        workload_ids: HashSet<WorkloadId>,
+        workload_ids: HashSet<WorkloadName>,
         service_ids: HashSet<ServiceId>,
     ) -> mpsc::Receiver<EventData> {
         let (tx, rx) = mpsc::channel(256);
@@ -435,7 +435,7 @@ impl OrchestratorShell {
     pub fn subscribe_events(
         &mut self,
         namespace_id: NamespaceId,
-        workload_ids: HashSet<WorkloadId>,
+        workload_ids: HashSet<WorkloadName>,
         service_ids: HashSet<ServiceId>,
     ) -> mpsc::Receiver<EventData> {
         let (tx, rx) = mpsc::channel(256);
@@ -449,7 +449,7 @@ impl OrchestratorShell {
     pub fn subscribe_events_with_sender(
         &mut self,
         namespace_id: NamespaceId,
-        workload_ids: HashSet<WorkloadId>,
+        workload_ids: HashSet<WorkloadName>,
         service_ids: HashSet<ServiceId>,
         tx: mpsc::Sender<EventData>,
     ) {

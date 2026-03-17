@@ -21,16 +21,20 @@ impl ScheduleRequestAdapter {
     /// Drain schedule request inputs from the router.
     /// With incremental aggregation the router already produces per-pod deltas,
     /// so no adapter-side diffing or caching is needed.
-    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<ScheduleRequestDelta> {
+    ///
+    /// Returns `(deltas, mutated_router)`. Currently only drains, so
+    /// `mutated_router` is always `false`.
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> (Vec<ScheduleRequestDelta>, bool) {
         let inputs = router.drain_schedule_request_inputs();
 
-        inputs
+        let deltas = inputs
             .into_iter()
             .filter(|(sr_id, _)| *sr_id == self.schedule_request_id)
             .map(|(_, input)| match input {
                 ScheduleRequestPortInput::PodRequestsInput(delta) => delta,
             })
-            .collect()
+            .collect();
+        (deltas, false)
     }
 }
 

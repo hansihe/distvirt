@@ -10,10 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::adapter::backend_need::BackendNeedAdapter;
+use crate::adapter::endpoint_demand::EndpointDemandAdapter;
 use crate::adapter::dns_registry::{DnsRegistryAction, DnsRegistryAdapter};
 use crate::adapter::endpoint::{EndpointAction, EndpointAdapter};
-use crate::adapter::flow_demand::FlowDemandAdapter;
 use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
@@ -42,8 +41,7 @@ pub(crate) struct Adapters {
     pod_assignment: PodAssignmentAdapter,
     schedule_request: ScheduleRequestAdapter,
     pub(crate) management: ManagementAdapter,
-    backend_need: BackendNeedAdapter,
-    flow_demand: FlowDemandAdapter,
+    endpoint_demand: EndpointDemandAdapter,
     pub(crate) endpoint: EndpointAdapter,
     pub(crate) dns_registry: DnsRegistryAdapter,
 }
@@ -95,8 +93,7 @@ impl NamespaceCore {
                 pod_assignment: PodAssignmentAdapter::new(),
                 schedule_request: ScheduleRequestAdapter::new(SCHEDULE_REQUEST),
                 management: ManagementAdapter::new(),
-                backend_need: BackendNeedAdapter::new(),
-                flow_demand: FlowDemandAdapter::new(),
+                endpoint_demand: EndpointDemandAdapter::new(),
                 endpoint: EndpointAdapter::new(ENDPOINT),
                 dns_registry: DnsRegistryAdapter::new(DNS_REGISTRY),
             },
@@ -119,16 +116,13 @@ impl NamespaceCore {
         // Phase 2: Propagate
         self.router.propagate();
 
-        // Phase 3+4: Reconcile and collect effects in a loop until stable
+        // Phase 3+4: Reconcile and collect effects in a loop until stable.
+        // The loop re-propagates only when an adapter signals that it wrote
+        // back into the router (mutated_router == true).
         loop {
-            let actions = self.reconcile();
-            let has_actions = !actions.timer_actions.is_empty()
-                || !actions.schedule_deltas.is_empty()
-                || !actions.pod_actions.is_empty()
-                || !actions.endpoint_actions.is_empty()
-                || !actions.dns_registry_actions.is_empty();
+            let (actions, mutated_router) = self.reconcile();
             self.collect_effects(actions, &mut effects);
-            if !has_actions {
+            if !mutated_router {
                 break;
             }
             self.router.propagate();
@@ -187,14 +181,6 @@ impl NamespaceCore {
                             );
                         }
                     }
-                    InternalWorkerEvent::ServiceBackendNeed { service_id, need } => {
-                        self.adapters.backend_need.push_need(
-                            &mut self.router,
-                            worker_id,
-                            service_id,
-                            need,
-                        );
-                    }
                     InternalWorkerEvent::EndpointActivation { service_name } => {
                         self.adapters.management.send_activate_service(
                             &mut self.router,
@@ -202,24 +188,18 @@ impl NamespaceCore {
                             true,
                         );
                     }
-                    InternalWorkerEvent::EndpointFlowStatus {
-                        worker_id: flow_worker_id,
-                        service_id,
-                        has_active_flows,
-                    } => {
-                        if has_active_flows {
-                            self.adapters.flow_demand.set_active(
-                                &mut self.router,
-                                flow_worker_id,
-                                service_id,
-                            );
+                    InternalWorkerEvent::EndpointDemand { service_id, active } => {
+                        let need = if active {
+                            crate::sm::BackendNeed::Active
                         } else {
-                            self.adapters.flow_demand.set_inactive(
-                                &mut self.router,
-                                flow_worker_id,
-                                service_id,
-                            );
-                        }
+                            crate::sm::BackendNeed::None
+                        };
+                        self.adapters.endpoint_demand.push_need(
+                            &mut self.router,
+                            worker_id,
+                            service_id,
+                            need,
+                        );
                     }
                 }
             }
@@ -247,10 +227,7 @@ impl NamespaceCore {
                 }
 
                 self.adapters
-                    .backend_need
-                    .remove_worker(&mut self.router, &worker_id);
-                self.adapters
-                    .flow_demand
+                    .endpoint_demand
                     .remove_worker(&mut self.router, &worker_id);
                 self.router.destroy_worker(worker_id);
             }
@@ -343,14 +320,24 @@ impl NamespaceCore {
     }
 
     /// Phase 3: Reconcile all adapters. Pure/sync — no I/O.
-    fn reconcile(&mut self) -> ReconcileActions {
-        ReconcileActions {
-            timer_actions: self.adapters.timer.reconcile(&mut self.router),
-            schedule_deltas: self.adapters.schedule_request.reconcile(&mut self.router),
-            pod_actions: self.adapters.pod_assignment.reconcile(&mut self.router),
-            endpoint_actions: self.adapters.endpoint.reconcile(&mut self.router),
-            dns_registry_actions: self.adapters.dns_registry.reconcile(&mut self.router),
-        }
+    /// Returns `(actions, mutated_router)` — the flag is `true` when any
+    /// adapter wrote back into the router and a new propagation is needed.
+    fn reconcile(&mut self) -> (ReconcileActions, bool) {
+        let (timer_actions, timer_mut) = self.adapters.timer.reconcile(&mut self.router);
+        let (schedule_deltas, sched_mut) = self.adapters.schedule_request.reconcile(&mut self.router);
+        let (pod_actions, pod_mut) = self.adapters.pod_assignment.reconcile(&mut self.router);
+        let (endpoint_actions, ep_mut) = self.adapters.endpoint.reconcile(&mut self.router);
+        let (dns_registry_actions, dns_mut) = self.adapters.dns_registry.reconcile(&mut self.router);
+
+        let mutated = timer_mut || sched_mut || pod_mut || ep_mut || dns_mut;
+
+        (ReconcileActions {
+            timer_actions,
+            schedule_deltas,
+            pod_actions,
+            endpoint_actions,
+            dns_registry_actions,
+        }, mutated)
     }
 
     /// Phase 4: Translate reconcile actions into internal effects.

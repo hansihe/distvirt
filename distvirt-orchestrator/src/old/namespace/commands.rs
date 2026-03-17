@@ -37,7 +37,7 @@ impl NamespaceStateMachine {
         }
 
         // Remove workloads no longer in spec.
-        let removed_workloads: Vec<WorkloadId> = self
+        let removed_workloads: Vec<WorkloadName> = self
             .workloads
             .keys()
             .filter(|wl_id| !spec.workloads.contains_key(wl_id))
@@ -275,7 +275,7 @@ impl NamespaceStateMachine {
 
     pub(super) fn handle_launch_pod(
         &mut self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         worker_id: &WorkerId,
         pod_id: &PodId,
         placement_table: &mut PlacementTable,
@@ -319,7 +319,7 @@ impl NamespaceStateMachine {
 
     pub(super) fn handle_resume_pod(
         &mut self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         worker_id: &WorkerId,
         pod_id: &PodId,
         artifact_id: &ArtifactId,
@@ -374,7 +374,7 @@ impl NamespaceStateMachine {
     pub(super) fn handle_deactivate_workload(
         &mut self,
         client_id: ClientId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {
@@ -472,7 +472,7 @@ impl NamespaceStateMachine {
     /// needs capacity and this workload has been selected as the victim.
     pub(super) fn handle_preempt_workload(
         &mut self,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
     ) {

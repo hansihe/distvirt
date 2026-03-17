@@ -21,7 +21,7 @@ fn test_image_change_restarts_running_workload() {
     let mut new_spec = always_on_spec();
     new_spec
         .workloads
-        .get_mut(&WorkloadId("echo".to_string()))
+        .get_mut(&WorkloadName("echo".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/alpine:v2".to_string();
@@ -54,7 +54,7 @@ fn test_image_change_on_suspended_workload() {
     let mut new_spec = activation_spec(timeout);
     new_spec
         .workloads
-        .get_mut(&WorkloadId("web".to_string()))
+        .get_mut(&WorkloadName("web".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/nginx:v2".to_string();
@@ -95,7 +95,7 @@ fn test_add_workload_to_existing_namespace() {
 
     // Add a second workload
     let mut new_spec = always_on_spec();
-    let wl_b = WorkloadId("echo-b".to_string());
+    let wl_b = WorkloadName("echo-b".to_string());
     new_spec.workloads.insert(
         wl_b.clone(),
         WorkloadSpec {
@@ -139,7 +139,7 @@ fn test_remove_workload_from_namespace() {
 
     // Remove echo-b: create spec with only echo-a
     let mut new_spec = always_on_two_workloads_spec();
-    new_spec.workloads.remove(&WorkloadId("echo-b".to_string()));
+    new_spec.workloads.remove(&WorkloadName("echo-b".to_string()));
     new_spec.services.remove(&"svc-b".to_string());
     h.update_namespace("ns", new_spec);
     h.converge();
@@ -151,7 +151,7 @@ fn test_remove_workload_from_namespace() {
     assert!(
         !spec
             .workloads
-            .contains_key(&WorkloadId("echo-b".to_string())),
+            .contains_key(&WorkloadName("echo-b".to_string())),
         "removed workload 'echo-b' should not exist"
     );
 
@@ -181,7 +181,7 @@ fn test_suspend_on_idle_flag_change() {
     let mut new_spec = activation_spec(timeout);
     new_spec
         .workloads
-        .get_mut(&WorkloadId("web".to_string()))
+        .get_mut(&WorkloadName("web".to_string()))
         .unwrap()
         .suspend_on_idle = false;
     h.update_namespace("ns", new_spec);

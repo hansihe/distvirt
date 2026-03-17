@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, PoolId, PoolInfo,
-    WorkerCommand, WorkerEvent,
+    ContainerConfig, ContainerSpec, NetworkConfig, PodId, PodNetworkConfig, PoolId, PoolInfo,
+    WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -42,8 +42,8 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     }];
 
     // Start both workers, capturing transfer_listen_port from WorkerReady.
-    let ws_a = setup_with_pools_full("worker-a", pools_a).await?;
-    let ws_b = setup_with_pools_full("worker-b", pools_b).await?;
+    let ws_a = setup_with_pools_full(WorkerId(1), pools_a).await?;
+    let ws_b = setup_with_pools_full(WorkerId(2), pools_b).await?;
 
     let mut conn_a = ws_a.conn;
     let handle_a = ws_a.handle;
@@ -83,12 +83,12 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     .await?;
 
     // --- Launch a long-running pod on worker A ---
-    register_pod_endpoint(&mut conn_a, "ns-xfer", &pod_network, "worker-a").await?;
+    register_pod_endpoint(&mut conn_a, "ns-xfer", &pod_network, WorkerId(1)).await?;
 
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
             namespace_id: "ns-xfer".into(),
-            pod_id: "pod-xfer".into(),
+            pod_id: PodId(1),
             network: pod_network.clone(),
             containers: vec![ContainerSpec {
                 container_id: "ctr-xfer".into(),
@@ -112,7 +112,7 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     recv_until(
         &mut conn_a,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-xfer"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
     eprintln!("e2e: pod-xfer running on worker-a");
@@ -121,7 +121,7 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     conn_a
         .send_command(&WorkerCommand::SuspendPod {
             namespace_id: "ns-xfer".into(),
-            pod_id: "pod-xfer".into(),
+            pod_id: PodId(1),
             artifact_id: "snap-xfer".into(),
             pool_id: pool_id_a.clone(),
         })
@@ -232,12 +232,12 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     })
     .await?;
 
-    register_pod_endpoint(&mut conn_b, "ns-xfer", &pod_network, "worker-b").await?;
+    register_pod_endpoint(&mut conn_b, "ns-xfer", &pod_network, WorkerId(2)).await?;
 
     conn_b
         .send_command(&WorkerCommand::ResumePod {
             namespace_id: "ns-xfer".into(),
-            pod_id: "pod-xfer-resumed".into(),
+            pod_id: PodId(2),
             artifact_id: "snap-xfer-copy".into(),
             network: pod_network,
             pool_id: pool_id_b.clone(),
@@ -247,7 +247,7 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     recv_until(
         &mut conn_b,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-xfer-resumed"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(2)),
     )
     .await?;
     eprintln!("e2e: pod-xfer-resumed running on worker-b after cross-worker transfer");
@@ -256,7 +256,7 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     conn_b
         .send_command(&WorkerCommand::StopPod {
             namespace_id: "ns-xfer".into(),
-            pod_id: "pod-xfer-resumed".into(),
+            pod_id: PodId(2),
             graceful: true,
         })
         .await?;
@@ -264,7 +264,7 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
     recv_until(
         &mut conn_b,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-xfer-resumed"),
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if *pod_id == PodId(2)),
     )
     .await?;
     eprintln!("e2e: pod-xfer-resumed stopped on worker-b");

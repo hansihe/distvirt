@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use distvirt_worker_protocol::{
     ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig,
-    OrchestratorConnection, PodNetworkConfig, WorkerAccepted, WorkerCommand, WorkerConnection,
-    WorkerEvent, WorkerId,
+    OrchestratorConnection, PodId, PodNetworkConfig, WorkerAccepted, WorkerCommand,
+    WorkerConnection, WorkerEvent, WorkerId,
 };
 
 use distvirt_worker::image_provider::stub::StubImageProvider;
@@ -53,7 +53,7 @@ pub async fn setup_with_behavior(
 
     let _hello = conn.recv_hello().await?;
     conn.send_accepted(&WorkerAccepted {
-        worker_id: WorkerId::from("sim-worker"),
+        worker_id: WorkerId(1),
         adapters: vec![],
         tunnel_encrypted: false,
         pools: vec![],
@@ -174,14 +174,14 @@ pub async fn create_namespace(
 pub async fn launch_pod(
     conn: &mut OrchestratorConnection,
     ns_id: &str,
-    pod_id: &str,
+    pod_id: PodId,
     pod_net: &PodNetworkConfig,
 ) -> anyhow::Result<()> {
-    register_pod_endpoint(conn, ns_id, pod_net, "sim-worker").await?;
+    register_pod_endpoint(conn, ns_id, pod_net, WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: ns_id.into(),
-        pod_id: pod_id.into(),
+        pod_id,
         network: pod_net.clone(),
         containers: vec![ContainerSpec {
             container_id: "ctr-sim".into(),
@@ -204,7 +204,7 @@ pub async fn launch_pod(
 
     recv_until(conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodRunning { namespace_id, pod_id: pid }
-            if namespace_id == ns_id && pid == pod_id)
+            if namespace_id == ns_id && *pid == pod_id)
     })
     .await?;
 
@@ -243,7 +243,7 @@ pub async fn setup_with_crash_handles(
 
     let _hello = conn.recv_hello().await?;
     conn.send_accepted(&WorkerAccepted {
-        worker_id: WorkerId::from("sim-worker"),
+        worker_id: WorkerId(1),
         adapters: vec![],
         tunnel_encrypted: false,
         pools: vec![],
@@ -258,7 +258,7 @@ pub async fn register_pod_endpoint(
     conn: &mut OrchestratorConnection,
     namespace_id: &str,
     pod_network: &PodNetworkConfig,
-    worker_id: &str,
+    worker_id: WorkerId,
 ) -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: namespace_id.into(),
@@ -266,7 +266,7 @@ pub async fn register_pod_endpoint(
             ip: pod_network.ip,
             kind: EndpointKind::Pod {
                 placement: Some(EndpointPlacement {
-                    worker_id: WorkerId::from(worker_id),
+                    worker_id,
                 }),
             },
         }],

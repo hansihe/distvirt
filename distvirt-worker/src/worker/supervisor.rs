@@ -922,6 +922,8 @@ mod tests {
     // Tests
     // -----------------------------------------------------------------------
 
+    const POD_ID: PodId = PodId(11);
+
     #[tokio::test]
     async fn image_provider_failure_sends_pod_failed() {
         let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
@@ -935,7 +937,7 @@ mod tests {
         let log_opener = make_log_opener();
 
         let ns_id = NamespaceId::from("ns1");
-        let pod_id = PodId::from("pod1");
+        let pod_id = POD_ID;
 
         // Run pod_supervisor directly.
         tokio::spawn({
@@ -977,7 +979,7 @@ mod tests {
                 error,
             } => {
                 assert_eq!(namespace_id, "ns1");
-                assert_eq!(pod_id, "pod1");
+                assert_eq!(pod_id, POD_ID);
                 assert!(
                     error.contains("image not found"),
                     "error should mention image failure: {}",
@@ -1003,7 +1005,7 @@ mod tests {
         let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
 
         let ns_id = NamespaceId::from("ns1");
-        let pod_id = PodId::from("pod1");
+        let pod_id = POD_ID;
 
         tokio::spawn({
             let ns_id = ns_id.clone();
@@ -1079,7 +1081,7 @@ mod tests {
                 cancel_clone,
                 bg_event_tx,
                 NamespaceId::from("ns1"),
-                PodId::from("pod1"),
+                POD_ID,
                 make_pod_network(),
                 make_containers(),
                 None,
@@ -1118,7 +1120,7 @@ mod tests {
         let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
 
         let ns_id = NamespaceId::from("ns1");
-        let pod_id = PodId::from("pod1");
+        let pod_id = POD_ID;
 
         tokio::spawn({
             let ns_id = ns_id.clone();
@@ -1157,7 +1159,7 @@ mod tests {
                 pod_id,
             } => {
                 assert_eq!(namespace_id, "ns1");
-                assert_eq!(pod_id, "pod1");
+                assert_eq!(pod_id, POD_ID);
             }
             other => panic!("expected PodRunning, got {:?}", other),
         }
@@ -1174,7 +1176,7 @@ mod tests {
                 exit_code,
             } => {
                 assert_eq!(namespace_id, "ns1");
-                assert_eq!(pod_id, "pod1");
+                assert_eq!(pod_id, POD_ID);
                 assert_eq!(exit_code, 0);
             }
             other => panic!("expected PodExited(0), got {:?}", other),

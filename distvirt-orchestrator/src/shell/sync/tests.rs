@@ -58,11 +58,11 @@ fn ns(name: &str) -> NamespaceId {
 
 /// Always-on spec: 1 workload "echo" + 1 always-on service "echo-svc".
 fn always_on_spec() -> NamespaceSpec {
-    use crate::types::WorkloadId;
+    use crate::types::WorkloadName;
     use distvirt_worker_protocol::ServicePolicy;
     use std::collections::BTreeMap;
 
-    let wl_id = WorkloadId("echo".to_string());
+    let wl_id = WorkloadName("echo".to_string());
     let svc_id = "echo-svc".to_string();
 
     let mut workloads = BTreeMap::new();

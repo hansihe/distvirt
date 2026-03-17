@@ -54,7 +54,7 @@ fn setup_workload(
     router.propagate();
 
     // Drain initial state (may include pod launch timers from always-on service).
-    let _ = adapter.reconcile(router);
+    let _ = adapter.reconcile(router).0;
 
     (mgmt, worker)
 }
@@ -71,7 +71,7 @@ fn no_timers_no_actions() {
 
     // No SMs, just propagate.
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(actions.is_empty());
 }
 
@@ -96,7 +96,7 @@ fn new_timer_produces_start() {
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     let starts: Vec<_> = actions
         .iter()
         .filter(|a| matches!(a, TimerAction::Start { .. }))
@@ -142,7 +142,7 @@ fn timer_removed_produces_cancel() {
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions
             .iter()
@@ -157,7 +157,7 @@ fn timer_removed_produces_cancel() {
     );
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     let cancels: Vec<_> = actions
         .iter()
         .filter(|a| matches!(a, TimerAction::Cancel { .. }))
@@ -195,12 +195,12 @@ fn same_generation_no_action() {
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(!actions.is_empty());
 
     // Propagate again without any changes — signal dedup means no delivery.
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.is_empty(),
         "expected no actions on stable state, got {:?}",
@@ -246,7 +246,7 @@ fn generation_change_restarts_timer() {
         },
     );
     router.propagate();
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Activate via BackendNeed traffic.
     let bn = router.create_backend_need();
@@ -263,12 +263,12 @@ fn generation_change_restarts_timer() {
     router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
     router.propagate();
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Traffic stops → idle timer starts (generation 1).
     router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.iter().any(|a| matches!(
             a,
@@ -284,7 +284,7 @@ fn generation_change_restarts_timer() {
     // Traffic returns → idle timer cancelled.
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.iter().any(|a| matches!(
             a,
@@ -299,7 +299,7 @@ fn generation_change_restarts_timer() {
     // Traffic stops again → idle timer starts with new generation (2).
     router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     let start = actions.iter().find(|a| {
         matches!(
             a,
@@ -354,7 +354,7 @@ fn multiple_sm_kinds_in_one_cycle() {
         },
     );
     router.propagate();
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Activate via traffic, make pod running.
     let bn = router.create_backend_need();
@@ -370,14 +370,14 @@ fn multiple_sm_kinds_in_one_cycle() {
     router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
     router.propagate();
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Traffic stops → idle timer. Also make pod fail → workload retry timer.
     router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
 
     // Should have actions for multiple SM kinds.
     let has_service_timer = actions.iter().any(|a| {

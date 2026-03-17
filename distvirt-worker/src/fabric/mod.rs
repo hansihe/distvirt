@@ -13,6 +13,8 @@ pub(crate) mod tunnel;
 //   4. tunnel_ports
 // Most paths only hold one lock at a time.
 
+use distvirt_worker_protocol::ServiceId;
+use distvirt_worker_protocol::WorkerId;
 pub use endpoint::EndpointTable;
 pub(crate) use endpoint::MarkReadyResult;
 pub(crate) use endpoint::ServiceProcessor;
@@ -30,23 +32,12 @@ use crate::packet::{
     FabricPacket, ip_packet_protocol, ip_packet_src, ip_packet_transport_ports, rewrite_ipv4_dst,
 };
 use crate::task_handle::TaskHandle;
-use distvirt_activator::types::{Action, BackendNeed as ActivatorBackendNeed, LogAction, LogLevel};
+use distvirt_activator::types::{Action, LogAction, LogLevel};
 use forwarding::{FabricContext, gateway_ingress_task, port_read_loop};
 use tokio::sync::mpsc;
 
-/// Convert activator BackendNeed to protocol BackendNeed.
-pub(crate) fn convert_backend_need(
-    need: &ActivatorBackendNeed,
-) -> distvirt_worker_protocol::BackendNeed {
-    match need {
-        ActivatorBackendNeed::None => distvirt_worker_protocol::BackendNeed::None,
-        ActivatorBackendNeed::Traffic => distvirt_worker_protocol::BackendNeed::Traffic,
-        ActivatorBackendNeed::Active => distvirt_worker_protocol::BackendNeed::Active,
-    }
-}
-
 /// Log an activator log action with appropriate level.
-pub(crate) fn handle_log_action(service_id: &str, log_action: &LogAction) {
+pub(crate) fn handle_log_action(service_id: ServiceId, log_action: &LogAction) {
     let msg = format!("activator[{}]: {}", service_id, log_action.message);
     match log_action.level {
         LogLevel::Trace => log::trace!("{}", msg),
@@ -63,20 +54,13 @@ pub enum FabricEvent {
     /// A frame hit an endpoint that needs activation (service or unplaced pod).
     EndpointActivation {
         dst_ip: Ipv4Addr,
-        service_id: Option<String>,
+        service_id: Option<ServiceId>,
     },
-    /// Flow status changed for an endpoint (active flows started or stopped).
-    EndpointFlowStatus {
+    /// Demand level changed for an endpoint (active flows started/stopped, or activator signaled).
+    EndpointDemand {
         ip: Ipv4Addr,
-        service_id: Option<String>,
-        has_active_flows: bool,
-    },
-    /// An activator signaled a backend need level change.
-    ServiceBackendNeed {
-        service_id: String,
-        #[allow(dead_code)]
-        dst_ip: Ipv4Addr,
-        need: distvirt_worker_protocol::BackendNeed,
+        service_id: Option<ServiceId>,
+        active: bool,
     },
 }
 
@@ -252,10 +236,10 @@ impl<P: FramePort> Fabric<P> {
                     };
                     if let Some(tx) = inner.event_tx.get() {
                         for change in flow_changes {
-                            let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
+                            let _ = tx.try_send(FabricEvent::EndpointDemand {
                                 ip: change.ip,
                                 service_id: change.service_id,
-                                has_active_flows: change.has_active_flows,
+                                active: change.active,
                             });
                         }
                     }
@@ -281,11 +265,11 @@ impl<P: FramePort> Fabric<P> {
     ///
     /// Adds the port to the fabric and records the worker_id → port_id mapping
     /// so `dispatch_frame` can forward `RemoteWorker` traffic through it.
-    pub fn add_tunnel_port(&self, worker_id: String, port: P) -> (PortId, TaskHandle<()>) {
+    pub fn add_tunnel_port(&self, worker_id: WorkerId, port: P) -> (PortId, TaskHandle<()>) {
         let (port_id, task) = self.add_port_inner(port, None);
         {
             let mut tp = self.ctx.inner.tunnel_ports.lock().expect("poisoned");
-            tp.insert(worker_id.clone(), port_id);
+            tp.insert(worker_id, port_id);
         }
         log::info!(
             "fabric: registered tunnel port {} for worker {}",
@@ -297,9 +281,9 @@ impl<P: FramePort> Fabric<P> {
 
     /// Remove a tunnel port for a remote worker.
     #[allow(dead_code)]
-    pub fn remove_tunnel_port(&self, worker_id: &str) {
+    pub fn remove_tunnel_port(&self, worker_id: WorkerId) {
         let mut tp = self.ctx.inner.tunnel_ports.lock().expect("poisoned");
-        if let Some(port_id) = tp.remove(worker_id) {
+        if let Some(port_id) = tp.remove(&worker_id) {
             log::info!(
                 "fabric: removed tunnel port {} for worker {}",
                 port_id,
@@ -318,7 +302,7 @@ impl<P: FramePort> Fabric<P> {
     ///
     /// Looks up the service IP from the service table, then delegates to
     /// `forwarding::dispatch_action` for each action.
-    pub async fn dispatch_actions(&self, actions: &[Action], service_id: &str) {
+    pub async fn dispatch_actions(&self, actions: &[Action], service_id: ServiceId) {
         let dst_ip = {
             let st = self.ctx.inner.endpoint_table.lock().expect("poisoned");
             st.get_service_ip(service_id)

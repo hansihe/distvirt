@@ -26,24 +26,24 @@ pub enum NamespaceInput {
     },
     Splice {
         client_id: ClientId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         worker_id: WorkerId,
     },
     Unsplice {
         client_id: ClientId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
     },
     StreamLogs {
         client_id: ClientId,
         service_id: Option<String>,
     },
     LaunchPod {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         worker_id: WorkerId,
         pod_id: PodId,
     },
     ResumePod {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         worker_id: WorkerId,
         pod_id: PodId,
         artifact_id: ArtifactId,
@@ -60,10 +60,10 @@ pub enum NamespaceInput {
     },
     DeactivateWorkload {
         client_id: ClientId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
     },
     PreemptWorkload {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
     },
 }
 
@@ -81,7 +81,7 @@ pub struct NamespaceOutput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResumeRequest {
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub artifact_id: ArtifactId,
 }
 
@@ -126,17 +126,13 @@ pub enum WorkerEvent {
         pool_id: PoolId,
         size_bytes: u64,
     },
-    ServiceBackendNeed {
-        service_id: String,
-        need: BackendNeed,
-    },
     EndpointActivation {
         ip: std::net::Ipv4Addr,
         service_id: Option<String>,
     },
-    EndpointFlowStatus {
+    EndpointDemand {
         ip: std::net::Ipv4Addr,
         service_id: Option<String>,
-        has_active_flows: bool,
+        active: bool,
     },
 }

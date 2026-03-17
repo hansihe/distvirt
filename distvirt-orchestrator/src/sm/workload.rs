@@ -55,6 +55,10 @@ pub struct WorkloadSm {
     /// spec changes (only image changes bump spec_version and trigger restarts;
     /// behavioral flags like suspend_on_idle do not).
     pub current_image: Option<String>,
+
+    /// Pod IP from spec's network config, included in ReadyInfo for downstream
+    /// consumers (endpoint signals).
+    pub pod_ip: std::net::Ipv4Addr,
 }
 
 impl WorkloadSm {
@@ -83,13 +87,14 @@ impl WorkloadSm {
             awaiting_suspend: false,
             artifact_counter: 0,
             current_image: None,
+            pod_ip: std::net::Ipv4Addr::UNSPECIFIED,
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn next_artifact_id(&mut self) -> ArtifactId {
         self.artifact_counter += 1;
-        ArtifactId(self.artifact_counter)
+        ArtifactId(self.artifact_counter.to_string())
     }
 }
 
@@ -130,6 +135,13 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 ctx.set_pod_launch_spec(launch_spec);
 
                 if let Some((_, ref spec)) = spec_opt {
+                    // --- Update pod_ip from spec network config ---
+                    self.pod_ip = spec
+                        .network
+                        .as_ref()
+                        .map(|n| n.ip)
+                        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+
                     // --- Update suspend_on_idle from spec ---
                     let old_suspend_on_idle = self.suspend_on_idle;
                     self.suspend_on_idle = spec.suspend_on_idle;
@@ -144,6 +156,10 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.spec_version += 1;
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
+
+                        // Discard any suspended artifact — it was produced
+                        // from the old image and cannot be resumed.
+                        self.suspended_artifact = None;
 
                         // If pod is already Running, restart immediately.
                         if self.pod_running {
@@ -184,7 +200,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
 
                 // Pod reached Suspended terminal state — save artifact and reap.
                 let suspended_artifact = statuses.iter().find_map(|s| match s {
-                    PodStatus::Suspended { artifact_id } => Some(*artifact_id),
+                    PodStatus::Suspended { artifact_id } => Some(artifact_id.clone()),
                     _ => None,
                 });
 
@@ -203,8 +219,12 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 }
 
                 if let Some(artifact_id) = suspended_artifact {
-                    // Pod successfully suspended. Save artifact, reap pod.
-                    self.suspended_artifact = Some(artifact_id);
+                    // Pod successfully suspended. Save artifact if spec
+                    // hasn't changed since the pod was launched; otherwise
+                    // the artifact is stale and must be discarded.
+                    if self.spec_version == self.launched_with_spec_version {
+                        self.suspended_artifact = Some(artifact_id);
+                    }
                     // pod_running already set to false at top of handler
                     // (Suspended is not Running).
                     // pod_worker_id will be cleared by PodWorkerInput signal propagation.
@@ -323,6 +343,7 @@ impl WorkloadSm {
         ctx.set_readiness(Some(ReadyInfo {
             pod_id: self.pod_id.unwrap_or(PodId(0)),
             worker_id: self.pod_worker_id.unwrap_or(WorkerId(0)),
+            pod_ip: self.pod_ip,
         }));
     }
 

@@ -10,8 +10,8 @@ use distvirt_worker_protocol::{ActivatorConfig,  ServicePolicy, WorkerEvent};
 /// Namespace with two activation-based workloads: "wl-a" (service "svc-a") and "wl-b" (service "svc-b").
 /// Both have suspend_on_idle=true and activation.
 fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_a = WorkloadId("wl-a".to_string());
-    let wl_b = WorkloadId("wl-b".to_string());
+    let wl_a = WorkloadName("wl-a".to_string());
+    let wl_b = WorkloadName("wl-b".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(

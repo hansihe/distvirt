@@ -318,7 +318,7 @@ impl Model for PodNewModel {
                 apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Finished))
             }
             PodNewAction::NotifySuspended => {
-                apply_pod_input(state, PodInput::NotifyPodSuspended(ArtifactId(1)))
+                apply_pod_input(state, PodInput::NotifyPodSuspended(ArtifactId(1.to_string())))
             }
             PodNewAction::LaunchTimeoutFired => {
                 let mut s =
@@ -458,11 +458,11 @@ impl Representative for PodNewModelState {
         // Normalize artifact_id in Suspended status and resume_artifact.
         if let PodStatus::Suspended { .. } = s.sm.status {
             s.sm.status = PodStatus::Suspended {
-                artifact_id: ArtifactId(0),
+                artifact_id: ArtifactId(0.to_string()),
             };
         }
         if let Some(_) = s.sm.resume_artifact {
-            s.sm.resume_artifact = Some(ArtifactId(0));
+            s.sm.resume_artifact = Some(ArtifactId(0.to_string()));
         }
 
         // Normalize assigned_worker — only presence matters.

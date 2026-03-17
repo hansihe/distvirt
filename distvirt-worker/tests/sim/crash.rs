@@ -1,5 +1,5 @@
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
-use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{PodId, WorkerCommand, WorkerEvent};
 
 use super::common::*;
 
@@ -11,7 +11,7 @@ async fn test_sim_vm_crash() -> anyhow::Result<()> {
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 
     let pod_net = test_pod_network_config();
-    launch_pod(&mut conn, "ns-sim", "pod-sim", &pod_net).await?;
+    launch_pod(&mut conn, "ns-sim", PodId(1), &pod_net).await?;
 
     // Get the crash handle for the launched VM.
     let crash_handle = crash_rx.recv().await.expect("should receive crash handle");
@@ -23,7 +23,7 @@ async fn test_sim_vm_crash() -> anyhow::Result<()> {
     let event = recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim"),
+        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
     assert!(
@@ -45,7 +45,7 @@ async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 
     let pod_net = test_pod_network_config();
-    launch_pod(&mut conn, "ns-sim", "pod-sim-1", &pod_net).await?;
+    launch_pod(&mut conn, "ns-sim", PodId(1), &pod_net).await?;
 
     // Crash the first VM.
     let crash_handle = crash_rx.recv().await.expect("should receive crash handle");
@@ -55,18 +55,18 @@ async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
     recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if pod_id == "pod-sim-1"),
+        |e| matches!(e, WorkerEvent::PodFailed { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
 
     // Launch a new pod in the same namespace — worker should still be healthy.
     let pod_net2 = test_pod_network_config_with_ip(3);
-    launch_pod(&mut conn, "ns-sim", "pod-sim-2", &pod_net2).await?;
+    launch_pod(&mut conn, "ns-sim", PodId(2), &pod_net2).await?;
 
     // The RunUntilSignaled pod is running; stop it gracefully.
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim-2".into(),
+        pod_id: PodId(2),
         graceful: true,
     })
     .await?;
@@ -74,7 +74,7 @@ async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
     recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-sim-2"),
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if *pod_id == PodId(2)),
     )
     .await?;
 

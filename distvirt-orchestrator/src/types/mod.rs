@@ -24,11 +24,14 @@ mod states;
 // --- Re-exports from protocol ---
 
 pub use distvirt_worker_protocol::{
-    ActivatorConfig, ArtifactId, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
+    ActivatorConfig, ArtifactId, ContainerConfig, ContainerSpec, EndpointKind,
     EndpointPlacement, EndpointPodBackend, EndpointSpec, NamespaceId, NetworkConfig, PodId,
     PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, RegistryEntry, ServiceBackend,
     ServicePolicy, WorkerCommand, WorkerId,
 };
+
+// Re-export SM's BackendNeed (no longer in the worker protocol).
+pub use crate::sm::BackendNeed;
 
 // Re-export all submodule types.
 pub use client::*;
@@ -43,7 +46,7 @@ use serde::{Deserialize, Serialize};
 // --- Orchestrator-only ID Newtypes ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct WorkloadId(pub String);
+pub struct WorkloadName(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClientId(pub u64);
@@ -56,19 +59,19 @@ pub enum TimerKey {
         service_id: distvirt_worker_protocol::ServiceId,
     },
     LaunchTimeout {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         pod_id: PodId,
     },
     SuspendTimeout {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         pod_id: PodId,
     },
     ResumeTimeout {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         pod_id: PodId,
     },
     RetryBackoffTimeout {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
     },
 }
 
@@ -76,5 +79,5 @@ pub enum TimerKey {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PodRequest {
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
 }

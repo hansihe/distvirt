@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, PoolId, PoolInfo,
-    WorkerCommand, WorkerEvent,
+    ContainerConfig, ContainerSpec, NetworkConfig, PodId, PodNetworkConfig, PoolId, PoolInfo,
+    WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -32,8 +32,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     }];
 
     // --- Start two workers, both with the shared pool ---
-    let (mut conn_a, handle_a) = setup_with_pools("worker-a", pushed_pools.clone()).await?;
-    let (mut conn_b, handle_b) = setup_with_pools("worker-b", pushed_pools).await?;
+    let (mut conn_a, handle_a) = setup_with_pools(WorkerId(1), pushed_pools.clone()).await?;
+    let (mut conn_b, handle_b) = setup_with_pools(WorkerId(2), pushed_pools).await?;
 
     let network = NetworkConfig {
         subnet: Ipv4Addr::new(10, 0, 0, 0),
@@ -63,12 +63,12 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     .await?;
 
     // --- Launch pod on worker A ---
-    register_pod_endpoint(&mut conn_a, "ns-shared", &pod_network, "worker-a").await?;
+    register_pod_endpoint(&mut conn_a, "ns-shared", &pod_network, WorkerId(1)).await?;
 
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
             namespace_id: "ns-shared".into(),
-            pod_id: "pod-migrate".into(),
+            pod_id: PodId(1),
             network: pod_network.clone(),
             containers: vec![ContainerSpec {
                 container_id: "ctr-migrate".into(),
@@ -92,7 +92,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     recv_until(
         &mut conn_a,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-migrate"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
     eprintln!("e2e: pod-migrate running on worker-a");
@@ -101,7 +101,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     conn_a
         .send_command(&WorkerCommand::SuspendPod {
             namespace_id: "ns-shared".into(),
-            pod_id: "pod-migrate".into(),
+            pod_id: PodId(1),
             artifact_id: "snap-shared".into(),
             pool_id: shared_pool_id.clone(),
         })
@@ -176,12 +176,12 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     .await?;
 
     // --- Resume pod on worker B from the shared pool ---
-    register_pod_endpoint(&mut conn_b, "ns-shared", &pod_network, "worker-b").await?;
+    register_pod_endpoint(&mut conn_b, "ns-shared", &pod_network, WorkerId(2)).await?;
 
     conn_b
         .send_command(&WorkerCommand::ResumePod {
             namespace_id: "ns-shared".into(),
-            pod_id: "pod-migrated".into(),
+            pod_id: PodId(2),
             artifact_id: "snap-shared".into(),
             network: pod_network,
             pool_id: shared_pool_id.clone(),
@@ -191,7 +191,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     recv_until(
         &mut conn_b,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-migrated"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(2)),
     )
     .await?;
     eprintln!("e2e: pod-migrated running on worker-b after cross-worker resume");
@@ -200,7 +200,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     conn_b
         .send_command(&WorkerCommand::StopPod {
             namespace_id: "ns-shared".into(),
-            pod_id: "pod-migrated".into(),
+            pod_id: PodId(2),
             graceful: true,
         })
         .await?;
@@ -208,7 +208,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     recv_until(
         &mut conn_b,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-migrated"),
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if *pod_id == PodId(2)),
     )
     .await?;
     eprintln!("e2e: pod-migrated stopped on worker-b");

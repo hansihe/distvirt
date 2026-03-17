@@ -68,7 +68,7 @@ impl PodSm {
     /// Build a PodScheduleRequest with the current state.
     fn make_schedule_request(&self) -> PodScheduleRequest {
         PodScheduleRequest {
-            resume_artifact: self.resume_artifact,
+            resume_artifact: self.resume_artifact.clone(),
             suspend: matches!(self.status, PodStatus::Suspending),
             spec: self.launch_spec.clone(),
         }

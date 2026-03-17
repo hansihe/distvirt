@@ -507,22 +507,6 @@ pub fn read_endpoint_spec(
     Ok(EndpointSpec { ip, kind })
 }
 
-fn write_backend_need(val: &BackendNeed) -> schema::BackendNeed {
-    match val {
-        BackendNeed::None => schema::BackendNeed::None,
-        BackendNeed::Traffic => schema::BackendNeed::Traffic,
-        BackendNeed::Active => schema::BackendNeed::Active,
-    }
-}
-
-fn read_backend_need(val: schema::BackendNeed) -> capnp::Result<BackendNeed> {
-    match val {
-        schema::BackendNeed::None => Ok(BackendNeed::None),
-        schema::BackendNeed::Traffic => Ok(BackendNeed::Traffic),
-        schema::BackendNeed::Active => Ok(BackendNeed::Active),
-    }
-}
-
 // --- Handshake Messages ---
 
 pub fn write_worker_hello(builder: &mut schema::worker_hello::Builder<'_>, val: &WorkerHello) {
@@ -873,7 +857,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
             let mut b = builder.init_suspend_pod();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(&write_u64_id(pod_id.0));
-            b.set_snapshot_id(&write_u64_id(artifact_id.0));
+            b.set_snapshot_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::ResumePod {
@@ -886,7 +870,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
             let mut b = builder.init_resume_pod();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(&write_u64_id(pod_id.0));
-            b.set_snapshot_id(&write_u64_id(artifact_id.0));
+            b.set_snapshot_id(artifact_id.as_ref());
             write_pod_network_config(&mut b.reborrow().init_network(), network);
             b.set_pool_id(pool_id.as_ref());
         }
@@ -895,7 +879,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
             pool_id,
         } => {
             let mut b = builder.init_delete_snapshot();
-            b.set_snapshot_id(&write_u64_id(artifact_id.0));
+            b.set_snapshot_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::WorkerRegistrySync { workers } => {
@@ -915,9 +899,9 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
         } => {
             let mut b = builder.init_transfer_artifact();
             b.set_transfer_id(*transfer_id);
-            b.set_source_artifact_id(&write_u64_id(source_artifact_id.0));
+            b.set_source_artifact_id(source_artifact_id.as_ref());
             b.set_source_pool_id(source_pool_id.as_ref());
-            b.set_dest_artifact_id(&write_u64_id(dest_artifact_id.0));
+            b.set_dest_artifact_id(dest_artifact_id.as_ref());
             b.set_dest_pool_id(dest_pool_id.as_ref());
             match dest_endpoint {
                 Some(ep) => b.set_dest_endpoint(ep),
@@ -1084,7 +1068,7 @@ pub fn read_worker_command(
             Ok(WorkerCommand::SuspendPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
-                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1093,7 +1077,7 @@ pub fn read_worker_command(
             Ok(WorkerCommand::ResumePod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
-                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 network: read_pod_network_config(r.get_network()?)?,
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
@@ -1101,7 +1085,7 @@ pub fn read_worker_command(
         DeleteSnapshot(r) => {
             let r = r?;
             Ok(WorkerCommand::DeleteArtifact {
-                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1124,9 +1108,9 @@ pub fn read_worker_command(
             };
             Ok(WorkerCommand::TransferArtifact {
                 transfer_id: r.get_transfer_id(),
-                source_artifact_id: ArtifactId(read_u64_id(r.get_source_artifact_id()?.to_str()?)?),
+                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
                 source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
-                dest_artifact_id: ArtifactId(read_u64_id(r.get_dest_artifact_id()?.to_str()?)?),
+                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 dest_endpoint,
             })
@@ -1230,16 +1214,6 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
             b.set_phase(phase);
             b.set_error(error);
         }
-        WorkerEvent::ServiceBackendNeed {
-            namespace_id,
-            service_id,
-            need,
-        } => {
-            let mut b = builder.init_service_backend_need();
-            b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(&write_u64_id(service_id.0));
-            b.set_need(write_backend_need(need));
-        }
         WorkerEvent::PodSuspended {
             namespace_id,
             pod_id,
@@ -1250,7 +1224,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
             let mut b = builder.init_pod_suspended();
             b.set_namespace_id(namespace_id.as_ref());
             b.set_pod_id(&write_u64_id(pod_id.0));
-            b.set_snapshot_id(&write_u64_id(artifact_id.0));
+            b.set_snapshot_id(artifact_id.as_ref());
             b.set_snapshot_size_bytes(*artifact_size_bytes);
             b.set_pool_id(pool_id.as_ref());
         }
@@ -1310,7 +1284,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_artifact_write_started();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_artifact_id(&write_u64_id(artifact_id.0));
+            b.set_artifact_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerEvent::ArtifactWriteCommitted {
@@ -1321,7 +1295,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_artifact_write_committed();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_artifact_id(&write_u64_id(artifact_id.0));
+            b.set_artifact_id(artifact_id.as_ref());
             b.set_pool_id(pool_id.as_ref());
             b.set_size_bytes(*size_bytes);
         }
@@ -1335,9 +1309,9 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_artifact_transfer_received();
             b.set_transfer_id(*transfer_id);
-            b.set_source_artifact_id(&write_u64_id(source_artifact_id.0));
+            b.set_source_artifact_id(source_artifact_id.as_ref());
             b.set_source_pool_id(source_pool_id.as_ref());
-            b.set_dest_artifact_id(&write_u64_id(dest_artifact_id.0));
+            b.set_dest_artifact_id(dest_artifact_id.as_ref());
             b.set_dest_pool_id(dest_pool_id.as_ref());
             b.set_size_bytes(*size_bytes);
         }
@@ -1351,9 +1325,9 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_transfer_failed();
             b.set_transfer_id(*transfer_id);
-            b.set_source_artifact_id(&write_u64_id(source_artifact_id.0));
+            b.set_source_artifact_id(source_artifact_id.as_ref());
             b.set_source_pool_id(source_pool_id.as_ref());
-            b.set_dest_artifact_id(&write_u64_id(dest_artifact_id.0));
+            b.set_dest_artifact_id(dest_artifact_id.as_ref());
             b.set_dest_pool_id(dest_pool_id.as_ref());
             b.set_error(error);
         }
@@ -1379,16 +1353,16 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
                 None => b.set_has_service_id(false),
             }
         }
-        WorkerEvent::EndpointFlowStatus {
+        WorkerEvent::EndpointDemand {
             namespace_id,
             ip,
             service_id,
-            has_active_flows,
+            active,
         } => {
-            let mut b = builder.init_endpoint_flow_status();
+            let mut b = builder.init_endpoint_demand();
             b.set_namespace_id(namespace_id.as_ref());
             write_ipv4(&mut b.reborrow().init_ip(), ip);
-            b.set_has_active_flows(*has_active_flows);
+            b.set_active(*active);
             match service_id {
                 Some(sid) => {
                     b.set_has_service_id(true);
@@ -1476,14 +1450,10 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
         ServiceActivation(_) => Err(capnp::Error::failed(
             "received deprecated event variant: ServiceActivation".into(),
         )),
-        ServiceBackendNeed(r) => {
-            let r = r?;
-            Ok(WorkerEvent::ServiceBackendNeed {
-                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?),
-                need: read_backend_need(r.get_need()?)?,
-            })
-        }
+        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
+        ServiceBackendNeed(_) => Err(capnp::Error::failed(
+            "received deprecated event variant: ServiceBackendNeed".into(),
+        )),
         // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
         FabricRouteMiss(_) => Err(capnp::Error::failed(
             "received deprecated event variant: FabricRouteMiss".into(),
@@ -1493,7 +1463,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             Ok(WorkerEvent::PodSuspended {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
-                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
+                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
                 artifact_size_bytes: r.get_snapshot_size_bytes(),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
@@ -1552,7 +1522,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ArtifactWriteStarted {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                artifact_id: ArtifactId(read_u64_id(r.get_artifact_id()?.to_str()?)?),
+                artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1560,7 +1530,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ArtifactWriteCommitted {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                artifact_id: ArtifactId(read_u64_id(r.get_artifact_id()?.to_str()?)?),
+                artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
                 size_bytes: r.get_size_bytes(),
             })
@@ -1569,9 +1539,9 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ArtifactTransferReceived {
                 transfer_id: r.get_transfer_id(),
-                source_artifact_id: ArtifactId(read_u64_id(r.get_source_artifact_id()?.to_str()?)?),
+                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
                 source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
-                dest_artifact_id: ArtifactId(read_u64_id(r.get_dest_artifact_id()?.to_str()?)?),
+                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 size_bytes: r.get_size_bytes(),
             })
@@ -1580,9 +1550,9 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::TransferFailed {
                 transfer_id: r.get_transfer_id(),
-                source_artifact_id: ArtifactId(read_u64_id(r.get_source_artifact_id()?.to_str()?)?),
+                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
                 source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
-                dest_artifact_id: ArtifactId(read_u64_id(r.get_dest_artifact_id()?.to_str()?)?),
+                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 error: r.get_error()?.to_string()?,
             })
@@ -1608,18 +1578,22 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
                 service_id,
             })
         }
-        EndpointFlowStatus(r) => {
+        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
+        EndpointFlowStatus(_) => Err(capnp::Error::failed(
+            "received deprecated event variant: EndpointFlowStatus".into(),
+        )),
+        EndpointDemand(r) => {
             let r = r?;
             let service_id = if r.get_has_service_id() {
                 Some(ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?))
             } else {
                 None
             };
-            Ok(WorkerEvent::EndpointFlowStatus {
+            Ok(WorkerEvent::EndpointDemand {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 ip: read_ipv4(r.get_ip()?),
                 service_id,
-                has_active_flows: r.get_has_active_flows(),
+                active: r.get_active(),
             })
         }
     }

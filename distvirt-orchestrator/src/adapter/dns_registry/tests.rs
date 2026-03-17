@@ -43,7 +43,7 @@ fn service_with_dns_produces_add_action() {
     });
 
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
 
     assert_eq!(actions.len(), 1);
     assert_eq!(
@@ -84,13 +84,13 @@ fn service_removal_produces_remove_action() {
     });
 
     router.propagate();
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Now destroy the management port → service self-destructs.
     router.destroy_management(mgmt);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.iter().any(|a| matches!(a, DnsRegistryAction::Remove { name } if name == "echo-svc")),
         "expected Remove action for echo-svc, got {:?}",
@@ -126,6 +126,6 @@ fn no_dns_info_no_actions() {
     });
 
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(actions.is_empty());
 }

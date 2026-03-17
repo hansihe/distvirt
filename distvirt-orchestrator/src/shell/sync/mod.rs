@@ -28,6 +28,7 @@ use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
     WorkerConnectedInfo, WorkerStateCoreEvent,
 };
+use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::worker_event::{ClassifiedWorkerEvent, classify};
 use crate::core::{ClientCommand, GlobalWorkerId, WorkerNamespaceEvent, WorkerNamespaceEventKind};
 use crate::types::NamespaceId;
@@ -121,6 +122,7 @@ fn default_command_handler(cmd: &WorkerCommand) -> Vec<WorkerEvent> {
 pub struct MockWorkerConfig {
     pub handler: Option<CommandHandler>,
     pub capabilities: distvirt_worker_protocol::WorkerCapabilities,
+    pub tunnel_info: Option<WorkerTunnelInfo>,
 }
 
 impl Default for MockWorkerConfig {
@@ -136,6 +138,7 @@ impl Default for MockWorkerConfig {
                 public_endpoint: String::new(),
                 pools: vec![],
             },
+            tunnel_info: None,
         }
     }
 }
@@ -282,7 +285,7 @@ impl MockWorkerConfig {
     }
 
     /// Config with tunnel capabilities.
-    pub fn with_tunnel(endpoint: &str, _public_key: [u8; 32]) -> Self {
+    pub fn with_tunnel(endpoint: &str, public_key: [u8; 32]) -> Self {
         MockWorkerConfig {
             capabilities: distvirt_worker_protocol::WorkerCapabilities {
                 has_kvm: true,
@@ -298,6 +301,10 @@ impl MockWorkerConfig {
                     available_bytes: 1024 * 1024 * 1024,
                 }],
             },
+            tunnel_info: Some(WorkerTunnelInfo {
+                listen_port: 51820,
+                public_key,
+            }),
             ..Default::default()
         }
     }
@@ -373,7 +380,7 @@ impl SyncShell {
             WorkerConnectedInfo {
                 worker_id,
                 capabilities: config.capabilities,
-                tunnel_info: None,
+                tunnel_info: config.tunnel_info,
                 proto_worker_id,
             },
             self.now,

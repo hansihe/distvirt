@@ -232,6 +232,8 @@ impl ManagementAdapter {
                 .unwrap_or_default(),
             dns_name: Some(name.to_owned()),
             dns_ip: Some(spec.ip),
+            ip: spec.ip,
+            policy: spec.policy.clone(),
         }
     }
 }

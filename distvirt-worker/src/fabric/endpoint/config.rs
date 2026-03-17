@@ -1,7 +1,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::net::Ipv4Addr;
 
-use distvirt_worker_protocol::{BufferPolicy, EndpointKind, EndpointSpec, ServicePolicy};
+use distvirt_worker_protocol::{
+    BufferPolicy, EndpointKind, EndpointSpec, ServiceId, ServicePolicy, WorkerId,
+};
 
 use super::ServiceProcessor;
 use super::{Endpoint, EndpointBackend, EndpointState, EndpointSyncEffect, EndpointTable};
@@ -21,8 +23,8 @@ impl EndpointTable {
     pub fn apply_endpoint_sync(
         &mut self,
         specs: Vec<EndpointSpec>,
-        my_worker_id: &str,
-        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+        my_worker_id: WorkerId,
+        make_processor: &mut dyn FnMut(ServiceId, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
         adapter_port_id: Option<PortId>,
     ) -> Vec<EndpointSyncEffect> {
         let mut effects = Vec::new();
@@ -63,8 +65,8 @@ impl EndpointTable {
         &mut self,
         upserted: Vec<EndpointSpec>,
         removed_ips: Vec<Ipv4Addr>,
-        my_worker_id: &str,
-        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+        my_worker_id: WorkerId,
+        make_processor: &mut dyn FnMut(ServiceId, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
         adapter_port_id: Option<PortId>,
     ) -> Vec<EndpointSyncEffect> {
         let mut effects = Vec::new();
@@ -94,8 +96,8 @@ impl EndpointTable {
     fn apply_single_spec(
         &mut self,
         spec: EndpointSpec,
-        my_worker_id: &str,
-        make_processor: &mut dyn FnMut(&str, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
+        my_worker_id: WorkerId,
+        make_processor: &mut dyn FnMut(ServiceId, &ServicePolicy, Ipv4Addr) -> ServiceProcessor,
         adapter_port_id: Option<PortId>,
     ) -> Vec<EndpointSyncEffect> {
         let mut effects = Vec::new();
@@ -104,7 +106,7 @@ impl EndpointTable {
         match spec.kind {
             EndpointKind::Pod { placement } => {
                 match placement {
-                    Some(ref p) if p.worker_id.as_ref() == my_worker_id => {
+                    Some(ref p) if p.worker_id == my_worker_id => {
                         // Local pod — create/update LocalPod endpoint, preserving port_id if already attached.
                         let existing_port_id = self.by_ip.get(&ip).and_then(|ep| {
                             if let EndpointBackend::LocalPod { port_id } = &ep.backend {
@@ -168,7 +170,7 @@ impl EndpointTable {
                                 buffer: VecDeque::new(),
                                 buffer_start: None,
                                 backend: EndpointBackend::RemoteSegment {
-                                    worker_id: p.worker_id.0.clone(),
+                                    worker_id: p.worker_id,
                                 },
                                 flow_tracker: None,
                                 last_activation: None,
@@ -205,7 +207,7 @@ impl EndpointTable {
             }
             EndpointKind::WireGuardPeer { placement } => {
                 match placement {
-                    Some(ref p) if p.worker_id.as_ref() == my_worker_id => {
+                    Some(ref p) if p.worker_id == my_worker_id => {
                         // Local adapter — create LocalAdapter endpoint.
                         let port_id = match adapter_port_id {
                             Some(id) => id,
@@ -270,7 +272,7 @@ impl EndpointTable {
                                 buffer: VecDeque::new(),
                                 buffer_start: None,
                                 backend: EndpointBackend::RemoteSegment {
-                                    worker_id: p.worker_id.0.clone(),
+                                    worker_id: p.worker_id,
                                 },
                                 flow_tracker: None,
                                 last_activation: None,
@@ -309,8 +311,6 @@ impl EndpointTable {
                 policy,
                 backend,
             } => {
-                let svc_id_str = service_id.0.clone();
-
                 // Determine new state and backend_ip from the backend field.
                 let (new_state, new_backend_ip) = match &backend {
                     None => (EndpointState::Buffering, None),
@@ -328,7 +328,7 @@ impl EndpointTable {
                             ..
                         } = ep.backend
                         {
-                            existing_id == &svc_id_str
+                            *existing_id == service_id
                                 && existing_policy.activator == policy.activator
                         } else {
                             false
@@ -373,8 +373,8 @@ impl EndpointTable {
                             if ft.has_active_flows() {
                                 effects.push(EndpointSyncEffect::FlowStatusChange {
                                     ip,
-                                    service_id: Some(svc_id_str.clone()),
-                                    has_active_flows: false,
+                                    service_id: Some(service_id),
+                                    active: false,
                                 });
                             }
                         }
@@ -386,15 +386,15 @@ impl EndpointTable {
                     // Check if transitioning to Ready.
                     if new_state == EndpointState::Ready && old_state != EndpointState::Ready {
                         effects.push(EndpointSyncEffect::ServiceReady {
-                            service_id: svc_id_str.clone(),
+                            service_id: service_id,
                         });
                     }
                 } else {
                     // Create new service endpoint.
-                    let processor = make_processor(&svc_id_str, &policy, ip);
+                    let processor = make_processor(service_id, &policy, ip);
 
                     // Passthrough services get a FlowTracker immediately.
-                    // This is safe because has_active_flows() only counts
+                    // This is safe because active() only counts
                     // Established/HalfClosed flows, not Opening (SYN-only).
                     let flow_tracker = if matches!(processor, ServiceProcessor::Passthrough) {
                         Some(FlowTracker::new())
@@ -409,7 +409,7 @@ impl EndpointTable {
                             ..
                         } = old_ep.backend
                         {
-                            if old_id != &svc_id_str {
+                            if *old_id != service_id {
                                 self.service_id_to_ip.remove(old_id);
                             }
                         }
@@ -423,7 +423,7 @@ impl EndpointTable {
                             buffer: VecDeque::new(),
                             buffer_start: None,
                             backend: EndpointBackend::Service {
-                                service_id: svc_id_str.clone(),
+                                service_id: service_id,
                                 policy,
                                 backend_ip: new_backend_ip,
                                 processor,
@@ -432,11 +432,11 @@ impl EndpointTable {
                             last_activation: None,
                         },
                     );
-                    self.service_id_to_ip.insert(svc_id_str.clone(), ip);
+                    self.service_id_to_ip.insert(service_id, ip);
 
                     if new_state == EndpointState::Ready {
                         effects.push(EndpointSyncEffect::ServiceReady {
-                            service_id: svc_id_str,
+                            service_id: service_id,
                         });
                     }
                 }

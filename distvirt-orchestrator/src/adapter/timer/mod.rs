@@ -51,10 +51,14 @@ impl TimerAdapter {
     /// Drain timer port inputs from the router.
     /// With incremental aggregation the router already produces per-timer deltas,
     /// so no adapter-side diffing or caching is needed.
-    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<TimerAction> {
+    ///
+    /// Returns `(actions, mutated_router)`. Currently this adapter only drains
+    /// outputs and never writes back to the router, so `mutated_router` is
+    /// always `false`.
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> (Vec<TimerAction>, bool) {
         let inputs = router.drain_timer_inputs();
 
-        inputs
+        let actions = inputs
             .into_iter()
             .filter(|(timer_id, _)| *timer_id == TIMER)
             .flat_map(|(_, input)| match input {
@@ -62,7 +66,8 @@ impl TimerAdapter {
                 TimerPortInput::ServiceTimersInput(actions) => actions,
                 TimerPortInput::PodTimersInput(actions) => actions,
             })
-            .collect()
+            .collect();
+        (actions, false)
     }
 
     /// Dispatch a timer fire event into the router.

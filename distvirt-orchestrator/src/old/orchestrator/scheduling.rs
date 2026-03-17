@@ -116,7 +116,7 @@ impl Orchestrator {
         // Collect (namespace_id, workload_id) pairs for workloads waiting for capacity.
         // Skip namespaces in Destroying state.
         // BTreeMap iteration is sorted, so the result is deterministic.
-        let waiting: Vec<(NamespaceId, WorkloadId)> = self
+        let waiting: Vec<(NamespaceId, WorkloadName)> = self
             .namespaces
             .iter()
             .filter(|(_, ns)| ns.status != NamespaceStatus::Destroying)
@@ -178,7 +178,7 @@ impl Orchestrator {
             None => return false,
         };
 
-        let mut candidates: Vec<(WorkloadId, u8, usize)> = Vec::new();
+        let mut candidates: Vec<(WorkloadName, u8, usize)> = Vec::new();
 
         for (wl_id, wl) in &ns.workloads {
             // Only consider workloads with a pod that can be preempted.
@@ -353,7 +353,7 @@ mod tests {
             pod_map.insert(
                 PodId(format!("{}-{}", prefix, i)),
                 PodInfo {
-                    workload_id: WorkloadId("wl".into()),
+                    workload_id: WorkloadName("wl".into()),
                     worker_id: worker_id.clone(),
                 },
             );

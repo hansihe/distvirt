@@ -96,18 +96,14 @@ pub enum WorkerNamespaceEventKind {
     PodSuspendFailed {
         pod_id: distvirt_worker_protocol::PodId,
     },
-    ServiceBackendNeed {
-        service_id: distvirt_worker_protocol::ServiceId,
-        need: distvirt_worker_protocol::BackendNeed,
-    },
     EndpointActivation {
         ip: std::net::Ipv4Addr,
         service_id: Option<distvirt_worker_protocol::ServiceId>,
     },
-    EndpointFlowStatus {
+    EndpointDemand {
         ip: std::net::Ipv4Addr,
         service_id: Option<distvirt_worker_protocol::ServiceId>,
-        has_active_flows: bool,
+        active: bool,
     },
     NamespaceCreated,
     NamespaceFailed {

@@ -19,30 +19,17 @@ pub use pod::*;
 pub use service::*;
 pub use workload::*;
 
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct ServiceId(pub u64);
+pub use distvirt_worker_protocol::{ServiceId, WorkerId, ArtifactId};
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct WorkloadId(pub u64);
-
-/// Worker identity — used by the router, the global scheduler, and the protocol.
-/// A single type for all three contexts. Values are allocated by the orchestrator
-/// shell on worker connect and flow through unchanged.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct WorkerId(pub u64);
-
-#[cfg(test)]
-impl WorkerId {
-    pub(crate) fn test(id: u64) -> Self {
-        WorkerId(id)
-    }
-}
 
 /// Readiness info broadcast from workload to services.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReadyInfo {
     pub pod_id: PodId,
     pub worker_id: WorkerId,
+    pub pod_ip: std::net::Ipv4Addr,
 }
 
 /// Pod status reported from pod SM back to workload.
@@ -87,10 +74,6 @@ pub enum PodIntent {
     Suspend,
 }
 
-/// Identifier for a suspend/resume artifact (snapshot).
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct ArtifactId(pub u64);
-
 /// Manual ID for the singleton schedule-request port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct ScheduleRequestId(pub u64);
@@ -124,6 +107,16 @@ pub const DNS_REGISTRY: DnsRegistryId = DnsRegistryId(0);
 pub struct DnsEntryInfo {
     pub name: String,
     pub ip: std::net::Ipv4Addr,
+}
+
+/// Self-contained endpoint info emitted by service SM to the endpoint port.
+/// Combines service spec fields (ip, policy) with workload readiness (pod_ip, worker_id).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ServiceEndpointInfo {
+    pub service_ip: std::net::Ipv4Addr,
+    pub policy: distvirt_worker_protocol::ServicePolicy,
+    pub pod_ip: std::net::Ipv4Addr,
+    pub worker_id: WorkerId,
 }
 
 /// Delta produced by the incremental schedule-request aggregator.
@@ -184,7 +177,7 @@ pub struct WorkloadSpec {
 }
 
 /// Service spec delivered by management port.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServiceSpec {
     pub workload: WorkloadId,
     pub has_activation: bool,
@@ -194,6 +187,28 @@ pub struct ServiceSpec {
     pub dns_name: Option<String>,
     /// DNS IP for registry (e.g. service VIP from namespace spec).
     pub dns_ip: Option<std::net::Ipv4Addr>,
+    /// Service VIP (for endpoint signals).
+    pub ip: std::net::Ipv4Addr,
+    /// Service policy (for endpoint signals).
+    pub policy: distvirt_worker_protocol::ServicePolicy,
+}
+
+impl Default for ServiceSpec {
+    fn default() -> Self {
+        ServiceSpec {
+            workload: WorkloadId::default(),
+            has_activation: false,
+            idle_timeout: std::time::Duration::default(),
+            dns_name: None,
+            dns_ip: None,
+            ip: std::net::Ipv4Addr::UNSPECIFIED,
+            policy: distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 0,
+                timeout_ms: 0,
+                activator: None,
+            },
+        }
+    }
 }
 
 /// Worker info produced by the worker port.
@@ -493,7 +508,7 @@ distvirt_sm_router::router! {
         Service::WantedTimers(Vec<ServiceTimerRequest>),
         Service::Status(SvcStatus),
         Service::IdleTimerActive(bool),
-        Service::EndpointInfo(Option<ReadyInfo>),
+        Service::EndpointInfo(Option<ServiceEndpointInfo>),
         Service::DnsEntry(Option<DnsEntryInfo>),
         Workload::Readiness(Option<ReadyInfo>),
         Workload::DnsEntry(Option<DnsEntryInfo>),

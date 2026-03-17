@@ -46,7 +46,7 @@ fn create_configured_core() -> (NamespaceWithBoundary, GlobalWorkerId, crate::sm
     // so we'll create a helper that builds the boundary with pre-configured core.
     let boundary = create_configured_boundary();
     let pod_id = boundary.router().get_workload(&W1).unwrap().pod_id.unwrap();
-    let global_worker_id = GlobalWorkerId::test(1);
+    let global_worker_id = GlobalWorkerId::from(1);
 
     (boundary, global_worker_id, pod_id)
 }
@@ -218,13 +218,13 @@ fn empty_core_processes_events() {
     let mut boundary = create_empty_boundary();
 
     // Connecting a worker to an empty namespace should work fine.
-    let (effects1, effects2) = connect_worker(&mut boundary, GlobalWorkerId::test(1));
+    let (effects1, effects2) = connect_worker(&mut boundary, GlobalWorkerId::from(1));
     // No workloads configured, so no scheduler messages expected.
     let _ = (effects1, effects2);
 
     // Disconnecting should also work.
     let effects = boundary.process_event(NamespaceCoreEvent::WorkerDisconnected {
-        worker_id: GlobalWorkerId::test(1),
+        worker_id: GlobalWorkerId::from(1),
     });
     assert!(boundary.active_workers().is_empty());
     let _ = effects;

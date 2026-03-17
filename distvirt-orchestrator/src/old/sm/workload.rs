@@ -151,7 +151,7 @@ impl std::fmt::Display for PodGoneReason {
 }
 
 pub struct WorkloadStateMachine {
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub state: WorkloadState,
     /// Current demand level, set authoritatively by the namespace reconciliation layer.
     pub current_demand: u32,
@@ -288,7 +288,7 @@ fn backoff_delay(failures: u32) -> std::time::Duration {
 
 impl WorkloadStateMachine {
     pub fn new(
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         suspend_on_idle: bool,
         has_activation: bool,
     ) -> (Self, Vec<WorkloadOutput>) {

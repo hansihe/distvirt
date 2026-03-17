@@ -7,7 +7,8 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use distvirt_activator::types::Action;
-use distvirt_worker_protocol::ServicePolicy;
+use distvirt_worker_protocol::{ServiceId, ServicePolicy, WorkerId};
+use tonic::service;
 
 use super::flow::FlowTracker;
 use super::port::PortId;
@@ -17,7 +18,7 @@ pub(crate) use service_processor::ServiceProcessor;
 #[derive(Debug)]
 pub enum EndpointSyncEffect {
     /// Service became ready — caller should flush buffered frames.
-    ServiceReady { service_id: String },
+    ServiceReady { service_id: ServiceId },
     /// Pod buffer should be flushed (pod became locally reachable).
     FlushPodBuffer { ip: Ipv4Addr },
     /// Adapter buffer should be flushed to the adapter port.
@@ -29,8 +30,8 @@ pub enum EndpointSyncEffect {
     /// Flow status changed due to endpoint reconfiguration (e.g. flow tracker cleared).
     FlowStatusChange {
         ip: Ipv4Addr,
-        service_id: Option<String>,
-        has_active_flows: bool,
+        service_id: Option<ServiceId>,
+        active: bool,
     },
 }
 
@@ -43,23 +44,23 @@ pub enum EndpointAction {
         service_ip: Ipv4Addr,
     },
     /// Frame was accepted into the endpoint buffer.
-    Buffered { service_id: Option<String> },
+    Buffered { service_id: Option<ServiceId> },
     /// Frame was dropped (buffer full or timed out).
-    Drop { service_id: Option<String> },
+    Drop { service_id: Option<ServiceId> },
     /// Activator processed the frame and returned actions for the fabric to execute.
     ActivatorActions {
         actions: Vec<Action>,
-        service_id: String,
+        service_id: ServiceId,
     },
     /// L4 stream manager processed the frame and produced outgoing frames + non-L4 actions.
     L4Result {
         actions: Vec<Action>,
         frames: Vec<Vec<u8>>,
-        service_id: String,
+        service_id: ServiceId,
         poll_delay: Option<Duration>,
     },
     /// Forward to a remote worker via tunnel port.
-    RemoteWorker { worker_id: String },
+    RemoteWorker { worker_id: WorkerId },
     /// Forward to a local adapter (WireGuard, splice) via its channel port.
     LocalAdapter { port_id: PortId },
     /// Deliver to a local pod port.
@@ -104,7 +105,7 @@ enum EndpointState {
 enum EndpointBackend {
     /// Service VIP backed by a pod.
     Service {
-        service_id: String,
+        service_id: ServiceId,
         policy: ServicePolicy,
         backend_ip: Option<Ipv4Addr>,
         processor: ServiceProcessor,
@@ -114,7 +115,7 @@ enum EndpointBackend {
         buffer_policy: distvirt_worker_protocol::BufferPolicy,
     },
     /// Pod located on a remote worker segment.
-    RemoteSegment { worker_id: String },
+    RemoteSegment { worker_id: WorkerId },
     /// WireGuard peer or splice target connected locally via channel port.
     LocalAdapter { port_id: PortId },
     /// Pod placed on this worker. `port_id` is None while launching, Some once TAP attached.
@@ -122,9 +123,9 @@ enum EndpointBackend {
 }
 
 impl EndpointBackend {
-    fn service_id(&self) -> Option<String> {
+    fn service_id(&self) -> Option<ServiceId> {
         match self {
-            EndpointBackend::Service { service_id, .. } => Some(service_id.clone()),
+            EndpointBackend::Service { service_id, .. } => Some(*service_id),
             _ => None,
         }
     }
@@ -150,8 +151,8 @@ struct Endpoint {
 #[derive(Debug, Clone)]
 pub struct FlowStatusChange {
     pub ip: Ipv4Addr,
-    pub service_id: Option<String>,
-    pub has_active_flows: bool,
+    pub service_id: Option<ServiceId>,
+    pub active: bool,
 }
 
 /// Table of endpoints indexed by IP for fast frame-path lookup.
@@ -161,7 +162,7 @@ pub struct FlowStatusChange {
 /// where the hot path (lookup_and_buffer) can proceed without a global lock.
 pub struct EndpointTable {
     by_ip: HashMap<Ipv4Addr, Endpoint>,
-    service_id_to_ip: HashMap<String, Ipv4Addr>,
+    service_id_to_ip: HashMap<ServiceId, Ipv4Addr>,
     activation_debounce: Duration,
 }
 
@@ -176,8 +177,8 @@ impl EndpointTable {
 
     /// Mark a service as ready. Returns buffered frames / activator actions
     /// (L3 passthrough mode) or an L4Result (L4 stream mode).
-    pub fn mark_service_ready(&mut self, service_id: &str) -> Option<MarkReadyResult> {
-        let ip = match self.service_id_to_ip.get(service_id) {
+    pub fn mark_service_ready(&mut self, service_id: ServiceId) -> Option<MarkReadyResult> {
+        let ip = match self.service_id_to_ip.get(&service_id) {
             Some(ip) => *ip,
             None => return None,
         };
@@ -210,7 +211,7 @@ impl EndpointTable {
         );
 
         // L4/L3 activator path: delegate to processor.
-        if let Some(svc_action) = processor.on_mark_ready(svc_id) {
+        if let Some(svc_action) = processor.on_mark_ready(*svc_id) {
             if processor.has_stream_manager() {
                 return Some(MarkReadyResult::L4(svc_action));
             }
@@ -280,8 +281,8 @@ impl EndpointTable {
 
     /// Look up NAT-relevant info for a service by its ID.
     /// Returns `(service_ip, backend_ip)`.
-    pub fn get_service_nat_info(&self, service_id: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
-        let ip = self.service_id_to_ip.get(service_id)?;
+    pub fn get_service_nat_info(&self, service_id: ServiceId) -> Option<(Ipv4Addr, Ipv4Addr)> {
+        let ip = self.service_id_to_ip.get(&service_id)?;
         let endpoint = self.by_ip.get(ip)?;
         let EndpointBackend::Service { backend_ip, .. } = &endpoint.backend else {
             return None;
@@ -290,8 +291,8 @@ impl EndpointTable {
     }
 
     /// Look up the service IP for a given service ID.
-    pub fn get_service_ip(&self, service_id: &str) -> Option<Ipv4Addr> {
-        self.service_id_to_ip.get(service_id).copied()
+    pub fn get_service_ip(&self, service_id: ServiceId) -> Option<Ipv4Addr> {
+        self.service_id_to_ip.get(&service_id).copied()
     }
 
     /// Handle a smoltcp timeout for a service IP.
@@ -301,7 +302,7 @@ impl EndpointTable {
     pub fn handle_timeout_for_ip(&mut self, ip: Ipv4Addr) -> Option<EndpointAction> {
         let endpoint = self.by_ip.get_mut(&ip)?;
         let EndpointBackend::Service {
-            ref service_id,
+            service_id,
             ref mut processor,
             ..
         } = endpoint.backend
@@ -418,7 +419,7 @@ impl EndpointTable {
 
     /// Run GC on all endpoint flow trackers.
     ///
-    /// Returns flow status changes for any endpoints whose `has_active_flows`
+    /// Returns flow status changes for any endpoints whose `active`
     /// transitioned due to expired flows.
     pub fn gc_flow_trackers(&mut self) -> Vec<FlowStatusChange> {
         let now = Instant::now();
@@ -432,7 +433,7 @@ impl EndpointTable {
                     changes.push(FlowStatusChange {
                         ip: endpoint.ip,
                         service_id: endpoint.backend.service_id(),
-                        has_active_flows: has_active,
+                        active: has_active,
                     });
                 }
             }

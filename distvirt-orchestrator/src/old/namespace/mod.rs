@@ -35,17 +35,17 @@ pub struct NamespaceStateMachine {
     pub spec: NamespaceSpec,
     pub status: NamespaceStatus,
     pub segment_id: u16,
-    pub workloads: BTreeMap<WorkloadId, WorkloadStateMachine>,
+    pub workloads: BTreeMap<WorkloadName, WorkloadStateMachine>,
     pub services: BTreeMap<ServiceId, ServiceStateMachine>,
-    pub service_workload: BTreeMap<ServiceId, WorkloadId>,
+    pub service_workload: BTreeMap<ServiceId, WorkloadName>,
     pub pod_map: PodMap,
     pub workers: BTreeMap<WorkerId, NamespaceWorkerState>,
     /// WireGuard peer IP allocation and tracking.
     pub wg_peer_manager: WireGuardPeerManager,
     /// Cached readiness info per workload, updated from BecameReady/BecameUnready outputs.
-    pub workload_readiness: BTreeMap<WorkloadId, WorkloadReadyInfo>,
+    pub workload_readiness: BTreeMap<WorkloadName, WorkloadReadyInfo>,
     /// Workloads with active network flows (demand signal from fabric).
-    pub active_flows: BTreeSet<WorkloadId>,
+    pub active_flows: BTreeSet<WorkloadName>,
 }
 
 impl NamespaceStateMachine {
@@ -339,7 +339,7 @@ impl NamespaceStateMachine {
     /// Broadcast an incremental endpoint update for a workload's pod endpoint.
     pub(crate) fn emit_endpoint_update_for_workload(
         &self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         out: &mut NamespaceOutput,
     ) {
         if let Some(wl_spec) = self.spec.workloads.get(workload_id) {

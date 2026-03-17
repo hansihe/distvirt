@@ -74,7 +74,7 @@ fn no_active_services_no_actions() {
     let mut adapter = EndpointAdapter::new(ENDPOINT);
 
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(actions.is_empty());
 }
 
@@ -89,7 +89,7 @@ fn service_becomes_active_update() {
     let mut adapter = EndpointAdapter::new(ENDPOINT);
 
     // Initially, service is NeedBackend — no active endpoints.
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.is_empty(),
         "expected no actions before pod running, got {:?}",
@@ -98,14 +98,13 @@ fn service_becomes_active_update() {
 
     // Make pod running → service becomes Active.
     make_pod_running(&mut router, worker, pod_id);
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
 
     assert_eq!(actions.len(), 1);
     match &actions[0] {
-        EndpointAction::Update { service_id, ready } => {
+        EndpointAction::Update { service_id, info } => {
             assert_eq!(*service_id, S1);
-            assert_eq!(ready.pod_id, pod_id);
-            assert_eq!(ready.worker_id, worker);
+            assert_eq!(info.worker_id, worker);
         }
         other => panic!("expected Update, got {:?}", other),
     }
@@ -123,17 +122,23 @@ fn service_leaves_active_remove() {
 
     // Make active.
     make_pod_running(&mut router, worker, pod_id);
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Pod fails → service goes to NeedBackend.
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     let removes: Vec<_> = actions
         .iter()
         .filter(|a| matches!(a, EndpointAction::Remove { .. }))
         .collect();
+    // Verify the old_info is populated on Remove actions.
+    for r in &removes {
+        if let EndpointAction::Remove { old_info, .. } = r {
+            assert_eq!(old_info.worker_id, worker);
+        }
+    }
     assert!(
         !removes.is_empty(),
         "expected Remove action, got {:?}",
@@ -153,11 +158,11 @@ fn stable_state_no_actions() {
 
     // Make active and reconcile.
     make_pod_running(&mut router, worker, pod_id);
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Propagate again — signal dedup, no new delivery.
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.is_empty(),
         "expected no actions on stable state, got {:?}",
@@ -247,7 +252,7 @@ fn multiple_services_change() {
     router.propagate();
 
     let mut adapter = EndpointAdapter::new(ENDPOINT);
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
 
     let update_count = actions
         .iter()

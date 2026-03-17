@@ -120,12 +120,12 @@ The old scenario test harness (`tests/harness/`) has been transplanted from
 
 ### Results
 
-- **84 scenario tests:** 52 pass, 26 fail, 6 ignored
+- **84 scenario tests:** 60 pass, 18 fail, 6 ignored
 
-The 28 failing tests serve as a precise TODO list of behavioral differences
+The 18 failing tests serve as a precise TODO list of behavioral differences
 and missing features.
 
-### Passing tests (50)
+### Passing tests (55)
 
 | Category | Test |
 |----------|------|
@@ -140,12 +140,18 @@ and missing features.
 | failure_recovery | `test_pod_exit_while_running` |
 | failure_recovery | `test_pod_launch_failure_recovery_on_success` |
 | failure_recovery | `test_pod_launch_failure_retries` |
+| failure_recovery | `test_failed_condition_in_status_report` |
+| failure_recovery | `test_failed_condition_lifecycle` |
+| failure_recovery | `test_retry_backoff_condition_in_status_report` |
+| failure_recovery | `test_retry_backoff_condition_lifecycle` |
 | failure_recovery | `test_resume_failure_falls_back_to_cold_launch` |
 | multi_service | `test_add_service_to_running_workload` |
 | multi_service | `test_add_service_to_suspended_workload` |
 | multi_service | `test_always_on_multi_service_both_get_create_service` |
+| multi_service | `test_late_joining_worker_receives_create_service` |
 | multi_service | `test_remove_only_active_service_drops_demand` |
 | multi_service | `test_service_activation_while_already_running` |
+| multi_service | `test_remove_service_updates_demand` |
 | multi_service | `test_two_services_one_workload_shared_demand` |
 | preemption | `test_no_preemption_of_active_traffic_workloads` |
 | preemption | `test_no_preemption_when_capacity_exists` |
@@ -157,6 +163,8 @@ and missing features.
 | registry | `test_registry_sync_on_namespace_create` |
 | registry | `test_registry_sync_sent_to_new_worker` |
 | registry | `test_registry_update_on_service_change` |
+| registry | `test_non_tunnel_workers_excluded_from_registry_entries` |
+| registry | `test_worker_registry_sync_with_tunnel_workers` |
 | snapshot_placement | `test_resume_pinned_to_artifact_worker` |
 | spec_reconciliation | `test_add_workload_to_existing_namespace` |
 | spec_reconciliation | `test_image_change_restarts_running_workload` |
@@ -184,7 +192,7 @@ and missing features.
 
 ### Failure categories
 
-The 28 remaining failures break down into these root causes:
+The remaining failures break down into these root causes:
 
 #### 1. Worker disconnect — suspended artifact not cleared (1 test)
 
@@ -220,16 +228,21 @@ Remaining test `test_remove_service_updates_demand` fails for a different
 reason — asserts `EndpointUpdate` with `removed_ips` on service deletion,
 which is a missing endpoint cleanup path (moved to #7).
 
-#### 3. Harness stubs — unimplemented features (11 tests)
+#### ~~3. Harness stubs — unimplemented features~~ — PARTIALLY FIXED (2026-03-17)
 
-These panic at unimplemented harness methods. Cannot pass without feature
-implementation.
+**Fixed (2026-03-17):** Workload condition tracking (4 tests). The
+`workload_conditions()` harness stub was returning an empty map. The new
+`WorkloadSm` already tracks `consecutive_failures`, `max_retries`, and
+`in_backoff` — the fix derives `"failed"` and `"retry-backoff"` conditions
+from this state, matching the old `ConditionSet`/`ConditionClear` output
+behavior.
+
+**Remaining (7 tests):** These still panic at unimplemented harness methods.
 
 | Stub | Tests | Count |
 |------|-------|-------|
 | `drain_worker` / `undrain_worker` | All `drain::*` tests | 5 |
 | `assert_service_condition_set/clear` | `activation_pending_condition_lifecycle`, `activation_pending_in_status_report` | 2 |
-| Workload/service condition tracking | `failed_condition_lifecycle/report`, `retry_backoff_condition_lifecycle/report` | 4 |
 
 #### ~~4. Pressure-based scheduling and idle timeout~~ — PARTIALLY FIXED (2026-03-17)
 
@@ -269,7 +282,7 @@ with no pressure adjustment). These tests are `#[ignore]`d:
 IP to a service and activate it. The old code looked up the service by IP
 in the endpoint table and sent `ActivateService`.
 
-#### 6. Registry sync (2 tests remaining)
+#### ~~6. Registry sync (2 tests remaining)~~ — FIXED (2026-03-17)
 
 **Fixed (2026-03-17):** DNS service registry moved from spec-driven side-channel
 in `EndpointAdapter` to a proper router port (`DnsRegistry`). Services signal
@@ -279,16 +292,14 @@ and maintains a cache for new-worker full sync. Tests updated to expect
 `RegistryUpdate` (incremental) instead of `RegistrySync` (full) on initial
 spec application. `WorkloadToDnsRegistry` edge also declared for future use.
 
-| Test | Symptom |
-|------|---------|
-| `registry::test_non_tunnel_workers_excluded_from_registry_entries` | empty WorkerRegistrySync entries |
-| `registry::test_worker_registry_sync_with_tunnel_workers` | empty WorkerRegistrySync entries |
+**Fixed (2026-03-17):** Worker registry sync (inter-worker tunnel peer
+discovery via `WorkerRegistrySync`). The core logic in `WorkerStateCore` was
+already complete — `SyncShell::add_worker()` was hardcoding `tunnel_info: None`
+instead of passing through the `MockWorkerConfig`'s tunnel info. Added
+`tunnel_info` field to `MockWorkerConfig`, populated in `with_tunnel()`, and
+wired through to `WorkerConnectedInfo`.
 
-These two remaining failures are about the **Worker** registry (inter-worker
-tunnel peer discovery via `WorkerRegistrySync`), not the DNS service registry.
-They fail because `WorkerRegistrySync` commands aren't generated in `SyncShell`.
-
-#### 7. Remaining feature gaps (8 tests)
+#### 7. Remaining feature gaps (6 tests)
 
 | Test | Root cause |
 |------|-----------|
@@ -296,11 +307,33 @@ They fail because `WorkerRegistrySync` commands aren't generated in `SyncShell`.
 | `preemption::test_preempted_workload_can_reactivate` | Preemption trigger logic not implemented |
 | `worker::test_worker_condition_stored_on_event` | Worker condition tracking not in new core |
 | `worker::test_worker_condition_in_status_report` | Worker condition tracking not in new core |
-| `spec_reconciliation::test_image_change_on_suspended_workload` | expected Suspended, got Running |
-| `transition_intents::test_spec_change_during_suspend` | expected Suspending, got Running |
+| ~~`spec_reconciliation::test_image_change_on_suspended_workload`~~ | ~~expected Suspended, got Running~~ |
+| ~~`transition_intents::test_spec_change_during_suspend`~~ | ~~expected Suspending, got Running~~ |
 | `snapshot_placement::test_artifact_lost_on_worker_disconnect_cold_launch` | Same root cause as #1 (suspended artifact not cleared on worker disconnect) |
-| `multi_service::test_late_joining_worker_receives_create_service` | Worker doesn't get CreateService for existing services |
-| `multi_service::test_remove_service_updates_demand` | Missing EndpointUpdate with removed_ips on service deletion |
+
+**Partially fixed (2026-03-17):**
+`test_image_change_on_suspended_workload` and `test_spec_change_during_suspend` —
+WorkloadSm now clears `suspended_artifact` when image changes (stale artifact
+from old spec), and discards artifacts arriving via `PodSuspended` when
+`spec_version != launched_with_spec_version`. Stateright model strengthened:
+added `"suspended artifact matches current spec"` safety property and expanded
+`ChangeImage` action guard to cover Suspended state (was previously gated out).
+Both tests now pass the status assertion (Dormant instead of Suspended) but
+still fail on `DeleteArtifact` — the SM discards the artifact internally but
+the namespace boundary layer doesn't yet translate that into a
+`WorkerCommand::DeleteArtifact` to clean up the worker's disk.
+| ~~`multi_service::test_remove_service_updates_demand`~~ | ~~Missing EndpointUpdate with removed_ips on service deletion~~ |
+
+**Fixed (2026-03-17):** `test_remove_service_updates_demand` —
+`build_endpoint_command()` for `EndpointAction::Remove` was upserting an
+endpoint with `backend: None` instead of putting the service IP into
+`removed_ips`. Fixed to use `removed_ips` so the worker fully removes the
+endpoint rather than keeping it for buffering.
+
+**Fixed (2026-03-17):** `test_late_joining_worker_receives_create_service` — endpoint
+signals made self-contained (`ServiceEndpointInfo` carries `service_ip`, `policy`,
+`pod_ip`, `worker_id`), so `build_sync()` and `build_endpoint_command()` no longer
+need spec lookups. New workers receive correct endpoint state from the cache directly.
 
 ### Recommended priority order
 
@@ -310,13 +343,14 @@ They fail because `WorkerRegistrySync` commands aren't generated in `SyncShell`.
 | ~~**P1**~~ | ~~Multi-service late-joining readiness (#2)~~ | ~~3~~ | ~~DONE~~ |
 | **P2** | Route-miss IP→service lookup (#5) | 3 | Small |
 | **P3** | Pressure-adjusted idle timeout (#4 remaining) | 6 (currently ignored) | Medium |
-| **P4** | `#[ignore]` harness stubs (#3) | 0 (noise reduction) | Trivial |
-| ~~**P5**~~ | ~~DNS registry via router port (#6)~~ | ~~2 of 4~~ | ~~DONE — 2026-03-17~~ |
+| ~~**P4**~~ | ~~Workload condition derivation (#3 partial)~~ | ~~4~~ | ~~DONE — 2026-03-17~~ |
+| ~~**P5**~~ | ~~DNS registry + worker registry via router port (#6)~~ | ~~4~~ | ~~DONE — 2026-03-17~~ |
 | ~~**P6**~~ | ~~Pressure scheduling / pod_count tracking (#4a,c)~~ | ~~4~~ | ~~DONE — 2026-03-17~~ |
 | **P7** | Suspended artifact + worker disconnect (#1 remaining) | 2 | Medium |
-| **P8** | Preemption, conditions, misc (#7) | 7 | Large |
+| **P8** | Preemption, conditions, misc (#7) | 4 | Large |
 
-P5 done. Current: 52 pass, 26 fail, 6 ignored. P2 would take us to ~55/84 passing.
+P4 + P5 + P6 done. Current: 60 pass, 18 fail, 6 ignored. Two tests partially
+fixed (status correct, pending DeleteArtifact plumbing). P2 would take us to ~63/84 passing.
 
 ### Visibility changes
 

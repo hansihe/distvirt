@@ -9,7 +9,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSpec {
     pub network: NetworkConfig,
-    pub workloads: BTreeMap<WorkloadId, WorkloadSpec>,
+    pub workloads: BTreeMap<WorkloadName, WorkloadSpec>,
     pub services: BTreeMap<String, ServiceSpec>,
 }
 
@@ -50,7 +50,7 @@ pub struct WorkloadActivationSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceSpec {
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub ip: Ipv4Addr,
     pub policy: ServicePolicy,
     pub activation: Option<ActivationSpec>,

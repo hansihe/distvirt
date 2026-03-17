@@ -43,7 +43,7 @@ fn simple_workload_spec() -> WorkloadSpec {
 
 fn simple_service_spec(workload_name: &str) -> ServiceSpec {
     ServiceSpec {
-        workload_id: crate::types::WorkloadId(workload_name.into()),
+        workload_id: crate::types::WorkloadName(workload_name.into()),
         ip: Ipv4Addr::new(10, 0, 1, 1),
         policy: distvirt_worker_protocol::ServicePolicy {
             buffer_frames: 0,
@@ -67,7 +67,7 @@ fn make_namespace_spec(
         },
         workloads: workloads
             .into_iter()
-            .map(|(n, s)| (crate::types::WorkloadId(n.into()), s))
+            .map(|(n, s)| (crate::types::WorkloadName(n.into()), s))
             .collect(),
         services: services
             .into_iter()

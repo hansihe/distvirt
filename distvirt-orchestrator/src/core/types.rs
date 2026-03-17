@@ -119,17 +119,12 @@ pub(crate) enum InternalWorkerEvent {
     PodSuspendFailed {
         pod_id: PodId,
     },
-    ServiceBackendNeed {
-        service_id: ServiceId,
-        need: crate::sm::BackendNeed,
-    },
     EndpointActivation {
         service_name: String,
     },
-    EndpointFlowStatus {
-        worker_id: WorkerId,
+    EndpointDemand {
         service_id: ServiceId,
-        has_active_flows: bool,
+        active: bool,
     },
 }
 

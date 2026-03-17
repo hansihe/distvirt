@@ -86,16 +86,6 @@ pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> Classif
             worker_id,
             WorkerNamespaceEventKind::PodSuspendFailed { pod_id },
         ),
-        WorkerEvent::ServiceBackendNeed {
-            namespace_id,
-            service_id,
-            need,
-        } => ns_event(
-            &namespace_id,
-            worker_id,
-            WorkerNamespaceEventKind::ServiceBackendNeed { service_id, need },
-        ),
-
         // Namespace lifecycle
         WorkerEvent::NamespaceCreated { namespace_id } => ns_event(
             &namespace_id,
@@ -122,18 +112,18 @@ pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> Classif
             worker_id,
             WorkerNamespaceEventKind::EndpointActivation { ip, service_id },
         ),
-        WorkerEvent::EndpointFlowStatus {
+        WorkerEvent::EndpointDemand {
             namespace_id,
             ip,
             service_id,
-            has_active_flows,
+            active,
         } => ns_event(
             &namespace_id,
             worker_id,
-            WorkerNamespaceEventKind::EndpointFlowStatus {
+            WorkerNamespaceEventKind::EndpointDemand {
                 ip,
                 service_id,
-                has_active_flows,
+                active,
             },
         ),
 
@@ -248,7 +238,7 @@ mod tests {
             namespace_id: distvirt_worker_protocol::NamespaceId::from("ns1"),
             pod_id: distvirt_worker_protocol::PodId::from(1u64),
         };
-        match classify(GlobalWorkerId::test(1), event) {
+        match classify(GlobalWorkerId::from(1), event) {
             ClassifiedWorkerEvent::Namespace { namespace_id, .. } => {
                 assert_eq!(namespace_id, NamespaceId::from("ns1"));
             }
@@ -264,7 +254,7 @@ mod tests {
             io: Default::default(),
         };
         assert!(matches!(
-            classify(GlobalWorkerId::test(1), event),
+            classify(GlobalWorkerId::from(1), event),
             ClassifiedWorkerEvent::WorkerState(WorkerStateCoreEvent::PressureUpdate { .. })
         ));
     }
@@ -273,11 +263,11 @@ mod tests {
     fn artifact_write_classifies_as_scheduler() {
         let event = WorkerEvent::ArtifactWriteStarted {
             namespace_id: distvirt_worker_protocol::NamespaceId::from("ns1"),
-            artifact_id: distvirt_worker_protocol::ArtifactId::from(1u64),
+            artifact_id: distvirt_worker_protocol::ArtifactId::from("1"),
             pool_id: distvirt_worker_protocol::PoolId::from("p1"),
         };
         assert!(matches!(
-            classify(GlobalWorkerId::test(1), event),
+            classify(GlobalWorkerId::from(1), event),
             ClassifiedWorkerEvent::Scheduler(SchedulerCoreInput::ArtifactEvent { .. })
         ));
     }
@@ -285,7 +275,7 @@ mod tests {
     #[test]
     fn shutting_down_classifies_as_ignored() {
         assert!(matches!(
-            classify(GlobalWorkerId::test(1), WorkerEvent::ShuttingDown),
+            classify(GlobalWorkerId::from(1), WorkerEvent::ShuttingDown),
             ClassifiedWorkerEvent::Ignored
         ));
     }

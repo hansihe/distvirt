@@ -13,7 +13,7 @@ impl NamespaceStateMachine {
     /// never produces another SuspendRequest), so at most one re-drive.
     pub(crate) fn translate_workload_effects(
         &mut self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         outputs: Vec<WorkloadOutput>,
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,
@@ -50,7 +50,7 @@ impl NamespaceStateMachine {
     /// Returns `None` in the common case.
     fn translate_single_workload_output(
         &mut self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         wl_out: WorkloadOutput,
         placement_table: &mut PlacementTable,
         out: &mut NamespaceOutput,

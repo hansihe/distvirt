@@ -203,7 +203,7 @@ fn test_spec_change_during_launch() {
     let mut new_spec = always_on_spec();
     new_spec
         .workloads
-        .get_mut(&WorkloadId("echo".to_string()))
+        .get_mut(&WorkloadName("echo".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/alpine:v2".to_string();
@@ -264,7 +264,7 @@ fn test_spec_change_during_suspend() {
     let mut new_spec = activation_spec(timeout);
     new_spec
         .workloads
-        .get_mut(&WorkloadId("web".to_string()))
+        .get_mut(&WorkloadName("web".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/nginx:v2".to_string();

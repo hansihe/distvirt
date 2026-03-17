@@ -266,10 +266,14 @@ impl Model for WlNewModel {
             // Spec is present — allow removal and changes.
             actions.push(WlNewAction::RemoveSpec);
 
-            if state.sm.has_demand || state.sm.pod_id.is_some() || state.sm.committed_to_boot {
-                // Only explore image changes when the SM has something active.
-                // Changing image while fully dormant has no behavioral effect
-                // beyond bumping spec_version, which Representative normalizes.
+            if state.sm.has_demand
+                || state.sm.pod_id.is_some()
+                || state.sm.committed_to_boot
+                || state.sm.suspended_artifact.is_some()
+            {
+                // Explore image changes when the SM has something active or
+                // holds a suspended artifact. A spec change while an artifact
+                // exists should invalidate it.
                 actions.push(WlNewAction::ChangeImage);
             }
 
@@ -396,7 +400,7 @@ impl Model for WlNewModel {
             ),
             WlNewAction::PodSuspended => {
                 // Use a synthetic artifact ID based on SM's artifact counter.
-                let artifact_id = ArtifactId(state.sm.artifact_counter + 1);
+                let artifact_id = ArtifactId((state.sm.artifact_counter + 1).to_string());
                 apply_input(
                     state,
                     WorkloadInput::PodStatusInput(vec![PodStatus::Suspended { artifact_id }]),
@@ -557,6 +561,22 @@ impl Model for WlNewModel {
                     true
                 }
             }),
+            // Safety: a suspended artifact must match the current spec version.
+            // If the image changed since the pod that produced the artifact was
+            // launched, the artifact is stale and should have been discarded.
+            Property::<Self>::always(
+                "suspended artifact matches current spec",
+                |_model, state| {
+                    if state.self_destructed {
+                        return true;
+                    }
+                    if state.sm.suspended_artifact.is_some() && state.sm.pod_id.is_none() {
+                        state.sm.spec_version == state.sm.launched_with_spec_version
+                    } else {
+                        true
+                    }
+                },
+            ),
             // Safety: suspend_on_idle=false implies no artifact and no awaiting_suspend.
             // When suspend is disabled, there should never be suspend-related state.
             Property::<Self>::always("no suspend state when disabled", |_model, state| {
@@ -670,7 +690,7 @@ impl Representative for WlNewModelState {
         // suspended_artifact: only used as Some/None check (has artifact to
         // resume from?). The actual ArtifactId value doesn't matter.
         if let Some(_) = s.sm.suspended_artifact {
-            s.sm.suspended_artifact = Some(ArtifactId(0));
+            s.sm.suspended_artifact = Some(ArtifactId(0.to_string()));
         }
 
         // pod_worker_id: only used to construct ReadyInfo. The actual WorkerId
@@ -685,6 +705,10 @@ impl Representative for WlNewModelState {
         if let Some(_) = s.sm.current_image {
             s.sm.current_image = Some(String::new());
         }
+
+        // pod_ip: only used to construct ReadyInfo. The actual IP value doesn't
+        // affect SM decision-making.
+        s.sm.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
 
         s
     }

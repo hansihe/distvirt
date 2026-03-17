@@ -61,7 +61,7 @@ pub fn container_spec(image: &str) -> ContainerSpec {
 
 /// Always-on spec: 1 workload "echo" + 1 always-on service "echo-svc".
 pub fn always_on_spec() -> NamespaceSpec {
-    let wl_id = WorkloadId("echo".to_string());
+    let wl_id = WorkloadName("echo".to_string());
     let svc_id = "echo-svc".to_string();
 
     let mut workloads = BTreeMap::new();
@@ -100,7 +100,7 @@ pub fn always_on_spec() -> NamespaceSpec {
 
 /// Activation-based spec: 1 workload "web" with suspend_on_idle + 1 activation service "web-svc".
 pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_id = WorkloadId("web".to_string());
+    let wl_id = WorkloadName("web".to_string());
     let svc_id = "web-svc".to_string();
 
     let mut workloads = BTreeMap::new();
@@ -143,7 +143,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
 
 /// Activation-based spec without suspend: workload "web" with suspend_on_idle=false + activation service "web-svc".
 pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_id = WorkloadId("web".to_string());
+    let wl_id = WorkloadName("web".to_string());
     let svc_id = "web-svc".to_string();
 
     let mut workloads = BTreeMap::new();
@@ -186,7 +186,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
 
 /// 1 workload "shared" backed by 2 services "svc-a" and "svc-b" (both activation-based).
 pub fn multi_service_spec() -> NamespaceSpec {
-    let wl_id = WorkloadId("shared".to_string());
+    let wl_id = WorkloadName("shared".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -273,7 +273,7 @@ pub fn activation_spec_with_segment(idle_timeout: Duration, segment_id: u16) -> 
 
 /// 1 workload "shared" backed by 2 always-on services "svc-a" and "svc-b" (no activation).
 pub fn always_on_multi_service_spec() -> NamespaceSpec {
-    let wl_id = WorkloadId("shared".to_string());
+    let wl_id = WorkloadName("shared".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -324,8 +324,8 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
 
 /// 2 independent always-on workloads "echo-a" and "echo-b" with services.
 pub fn always_on_two_workloads_spec() -> NamespaceSpec {
-    let wl_a = WorkloadId("echo-a".to_string());
-    let wl_b = WorkloadId("echo-b".to_string());
+    let wl_a = WorkloadName("echo-a".to_string());
+    let wl_b = WorkloadName("echo-b".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(

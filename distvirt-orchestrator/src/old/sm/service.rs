@@ -25,7 +25,7 @@ impl ServiceState {
 pub struct ServiceStateMachine {
     pub service_id: ServiceId,
     pub state: ServiceState,
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub has_activation: bool,
     pub idle_timeout: std::time::Duration,
     /// Active conditions for observability (key → message).
@@ -82,7 +82,7 @@ pub enum ServiceOutput {
 impl ServiceStateMachine {
     pub fn new(
         service_id: ServiceId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         has_activation: bool,
         idle_timeout: std::time::Duration,
     ) -> Self {

@@ -55,7 +55,7 @@ fn no_requests_no_deltas() {
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
     router.propagate();
-    let deltas = adapter.reconcile(&mut router);
+    let (deltas, _) = adapter.reconcile(&mut router);
     assert!(deltas.is_empty());
 }
 
@@ -69,7 +69,7 @@ fn new_pod_request_delta() {
     let (_worker, pod_id) = setup_workload(&mut router);
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
-    let deltas = adapter.reconcile(&mut router);
+    let (deltas, _) = adapter.reconcile(&mut router);
     assert_eq!(deltas.len(), 1);
     match &deltas[0] {
         ScheduleRequestDelta::Request {
@@ -94,7 +94,7 @@ fn pod_removed_drop_delta() {
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
     // Drain initial deltas.
-    let deltas = adapter.reconcile(&mut router);
+    let (deltas, _) = adapter.reconcile(&mut router);
     assert_eq!(deltas.len(), 1);
 
     // Make pod fail → schedule request disappears.
@@ -107,7 +107,7 @@ fn pod_removed_drop_delta() {
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let deltas = adapter.reconcile(&mut router);
+    let (deltas, _) = adapter.reconcile(&mut router);
     let drop_deltas: Vec<_> = deltas
         .iter()
         .filter(|d| matches!(d, ScheduleRequestDelta::Drop { .. }))
@@ -130,11 +130,11 @@ fn stable_state_no_deltas() {
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
 
     // Initial reconcile.
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Propagate again — signal dedup, no new delivery.
     router.propagate();
-    let deltas = adapter.reconcile(&mut router);
+    let (deltas, _) = adapter.reconcile(&mut router);
     assert!(
         deltas.is_empty(),
         "expected no deltas on stable state, got {:?}",
@@ -204,7 +204,7 @@ fn multiple_pods_change() {
     router.propagate();
 
     let mut adapter = ScheduleRequestAdapter::new(SCHEDULE_REQUEST);
-    let deltas = adapter.reconcile(&mut router);
+    let (deltas, _) = adapter.reconcile(&mut router);
 
     let request_count = deltas
         .iter()

@@ -136,6 +136,7 @@ fn make_ready_info() -> ReadyInfo {
     ReadyInfo {
         pod_id: PodId(1),
         worker_id: WorkerId(1),
+        pod_ip: std::net::Ipv4Addr::new(10, 0, 0, 1),
     }
 }
 
@@ -422,15 +423,25 @@ impl Representative for SvcNewModelState {
         s.timer_generation = 0;
 
         // Normalize ReadyInfo inside Active state — actual pod/worker IDs
-        // don't affect service behavior.
+        // and pod_ip don't affect service behavior.
         if let ServiceState::Active { ref mut ready } = s.sm.state {
             ready.pod_id = PodId(0);
             ready.worker_id = WorkerId(0);
+            ready.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
         }
         if let Some(ref mut info) = s.sm.last_readiness {
             info.pod_id = PodId(0);
             info.worker_id = WorkerId(0);
+            info.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
         }
+
+        // Normalize service endpoint fields — don't affect service SM behavior.
+        s.sm.service_ip = std::net::Ipv4Addr::UNSPECIFIED;
+        s.sm.service_policy = distvirt_worker_protocol::ServicePolicy {
+            buffer_frames: 0,
+            timeout_ms: 0,
+            activator: None,
+        };
 
         s
     }

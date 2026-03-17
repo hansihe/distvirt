@@ -714,7 +714,7 @@ pub struct NamespaceWorkerState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PodInfo {
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub worker_id: WorkerId,
 }
 
@@ -831,7 +831,7 @@ mod lease_tests {
     fn test_resume_intent() {
         let mut table = LeaseTable::default();
         let pod_id = PodId(1);
-        let artifact_id = ArtifactId(1);
+        let artifact_id = ArtifactId("1".into());
 
         table.grant(
             pod_id.clone(),

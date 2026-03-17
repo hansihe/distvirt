@@ -18,7 +18,7 @@ pub(super) fn convert_proto_spec(spec: proto::NamespaceSpec) -> Result<Namespace
 
     let mut workloads = BTreeMap::new();
     for (id, wl) in spec.workloads {
-        workloads.insert(WorkloadId(id), convert_proto_workload_spec(wl)?);
+        workloads.insert(WorkloadName(id), convert_proto_workload_spec(wl)?);
     }
 
     let mut services = BTreeMap::new();
@@ -255,7 +255,7 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
     });
 
     Ok(ServiceSpec {
-        workload_id: WorkloadId(svc.workload_id),
+        workload_id: WorkloadName(svc.workload_id),
         ip,
         policy,
         activation,

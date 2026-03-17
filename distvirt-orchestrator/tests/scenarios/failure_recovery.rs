@@ -146,7 +146,7 @@ fn test_failed_workload_recovery_via_spec_change() {
     let mut new_spec = always_on_spec();
     new_spec
         .workloads
-        .get_mut(&WorkloadId("echo".to_string()))
+        .get_mut(&WorkloadName("echo".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/alpine:new".to_string();
@@ -416,7 +416,7 @@ fn test_failed_condition_lifecycle() {
     let mut new_spec = always_on_spec();
     new_spec
         .workloads
-        .get_mut(&WorkloadId("echo".to_string()))
+        .get_mut(&WorkloadName("echo".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/alpine:fixed".to_string();

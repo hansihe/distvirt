@@ -21,12 +21,12 @@ pub enum ClientCommand {
     ListNamespaces,
     Splice {
         namespace_id: NamespaceId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         worker_id: WorkerId,
     },
     Unsplice {
         namespace_id: NamespaceId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
     },
     CloneNamespace {
         source_namespace_id: NamespaceId,
@@ -53,7 +53,7 @@ pub enum ClientCommand {
     },
     DeactivateWorkload {
         namespace_id: NamespaceId,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
     },
     DrainWorker {
         worker_id: WorkerId,
@@ -114,7 +114,7 @@ pub struct WorkerStatusReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PodStatusReport {
     pub pod_id: PodId,
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub worker_id: WorkerId,
     pub ip: String,
     pub state: PodStatus,
@@ -133,7 +133,7 @@ pub enum PodStatus {
 pub struct NamespaceStatusReport {
     pub namespace_id: NamespaceId,
     pub status: NamespaceStatus,
-    pub workloads: BTreeMap<WorkloadId, WorkloadStatusReport>,
+    pub workloads: BTreeMap<WorkloadName, WorkloadStatusReport>,
     pub services: BTreeMap<String, ServiceStatusReport>,
     pub pods: BTreeMap<PodId, PodStatusReport>,
 }
@@ -147,7 +147,7 @@ pub struct WorkloadStatusReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceStatusReport {
-    pub workload_id: WorkloadId,
+    pub workload_id: WorkloadName,
     pub service_state: String,
     pub backend_need: Option<BackendNeed>,
     pub activation_enabled: bool,

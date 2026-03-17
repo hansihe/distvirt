@@ -67,10 +67,13 @@ impl PodAssignmentAdapter {
     /// Drain worker inputs from the router.
     /// With incremental aggregation the router already produces per-pod deltas,
     /// so no adapter-side diffing or caching is needed.
-    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<PodAssignmentAction> {
+    ///
+    /// Returns `(actions, mutated_router)`. Currently only drains, so
+    /// `mutated_router` is always `false`.
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> (Vec<PodAssignmentAction>, bool) {
         let inputs = router.drain_worker_inputs();
 
-        inputs
+        let actions = inputs
             .into_iter()
             .map(|(worker_id, input)| match input {
                 WorkerPortInput::AssignedPodsInput(delta) => match delta {
@@ -98,7 +101,8 @@ impl PodAssignmentAdapter {
                     }
                 },
             })
-            .collect()
+            .collect();
+        (actions, false)
     }
 }
 
@@ -112,7 +116,7 @@ impl IncrementalAggregator for PodAssignmentIncrementalAggregator {
     type Output = PodAssignmentDelta;
 
     fn added(&self, (pod_id, request): &(PodId, PodScheduleRequest)) -> Option<PodAssignmentDelta> {
-        if let Some(artifact_id) = request.resume_artifact {
+        if let Some(artifact_id) = request.resume_artifact.clone() {
             Some(PodAssignmentDelta::Resume {
                 pod_id: *pod_id,
                 artifact_id,

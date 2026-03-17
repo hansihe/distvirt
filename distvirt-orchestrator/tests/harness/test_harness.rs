@@ -187,15 +187,38 @@ impl TestHarness {
         }
     }
 
-    /// Stub: workload conditions not tracked in the new system.
+    /// Derive workload conditions from WorkloadSm state.
     pub fn workload_conditions(
         &self,
-        _ns_id: &str,
-        _wl_id: &str,
+        ns_id: &str,
+        wl_id: &str,
     ) -> std::collections::BTreeMap<String, String> {
-        // New system doesn't have workload conditions. Return empty.
-        // Tests depending on this will fail their assertions.
-        std::collections::BTreeMap::new()
+        let wl = self.workload_state(ns_id, wl_id);
+        let mut conditions = std::collections::BTreeMap::new();
+
+        let is_failed = wl.consecutive_failures >= wl.max_retries
+            && (wl.has_demand || wl.committed_to_boot);
+
+        if is_failed {
+            conditions.insert(
+                "failed".into(),
+                format!(
+                    "attempt {}/{}",
+                    wl.consecutive_failures, wl.max_retries,
+                ),
+            );
+        } else if wl.in_backoff {
+            conditions.insert(
+                "retry-backoff".into(),
+                format!(
+                    "attempt {}/{}, backing off",
+                    wl.consecutive_failures + 1,
+                    wl.max_retries,
+                ),
+            );
+        }
+
+        conditions
     }
 
     /// Stub: service conditions not tracked in the new system.
@@ -278,10 +301,11 @@ impl TestHarness {
 
         self.shell.queue_worker_event(
             worker_id,
-            WorkerEvent::ServiceBackendNeed {
+            WorkerEvent::EndpointDemand {
                 namespace_id,
-                service_id: self.proto_service_id(ns_id, svc_id),
-                need: distvirt_worker_protocol::BackendNeed::None,
+                ip: std::net::Ipv4Addr::UNSPECIFIED,
+                service_id: Some(self.proto_service_id(ns_id, svc_id)),
+                active: false,
             },
         );
         self.converge();

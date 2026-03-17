@@ -55,7 +55,7 @@ pub async fn setup_with_activators() -> anyhow::Result<(
 
 /// Like `setup()`, but with pools pushed to the worker via handshake and a custom worker ID.
 pub async fn setup_with_pools(
-    worker_id: &str,
+    worker_id: WorkerId,
     pushed_pools: Vec<PoolInfo>,
 ) -> anyhow::Result<(
     OrchestratorConnection,
@@ -67,7 +67,7 @@ pub async fn setup_with_pools(
 
 /// Like `setup_with_pools()`, but also returns the worker's transfer listen port.
 pub async fn setup_with_pools_full(
-    worker_id: &str,
+    worker_id: WorkerId,
     pushed_pools: Vec<PoolInfo>,
 ) -> anyhow::Result<WorkerSetup> {
     setup_full(None, Some(worker_id), pushed_pools).await
@@ -75,7 +75,7 @@ pub async fn setup_with_pools_full(
 
 async fn setup_full(
     component_dir: Option<PathBuf>,
-    worker_id: Option<&str>,
+    worker_id: Option<WorkerId>,
     pushed_pools: Vec<PoolInfo>,
 ) -> anyhow::Result<WorkerSetup> {
     let _ = env_logger::try_init();
@@ -115,7 +115,7 @@ async fn setup_full(
         worker.run(conn, "test-secret".to_string()).await
     });
 
-    let wid = worker_id.unwrap_or("test-worker");
+    let wid = worker_id.unwrap_or(WorkerId(1));
     let mut conn = OrchestratorConnection::connect(orch_half).await?;
 
     // Perform handshake
@@ -126,7 +126,7 @@ async fn setup_full(
     );
 
     conn.send_accepted(&WorkerAccepted {
-        worker_id: WorkerId::from(wid),
+        worker_id: wid,
         adapters: vec![],
         tunnel_encrypted: true,
         pools: pushed_pools,
@@ -277,7 +277,7 @@ pub async fn register_pod_endpoint(
     conn: &mut OrchestratorConnection,
     namespace_id: &str,
     pod_network: &PodNetworkConfig,
-    worker_id: &str,
+    worker_id: WorkerId,
 ) -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::EndpointUpdate {
         namespace_id: namespace_id.into(),
@@ -285,7 +285,7 @@ pub async fn register_pod_endpoint(
             ip: pod_network.ip,
             kind: EndpointKind::Pod {
                 placement: Some(EndpointPlacement {
-                    worker_id: WorkerId::from(worker_id),
+                    worker_id,
                 }),
             },
         }],

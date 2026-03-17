@@ -24,6 +24,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
+use distvirt_worker_protocol::WorkerId;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 
@@ -61,11 +62,11 @@ enum NoiseSession {
 /// State shared between the recv loop and the control API.
 struct TunnelState {
     /// worker_id → peer endpoint address.
-    peers: HashMap<String, PeerState>,
+    peers: HashMap<WorkerId, PeerState>,
     /// segment_id → ingress channel for that namespace.
     segment_channels: HashMap<u16, mpsc::Sender<Vec<u8>>>,
     /// peer endpoint addr → worker_id (reverse lookup for recv loop).
-    addr_to_worker: HashMap<SocketAddr, String>,
+    addr_to_worker: HashMap<SocketAddr, WorkerId>,
 }
 
 struct PeerState {
@@ -173,7 +174,7 @@ impl TunnelTransport {
     /// `is_initiator` controls whether this side starts the Noise handshake.
     pub fn add_peer(
         &self,
-        worker_id: String,
+        worker_id: WorkerId,
         endpoint: SocketAddr,
         peer_public_key: Option<&[u8; 32]>,
         is_initiator: bool,
@@ -217,9 +218,8 @@ impl TunnelTransport {
 
         {
             let mut st = self.state.write().expect("poisoned");
-            st.addr_to_worker.insert(endpoint, worker_id.clone());
-            st.peers
-                .insert(worker_id.clone(), PeerState { endpoint, noise });
+            st.addr_to_worker.insert(endpoint, worker_id);
+            st.peers.insert(worker_id, PeerState { endpoint, noise });
         }
 
         log::info!(
@@ -231,16 +231,16 @@ impl TunnelTransport {
 
         // If we're the initiator, send the first handshake message.
         if is_initiator && self.encryption.is_some() {
-            self.send_handshake_msg(&worker_id);
+            self.send_handshake_msg(worker_id);
         }
 
         Ok(())
     }
 
     /// Deregister a remote worker.
-    pub fn remove_peer(&self, worker_id: &str) {
+    pub fn remove_peer(&self, worker_id: WorkerId) {
         let mut st = self.state.write().expect("poisoned");
-        if let Some(peer) = st.peers.remove(worker_id) {
+        if let Some(peer) = st.peers.remove(&worker_id) {
             st.addr_to_worker.remove(&peer.endpoint);
         }
         log::info!("tunnel: removed peer {}", worker_id);
@@ -255,17 +255,20 @@ impl TunnelTransport {
     /// `worker_id` identifies which peer to send egress traffic to.
     pub fn create_namespace_port(
         &self,
-        worker_id: &str,
+        worker_id: WorkerId,
         segment_id: u16,
     ) -> io::Result<(ChannelPort, TunnelPortHandle)> {
         let endpoint = {
             let st = self.state.read().expect("poisoned");
-            st.peers.get(worker_id).map(|p| p.endpoint).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("unknown peer: {}", worker_id),
-                )
-            })?
+            st.peers
+                .get(&worker_id)
+                .map(|p| p.endpoint)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("unknown peer: {}", worker_id),
+                    )
+                })?
         };
 
         // Create a ChannelPort. The fabric writes to the port (fabric→adapter_rx),
@@ -280,7 +283,6 @@ impl TunnelTransport {
         }
 
         let encrypted = self.encryption.is_some();
-        let worker_id_owned = worker_id.to_string();
 
         // Spawn egress loop.
         let egress_task = TaskHandle::spawn(egress_loop(
@@ -290,7 +292,7 @@ impl TunnelTransport {
             segment_id,
             encrypted,
             Arc::clone(&self.state),
-            worker_id_owned,
+            worker_id,
             self.handshake_done_rx.clone(),
         ));
 
@@ -315,9 +317,9 @@ impl TunnelTransport {
     }
 
     /// Send the next handshake message for the given peer.
-    fn send_handshake_msg(&self, worker_id: &str) {
+    fn send_handshake_msg(&self, worker_id: WorkerId) {
         let mut st = self.state.write().expect("poisoned");
-        let peer = match st.peers.get_mut(worker_id) {
+        let peer = match st.peers.get_mut(&worker_id) {
             Some(p) => p,
             None => return,
         };
@@ -535,7 +537,7 @@ async fn egress_loop(
     segment_id: u16,
     encrypted: bool,
     state: Arc<RwLock<TunnelState>>,
-    worker_id: String,
+    worker_id: WorkerId,
     mut handshake_done_rx: watch::Receiver<u64>,
 ) {
     let seg_bytes = segment_id.to_be_bytes();
@@ -633,6 +635,10 @@ mod tests {
     use crate::packet::FabricPacket;
     use crate::packet::with_fabric_header;
 
+    const WORKER_A: WorkerId = WorkerId(1);
+    const WORKER_B: WorkerId = WorkerId(2);
+    const WORKER_PEER: WorkerId = WorkerId(3);
+
     /// Helper: build a minimal IPv4 fabric frame.
     fn make_ipv4_frame(src_ip: std::net::Ipv4Addr, dst_ip: std::net::Ipv4Addr) -> Vec<u8> {
         let mut ip_hdr = [0u8; 20];
@@ -656,20 +662,16 @@ mod tests {
         let addr_a = transport_a.local_addr().unwrap();
         let addr_b = transport_b.local_addr().unwrap();
 
-        transport_a
-            .add_peer("worker-b".into(), addr_b, None, false)
-            .unwrap();
-        transport_b
-            .add_peer("worker-a".into(), addr_a, None, false)
-            .unwrap();
+        transport_a.add_peer(WORKER_B, addr_b, None, false).unwrap();
+        transport_b.add_peer(WORKER_A, addr_a, None, false).unwrap();
 
         let segment_id = 42;
 
         let (port_a, _handle_a) = transport_a
-            .create_namespace_port("worker-b", segment_id)
+            .create_namespace_port(WORKER_B, segment_id)
             .unwrap();
         let (_port_b, _handle_b) = transport_b
-            .create_namespace_port("worker-a", segment_id)
+            .create_namespace_port(WORKER_A, segment_id)
             .unwrap();
 
         use super::super::port::FramePort;
@@ -718,17 +720,13 @@ mod tests {
         let addr_a = transport_a.local_addr().unwrap();
         let addr_b = transport_b.local_addr().unwrap();
 
-        transport_a
-            .add_peer("worker-b".into(), addr_b, None, false)
-            .unwrap();
-        transport_b
-            .add_peer("worker-a".into(), addr_a, None, false)
-            .unwrap();
+        transport_a.add_peer(WORKER_B, addr_b, None, false).unwrap();
+        transport_b.add_peer(WORKER_A, addr_a, None, false).unwrap();
 
-        let (port_a_seg1, _h1) = transport_a.create_namespace_port("worker-b", 1).unwrap();
-        let (port_a_seg2, _h2) = transport_a.create_namespace_port("worker-b", 2).unwrap();
-        let (_port_b_seg1, _h3) = transport_b.create_namespace_port("worker-a", 1).unwrap();
-        let (_port_b_seg2, _h4) = transport_b.create_namespace_port("worker-a", 2).unwrap();
+        let (port_a_seg1, _h1) = transport_a.create_namespace_port(WORKER_B, 1).unwrap();
+        let (port_a_seg2, _h2) = transport_a.create_namespace_port(WORKER_B, 2).unwrap();
+        let (_port_b_seg1, _h3) = transport_b.create_namespace_port(WORKER_A, 1).unwrap();
+        let (_port_b_seg2, _h4) = transport_b.create_namespace_port(WORKER_A, 2).unwrap();
 
         use super::super::port::FramePort;
 
@@ -781,10 +779,8 @@ mod tests {
         let addr = transport.local_addr().unwrap();
 
         // Register segment 10 only.
-        transport
-            .add_peer("peer".into(), addr, None, false)
-            .unwrap();
-        let (_port, _handle) = transport.create_namespace_port("peer", 10).unwrap();
+        transport.add_peer(WORKER_PEER, addr, None, false).unwrap();
+        let (_port, _handle) = transport.create_namespace_port(WORKER_PEER, 10).unwrap();
 
         // Send a datagram with segment_id=99 directly to the socket.
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -831,10 +827,10 @@ mod tests {
         let a_initiates = pub_a < pub_b;
 
         transport_a
-            .add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates)
+            .add_peer(WORKER_B, addr_b, Some(&pub_b), a_initiates)
             .unwrap();
         transport_b
-            .add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates)
+            .add_peer(WORKER_A, addr_a, Some(&pub_a), !a_initiates)
             .unwrap();
 
         // Give the handshake some time to complete.
@@ -843,10 +839,10 @@ mod tests {
         let segment_id = 42;
 
         let (port_a, _handle_a) = transport_a
-            .create_namespace_port("worker-b", segment_id)
+            .create_namespace_port(WORKER_B, segment_id)
             .unwrap();
         let (_port_b, _handle_b) = transport_b
-            .create_namespace_port("worker-a", segment_id)
+            .create_namespace_port(WORKER_A, segment_id)
             .unwrap();
 
         use super::super::port::FramePort;
@@ -896,18 +892,18 @@ mod tests {
         let a_initiates = pub_a < pub_b;
 
         transport_a
-            .add_peer("worker-b".into(), addr_b, Some(&pub_b), a_initiates)
+            .add_peer(WORKER_B, addr_b, Some(&pub_b), a_initiates)
             .unwrap();
         transport_b
-            .add_peer("worker-a".into(), addr_a, Some(&pub_a), !a_initiates)
+            .add_peer(WORKER_A, addr_a, Some(&pub_a), !a_initiates)
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let (port_a_seg1, _h1) = transport_a.create_namespace_port("worker-b", 1).unwrap();
-        let (port_a_seg2, _h2) = transport_a.create_namespace_port("worker-b", 2).unwrap();
-        let (_port_b_seg1, _h3) = transport_b.create_namespace_port("worker-a", 1).unwrap();
-        let (_port_b_seg2, _h4) = transport_b.create_namespace_port("worker-a", 2).unwrap();
+        let (port_a_seg1, _h1) = transport_a.create_namespace_port(WORKER_B, 1).unwrap();
+        let (port_a_seg2, _h2) = transport_a.create_namespace_port(WORKER_B, 2).unwrap();
+        let (_port_b_seg1, _h3) = transport_b.create_namespace_port(WORKER_A, 1).unwrap();
+        let (_port_b_seg2, _h4) = transport_b.create_namespace_port(WORKER_A, 2).unwrap();
 
         use super::super::port::FramePort;
 

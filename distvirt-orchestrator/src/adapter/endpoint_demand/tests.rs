@@ -53,7 +53,7 @@ fn push_need_creates_port() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup_activation_service(&mut router);
 
-    let mut adapter = BackendNeedAdapter::new();
+    let mut adapter = EndpointDemandAdapter::new();
     adapter.push_need(&mut router, worker, S1, BackendNeed::Traffic);
     router.propagate();
 
@@ -72,7 +72,7 @@ fn push_need_reuses_port() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup_activation_service(&mut router);
 
-    let mut adapter = BackendNeedAdapter::new();
+    let mut adapter = EndpointDemandAdapter::new();
     adapter.push_need(&mut router, worker, S1, BackendNeed::Traffic);
     let port_id_first = adapter.ports[&(worker, S1)];
 
@@ -95,7 +95,7 @@ fn multiple_workers_separate_ports() {
     router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
 
-    let mut adapter = BackendNeedAdapter::new();
+    let mut adapter = EndpointDemandAdapter::new();
     adapter.push_need(&mut router, worker1, S1, BackendNeed::Traffic);
     adapter.push_need(&mut router, worker2, S1, BackendNeed::Traffic);
 
@@ -143,7 +143,7 @@ fn remove_worker_cleans_up() {
     );
     router.propagate();
 
-    let mut adapter = BackendNeedAdapter::new();
+    let mut adapter = EndpointDemandAdapter::new();
     // Worker1 has need for both services
     adapter.push_need(&mut router, worker1, S1, BackendNeed::Traffic);
     adapter.push_need(&mut router, worker1, S2, BackendNeed::Active);
@@ -166,7 +166,7 @@ fn need_none_keeps_port() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker = setup_activation_service(&mut router);
 
-    let mut adapter = BackendNeedAdapter::new();
+    let mut adapter = EndpointDemandAdapter::new();
     adapter.push_need(&mut router, worker, S1, BackendNeed::Traffic);
     adapter.push_need(&mut router, worker, S1, BackendNeed::None);
 

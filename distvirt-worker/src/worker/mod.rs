@@ -607,7 +607,7 @@ impl<
                     FatalError::InternalInvariant(format!("namespace '{}' not found", namespace_id))
                 })?;
                 let pending_events =
-                    ns.endpoint_sync(&namespace_id, endpoints, &worker_id, activator_runtime)?;
+                    ns.endpoint_sync(&namespace_id, endpoints, worker_id, activator_runtime)?;
                 for event in pending_events {
                     let _ = self.bg_event_tx.try_send(event);
                 }
@@ -631,7 +631,7 @@ impl<
                     &namespace_id,
                     upserted,
                     removed_ips,
-                    &worker_id,
+                    worker_id,
                     activator_runtime,
                 )?;
                 for event in pending_events {
@@ -1361,7 +1361,7 @@ mod tests {
     async fn stop_pod_errors_on_missing_namespace() {
         let mut w = make_worker();
         let result = w
-            .handle_stop_pod(&NamespaceId::from("nope"), &PodId::from("pod1"), true)
+            .handle_stop_pod(&NamespaceId::from("nope"), &PodId(11), true)
             .await;
         assert!(result.is_err());
     }
@@ -1372,7 +1372,7 @@ mod tests {
         inject_namespace(&mut w, "ns1");
 
         // Stopping a pod that doesn't exist should succeed (no-op).
-        w.handle_stop_pod(&NamespaceId::from("ns1"), &PodId::from("pod1"), true)
+        w.handle_stop_pod(&NamespaceId::from("ns1"), &PodId(11), true)
             .await
             .unwrap();
     }
@@ -1544,7 +1544,7 @@ mod tests {
 
         w.handle_launch_pod(
             &NamespaceId::from("ns1"),
-            PodId::from("pod1"),
+            PodId(11),
             make_pod_network(),
             make_containers(),
             None,
@@ -1555,6 +1555,6 @@ mod tests {
 
         // Pod should be registered.
         let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
-        assert!(ns.pods.contains_key(&PodId::from("pod1")));
+        assert!(ns.pods.contains_key(&PodId(11)));
     }
 }

@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use distvirt_worker_protocol::{BackendNeed,  WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
@@ -95,10 +95,11 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     );
 
     // Idle → suspend.
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
         namespace_id: "ns1".into(),
-        service_id: h.proto_service_id("ns1", "web-svc"),
-        need: BackendNeed::None,
+        ip: Ipv4Addr::UNSPECIFIED,
+        service_id: Some(h.proto_service_id("ns1", "web-svc")),
+        active: false,
     });
     h.converge();
     h.advance_time(Duration::from_secs(31));
@@ -281,20 +282,12 @@ fn test_route_miss_demand_leak() {
     h.assert_workload_running("ns", "web");
     h.assert_service_active("ns", "web-svc");
 
-    // Step 3: Signal no more active flows (clears has_active_flows demand).
-    h.worker(&w1).send_event(WorkerEvent::EndpointFlowStatus {
+    // Step 3: Signal no more demand → start idle timer.
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
-        service_id: None,
-        has_active_flows: false,
-    });
-    h.converge();
-
-    // Step 4: Signal no more traffic → start idle timer.
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
-        namespace_id: "ns".into(),
-        service_id: h.proto_service_id("ns", "web-svc"),
-        need: BackendNeed::None,
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
+        active: false,
     });
     h.converge();
 

@@ -30,8 +30,8 @@ fn suspend_on_demand_drop() {
     assert_eq!(pod.status, PodStatus::Suspending);
 
     // Worker completes the suspend.
-    let artifact = ArtifactId(42);
-    router.send_notify_pod_suspended(_worker, pod_id, artifact);
+    let artifact = ArtifactId(42.to_string());
+    router.send_notify_pod_suspended(_worker, pod_id, artifact.clone());
     router.propagate();
 
     // Workload should have saved the artifact and reaped the pod.
@@ -57,12 +57,12 @@ fn resume_from_artifact() {
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
 
-    let artifact = ArtifactId(100);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(100.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert_eq!(wl.suspended_artifact, Some(artifact.clone()));
     assert!(wl.pod_id.is_none());
 
     // Re-activate → demand returns → workload should create pod from artifact.
@@ -120,8 +120,8 @@ fn demand_returns_during_suspend() {
     assert_eq!(pod.status, PodStatus::Suspending); // still suspending
 
     // Worker completes the suspend.
-    let artifact = ArtifactId(200);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(200.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     // Workload saved artifact, reaped pod, and immediately created new pod
@@ -176,8 +176,8 @@ fn spec_change_during_suspend() {
     router.propagate();
 
     // Worker completes the suspend.
-    let artifact = ArtifactId(300);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(300.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     // Workload should have created a new pod. Since spec changed,
@@ -224,8 +224,8 @@ fn destroy_discards_artifact() {
     // Suspend successfully.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact = ArtifactId(400);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(400.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -262,13 +262,13 @@ fn suspend_resume_suspend_cycle() {
     let pod1 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact1 = ArtifactId(500);
-    router.send_notify_pod_suspended(worker, pod1, artifact1);
+    let artifact1 = ArtifactId(500.to_string());
+    router.send_notify_pod_suspended(worker, pod1, artifact1.clone());
     router.propagate();
 
     assert_eq!(
         router.get_workload(&W1).unwrap().suspended_artifact,
-        Some(artifact1)
+        Some(artifact1.clone())
     );
 
     // First resume.
@@ -288,12 +288,12 @@ fn suspend_resume_suspend_cycle() {
     // Second suspend.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact2 = ArtifactId(501);
-    router.send_notify_pod_suspended(worker, pod2, artifact2);
+    let artifact2 = ArtifactId(501.to_string());
+    router.send_notify_pod_suspended(worker, pod2, artifact2.clone());
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact2));
+    assert_eq!(wl.suspended_artifact, Some(artifact2.clone()));
     assert!(wl.pod_id.is_none());
 
     // Second resume.
@@ -319,8 +319,8 @@ fn scavenge_clears_suspended_artifact() {
     // Suspend successfully.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact = ArtifactId(600);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(600.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -390,8 +390,8 @@ fn suspend_on_idle_disabled_discards_artifact() {
     // Suspend successfully.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact = ArtifactId(700);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(700.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -461,8 +461,8 @@ fn suspend_on_idle_enabled_with_running_pod() {
     assert!(wl.pod_id.is_some());
 
     // Complete suspend.
-    let artifact = ArtifactId(800);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(800.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();

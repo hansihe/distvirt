@@ -277,7 +277,7 @@ fn test_spec_change_during_resume() {
     let mut new_spec = activation_spec(timeout);
     new_spec
         .workloads
-        .get_mut(&WorkloadId("web".to_string()))
+        .get_mut(&WorkloadName("web".to_string()))
         .unwrap()
         .containers[0]
         .image_ref = "docker.io/library/nginx:v2".to_string();

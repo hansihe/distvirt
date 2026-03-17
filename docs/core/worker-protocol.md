@@ -137,7 +137,7 @@ Client pod → Service IP (virtual) → [buffer / activate / ready?] → Pod IP 
 ```
 
 A service can be in one of these states:
-- **No backend** — the service IP exists on the fabric but no pod is assigned. Traffic is buffered per policy and a `ServiceActivation` event fires so the orchestrator can schedule a pod. This is the scale-to-zero state.
+- **No backend** — the service IP exists on the fabric but no pod is assigned. Traffic is buffered per policy and an `EndpointActivation` event fires so the orchestrator can schedule a pod. This is the scale-to-zero state.
 - **Backend assigned, not ready** — a pod is assigned but hasn't passed readiness. Traffic is buffered, no activation event (orchestrator already knows).
 - **Ready** — traffic flows through to the backing pod.
 
@@ -640,7 +640,7 @@ The endpoint protocol provides a unified view of all addressable entities on the
 - **Pod** — includes optional placement information (which worker hosts it).
 - **WireGuardPeer** — includes optional placement (which worker hosts the WireGuard adapter).
 
-Workers report `EndpointActivation` when traffic arrives at an endpoint that needs orchestrator attention, and `EndpointFlowStatus` to signal active/idle flow state.
+Workers report `EndpointActivation` (pulse) when traffic arrives at an endpoint that needs orchestrator attention, and `EndpointDemand` (level) to signal active/idle demand state.
 
 ---
 
@@ -829,60 +829,26 @@ PsiMetrics {
 
 `PressureUpdate` — periodic PSI pressure metrics (sent every ~10 seconds or on threshold crossings). Only sent on Linux workers with PSI support. The orchestrator uses these for real-time pressure-aware scheduling.
 
-### Fabric Events
-
-```
-ServiceActivation {
-  namespace_id: String,
-  service_id: String,
-  dst_ip: Ipv4Addr,
-}
-
-FabricRouteMiss {
-  namespace_id: String,
-  dst_ip: Ipv4Addr,
-  dst_mac: MacAddr,
-}
-
-ServiceBackendNeed {
-  namespace_id: String,
-  service_id: String,
-  need: BackendNeed,
-}
-
-enum BackendNeed {
-  None,      // no meaningful traffic, backend may be released
-  Traffic,   // pulse: meaningful traffic detected (e.g. TCP SYN), start/extend timeout
-  Active,    // level: active sessions require backend (e.g. open H2 streams)
-}
-```
-
-`ServiceActivation` — traffic arrived at a service that has no backend (or whose backend isn't ready). The service entity buffers packets per its policy and emits this event so the orchestrator can schedule a pod, assign it as the backend, and eventually send `ServiceReady`. Debounced per service to avoid event floods.
-
-`FabricRouteMiss` — the worker's fabric received a packet for a **pod IP** (not a service IP) that it can't deliver locally. This fires for both unknown destinations (no route entry at all) and placeholders (route entry exists but destination is a `Placeholder`). For placeholders, the fabric applies the basic buffer policy before reporting the miss. The miss includes both the destination IP and MAC. The orchestrator can respond by scheduling a suspended pod, updating the route entry from placeholder to remote worker, etc. This is the pod-to-pod activation path — simpler and more limited than service activation.
-
-`ServiceBackendNeed` — a protocol activator is signaling its backend need level. Only emitted for services with an `ActivatorConfig`. The `BackendNeed` value distinguishes pulse signals (`Traffic` — something meaningful happened, start/extend a timeout) from level signals (`Active` — sessions are open, keep the backend up). Services without an activator use `ServiceActivation` instead.
-
 ### Endpoint Events
 
 ```
 EndpointActivation {
   namespace_id: String,
   ip: Ipv4Addr,
-  service_id: Option<String>,
+  service_id: Option<ServiceId>,
 }
 
-EndpointFlowStatus {
+EndpointDemand {
   namespace_id: String,
   ip: Ipv4Addr,
-  service_id: Option<String>,
-  has_active_flows: bool,
+  service_id: Option<ServiceId>,
+  active: bool,
 }
 ```
 
-`EndpointActivation` — traffic arrived at an endpoint that needs attention. If the endpoint is a service, `service_id` is set.
+`EndpointActivation` — **pulse** signal: traffic arrived at an endpoint that needs attention. Covers both traffic-based activation (buffer miss, debounced) and activator `BackendNeed::Traffic` signals. If the endpoint is a service, `service_id` is set. Replaces the former `ServiceActivation`, `FabricRouteMiss`, and `ServiceBackendNeed { need: Traffic }` events.
 
-`EndpointFlowStatus` — signals whether an endpoint has active flows. The orchestrator uses this to decide when to release backends.
+`EndpointDemand` — **level** signal: demand changed for an endpoint. `active: true` means the endpoint has active demand (TCP flows established, or activator signals `BackendNeed::Active`). `active: false` means no active demand (all TCP flows closed, or activator signals `BackendNeed::None`). Replaces the former `EndpointFlowStatus` and `ServiceBackendNeed { need: Active/None }` events. The orchestrator uses this to decide when to release backends.
 
 ### Log Streams (Out-of-Band)
 
@@ -944,9 +910,6 @@ WorkerEvent = NamespaceCreated { ... }
            | PodFailed { ... }
            | ShuttingDown
            | PodLogStreamError { ... }
-           | ServiceActivation { ... }
-           | ServiceBackendNeed { ... }
-           | FabricRouteMiss { ... }
            | PodSuspended { ... }
            | PodSuspendFailed { ... }
            | TunnelStatus { ... }
@@ -958,7 +921,7 @@ WorkerEvent = NamespaceCreated { ... }
            | TransferFailed { ... }
            | PressureUpdate { ... }
            | EndpointActivation { ... }
-           | EndpointFlowStatus { ... }
+           | EndpointDemand { ... }
 ```
 
 Over the wire: `[u32 LE length][Cap'n Proto payload]` on the yamux control stream. Log streams use the same framing for the initial `LogStreamHeader`, then raw bytes.

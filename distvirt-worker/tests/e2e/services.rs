@@ -4,8 +4,9 @@ use std::time::Duration;
 use futures_lite::io::AsyncReadExt;
 
 use distvirt_worker_protocol::{
-    ActivatorConfig, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
-    EndpointSpec, RegistryEntry, ServicePolicy, WorkerCommand, WorkerEvent,
+    ActivatorConfig, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
+    EndpointSpec, PodId, RegistryEntry, ServiceId, ServicePolicy, WorkerCommand, WorkerEvent,
+    WorkerId,
 };
 
 use super::common::*;
@@ -41,13 +42,13 @@ async fn test_registry_sync() -> anyhow::Result<()> {
         &mut conn,
         "ns-dns",
         &test_pod_network_config(),
-        "test-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-dns".into(),
-        pod_id: "pod-dns".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-dns".into(),
@@ -119,7 +120,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
-                service_id: "svc-tcp".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -140,13 +141,13 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
         &mut conn,
         "ns-tcp-act",
         &test_pod_network_config(),
-        "test-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-tcp-act".into(),
-        pod_id: "pod-tcp-act".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-tcp-act".into(),
@@ -177,23 +178,20 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait for the TCP activator to signal backend need.
-    // Note: ServiceBackendNeed may arrive before PodRunning because the SYN
+    // Wait for the TCP activator to signal activation (Traffic maps to EndpointActivation pulse).
+    // Note: EndpointActivation may arrive before PodRunning because the SYN
     // is sent as soon as the guest network is up, so we must wait for it first.
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(
             e,
-            WorkerEvent::ServiceBackendNeed {
-                need: BackendNeed::Traffic,
-                ..
-            }
+            WorkerEvent::EndpointActivation { .. }
         )
     })
     .await?;
 
     assert!(
-        matches!(&event, WorkerEvent::ServiceBackendNeed { namespace_id, service_id, need: BackendNeed::Traffic }
-            if namespace_id == "ns-tcp-act" && service_id == "svc-tcp"),
+        matches!(&event, WorkerEvent::EndpointActivation { namespace_id, service_id, .. }
+            if namespace_id == "ns-tcp-act" && *service_id == Some(ServiceId(1))),
         "unexpected event: {:?}",
         event
     );
@@ -235,7 +233,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
-                service_id: "svc-fwd".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -252,13 +250,13 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         &mut conn,
         "ns-svc-fwd",
         &test_pod_network_config(),
-        "test-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-fwd".into(),
-        pod_id: "pod-backend".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-backend".into(),
@@ -293,7 +291,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-backend"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
 
@@ -308,7 +306,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
-                service_id: "svc-fwd".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -330,13 +328,13 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
         &mut conn,
         "ns-svc-fwd",
         &test_pod_network_config_2(),
-        "test-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-fwd".into(),
-        pod_id: "pod-client".into(),
+        pod_id: PodId(2),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client".into(),
@@ -371,7 +369,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     let event = recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend"),
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
 
@@ -429,7 +427,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
-                service_id: "svc-buf".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -450,13 +448,13 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         &mut conn,
         "ns-svc-buf",
         &test_pod_network_config(),
-        "test-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-buf".into(),
-        pod_id: "pod-backend".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-backend".into(),
@@ -491,7 +489,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-backend"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
 
@@ -505,13 +503,13 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         &mut conn,
         "ns-svc-buf",
         &test_pod_network_config_2(),
-        "test-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-svc-buf".into(),
-        pod_id: "pod-client".into(),
+        pod_id: PodId(2),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
             container_id: "ctr-client".into(),
@@ -542,14 +540,11 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait for the TCP activator to signal backend need (SYN was buffered)
+    // Wait for the TCP activator to signal activation (SYN was buffered)
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(
             e,
-            WorkerEvent::ServiceBackendNeed {
-                need: BackendNeed::Traffic,
-                ..
-            }
+            WorkerEvent::EndpointActivation { .. }
         )
     })
     .await?;
@@ -560,7 +555,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
-                service_id: "svc-buf".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,
@@ -585,7 +580,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     let event = recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-backend"),
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
 
@@ -643,7 +638,7 @@ async fn test_destroy_service() -> anyhow::Result<()> {
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
-                service_id: "svc-destroy".into(),
+                service_id: ServiceId(1),
                 policy: ServicePolicy {
                     buffer_frames: 64,
                     timeout_ms: 30000,

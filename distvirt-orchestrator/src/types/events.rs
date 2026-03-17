@@ -7,12 +7,12 @@ use super::*;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SmNamespaceEvent {
     Workload {
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         event: SmWorkloadEvent,
     },
     Service {
         service_id: String,
-        workload_id: WorkloadId,
+        workload_id: WorkloadName,
         event: SmServiceEvent,
     },
 }

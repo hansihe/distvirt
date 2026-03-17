@@ -31,7 +31,10 @@ impl DnsRegistryAdapter {
     }
 
     /// Drain DNS registry inputs from the router and update cache.
-    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> Vec<DnsRegistryAction> {
+    ///
+    /// Returns `(actions, mutated_router)`. Currently only drains, so
+    /// `mutated_router` is always `false`.
+    pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> (Vec<DnsRegistryAction>, bool) {
         let inputs = router.drain_dns_registry_inputs();
 
         let actions: Vec<DnsRegistryAction> = inputs
@@ -55,7 +58,7 @@ impl DnsRegistryAdapter {
             }
         }
 
-        actions
+        (actions, false)
     }
 
     /// Build a full sync snapshot from cached state (for new workers).

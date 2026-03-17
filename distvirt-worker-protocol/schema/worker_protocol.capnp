@@ -697,6 +697,14 @@ struct EndpointFlowStatusEvt {
   serviceId @4 :Text;
 }
 
+struct EndpointDemandEvt {
+  namespaceId @0 :Text;
+  ip @1 :Ipv4Addr;
+  active @2 :Bool;
+  hasServiceId @3 :Bool;
+  serviceId @4 :Text;
+}
+
 # --- Control Stream: Commands (orchestrator -> worker) ---
 
 # Commands sent from the orchestrator to the worker.
@@ -949,6 +957,7 @@ struct WorkerEvent {
     # Periodic PSI pressure metrics from the worker.
     endpointActivation @21 :EndpointActivationEvt;
     endpointFlowStatus @22 :EndpointFlowStatusEvt;
+    endpointDemand @23 :EndpointDemandEvt;
   }
 }
 

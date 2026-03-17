@@ -283,8 +283,8 @@ fn idle_timeout_suspend_integration() {
     assert_eq!(pod.status, PodStatus::Suspending);
 
     // Worker completes suspend.
-    let artifact = ArtifactId(42);
-    router.send_notify_pod_suspended(worker, pod_id, artifact);
+    let artifact = ArtifactId(42.to_string());
+    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
     router.propagate();
 
     // Workload saved artifact, pod reaped.

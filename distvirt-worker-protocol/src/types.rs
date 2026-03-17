@@ -57,11 +57,11 @@ macro_rules! define_u64_id_newtype {
 
 define_string_id_newtype!(NamespaceId);
 define_string_id_newtype!(PoolId);
+define_string_id_newtype!(ArtifactId);
 
 define_u64_id_newtype!(WorkerId);
 define_u64_id_newtype!(PodId);
 define_u64_id_newtype!(ServiceId);
-define_u64_id_newtype!(ArtifactId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -131,13 +131,6 @@ pub struct ResourceValues {
 pub struct ResourceRequirements {
     pub requests: Option<ResourceValues>,
     pub limits: Option<ResourceValues>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum BackendNeed {
-    None,
-    Traffic,
-    Active,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -376,11 +369,6 @@ pub enum WorkerEvent {
         phase: String,
         error: String,
     },
-    ServiceBackendNeed {
-        namespace_id: NamespaceId,
-        service_id: ServiceId,
-        need: BackendNeed,
-    },
     PodSuspended {
         namespace_id: NamespaceId,
         pod_id: PodId,
@@ -445,11 +433,11 @@ pub enum WorkerEvent {
         ip: Ipv4Addr,
         service_id: Option<ServiceId>,
     },
-    EndpointFlowStatus {
+    EndpointDemand {
         namespace_id: NamespaceId,
         ip: Ipv4Addr,
         service_id: Option<ServiceId>,
-        has_active_flows: bool,
+        active: bool,
     },
 }
 

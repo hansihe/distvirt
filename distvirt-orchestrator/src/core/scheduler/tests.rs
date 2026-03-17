@@ -11,9 +11,9 @@ fn grant_immediate_when_worker_available() {
 
     // Add a worker.
     let decisions = sched.process(SchedulerCoreInput::WorkerUpdate(
-        GlobalWorkerId::test(1),
+        GlobalWorkerId::from(1),
         WorkerCandidate {
-            worker_id: GlobalWorkerId::test(1),
+            worker_id: GlobalWorkerId::from(1),
             max_pressure_band: PressureBand::Normal,
             pod_count: 0,
             draining: false,
@@ -31,7 +31,7 @@ fn grant_immediate_when_worker_available() {
     assert_eq!(decisions.len(), 1);
     assert!(matches!(
         &decisions[0],
-        SchedulerDecision::Grant { worker_id, .. } if *worker_id == GlobalWorkerId::test(1)
+        SchedulerDecision::Grant { worker_id, .. } if *worker_id == GlobalWorkerId::from(1)
     ));
 }
 
@@ -60,9 +60,9 @@ fn retry_pending_on_worker_update() {
 
     // Add worker — should grant the pending request.
     let decisions = sched.process(SchedulerCoreInput::WorkerUpdate(
-        GlobalWorkerId::test(1),
+        GlobalWorkerId::from(1),
         WorkerCandidate {
-            worker_id: GlobalWorkerId::test(1),
+            worker_id: GlobalWorkerId::from(1),
             max_pressure_band: PressureBand::Normal,
             pod_count: 0,
             draining: false,
@@ -78,9 +78,9 @@ fn drop_request_revokes_granted() {
     let mut sched = SchedulerCore::new();
 
     sched.process(SchedulerCoreInput::WorkerUpdate(
-        GlobalWorkerId::test(1),
+        GlobalWorkerId::from(1),
         WorkerCandidate {
-            worker_id: GlobalWorkerId::test(1),
+            worker_id: GlobalWorkerId::from(1),
             max_pressure_band: PressureBand::Normal,
             pod_count: 0,
             draining: false,

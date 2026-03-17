@@ -5,7 +5,7 @@ use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 #[allow(unused_imports)]
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed,  WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 /// Two services back same workload. Activate A → workload launches.
 /// Activate B → workload already running.
@@ -52,10 +52,11 @@ fn test_two_services_one_workload_shared_demand() {
 
     // Idle svc-a → demand drops. Workload stays running because svc-b has demand
     // (even though svc-b is in NeedBackend, it has issued DemandUp).
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
         namespace_id: "ns".into(),
-        service_id: svc_a_id,
-        need: BackendNeed::None,
+        ip: Ipv4Addr::UNSPECIFIED,
+        service_id: Some(svc_a_id),
+        active: false,
     });
     h.converge();
     let timeout = Duration::from_secs(30);
@@ -160,7 +161,7 @@ fn test_add_service_to_running_workload() {
     new_spec.services.insert(
         "echo-svc-2".to_string(),
         ServiceSpec {
-            workload_id: WorkloadId("echo".to_string()),
+            workload_id: WorkloadName("echo".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
             policy: distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 100,
@@ -218,10 +219,11 @@ fn test_add_service_to_suspended_workload() {
     h.converge();
     h.assert_workload_running("ns", "web");
 
-    h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
         namespace_id: "ns".into(),
-        service_id: web_svc_id,
-        need: BackendNeed::None,
+        ip: Ipv4Addr::UNSPECIFIED,
+        service_id: Some(web_svc_id),
+        active: false,
     });
     h.converge();
     h.advance_time(timeout + Duration::from_secs(1));
@@ -233,7 +235,7 @@ fn test_add_service_to_suspended_workload() {
     new_spec.services.insert(
         "web-svc-2".to_string(),
         ServiceSpec {
-            workload_id: WorkloadId("web".to_string()),
+            workload_id: WorkloadName("web".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
             policy: distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 100,

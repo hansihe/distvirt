@@ -84,7 +84,7 @@ impl PodSlot {
     pub fn new_launching(
         pod_id: PodId,
         worker_id: WorkerId,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
     ) -> (Self, Vec<PodOutput>) {
         let launch_timeout = TimerKey::LaunchTimeout {
             workload_id: workload_id.clone(),
@@ -108,7 +108,7 @@ impl PodSlot {
     pub fn new_resuming(
         pod_id: PodId,
         worker_id: WorkerId,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         artifact_id: ArtifactId,
     ) -> (Self, Vec<PodOutput>) {
         let resume_timeout = TimerKey::ResumeTimeout {
@@ -135,7 +135,7 @@ impl PodSlot {
     /// Initiate suspension of a Running pod. Transitions to Suspending state.
     pub fn initiate_suspend(
         &mut self,
-        workload_id: &WorkloadId,
+        workload_id: &WorkloadName,
         artifact_id: ArtifactId,
     ) -> Vec<PodOutput> {
         assert!(

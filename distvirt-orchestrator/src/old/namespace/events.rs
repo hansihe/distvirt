@@ -303,7 +303,7 @@ impl NamespaceStateMachine {
                 lost_pods
             );
         }
-        let affected_workloads: Vec<WorkloadId> = {
+        let affected_workloads: Vec<WorkloadName> = {
             // We already removed the pods, but we need the workload IDs.
             // Collect unique workload IDs from workloads that reference this worker.
             self.workloads
@@ -316,7 +316,7 @@ impl NamespaceStateMachine {
         // Suspended workloads whose artifact was removed from the placement table.
         // These won't be caught by the worker_id() check above because Suspended
         // has no worker_id, only an artifact_id.
-        let stale_suspended: Vec<WorkloadId> = self
+        let stale_suspended: Vec<WorkloadName> = self
             .workloads
             .iter()
             .filter(|(_, wl)| {
@@ -329,7 +329,7 @@ impl NamespaceStateMachine {
             .collect();
 
         // Workloads with retiring pods on the lost worker.
-        let retiring_affected: Vec<WorkloadId> = self
+        let retiring_affected: Vec<WorkloadName> = self
             .workloads
             .iter()
             .filter(|(_, wl)| wl.retiring.iter().any(|r| r.worker_id == *worker_id))

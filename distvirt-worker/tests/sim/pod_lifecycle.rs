@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
-use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, PodId, WorkerCommand, WorkerEvent, WorkerId};
 
 use super::common::*;
 
@@ -47,14 +47,14 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
         &mut conn,
         "ns-sim",
         &test_pod_network_config(),
-        "sim-worker",
+        WorkerId(1),
     )
     .await?;
 
     // Launch pod
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-sim".into(),
@@ -82,7 +82,7 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::PodRunning { namespace_id, pod_id }
-            if namespace_id == "ns-sim" && pod_id == "pod-sim"),
+            if namespace_id == "ns-sim" && *pod_id == PodId(1)),
         "unexpected event: {:?}",
         event
     );
@@ -124,13 +124,13 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
         &mut conn,
         "ns-sim",
         &test_pod_network_config(),
-        "sim-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-sim".into(),
@@ -185,13 +185,13 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
         &mut conn,
         "ns-sim",
         &test_pod_network_config(),
-        "sim-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-sim".into(),
@@ -219,7 +219,7 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
 
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         graceful: true,
     })
     .await?;
@@ -259,13 +259,13 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
         &mut conn,
         "ns-sim",
         &test_pod_network_config(),
-        "sim-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-sim".into(),
@@ -293,7 +293,7 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
 
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         graceful: false,
     })
     .await?;
@@ -324,13 +324,13 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
         &mut conn,
         "ns-sim",
         &test_pod_network_config(),
-        "sim-worker",
+        WorkerId(1),
     )
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
             container_id: "ctr-sim".into(),
@@ -397,20 +397,20 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
     let net2 = test_pod_network_config_with_ip(3);
 
     // Register and launch both pods without waiting between them
-    register_pod_endpoint(&mut conn, "ns-sim", &net1, "sim-worker").await?;
+    register_pod_endpoint(&mut conn, "ns-sim", &net1, WorkerId(1)).await?;
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-1".into(),
+        pod_id: PodId(1),
         network: net1,
         containers: vec![default_container_spec()],
         resources: None,
     })
     .await?;
 
-    register_pod_endpoint(&mut conn, "ns-sim", &net2, "sim-worker").await?;
+    register_pod_endpoint(&mut conn, "ns-sim", &net2, WorkerId(1)).await?;
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-2".into(),
+        pod_id: PodId(2),
         network: net2,
         containers: vec![default_container_spec()],
         resources: None,
@@ -426,21 +426,21 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
         let event = recv_event_timeout(&mut conn, remaining).await?;
         match &event {
             WorkerEvent::PodRunning { pod_id, .. } => {
-                running_pods.insert(pod_id.to_string());
+                running_pods.insert(*pod_id);
             }
             WorkerEvent::PodExited {
                 pod_id, exit_code, ..
             } => {
                 assert_eq!(*exit_code, 0, "expected exit_code 0, got {:?}", event);
-                exited_pods.insert(pod_id.to_string());
+                exited_pods.insert(*pod_id);
             }
             _ => { /* skip other events like PressureUpdate */ }
         }
     }
-    assert!(running_pods.contains("pod-1"), "pod-1 should have run");
-    assert!(running_pods.contains("pod-2"), "pod-2 should have run");
-    assert!(exited_pods.contains("pod-1"), "pod-1 should have exited");
-    assert!(exited_pods.contains("pod-2"), "pod-2 should have exited");
+    assert!(running_pods.contains(&PodId(1)), "pod-1 should have run");
+    assert!(running_pods.contains(&PodId(2)), "pod-2 should have run");
+    assert!(exited_pods.contains(&PodId(1)), "pod-1 should have exited");
+    assert!(exited_pods.contains(&PodId(2)), "pod-2 should have exited");
 
     shutdown_worker(&mut conn, worker_handle).await?;
     Ok(())
@@ -458,8 +458,8 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
     let net_a = test_pod_network_config_for_subnet(0, 2);
     let net_b = test_pod_network_config_for_subnet(1, 2);
 
-    launch_pod(&mut conn, "ns-a", "pod-a", &net_a).await?;
-    launch_pod(&mut conn, "ns-b", "pod-b", &net_b).await?;
+    launch_pod(&mut conn, "ns-a", PodId(1), &net_a).await?;
+    launch_pod(&mut conn, "ns-b", PodId(2), &net_b).await?;
 
     // Destroy ns-a only
     conn.send_command(&WorkerCommand::DestroyNamespace {
@@ -485,7 +485,7 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
     // ns-b pod should still be running — stop it gracefully
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-b".into(),
-        pod_id: "pod-b".into(),
+        pod_id: PodId(2),
         graceful: true,
     })
     .await?;
@@ -509,11 +509,11 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 
     let pod_net = test_pod_network_config();
-    register_pod_endpoint(&mut conn, "ns-sim", &pod_net, "sim-worker").await?;
+    register_pod_endpoint(&mut conn, "ns-sim", &pod_net, WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: pod_net,
         containers: vec![default_container_spec()],
         resources: None,
@@ -552,11 +552,11 @@ async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 
     let pod_net = test_pod_network_config();
-    register_pod_endpoint(&mut conn, "ns-sim", &pod_net, "sim-worker").await?;
+    register_pod_endpoint(&mut conn, "ns-sim", &pod_net, WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         network: pod_net,
         containers: vec![default_container_spec()],
         resources: None,
@@ -566,7 +566,7 @@ async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
     // Immediately stop before waiting for PodRunning
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         graceful: true,
     })
     .await?;
@@ -594,12 +594,12 @@ async fn test_sim_double_stop() -> anyhow::Result<()> {
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 
     let pod_net = test_pod_network_config();
-    launch_pod(&mut conn, "ns-sim", "pod-sim", &pod_net).await?;
+    launch_pod(&mut conn, "ns-sim", PodId(1), &pod_net).await?;
 
     // First stop
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         graceful: true,
     })
     .await?;
@@ -612,7 +612,7 @@ async fn test_sim_double_stop() -> anyhow::Result<()> {
     // Second stop — should be silently ignored, no panic
     conn.send_command(&WorkerCommand::StopPod {
         namespace_id: "ns-sim".into(),
-        pod_id: "pod-sim".into(),
+        pod_id: PodId(1),
         graceful: true,
     })
     .await?;

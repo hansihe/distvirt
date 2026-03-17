@@ -6,12 +6,13 @@ use std::time::Duration;
 use super::endpoint::EndpointAction;
 use super::nat::{NatEntry, NatFlowKey};
 use super::port::{FramePort, PortId};
-use super::{FabricEvent, SharedPort, convert_backend_need, handle_log_action};
+use super::{FabricEvent, SharedPort, handle_log_action};
 use crate::packet::{
     FABRIC_HDR_SZ, FabricPacket, IP_PROTO_TCP, format_tcp_flags, ip_packet_dst, ip_packet_protocol,
     ip_packet_transport_ports, rewrite_ipv4_dst, rewrite_ipv4_src, with_fabric_header,
 };
 use distvirt_activator::types::Action;
+use distvirt_worker_protocol::{ServiceId, WorkerId};
 use tokio::sync::mpsc;
 
 /// Shared fabric tables wrapped in a single Arc.
@@ -25,7 +26,7 @@ pub(crate) struct FabricContextInner<P: FramePort> {
     pub(crate) prefix_len: u8,
     pub(crate) gateway_ip: Ipv4Addr,
     /// worker_id → port_id for tunnel ports (inter-worker forwarding).
-    pub(crate) tunnel_ports: Mutex<HashMap<String, PortId>>,
+    pub(crate) tunnel_ports: Mutex<HashMap<WorkerId, PortId>>,
 }
 
 impl<P: FramePort> FabricContextInner<P> {
@@ -195,10 +196,10 @@ async fn dispatch_frame<P: FramePort>(
         // Emit flow status change if the tracker detected a transition.
         if let Some(change) = flow_change {
             if let Some(tx) = ctx.inner.event_tx.get() {
-                let _ = tx.try_send(FabricEvent::EndpointFlowStatus {
+                let _ = tx.try_send(FabricEvent::EndpointDemand {
                     ip: change.ip,
                     service_id: change.service_id,
-                    has_active_flows: change.has_active_flows,
+                    active: change.active,
                 });
             }
         }
@@ -224,17 +225,17 @@ async fn dispatch_frame<P: FramePort>(
                 }
                 continue;
             }
-            EndpointAction::Buffered { ref service_id } => {
+            EndpointAction::Buffered { service_id } => {
                 log::trace!("fabric: frame to {} buffered", dst_ip);
                 if should_activate {
-                    emit_activation(ctx, dst_ip, service_id.clone()).await;
+                    emit_activation(ctx, dst_ip, service_id).await;
                 }
                 return;
             }
-            EndpointAction::Drop { ref service_id } => {
+            EndpointAction::Drop { service_id } => {
                 log::trace!("fabric: frame to {} dropped", dst_ip);
                 if should_activate {
-                    emit_activation(ctx, dst_ip, service_id.clone()).await;
+                    emit_activation(ctx, dst_ip, service_id).await;
                 }
                 return;
             }
@@ -248,7 +249,7 @@ async fn dispatch_frame<P: FramePort>(
                     actions.len()
                 );
                 for action in actions {
-                    dispatch_action(&action, &service_id, dst_ip, ctx).await;
+                    dispatch_action(&action, service_id, dst_ip, ctx).await;
                 }
                 if should_activate {
                     emit_activation(ctx, dst_ip, Some(service_id)).await;
@@ -263,7 +264,7 @@ async fn dispatch_frame<P: FramePort>(
             } => {
                 send_l4_frames(&frames, ctx);
                 for action in actions {
-                    dispatch_action(&action, &service_id, dst_ip, ctx).await;
+                    dispatch_action(&action, service_id, dst_ip, ctx).await;
                 }
                 if let Some(delay) = poll_delay {
                     schedule_poll_timer(delay, dst_ip, ctx.clone());
@@ -389,7 +390,7 @@ async fn dispatch_frame<P: FramePort>(
 async fn emit_activation<P: FramePort>(
     ctx: &FabricContext<P>,
     dst_ip: Ipv4Addr,
-    service_id: Option<String>,
+    service_id: Option<ServiceId>,
 ) {
     if let Some(tx) = ctx.inner.event_tx.get() {
         let _ = tx.try_send(FabricEvent::EndpointActivation { dst_ip, service_id });
@@ -467,7 +468,7 @@ pub(super) async fn gateway_ingress_task<P: FramePort>(
 /// Shared by `dispatch_frame` service path and `Fabric::execute_service_actions`.
 pub(super) async fn dispatch_action<P: FramePort>(
     action: &Action,
-    service_id: &str,
+    service_id: ServiceId,
     dst_ip: Ipv4Addr,
     ctx: &FabricContext<P>,
 ) {
@@ -495,21 +496,50 @@ pub(super) async fn dispatch_action<P: FramePort>(
             }
         }
         Action::SetBackendNeed(need) => {
-            let proto_need = convert_backend_need(need);
+            use distvirt_activator::types::BackendNeed as ActivatorBackendNeed;
             if let Some(tx) = ctx.inner.event_tx.get() {
-                if let Err(e) = tx
-                    .send(FabricEvent::ServiceBackendNeed {
-                        service_id: service_id.to_string(),
-                        dst_ip,
-                        need: proto_need,
-                    })
-                    .await
-                {
-                    log::warn!(
-                        "fabric: failed to send ServiceBackendNeed for {}: {}",
-                        service_id,
-                        e
-                    );
+                match need {
+                    ActivatorBackendNeed::Traffic => {
+                        // Pulse signal — lossy (try_send), same as EndpointActivation.
+                        let _ = tx.try_send(FabricEvent::EndpointActivation {
+                            dst_ip,
+                            service_id: Some(service_id),
+                        });
+                    }
+                    ActivatorBackendNeed::Active => {
+                        // Level signal — reliable (send).
+                        if let Err(e) = tx
+                            .send(FabricEvent::EndpointDemand {
+                                ip: dst_ip,
+                                service_id: Some(service_id),
+                                active: true,
+                            })
+                            .await
+                        {
+                            log::warn!(
+                                "fabric: failed to send EndpointDemand(active) for {}: {}",
+                                service_id,
+                                e
+                            );
+                        }
+                    }
+                    ActivatorBackendNeed::None => {
+                        // Level signal — reliable (send).
+                        if let Err(e) = tx
+                            .send(FabricEvent::EndpointDemand {
+                                ip: dst_ip,
+                                service_id: Some(service_id),
+                                active: false,
+                            })
+                            .await
+                        {
+                            log::warn!(
+                                "fabric: failed to send EndpointDemand(inactive) for {}: {}",
+                                service_id,
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -582,7 +612,7 @@ fn schedule_poll_timer<P: FramePort>(delay: Duration, ip: Ipv4Addr, ctx: FabricC
             send_l4_frames(&frames, &ctx);
 
             for action in &actions {
-                dispatch_action(action, &service_id, ip, &ctx).await;
+                dispatch_action(action, service_id, ip, &ctx).await;
             }
 
             // Reschedule if smoltcp still needs polling.

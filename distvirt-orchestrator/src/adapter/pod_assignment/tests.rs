@@ -64,7 +64,7 @@ fn no_pods_no_actions() {
     let mut adapter = PodAssignmentAdapter::new();
 
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(actions.is_empty());
 }
 
@@ -81,7 +81,7 @@ fn pod_appears_launch() {
     schedule_pod(&mut router, worker, pod_id);
 
     let mut adapter = PodAssignmentAdapter::new();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
 
     assert_eq!(actions.len(), 1);
     match &actions[0] {
@@ -123,7 +123,7 @@ fn pod_disappears_stop() {
 
     let mut adapter = PodAssignmentAdapter::new();
     // Consume the initial Launch delta.
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], PodAssignmentAction::Launch { .. }));
 
@@ -132,7 +132,7 @@ fn pod_disappears_stop() {
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     let stop_actions: Vec<_> = actions
         .iter()
         .filter(|a| matches!(a, PodAssignmentAction::Stop { .. }))
@@ -156,11 +156,11 @@ fn stable_state_no_actions() {
     schedule_pod(&mut router, worker, pod_id);
 
     let mut adapter = PodAssignmentAdapter::new();
-    let _ = adapter.reconcile(&mut router);
+    let _ = adapter.reconcile(&mut router).0;
 
     // Propagate again — no new deltas since nothing changed.
     router.propagate();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
     assert!(
         actions.is_empty(),
         "expected no actions on stable state, got {:?}",
@@ -248,7 +248,7 @@ fn multiple_workers() {
     router.propagate();
 
     let mut adapter = PodAssignmentAdapter::new();
-    let actions = adapter.reconcile(&mut router);
+    let (actions, _) = adapter.reconcile(&mut router);
 
     // Should have launches for both workers.
     let launch_count = actions

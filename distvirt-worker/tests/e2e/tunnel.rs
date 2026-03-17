@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use distvirt_worker_protocol::{
     ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig,
-    OrchestratorConnection, PodNetworkConfig, WorkerAccepted, WorkerCommand, WorkerConnection,
-    WorkerEvent, WorkerHello, WorkerId, WorkerPeerInfo, WorkerReady,
+    OrchestratorConnection, PodId, PodNetworkConfig, WorkerAccepted, WorkerCommand,
+    WorkerConnection, WorkerEvent, WorkerHello, WorkerId, WorkerPeerInfo, WorkerReady,
 };
 
 use super::common::*;
@@ -12,7 +12,7 @@ use super::common::*;
 /// Spawn a worker and return the orchestrator connection, the WorkerHello,
 /// the WorkerReady (containing tunnel_listen_port), and the worker task handle.
 async fn setup_worker(
-    worker_id: &str,
+    worker_id: WorkerId,
 ) -> anyhow::Result<(
     OrchestratorConnection,
     WorkerHello,
@@ -63,7 +63,7 @@ async fn setup_worker(
     );
 
     conn.send_accepted(&WorkerAccepted {
-        worker_id: WorkerId::from(worker_id),
+        worker_id,
         adapters: vec![],
         tunnel_encrypted: true,
         pools: vec![],
@@ -90,8 +90,8 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     let _ = env_logger::try_init();
 
     // --- Start two workers ---
-    let (mut conn_a, _hello_a, ready_a, handle_a) = setup_worker("worker-a").await?;
-    let (mut conn_b, _hello_b, ready_b, handle_b) = setup_worker("worker-b").await?;
+    let (mut conn_a, _hello_a, ready_a, handle_a) = setup_worker(WorkerId(1)).await?;
+    let (mut conn_b, _hello_b, ready_b, handle_b) = setup_worker(WorkerId(2)).await?;
 
     let port_a = ready_a
         .tunnel_listen_port
@@ -151,7 +151,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     conn_a
         .send_command(&WorkerCommand::WorkerRegistrySync {
             workers: vec![WorkerPeerInfo {
-                worker_id: "worker-b".into(),
+                worker_id: WorkerId(2),
                 endpoint: format!("127.0.0.1:{}", port_b),
                 public_key: pubkey_b,
                 segments: vec![segment_id],
@@ -162,7 +162,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     conn_b
         .send_command(&WorkerCommand::WorkerRegistrySync {
             workers: vec![WorkerPeerInfo {
-                worker_id: "worker-a".into(),
+                worker_id: WorkerId(1),
                 endpoint: format!("127.0.0.1:{}", port_a),
                 public_key: pubkey_a,
                 segments: vec![segment_id],
@@ -181,7 +181,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                 ip: pod_b_ip,
                 kind: EndpointKind::Pod {
                     placement: Some(EndpointPlacement {
-                        worker_id: "worker-b".into(),
+                        worker_id: WorkerId(2),
                     }),
                 },
             }],
@@ -195,7 +195,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                 ip: pod_a_ip,
                 kind: EndpointKind::Pod {
                     placement: Some(EndpointPlacement {
-                        worker_id: "worker-a".into(),
+                        worker_id: WorkerId(1),
                     }),
                 },
             }],
@@ -209,13 +209,13 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         gateway: Ipv4Addr::new(10, 0, 0, 1),
         netmask: "255.255.255.0".into(),
     };
-    register_pod_endpoint(&mut conn_b, "ns-tunnel", &pod_b_network, "worker-b").await?;
+    register_pod_endpoint(&mut conn_b, "ns-tunnel", &pod_b_network, WorkerId(2)).await?;
 
     // --- Launch pod-B: a long-running process so the fabric has a destination ---
     conn_b
         .send_command(&WorkerCommand::LaunchPod {
             namespace_id: "ns-tunnel".into(),
-            pod_id: "pod-b".into(),
+            pod_id: PodId(2),
             network: PodNetworkConfig {
                 ip: pod_b_ip,
                 mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x03],
@@ -244,7 +244,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     recv_until(
         &mut conn_b,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-b"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(2)),
     )
     .await?;
     eprintln!("e2e: pod-b running on worker-b");
@@ -255,13 +255,13 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
         gateway: Ipv4Addr::new(10, 0, 0, 1),
         netmask: "255.255.255.0".into(),
     };
-    register_pod_endpoint(&mut conn_a, "ns-tunnel", &pod_a_network, "worker-a").await?;
+    register_pod_endpoint(&mut conn_a, "ns-tunnel", &pod_a_network, WorkerId(1)).await?;
 
     // --- Launch pod-A: ping pod-B's IP through the tunnel ---
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
             namespace_id: "ns-tunnel".into(),
-            pod_id: "pod-a".into(),
+            pod_id: PodId(1),
             network: PodNetworkConfig {
                 ip: pod_a_ip,
                 mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
@@ -296,7 +296,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     recv_until(
         &mut conn_a,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if pod_id == "pod-a"),
+        |e| matches!(e, WorkerEvent::PodRunning { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
     eprintln!("e2e: pod-a running on worker-a, pinging pod-b");
@@ -309,7 +309,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     let event = recv_until(
         &mut conn_a,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if pod_id == "pod-a"),
+        |e| matches!(e, WorkerEvent::PodExited { pod_id, .. } if *pod_id == PodId(1)),
     )
     .await?;
 
