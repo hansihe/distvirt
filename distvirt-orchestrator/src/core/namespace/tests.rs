@@ -24,12 +24,21 @@ fn test_timer_config() -> TimerConfig {
     }
 }
 
+fn test_network() -> distvirt_worker_protocol::NetworkConfig {
+    distvirt_worker_protocol::NetworkConfig {
+        segment_id: None,
+        subnet: std::net::Ipv4Addr::new(10, 0, 0, 0),
+        gateway: std::net::Ipv4Addr::new(10, 0, 0, 1),
+        prefix_len: 24,
+    }
+}
+
 const W1: WorkloadId = WorkloadId(1);
 const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
 
 /// Create a NamespaceWithBoundary with a pre-configured workload+service.
 fn create_configured_core() -> (NamespaceWithBoundary, GlobalWorkerId, crate::sm::PodId) {
-    let mut boundary = NamespaceWithBoundary::new(ns("test"), test_timer_config());
+    let mut boundary = NamespaceWithBoundary::new(ns("test"), test_timer_config(), &test_network());
 
     // Set up a workload with an always-on service to generate demand.
     // We need to access the router through the core — use the public accessor.
@@ -58,7 +67,7 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
     // so we'll construct the core directly and configure it.
     use crate::core::namespace::NamespaceCore;
 
-    let mut core = NamespaceCore::new(ns("test"), test_timer_config());
+    let mut core = NamespaceCore::new(ns("test"), test_timer_config(), &test_network());
 
     let mgmt = core.router_mut().create_management();
     core.router_mut().create_workload(W1, WorkloadSm::new());
@@ -88,7 +97,7 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
 }
 
 fn create_empty_boundary() -> NamespaceWithBoundary {
-    NamespaceWithBoundary::new(ns("test"), test_timer_config())
+    NamespaceWithBoundary::new(ns("test"), test_timer_config(), &test_network())
 }
 
 /// Helper: connect a worker and confirm fabric creation.

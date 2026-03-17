@@ -133,6 +133,27 @@ pub(super) fn gen_edge_setters(
     }
 }
 
+/// Generate public signal getter methods for all signals.
+pub(super) fn gen_signal_getters(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
+    for sig in &def.signals {
+        let method = format_ident!(
+            "signal_{}_{}",
+            to_snake_case(&sig.node.to_string()),
+            to_snake_case(&sig.signal.to_string())
+        );
+        let id_type = node_id_type(def, &sig.node);
+        let vt = &sig.value_type;
+        let node_state = signal_state_field(&sig.node);
+        let out_field = out_field_name(&sig.signal);
+
+        methods.push(quote! {
+            fn #method(&self, id: #id_type) -> Option<&#vt> {
+                self.#node_state.get(&id).map(|s| &s.#out_field)
+            }
+        });
+    }
+}
+
 /// Generate public event send methods for port-sourced events.
 pub(super) fn gen_event_send_methods(def: &TopologyDef, methods: &mut Vec<TokenStream>) {
     for ev in &def.events {

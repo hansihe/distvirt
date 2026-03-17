@@ -259,6 +259,7 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     // Always public: port signal/edge setters, port event senders
     // Internal: SM signal/edge setters
     gen_signal_setters(def, &mut public_methods, &mut internal_methods);
+    gen_signal_getters(def, &mut public_methods);
     gen_edge_setters(def, &mut public_methods, &mut internal_methods);
     gen_event_send_methods(def, &mut public_methods);
 

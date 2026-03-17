@@ -128,6 +128,14 @@ pub struct ServiceEndpointInfo {
     pub worker_id: WorkerId,
 }
 
+/// Endpoint info for a WireGuard peer: its allocated IP and the worker hosting the WG adapter.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WireGuardPeerEndpointInfo {
+    pub peer_ip: std::net::Ipv4Addr,
+    pub worker_id: WorkerId,
+    pub peer_public_key: [u8; 32],
+}
+
 /// Delta produced by the incremental schedule-request aggregator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScheduleRequestDelta {
@@ -529,14 +537,17 @@ distvirt_sm_router::router! {
         Endpoint(EndpointId),
         DnsRegistry(DnsRegistryId),
         Artifact(ArtifactPortId),
+        WireGuardPeer(auto),
     }
     signals {
         Service::Demand(bool),
         Service::WantedTimers(Vec<ServiceTimerRequest>),
         Service::Status(SvcStatus),
+        Service::CurrentBackendNeed(BackendNeed),
         Service::IdleTimerActive(bool),
         Service::EndpointInfo(Option<ServiceEndpointInfo>),
         Service::DnsEntry(Option<DnsEntryInfo>),
+        WireGuardPeer::EndpointInfo(Option<WireGuardPeerEndpointInfo>),
         Workload::Readiness(Option<ReadyInfo>),
         Workload::DnsEntry(Option<DnsEntryInfo>),
         Workload::PodIntent(PodIntent),
@@ -573,6 +584,7 @@ distvirt_sm_router::router! {
         PodLease: ScheduleLease -> Pod,
         PodPlacement: Pod -> Worker,
         ServiceEndpoints: Service -> Endpoint,
+        WireGuardPeerEndpoints: WireGuardPeer -> Endpoint,
         ServiceDns: Service -> DnsRegistry,
         WorkloadDns: Workload -> DnsRegistry,
         WorkloadArtifactRef: Workload -> Artifact,
@@ -656,8 +668,8 @@ distvirt_sm_router::router! {
             sources: [(PodTimers, Pod::WantedTimers)],
             incremental_aggregator: PodTimerIncrementalAggregator,
         },
-        Endpoint::ServiceEndpointsInput {
-            sources: [(ServiceEndpoints, Service::EndpointInfo)],
+        Endpoint::EndpointsInput {
+            sources: [(ServiceEndpoints, Service::EndpointInfo), (WireGuardPeerEndpoints, WireGuardPeer::EndpointInfo)],
             incremental_aggregator: EndpointIncrementalAggregator,
         },
         DnsRegistry::ServiceDnsInput {

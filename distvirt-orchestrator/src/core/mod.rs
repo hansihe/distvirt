@@ -11,6 +11,7 @@ use crate::{sm::PodId, types::NamespaceSpec};
 pub mod namespace;
 pub mod namespace_boundary;
 pub mod orchestrator;
+pub mod wg_peers;
 pub(crate) mod scheduler;
 pub mod timer_wheel;
 pub mod types;
@@ -125,6 +126,54 @@ pub enum ClientCommand {
     Scavenge { workload_name: String },
     /// Activate or deactivate a service by protocol name.
     ActivateService { service_name: String, active: bool },
+    /// Connect a WireGuard peer to the namespace network.
+    Connect {
+        client_public_key: [u8; 32],
+        worker_id: crate::sm::WorkerId,
+    },
+    /// Disconnect a WireGuard peer from the namespace network.
+    Disconnect { client_public_key: [u8; 32] },
+}
+
+// =============================================================================
+// Client errors
+// =============================================================================
+
+/// Result of a successful WireGuard network connect.
+#[derive(Debug, Clone)]
+pub struct ConnectResult {
+    pub server_public_key: [u8; 32],
+    pub endpoint: String,
+    pub client_ip: std::net::Ipv4Addr,
+    pub subnet: String,
+}
+
+/// Errors returned by core client-facing operations.
+#[derive(Debug, Clone)]
+pub enum ClientError {
+    NamespaceNotFound,
+    NamespaceAlreadyExists,
+    /// No worker with tunnel capabilities is available.
+    NoTunnelWorker,
+    /// WireGuard peer IP pool exhausted.
+    IpExhausted,
+    /// No worker with the given ID exists.
+    WorkerNotFound,
+    /// The shell event loop has stopped.
+    ShellGone,
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientError::NamespaceNotFound => write!(f, "namespace not found"),
+            ClientError::NamespaceAlreadyExists => write!(f, "namespace already exists"),
+            ClientError::WorkerNotFound => write!(f, "worker not found"),
+            ClientError::NoTunnelWorker => write!(f, "no worker with tunnel capabilities"),
+            ClientError::IpExhausted => write!(f, "WireGuard peer IP pool exhausted"),
+            ClientError::ShellGone => write!(f, "orchestrator shell has stopped"),
+        }
+    }
 }
 
 // =============================================================================

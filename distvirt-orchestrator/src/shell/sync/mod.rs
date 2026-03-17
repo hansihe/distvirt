@@ -410,7 +410,7 @@ impl SyncShell {
         namespace_id: NamespaceId,
         network: distvirt_worker_protocol::NetworkConfig,
     ) {
-        let effects = self.core.create_namespace(
+        let (_result, effects) = self.core.create_namespace(
             CreateNamespaceInfo {
                 namespace_id,
                 network,
@@ -425,11 +425,35 @@ impl SyncShell {
 
     /// Destroy a namespace.
     pub fn destroy_namespace(&mut self, namespace_id: &NamespaceId) {
-        let effects = self.core.destroy_namespace(namespace_id);
+        let (_result, effects) = self.core.destroy_namespace(namespace_id);
         self.execute_effects(effects);
 
         // Process DestroyNamespace commands → NamespaceDestroyed responses.
         self.process_new_worker_commands();
+    }
+
+    /// Connect a WireGuard peer to a namespace. Processes immediately and drains.
+    pub fn connect_network(
+        &mut self,
+        namespace_id: &NamespaceId,
+        client_public_key: [u8; 32],
+    ) -> Result<crate::core::ConnectResult, crate::core::ClientError> {
+        let (result, effects) = self.core.connect_network(namespace_id, client_public_key, self.now);
+        self.execute_effects(effects);
+        self.process_new_worker_commands();
+        result
+    }
+
+    /// Disconnect a WireGuard peer from a namespace. Processes immediately and drains.
+    pub fn disconnect_network(
+        &mut self,
+        namespace_id: &NamespaceId,
+        client_public_key: [u8; 32],
+    ) -> Result<(), crate::core::ClientError> {
+        let (result, effects) = self.core.disconnect_network(namespace_id, client_public_key, self.now);
+        self.execute_effects(effects);
+        self.process_new_worker_commands();
+        result
     }
 
     /// Queue a client command to a namespace (processed on next `step()`/`drain()`).

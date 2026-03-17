@@ -108,6 +108,18 @@ impl TrackedWorkerStateCore {
 }
 
 // =============================================================================
+// Worker query info (returned by read-only queries)
+// =============================================================================
+
+pub struct WorkerQueryInfo {
+    pub worker_id: GlobalWorkerId,
+    pub max_pods: u32,
+    pub available_memory_mb: u64,
+    pub active_pods: u32,
+    pub conditions: HashMap<String, bool>,
+}
+
+// =============================================================================
 // WorkerStateCore
 // =============================================================================
 
@@ -232,6 +244,42 @@ impl WorkerStateCore {
         }
 
         effects
+    }
+
+    /// Find the first worker with tunnel info. Returns (worker_id, tunnel_info, public_endpoint).
+    pub(crate) fn find_tunnel_worker(&self) -> Option<(GlobalWorkerId, &WorkerTunnelInfo, &str)> {
+        for (&wid, state) in &self.workers {
+            if let Some(ref tunnel) = state.tunnel_info {
+                if !state.capabilities.public_endpoint.is_empty() {
+                    return Some((wid, tunnel, &state.capabilities.public_endpoint));
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn query_worker(&self, id: GlobalWorkerId) -> Option<WorkerQueryInfo> {
+        let state = self.workers.get(&id)?;
+        Some(WorkerQueryInfo {
+            worker_id: id,
+            max_pods: state.capabilities.max_pods,
+            available_memory_mb: state.capabilities.available_memory_mb,
+            active_pods: state.pod_count as u32,
+            conditions: state.conditions.clone(),
+        })
+    }
+
+    pub(crate) fn query_all_workers(&self) -> Vec<WorkerQueryInfo> {
+        self.workers
+            .iter()
+            .map(|(&id, state)| WorkerQueryInfo {
+                worker_id: id,
+                max_pods: state.capabilities.max_pods,
+                available_memory_mb: state.capabilities.available_memory_mb,
+                active_pods: state.pod_count as u32,
+                conditions: state.conditions.clone(),
+            })
+            .collect()
     }
 
     fn build_worker_registry(&self) -> Vec<distvirt_worker_protocol::WorkerPeerInfo> {

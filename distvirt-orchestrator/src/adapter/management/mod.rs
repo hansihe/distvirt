@@ -148,6 +148,16 @@ impl ManagementAdapter {
         self.proto_to_router_svc.get(proto_name).copied()
     }
 
+    /// Iterate over all workloads: (protocol name, router ID).
+    pub fn iter_workloads(&self) -> impl Iterator<Item = (&str, WorkloadId)> + '_ {
+        self.proto_to_router_wl.iter().map(|(name, &id)| (name.as_str(), id))
+    }
+
+    /// Iterate over all services: (protocol name, router ID).
+    pub fn iter_services(&self) -> impl Iterator<Item = (&str, crate::sm::ServiceId)> + '_ {
+        self.proto_to_router_svc.iter().map(|(name, &id)| (name.as_str(), id))
+    }
+
     /// Look up a workload's protocol name by router ID.
     pub(crate) fn workload_proto_name(&self, id: &WorkloadId) -> Option<&str> {
         self.router_to_proto_wl.get(id).map(|s| s.as_str())

@@ -215,6 +215,13 @@ pub(super) fn gen_sm_accessors(def: &TopologyDef, methods: &mut Vec<TokenStream>
                 self.instances.#instances.get(id)
             }
         });
+
+        let iter_method = format_ident!("iter_{}", to_snake_case(&sm.name.to_string()));
+        methods.push(quote! {
+            fn #iter_method(&self) -> impl Iterator<Item = (&#id_type, &#handler)> {
+                self.instances.#instances.iter()
+            }
+        });
     }
 }
 

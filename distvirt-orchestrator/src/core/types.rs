@@ -12,7 +12,7 @@ use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::{
     ArtifactPlacementEvent, ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent,
 };
-use crate::sm::{ArtifactId, ArtifactPortId, PodId, ServiceId, WorkerId};
+use crate::sm::{ArtifactPortId, PodId, ServiceId, WorkerId};
 use crate::types::NamespaceId;
 
 // =============================================================================
@@ -295,6 +295,7 @@ pub enum OrchestratorInput {
     SchedulerEvent(SchedulerCoreInput),
     CreateNamespace {
         namespace_id: NamespaceId,
+        network: distvirt_worker_protocol::NetworkConfig,
     },
     DestroyNamespace {
         namespace_id: NamespaceId,

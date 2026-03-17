@@ -12,7 +12,7 @@ use crate::adapter::dns_registry::DnsRegistryAction;
 use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::TimerConfig;
-use crate::core::{ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
+use crate::core::{GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
 use crate::sm::{ArtifactId, ArtifactPortId, DRouter, PodId, WorkerId};
 use crate::types::{NamespaceId, NamespaceSpec};
 
@@ -58,9 +58,13 @@ pub struct NamespaceWithBoundary {
 }
 
 impl NamespaceWithBoundary {
-    pub fn new(namespace_id: NamespaceId, timer_config: TimerConfig) -> Self {
+    pub fn new(
+        namespace_id: NamespaceId,
+        timer_config: TimerConfig,
+        network: &distvirt_worker_protocol::NetworkConfig,
+    ) -> Self {
         NamespaceWithBoundary {
-            core: NamespaceCore::new(namespace_id, timer_config),
+            core: NamespaceCore::new(namespace_id, timer_config, network),
             pending_workers: HashMap::new(),
             active_workers: HashSet::new(),
             deferred_grants: Vec::new(),
@@ -146,20 +150,48 @@ impl NamespaceWithBoundary {
                             }
 
                             // Send initial endpoint state to the new worker.
-                            let endpoint_entries = self.core.adapters.endpoint.build_sync();
-                            if !endpoint_entries.is_empty() {
-                                let endpoints: Vec<_> = endpoint_entries
-                                    .iter()
-                                    .map(|(service_id, info)| {
-                                        Self::build_endpoint_spec_from_info(service_id, info)
-                                    })
-                                    .collect();
+                            {
+                                let mut endpoints: Vec<distvirt_worker_protocol::EndpointSpec> = Vec::new();
+
+                                // Service endpoints
+                                for (service_id, info) in self.core.adapters.endpoint.build_service_sync() {
+                                    endpoints.push(Self::build_endpoint_spec_from_info(&service_id, &info));
+                                }
+
+                                // WireGuard peer endpoints
+                                for (_peer_id, info) in self.core.adapters.endpoint.build_wg_peer_sync() {
+                                    endpoints.push(distvirt_worker_protocol::EndpointSpec {
+                                        ip: info.peer_ip,
+                                        kind: distvirt_worker_protocol::EndpointKind::WireGuardPeer {
+                                            placement: Some(distvirt_worker_protocol::EndpointPlacement {
+                                                worker_id: info.worker_id,
+                                            }),
+                                        },
+                                    });
+                                }
+
                                 if !endpoints.is_empty() {
                                     let cmd = distvirt_worker_protocol::WorkerCommand::EndpointSync {
                                         namespace_id: self.core.namespace_id().clone(),
                                         endpoints,
                                     };
                                     effects.worker_commands.push((wne.worker_id, cmd));
+                                }
+                            }
+
+                            // Send AddWireGuardPeer commands for existing peers placed on this worker.
+                            // Derive from the endpoint adapter's WG peer cache (which has peer_public_key).
+                            for (_peer_id, info) in self.core.adapters.endpoint.build_wg_peer_sync() {
+                                if info.worker_id == wne.worker_id {
+                                    effects.worker_commands.push((
+                                        wne.worker_id,
+                                        distvirt_worker_protocol::WorkerCommand::AddWireGuardPeer {
+                                            namespace_id: self.core.namespace_id().clone(),
+                                            peer_public_key: info.peer_public_key,
+                                            peer_ip: info.peer_ip,
+                                            preshared_key: None,
+                                        },
+                                    ));
                                 }
                             }
 
@@ -481,10 +513,35 @@ impl NamespaceWithBoundary {
             }
         }
 
-        // Translate endpoint actions → broadcast commands.
+        // Translate endpoint actions → broadcast commands + WG worker commands.
         for action in internal.endpoint_actions {
+            // Emit EndpointUpdate broadcast (existing behavior).
             let cmd = self.build_endpoint_command(&action);
             effects.broadcast_commands.push(cmd);
+
+            // Also emit AddWireGuardPeer/RemoveWireGuardPeer worker commands
+            // derived from the same endpoint action.
+            match &action {
+                EndpointAction::WireGuardPeerUpdate { info, .. } => {
+                    effects.worker_commands.push((
+                        info.worker_id,
+                        distvirt_worker_protocol::WorkerCommand::AddWireGuardPeer {
+                            namespace_id: self.core.namespace_id().clone(),
+                            peer_public_key: info.peer_public_key,
+                            peer_ip: info.peer_ip,
+                            preshared_key: None,
+                        },
+                    ));
+                }
+                EndpointAction::WireGuardPeerRemove { old_info, .. } => {
+                    effects.broadcast_commands.push(
+                        distvirt_worker_protocol::WorkerCommand::RemoveWireGuardPeer {
+                            peer_public_key: old_info.peer_public_key,
+                        },
+                    );
+                }
+                _ => {}
+            }
         }
 
         // Translate DNS registry actions → broadcast commands.
@@ -593,7 +650,7 @@ impl NamespaceWithBoundary {
         action: &EndpointAction,
     ) -> distvirt_worker_protocol::WorkerCommand {
         match action {
-            EndpointAction::Update { service_id, info } => {
+            EndpointAction::ServiceUpdate { service_id, info } => {
                 let endpoint_spec = Self::build_endpoint_spec_from_info(service_id, info);
                 distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
                     namespace_id: self.core.namespace_id().clone(),
@@ -601,7 +658,7 @@ impl NamespaceWithBoundary {
                     removed_ips: vec![],
                 }
             }
-            EndpointAction::Remove {
+            EndpointAction::ServiceRemove {
                 service_id: _,
                 old_info,
             } => {
@@ -609,6 +666,28 @@ impl NamespaceWithBoundary {
                     namespace_id: self.core.namespace_id().clone(),
                     upserted: vec![],
                     removed_ips: vec![old_info.service_ip],
+                }
+            }
+            EndpointAction::WireGuardPeerUpdate { peer_id: _, info } => {
+                let endpoint_spec = distvirt_worker_protocol::EndpointSpec {
+                    ip: info.peer_ip,
+                    kind: distvirt_worker_protocol::EndpointKind::WireGuardPeer {
+                        placement: Some(distvirt_worker_protocol::EndpointPlacement {
+                            worker_id: info.worker_id,
+                        }),
+                    },
+                };
+                distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
+                    namespace_id: self.core.namespace_id().clone(),
+                    upserted: vec![endpoint_spec],
+                    removed_ips: vec![],
+                }
+            }
+            EndpointAction::WireGuardPeerRemove { peer_id: _, old_info } => {
+                distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
+                    namespace_id: self.core.namespace_id().clone(),
+                    upserted: vec![],
+                    removed_ips: vec![old_info.peer_ip],
                 }
             }
         }
@@ -633,9 +712,19 @@ impl NamespaceWithBoundary {
         self.core.management()
     }
 
+    /// Access the WireGuard peer manager (for reading peer state).
+    pub fn wg_peers(&self) -> &crate::core::wg_peers::WireGuardPeerManager {
+        self.core.wg_peers()
+    }
+
     /// Access the current namespace spec.
     pub fn current_spec(&self) -> Option<&NamespaceSpec> {
         self.core.current_spec()
+    }
+
+    /// Build a status report for this namespace.
+    pub fn status_report(&self) -> crate::types::NamespaceStatusReport {
+        self.core.status_report()
     }
 
     /// Map a router-internal PodId to a protocol PodId.

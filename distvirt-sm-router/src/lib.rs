@@ -371,8 +371,9 @@
 //!    SM itself (via `ctx` in `initialize` and `handle`).
 //! 3. **Send events** from ports to SMs
 //! 4. **Call `propagate()`** — all cascading effects resolve before it returns
-//! 5. **Read results** — inspect SM state via `get_{sm}()`, drain port inputs
-//!    via `drain_{port}_inputs()`
+//! 5. **Read results** — query signal values via `signal_{node}_{signal}()`,
+//!    iterate SMs via `iter_{sm}()`, inspect SM state via `get_{sm}()`,
+//!    drain port inputs via `drain_{port}_inputs()`
 //!
 //! ```rust,ignore
 //! // External code (e.g., gRPC handler, timer tick, scheduler callback)

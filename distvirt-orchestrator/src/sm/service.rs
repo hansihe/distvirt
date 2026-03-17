@@ -27,6 +27,8 @@ pub struct ServiceSm {
     pub last_readiness: Option<ReadyInfo>,
     /// DNS entry info from spec, signaled to the DnsRegistry port.
     pub dns_entry: Option<DnsEntryInfo>,
+    /// Current aggregated backend need level.
+    pub backend_need: BackendNeed,
     /// Service VIP from spec, used to construct ServiceEndpointInfo.
     pub service_ip: std::net::Ipv4Addr,
     /// Service policy from spec, used to construct ServiceEndpointInfo.
@@ -46,6 +48,7 @@ impl ServiceSm {
             idle_timer_active: false,
             idle_timeout: std::time::Duration::ZERO,
             last_readiness: None,
+            backend_need: BackendNeed::None,
             dns_entry: None,
             service_ip: std::net::Ipv4Addr::UNSPECIFIED,
             service_policy: distvirt_worker_protocol::ServicePolicy {
@@ -87,6 +90,7 @@ impl ServiceSm {
             ServiceState::Active { .. } => SvcStatus::Active,
         };
         ctx.set_status(status);
+        ctx.set_current_backend_need(self.backend_need.clone());
         ctx.set_idle_timer_active(self.idle_timer_active);
 
         let endpoint_info = match &self.state {
@@ -180,7 +184,9 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                     }
                 }
             }
-            ServiceInput::BackendNeedInput(need) => match (&self.state, &need) {
+            ServiceInput::BackendNeedInput(need) => {
+                self.backend_need = need.clone();
+                match (&self.state, &need) {
                 (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
                     if !self.idle_timer_active {
                         self.idle_timer_active = true;
@@ -199,7 +205,8 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                     self.activate();
                 }
                 _ => {}
-            },
+                }
+            }
             ServiceInput::ServiceTimerFired(key) => match key {
                 ServiceTimerKey::IdleTimeout => {
                     if matches!(self.state, ServiceState::Active { .. })

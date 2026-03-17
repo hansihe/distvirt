@@ -262,7 +262,37 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
     })
 }
 
-// --- Internal -> Proto conversions ---
+// --- Internal -> Proto conversions (workers/pods) ---
+
+pub(super) fn convert_worker_query_info(
+    info: crate::core::worker_state::WorkerQueryInfo,
+) -> proto::WorkerInfo {
+    proto::WorkerInfo {
+        worker_id: info.worker_id.0.to_string(),
+        max_pods: info.max_pods,
+        available_memory_mb: info.available_memory_mb,
+        active_pods: info.active_pods,
+    }
+}
+
+pub(super) fn convert_pod_status_report(pod: PodStatusReport) -> proto::PodInfo {
+    proto::PodInfo {
+        pod_id: pod.pod_id.0.to_string(),
+        workload_id: pod.workload_id.0.clone(),
+        worker_id: pod.worker_id.0.to_string(),
+        ip: pod.ip,
+        mac: String::new(),
+        state: match pod.state {
+            PodStatus::Launching => proto::PodState::Launching as i32,
+            PodStatus::Running => proto::PodState::Running as i32,
+            PodStatus::Suspending => proto::PodState::Suspending as i32,
+            PodStatus::Suspended => proto::PodState::Suspended as i32,
+            PodStatus::Resuming => proto::PodState::Resuming as i32,
+        },
+    }
+}
+
+// --- Internal -> Proto conversions (namespaces) ---
 
 pub(super) fn convert_namespace_state(status: &NamespaceStatus) -> i32 {
     match status {

@@ -21,11 +21,13 @@ use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
 use crate::core::ClientCommand;
 use distvirt_sm_router::trace::PanicTracer;
 
+use crate::core::wg_peers::{WireGuardPeerManager, WgPeerOutput};
 use crate::sm::{
     AdminCmd, DRouter, DNS_REGISTRY, ENDPOINT, LeaseInfo, PodId, PodStatus,
-    Router, SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WorkerId,
+    Router, SCHEDULE_REQUEST, ScheduleLeaseId, SvcStatus, TIMER, WlStatus, WorkerId,
+    WireGuardPeerEndpointInfo, WireGuardPeerId,
 };
-use crate::types::{NamespaceId, NamespaceSpec};
+use crate::types::{NamespaceId, NamespaceSpec, NamespaceStatusReport, WorkloadName};
 
 use super::types::{InternalNamespaceEffects, InternalNamespaceEvent, InternalSchedulerMessage, InternalWorkerEvent};
 
@@ -77,10 +79,19 @@ pub struct NamespaceCore {
     pod_worker: HashMap<PodId, WorkerId>,
 
     pub(crate) current_spec: Option<NamespaceSpec>,
+
+    /// WireGuard peer IP allocation and tracking.
+    wg_peer_mgr: WireGuardPeerManager,
+    /// Maps client public key → WireGuardPeerId (router port).
+    wg_peer_ports: HashMap<[u8; 32], WireGuardPeerId>,
 }
 
 impl NamespaceCore {
-    pub fn new(namespace_id: NamespaceId, timer_config: TimerConfig) -> Self {
+    pub fn new(
+        namespace_id: NamespaceId,
+        timer_config: TimerConfig,
+        network: &distvirt_worker_protocol::NetworkConfig,
+    ) -> Self {
         let mut router = Router::new_traced(16, PanicTracer::new());
         router.create_timer(TIMER);
         router.create_schedule_request(SCHEDULE_REQUEST);
@@ -104,6 +115,8 @@ impl NamespaceCore {
             worker_pod_edges: HashMap::new(),
             pod_worker: HashMap::new(),
             current_spec: None,
+            wg_peer_mgr: WireGuardPeerManager::new(network.subnet, network.prefix_len),
+            wg_peer_ports: HashMap::new(),
         }
     }
 
@@ -304,6 +317,87 @@ impl NamespaceCore {
                     active,
                 );
             }
+            ClientCommand::Connect {
+                client_public_key,
+                worker_id,
+            } => {
+                self.handle_wg_connect(client_public_key, worker_id);
+            }
+            ClientCommand::Disconnect { client_public_key } => {
+                self.handle_wg_disconnect(client_public_key);
+            }
+        }
+    }
+
+    fn handle_wg_connect(
+        &mut self,
+        client_public_key: [u8; 32],
+        worker_id: WorkerId,
+    ) {
+        let result = self.wg_peer_mgr.connect(client_public_key);
+        match result {
+            crate::core::wg_peers::ConnectResult::Ok { client_ip, outputs } => {
+                for output in outputs {
+                    match output {
+                        WgPeerOutput::AddPeer {
+                            peer_public_key,
+                            peer_ip,
+                        } => {
+                            // Create router port for this WG peer.
+                            let peer_port_id = self.router.create_wire_guard_peer();
+                            self.wg_peer_ports.insert(peer_public_key, peer_port_id);
+
+                            // Set endpoint info signal (includes public key so the
+                            // boundary can derive AddWireGuardPeer commands from
+                            // endpoint actions).
+                            self.router.set_wire_guard_peer_endpoint_info(
+                                peer_port_id,
+                                Some(WireGuardPeerEndpointInfo {
+                                    peer_ip,
+                                    worker_id,
+                                    peer_public_key,
+                                }),
+                            );
+
+                            // Connect WG peer port to ENDPOINT port.
+                            self.router.set_wire_guard_peer_endpoints_edges(
+                                peer_port_id,
+                                vec![ENDPOINT],
+                            );
+                        }
+                        WgPeerOutput::RemovePeer { .. } => {
+                            // Shouldn't happen on connect.
+                        }
+                    }
+                }
+                let _ = client_ip; // IP is returned to caller via ConnectResult at orchestrator level.
+            }
+            crate::core::wg_peers::ConnectResult::Error { .. } => {
+                // Error is returned to caller at orchestrator level.
+            }
+        }
+    }
+
+    fn handle_wg_disconnect(
+        &mut self,
+        client_public_key: [u8; 32],
+    ) {
+        let outputs = self.wg_peer_mgr.disconnect(client_public_key);
+        for output in outputs {
+            match output {
+                WgPeerOutput::RemovePeer { peer_public_key } => {
+                    // Destroy the router port (clears signals/edges automatically).
+                    // This produces a WireGuardPeerRemove endpoint action via the
+                    // incremental aggregator, which the boundary translates into
+                    // both EndpointUpdate and RemoveWireGuardPeer commands.
+                    if let Some(peer_port_id) = self.wg_peer_ports.remove(&peer_public_key) {
+                        self.router.destroy_wire_guard_peer(peer_port_id);
+                    }
+                }
+                WgPeerOutput::AddPeer { .. } => {
+                    // Shouldn't happen on disconnect.
+                }
+            }
         }
     }
 
@@ -421,6 +515,105 @@ impl NamespaceCore {
     // Accessors
     // =========================================================================
 
+    /// Build a status report for this namespace.
+    pub fn status_report(&self) -> NamespaceStatusReport {
+        use std::collections::BTreeMap;
+
+        let mut workloads = BTreeMap::new();
+        let mut services = BTreeMap::new();
+        let mut pods = BTreeMap::new();
+
+        // Workloads
+        for (name, router_id) in self.adapters.management.iter_workloads() {
+            let state = self.router.signal_workload_status(router_id)
+                .map(|s| wl_status_str(s))
+                .unwrap_or("unknown");
+            let pod_id = self.router.get_workload(&router_id)
+                .and_then(|wl| wl.pod_id)
+                .map(|pid| crate::types::PodId(pid.0));
+
+            workloads.insert(
+                WorkloadName(name.to_string()),
+                crate::types::WorkloadStatusReport {
+                    state: state.to_string(),
+                    pod_id,
+                    conditions: BTreeMap::new(),
+                },
+            );
+        }
+
+        // Services
+        for (name, router_id) in self.adapters.management.iter_services() {
+            let service_state = self.router.signal_service_status(router_id)
+                .map(|s| svc_status_str(s))
+                .unwrap_or("unknown");
+            let backend_need = self.router.signal_service_current_backend_need(router_id)
+                .cloned();
+            let svc_sm = self.router.get_service(&router_id);
+            let has_activation = svc_sm.map(|s| s.has_activation).unwrap_or(false);
+            let service_ip = svc_sm.map(|s| s.service_ip).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+
+            // Look up the workload name from the spec.
+            let workload_name = self.current_spec.as_ref()
+                .and_then(|spec| spec.services.get(name))
+                .map(|svc_spec| svc_spec.workload_id.clone())
+                .unwrap_or_else(|| WorkloadName(String::new()));
+
+            services.insert(
+                name.to_string(),
+                crate::types::ServiceStatusReport {
+                    workload_id: workload_name,
+                    service_state: service_state.to_string(),
+                    backend_need,
+                    activation_enabled: has_activation,
+                    ip: service_ip.to_string(),
+                    conditions: BTreeMap::new(),
+                },
+            );
+        }
+
+        // Pods
+        for (pod_id, pod_sm) in self.router.iter_pod() {
+            // Skip terminal pods with no workload (being reaped).
+            if pod_sm.workload_id.is_none() {
+                continue;
+            }
+            let workload_router_id = pod_sm.workload_id.unwrap();
+            let workload_name = self.adapters.management.workload_proto_name(&workload_router_id)
+                .map(|n| WorkloadName(n.to_string()))
+                .unwrap_or_else(|| WorkloadName(String::new()));
+
+            let proto_pod_id = crate::types::PodId(pod_id.0);
+            let worker_id = pod_sm.worker_id
+                .map(|w| crate::types::WorkerId(w.0))
+                .unwrap_or(crate::types::WorkerId(0));
+            let ip = pod_sm.launch_spec.as_ref()
+                .and_then(|s| s.network.as_ref())
+                .map(|n| n.ip.to_string())
+                .unwrap_or_default();
+            let state = sm_pod_status_to_client(&pod_sm.status);
+
+            pods.insert(
+                proto_pod_id.clone(),
+                crate::types::PodStatusReport {
+                    pod_id: proto_pod_id,
+                    workload_id: workload_name,
+                    worker_id,
+                    ip,
+                    state,
+                },
+            );
+        }
+
+        NamespaceStatusReport {
+            namespace_id: self.namespace_id.clone(),
+            status: crate::types::NamespaceStatus::Active,
+            workloads,
+            services,
+            pods,
+        }
+    }
+
     /// Access the router (for inspecting workload/service/pod state).
     pub fn router(&self) -> &DRouter {
         &self.router
@@ -446,4 +639,42 @@ impl NamespaceCore {
         &self.namespace_id
     }
 
+    /// Access the WireGuard peer manager (for reading subnet info etc.).
+    pub fn wg_peers(&self) -> &WireGuardPeerManager {
+        &self.wg_peer_mgr
+    }
+
+}
+
+fn wl_status_str(status: &WlStatus) -> &'static str {
+    match status {
+        WlStatus::Dormant => "dormant",
+        WlStatus::WaitingForSpec => "waiting_for_spec",
+        WlStatus::Launching => "launching",
+        WlStatus::Running => "running",
+        WlStatus::Suspending => "suspending",
+        WlStatus::Suspended => "suspended",
+        WlStatus::RetryBackoff => "retry_backoff",
+        WlStatus::Failed => "failed",
+    }
+}
+
+fn svc_status_str(status: &SvcStatus) -> &'static str {
+    match status {
+        SvcStatus::Idle => "idle",
+        SvcStatus::NeedBackend => "need_backend",
+        SvcStatus::Active => "active",
+    }
+}
+
+fn sm_pod_status_to_client(status: &PodStatus) -> crate::types::PodStatus {
+    match status {
+        PodStatus::Pending => crate::types::PodStatus::Launching,
+        PodStatus::Running => crate::types::PodStatus::Running,
+        PodStatus::Suspending => crate::types::PodStatus::Suspending,
+        PodStatus::Suspended { .. } => crate::types::PodStatus::Suspended,
+        PodStatus::Finished | PodStatus::Failed | PodStatus::Displaced => {
+            crate::types::PodStatus::Launching // terminal pods are filtered out
+        }
+    }
 }

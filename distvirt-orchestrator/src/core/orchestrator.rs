@@ -24,9 +24,9 @@ use super::types::{
 };
 use super::worker_state::WorkerStateCore;
 use crate::adapter::timer::TimerConfig;
-use crate::core::{GlobalWorkerId, SchedulerDecision};
+use crate::core::{ClientCommand, ClientError, GlobalWorkerId, SchedulerDecision};
 use crate::sm::{ArtifactPortId, WorkerInfo};
-use crate::types::NamespaceId;
+use crate::types::{NamespaceId, NamespaceSpec};
 
 pub struct OrchestratorCore {
     namespaces: HashMap<NamespaceId, NamespaceWithBoundary>,
@@ -93,9 +93,9 @@ impl OrchestratorCore {
                 let sched_effects = self.scheduler.process(input);
                 self.route_scheduler_effects(sched_effects, &mut effects, now);
             }
-            OrchestratorInput::CreateNamespace { namespace_id } => {
+            OrchestratorInput::CreateNamespace { namespace_id, network } => {
                 if !self.namespaces.contains_key(&namespace_id) {
-                    let ns = NamespaceWithBoundary::new(namespace_id.clone(), self.timer_config.clone());
+                    let ns = NamespaceWithBoundary::new(namespace_id.clone(), self.timer_config.clone(), &network);
                     self.namespaces.insert(namespace_id, ns);
                 }
             }
@@ -265,9 +265,9 @@ impl OrchestratorCore {
         &mut self,
         info: CreateNamespaceInfo,
         now: Duration,
-    ) -> OrchestratorEffects {
+    ) -> (Result<(), ClientError>, OrchestratorEffects) {
         if self.namespaces.contains_key(&info.namespace_id) {
-            return OrchestratorEffects::default();
+            return (Err(ClientError::NamespaceAlreadyExists), OrchestratorEffects::default());
         }
 
         let mut effects = OrchestratorEffects::default();
@@ -288,7 +288,7 @@ impl OrchestratorCore {
                 });
         self.route_worker_state_effects(ws_effects, &mut effects, now);
 
-        let ns = NamespaceWithBoundary::new(info.namespace_id.clone(), self.timer_config.clone());
+        let ns = NamespaceWithBoundary::new(info.namespace_id.clone(), self.timer_config.clone(), &network);
         self.namespaces.insert(info.namespace_id.clone(), ns);
 
         let workers: Vec<_> = self
@@ -323,17 +323,17 @@ impl OrchestratorCore {
             self.route_worker_state_effects(ws_effects, &mut effects, now);
         }
 
-        effects
+        (Ok(()), effects)
     }
 
     /// Destroy a namespace.
     ///
     /// Fans out NamespaceUnassigned, unregisters segment, removes namespace core.
-    pub fn destroy_namespace(&mut self, namespace_id: &NamespaceId) -> OrchestratorEffects {
+    pub fn destroy_namespace(&mut self, namespace_id: &NamespaceId) -> (Result<(), ClientError>, OrchestratorEffects) {
         let mut effects = OrchestratorEffects::default();
 
         if self.namespaces.remove(namespace_id).is_none() {
-            return effects;
+            return (Err(ClientError::NamespaceNotFound), effects);
         }
 
         self.timer_wheel.remove_namespace(namespace_id);
@@ -363,7 +363,106 @@ impl OrchestratorCore {
                 });
         self.route_worker_state_effects(ws_effects, &mut effects, Duration::ZERO);
 
-        effects
+        (Ok(()), effects)
+    }
+
+    /// Update a namespace's spec.
+    ///
+    /// Routes `ClientCommand::UpdateSpec` to the target namespace.
+    pub fn update_namespace(
+        &mut self,
+        namespace_id: &NamespaceId,
+        spec: NamespaceSpec,
+        now: Duration,
+    ) -> (Result<(), ClientError>, OrchestratorEffects) {
+        let Some(ns) = self.namespaces.get_mut(namespace_id) else {
+            return (Err(ClientError::NamespaceNotFound), OrchestratorEffects::default());
+        };
+        let ns_effects = ns.process_event(NamespaceCoreEvent::ClientCommand(
+            ClientCommand::UpdateSpec(spec),
+        ));
+        let mut effects = OrchestratorEffects::default();
+        self.route_namespace_effects(namespace_id, ns_effects, &mut effects, now);
+        (Ok(()), effects)
+    }
+
+    /// Connect a WireGuard peer to a namespace's network.
+    ///
+    /// Picks a worker with tunnel info, routes `ClientCommand::Connect` to the
+    /// target namespace, and returns connection details.
+    pub fn connect_network(
+        &mut self,
+        namespace_id: &NamespaceId,
+        client_public_key: [u8; 32],
+        now: Duration,
+    ) -> (Result<super::ConnectResult, ClientError>, OrchestratorEffects) {
+        // Look up namespace.
+        if !self.namespaces.contains_key(namespace_id) {
+            return (Err(ClientError::NamespaceNotFound), OrchestratorEffects::default());
+        }
+
+        // Find a worker with tunnel capabilities.
+        let (worker_id, tunnel_info, public_endpoint) = match self.worker_state.find_tunnel_worker() {
+            Some((wid, ti, ep)) => (wid, ti.clone(), ep.to_string()),
+            None => return (Err(ClientError::NoTunnelWorker), OrchestratorEffects::default()),
+        };
+
+        // Get network config for building the result.
+        let network = self.namespace_networks.get(namespace_id).cloned();
+
+        // Route connect command to namespace.
+        let ns = self.namespaces.get_mut(namespace_id).unwrap();
+        let ns_effects = ns.process_event(NamespaceCoreEvent::ClientCommand(
+            ClientCommand::Connect {
+                client_public_key,
+                worker_id,
+            },
+        ));
+
+        let mut effects = OrchestratorEffects::default();
+        self.route_namespace_effects(namespace_id, ns_effects, &mut effects, now);
+
+        // Look up the allocated client IP from the namespace's WG peer manager.
+        // The namespace core handles the IP allocation internally; we need to
+        // read it back from the WG peer manager.
+        let ns = self.namespaces.get(namespace_id).unwrap();
+        let wg_peers = ns.wg_peers();
+        let client_ip = match wg_peers.peers.get(&client_public_key) {
+            Some(info) => info.client_ip,
+            None => return (Err(ClientError::IpExhausted), effects),
+        };
+
+        let subnet_cidr = wg_peers.subnet_cidr();
+        let endpoint = format!("{}:{}", public_endpoint, tunnel_info.listen_port);
+
+        let result = super::ConnectResult {
+            server_public_key: tunnel_info.public_key,
+            endpoint,
+            client_ip,
+            subnet: subnet_cidr,
+        };
+
+        (Ok(result), effects)
+    }
+
+    /// Disconnect a WireGuard peer from a namespace's network.
+    pub fn disconnect_network(
+        &mut self,
+        namespace_id: &NamespaceId,
+        client_public_key: [u8; 32],
+        now: Duration,
+    ) -> (Result<(), ClientError>, OrchestratorEffects) {
+        let Some(ns) = self.namespaces.get_mut(namespace_id) else {
+            return (Err(ClientError::NamespaceNotFound), OrchestratorEffects::default());
+        };
+
+        let ns_effects = ns.process_event(NamespaceCoreEvent::ClientCommand(
+            ClientCommand::Disconnect { client_public_key },
+        ));
+
+        let mut effects = OrchestratorEffects::default();
+        self.route_namespace_effects(namespace_id, ns_effects, &mut effects, now);
+        (Ok(()), effects)
     }
 
     // =========================================================================
@@ -550,12 +649,41 @@ impl OrchestratorCore {
     // Accessors
     // =========================================================================
 
+    pub fn list_workers(&self) -> Vec<super::worker_state::WorkerQueryInfo> {
+        self.worker_state.query_all_workers()
+    }
+
+    pub fn get_worker(&self, worker_id: GlobalWorkerId) -> Result<super::worker_state::WorkerQueryInfo, ClientError> {
+        self.worker_state.query_worker(worker_id).ok_or(ClientError::WorkerNotFound)
+    }
+
+    pub fn list_pods(&self, namespace_id: &NamespaceId) -> Result<Vec<crate::types::PodStatusReport>, ClientError> {
+        let ns = self.namespaces.get(namespace_id).ok_or(ClientError::NamespaceNotFound)?;
+        let report = ns.status_report();
+        Ok(report.pods.into_values().collect())
+    }
+
     pub fn namespace(&self, id: &NamespaceId) -> Option<&NamespaceWithBoundary> {
         self.namespaces.get(id)
     }
 
     pub fn namespace_ids(&self) -> impl Iterator<Item = &NamespaceId> {
         self.namespaces.keys()
+    }
+
+    /// Get the status report for a single namespace. Pure read — no effects.
+    pub fn get_namespace_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<crate::types::NamespaceStatusReport, ClientError> {
+        let ns = self.namespaces.get(namespace_id)
+            .ok_or(ClientError::NamespaceNotFound)?;
+        Ok(ns.status_report())
+    }
+
+    /// List all namespaces with their status reports. Pure read — no effects.
+    pub fn list_namespaces(&self) -> Vec<crate::types::NamespaceStatusReport> {
+        self.namespaces.values().map(|ns| ns.status_report()).collect()
     }
 }
 
@@ -609,6 +737,7 @@ mod tests {
         let effects = orch.process(
             OrchestratorInput::CreateNamespace {
                 namespace_id: ns("test"),
+                network: test_network(),
             },
             Duration::ZERO,
         );
@@ -646,7 +775,7 @@ mod tests {
     fn worker_connected_fans_out_to_namespaces() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        orch.create_namespace(
+        let _ = orch.create_namespace(
             CreateNamespaceInfo {
                 namespace_id: ns("test"),
                 network: test_network(),
@@ -690,7 +819,7 @@ mod tests {
             Duration::ZERO,
         );
 
-        let effects = orch.create_namespace(
+        let (_result, effects) = orch.create_namespace(
             CreateNamespaceInfo {
                 namespace_id: ns("test"),
                 network: test_network(),
@@ -715,7 +844,7 @@ mod tests {
     fn full_sync_flow() {
         let mut orch = OrchestratorCore::new(test_timer_config());
 
-        orch.create_namespace(
+        let _ = orch.create_namespace(
             CreateNamespaceInfo {
                 namespace_id: ns("test"),
                 network: test_network(),
@@ -748,7 +877,7 @@ mod tests {
         let effects = orch.worker_disconnected(GlobalWorkerId::from(1), Duration::ZERO);
         let _ = effects;
 
-        let effects = orch.destroy_namespace(&ns("test"));
+        let (_result, effects) = orch.destroy_namespace(&ns("test"));
         let _ = effects;
 
         assert!(orch.namespace(&ns("test")).is_none());

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use distvirt_worker_protocol::OrchestratorConnection;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -25,8 +25,8 @@ use crate::core::types::{
     SchedulerCoreInput, WorkerConnectedInfo, WorkerStateCoreEvent,
 };
 use crate::core::worker_state::WorkerTunnelInfo;
-use crate::core::{GlobalWorkerId, WorkerWriterHandle};
-use crate::types::NamespaceId;
+use crate::core::{ClientError, ConnectResult, GlobalWorkerId, WorkerWriterHandle};
+use crate::types::{NamespaceId, NamespaceSpec};
 
 // =============================================================================
 // Shell event — everything the shell can receive
@@ -56,9 +56,44 @@ enum ShellCommand {
     CreateNamespace {
         namespace_id: NamespaceId,
         network: distvirt_worker_protocol::NetworkConfig,
+        response: oneshot::Sender<Result<(), ClientError>>,
     },
     DestroyNamespace {
         namespace_id: NamespaceId,
+        response: oneshot::Sender<Result<(), ClientError>>,
+    },
+    UpdateNamespace {
+        namespace_id: NamespaceId,
+        spec: NamespaceSpec,
+        response: oneshot::Sender<Result<(), ClientError>>,
+    },
+    GetNamespaceStatus {
+        namespace_id: NamespaceId,
+        response: oneshot::Sender<Result<crate::types::NamespaceStatusReport, ClientError>>,
+    },
+    ListNamespaces {
+        response: oneshot::Sender<Vec<crate::types::NamespaceStatusReport>>,
+    },
+    ConnectNetwork {
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+        response: oneshot::Sender<Result<ConnectResult, ClientError>>,
+    },
+    DisconnectNetwork {
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+        response: oneshot::Sender<Result<(), ClientError>>,
+    },
+    ListWorkers {
+        response: oneshot::Sender<Vec<crate::core::worker_state::WorkerQueryInfo>>,
+    },
+    GetWorker {
+        worker_id: GlobalWorkerId,
+        response: oneshot::Sender<Result<crate::core::worker_state::WorkerQueryInfo, ClientError>>,
+    },
+    ListPods {
+        namespace_id: NamespaceId,
+        response: oneshot::Sender<Result<Vec<crate::types::PodStatusReport>, ClientError>>,
     },
 }
 
@@ -82,23 +117,141 @@ impl ShellHandle {
         &self,
         namespace_id: NamespaceId,
         network: distvirt_worker_protocol::NetworkConfig,
-    ) {
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ShellEvent::Command(ShellCommand::CreateNamespace {
                 namespace_id,
                 network,
+                response: tx,
             }))
             .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
     }
 
-    pub async fn destroy_namespace(&self, namespace_id: NamespaceId) {
+    pub async fn destroy_namespace(&self, namespace_id: NamespaceId) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ShellEvent::Command(ShellCommand::DestroyNamespace {
                 namespace_id,
+                response: tx,
             }))
             .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn update_namespace(
+        &self,
+        namespace_id: NamespaceId,
+        spec: NamespaceSpec,
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::UpdateNamespace {
+                namespace_id,
+                spec,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn get_namespace_status(
+        &self,
+        namespace_id: NamespaceId,
+    ) -> Result<crate::types::NamespaceStatusReport, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::GetNamespaceStatus {
+                namespace_id,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn list_namespaces(&self) -> Result<Vec<crate::types::NamespaceStatusReport>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::ListNamespaces {
+                response: tx,
+            }))
+            .await;
+        rx.await.map_err(|_| ClientError::ShellGone)
+    }
+
+    pub async fn connect_network(
+        &self,
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+    ) -> Result<ConnectResult, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::ConnectNetwork {
+                namespace_id,
+                client_public_key,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn disconnect_network(
+        &self,
+        namespace_id: NamespaceId,
+        client_public_key: [u8; 32],
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::DisconnectNetwork {
+                namespace_id,
+                client_public_key,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn list_workers(&self) -> Result<Vec<crate::core::worker_state::WorkerQueryInfo>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::ListWorkers {
+                response: tx,
+            }))
+            .await;
+        rx.await.map_err(|_| ClientError::ShellGone)
+    }
+
+    pub async fn get_worker(&self, worker_id: GlobalWorkerId) -> Result<crate::core::worker_state::WorkerQueryInfo, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::GetWorker {
+                worker_id,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn list_pods(&self, namespace_id: NamespaceId) -> Result<Vec<crate::types::PodStatusReport>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::ListPods {
+                namespace_id,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
     }
 }
 
@@ -180,8 +333,9 @@ impl Shell {
                 ShellCommand::CreateNamespace {
                     namespace_id,
                     network,
+                    response,
                 } => {
-                    let effects = self.orchestrator.create_namespace(
+                    let (result, effects) = self.orchestrator.create_namespace(
                         CreateNamespaceInfo {
                             namespace_id,
                             network,
@@ -189,10 +343,79 @@ impl Shell {
                         now,
                     );
                     self.execute_effects(effects).await;
+                    let _ = response.send(result);
                 }
-                ShellCommand::DestroyNamespace { namespace_id } => {
-                    let effects = self.orchestrator.destroy_namespace(&namespace_id);
+                ShellCommand::DestroyNamespace {
+                    namespace_id,
+                    response,
+                } => {
+                    let (result, effects) = self.orchestrator.destroy_namespace(&namespace_id);
                     self.execute_effects(effects).await;
+                    let _ = response.send(result);
+                }
+                ShellCommand::UpdateNamespace {
+                    namespace_id,
+                    spec,
+                    response,
+                } => {
+                    let (result, effects) = self.orchestrator.update_namespace(&namespace_id, spec, now);
+                    self.execute_effects(effects).await;
+                    let _ = response.send(result);
+                }
+                ShellCommand::GetNamespaceStatus {
+                    namespace_id,
+                    response,
+                } => {
+                    let result = self.orchestrator.get_namespace_status(&namespace_id);
+                    let _ = response.send(result);
+                }
+                ShellCommand::ListNamespaces { response } => {
+                    let result = self.orchestrator.list_namespaces();
+                    let _ = response.send(result);
+                }
+                ShellCommand::ConnectNetwork {
+                    namespace_id,
+                    client_public_key,
+                    response,
+                } => {
+                    let (result, effects) = self.orchestrator.connect_network(
+                        &namespace_id,
+                        client_public_key,
+                        now,
+                    );
+                    self.execute_effects(effects).await;
+                    let _ = response.send(result);
+                }
+                ShellCommand::DisconnectNetwork {
+                    namespace_id,
+                    client_public_key,
+                    response,
+                } => {
+                    let (result, effects) = self.orchestrator.disconnect_network(
+                        &namespace_id,
+                        client_public_key,
+                        now,
+                    );
+                    self.execute_effects(effects).await;
+                    let _ = response.send(result);
+                }
+                ShellCommand::ListWorkers { response } => {
+                    let result = self.orchestrator.list_workers();
+                    let _ = response.send(result);
+                }
+                ShellCommand::GetWorker {
+                    worker_id,
+                    response,
+                } => {
+                    let result = self.orchestrator.get_worker(worker_id);
+                    let _ = response.send(result);
+                }
+                ShellCommand::ListPods {
+                    namespace_id,
+                    response,
+                } => {
+                    let result = self.orchestrator.list_pods(&namespace_id);
+                    let _ = response.send(result);
                 }
             },
             ShellEvent::NamespaceEvent {
