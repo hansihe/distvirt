@@ -161,7 +161,7 @@ fn test_worker_disconnect_clears_placements() {
 
     // Verify there's an artifact and placement exists for w1
     assert!(
-        h.workload_state("ns", "web").suspended_artifact.is_some(),
+        h.workload_state("ns", "web").artifact_port.is_some(),
         "expected Suspended state"
     );
     // placement_table not accessible in new harness — skip direct check

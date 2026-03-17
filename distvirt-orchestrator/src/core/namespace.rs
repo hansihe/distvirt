@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::adapter::artifact::{ArtifactAction, ArtifactAdapter};
 use crate::adapter::endpoint_demand::EndpointDemandAdapter;
 use crate::adapter::dns_registry::{DnsRegistryAction, DnsRegistryAdapter};
 use crate::adapter::endpoint::{EndpointAction, EndpointAdapter};
@@ -21,8 +22,8 @@ use crate::core::ClientCommand;
 use distvirt_sm_router::trace::PanicTracer;
 
 use crate::sm::{
-    AdminCmd, DRouter, DNS_REGISTRY, ENDPOINT, LeaseInfo, PodId, PodStatus, Router,
-    SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WorkerId,
+    AdminCmd, DRouter, DNS_REGISTRY, ENDPOINT, LeaseInfo, PodId, PodStatus,
+    Router, SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WorkerId,
 };
 use crate::types::{NamespaceId, NamespaceSpec};
 
@@ -44,6 +45,7 @@ pub(crate) struct Adapters {
     endpoint_demand: EndpointDemandAdapter,
     pub(crate) endpoint: EndpointAdapter,
     pub(crate) dns_registry: DnsRegistryAdapter,
+    artifact: ArtifactAdapter,
 }
 
 // =============================================================================
@@ -96,6 +98,7 @@ impl NamespaceCore {
                 endpoint_demand: EndpointDemandAdapter::new(),
                 endpoint: EndpointAdapter::new(ENDPOINT),
                 dns_registry: DnsRegistryAdapter::new(DNS_REGISTRY),
+                artifact: ArtifactAdapter::new(),
             },
             leases: HashMap::new(),
             worker_pod_edges: HashMap::new(),
@@ -126,6 +129,29 @@ impl NamespaceCore {
                 break;
             }
             self.router.propagate();
+        }
+
+        // Phase 5: Drain deduped artifact actions and emit scheduler messages.
+        // Also cleans up orphaned ports.
+        for action in self.adapters.artifact.finalize(&mut self.router) {
+            match action {
+                ArtifactAction::Referenced { port_id } => {
+                    effects.scheduler_messages.push(
+                        InternalSchedulerMessage::ArtifactReferenced {
+                            namespace_id: self.namespace_id.clone(),
+                            artifact_port_id: port_id,
+                        },
+                    );
+                }
+                ArtifactAction::Released { port_id } => {
+                    effects.scheduler_messages.push(
+                        InternalSchedulerMessage::ArtifactReleased {
+                            namespace_id: self.namespace_id.clone(),
+                            artifact_port_id: port_id,
+                        },
+                    );
+                }
+            }
         }
 
         effects
@@ -165,6 +191,9 @@ impl NamespaceCore {
                     }
                     InternalWorkerEvent::PodSuspended { pod_id, artifact_id } => {
                         if self.router.get_pod(&pod_id).is_some() {
+                            // Create artifact port so the workload can reference it.
+                            self.router.create_artifact(artifact_id);
+                            self.adapters.artifact.register_pending(artifact_id);
                             self.router.send_notify_pod_suspended(
                                 worker_id,
                                 pod_id,
@@ -233,6 +262,9 @@ impl NamespaceCore {
             }
             InternalNamespaceEvent::ClientCommand(cmd) => {
                 self.handle_client_command(cmd);
+            }
+            InternalNamespaceEvent::ArtifactInvalidated { artifact_port_id } => {
+                self.router.destroy_artifact(artifact_port_id);
             }
         }
     }
@@ -320,16 +352,17 @@ impl NamespaceCore {
     }
 
     /// Phase 3: Reconcile all adapters. Pure/sync — no I/O.
-    /// Returns `(actions, mutated_router)` — the flag is `true` when any
-    /// adapter wrote back into the router and a new propagation is needed.
+    /// Returns `(actions, mutated_router)`.
+    /// `mutated_router` is `true` when any adapter wrote back into the router.
     fn reconcile(&mut self) -> (ReconcileActions, bool) {
         let (timer_actions, timer_mut) = self.adapters.timer.reconcile(&mut self.router);
         let (schedule_deltas, sched_mut) = self.adapters.schedule_request.reconcile(&mut self.router);
         let (pod_actions, pod_mut) = self.adapters.pod_assignment.reconcile(&mut self.router);
         let (endpoint_actions, ep_mut) = self.adapters.endpoint.reconcile(&mut self.router);
         let (dns_registry_actions, dns_mut) = self.adapters.dns_registry.reconcile(&mut self.router);
+        let artifact_mut = self.adapters.artifact.reconcile(&mut self.router);
 
-        let mutated = timer_mut || sched_mut || pod_mut || ep_mut || dns_mut;
+        let mutated = timer_mut || sched_mut || pod_mut || ep_mut || dns_mut || artifact_mut;
 
         (ReconcileActions {
             timer_actions,

@@ -1,6 +1,6 @@
 use distvirt_sm_router::IncrementalAggregator;
 
-use crate::sm::{ArtifactId, DRouter, PodId, PodScheduleRequest, WorkerPortInput};
+use crate::sm::{ArtifactPortId, DRouter, PodId, PodScheduleRequest, WorkerPortInput};
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +19,7 @@ pub(crate) enum PodAssignmentAction {
     Resume {
         worker_id: crate::sm::WorkerId,
         pod_id: crate::sm::PodId,
-        artifact_id: crate::sm::ArtifactId,
+        artifact_id: crate::sm::ArtifactPortId,
         /// Full workload spec for building the protocol ResumePod command.
         /// Populated by NamespaceCore after the adapter produces the action.
         spec: Option<crate::sm::WorkloadSpec>,
@@ -45,7 +45,7 @@ pub enum PodAssignmentDelta {
     },
     Resume {
         pod_id: PodId,
-        artifact_id: ArtifactId,
+        artifact_id: ArtifactPortId,
         /// Full workload spec from the signal graph.
         spec: Option<crate::sm::WorkloadSpec>,
     },

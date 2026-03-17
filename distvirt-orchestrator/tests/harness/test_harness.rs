@@ -165,7 +165,7 @@ impl TestHarness {
             WlStatus::RetryBackoff
         } else if wl.awaiting_suspend {
             WlStatus::Suspending
-        } else if wl.suspended_artifact.is_some() && wl.pod_id.is_none() {
+        } else if wl.artifact_port.is_some() && wl.pod_id.is_none() {
             WlStatus::Suspended
         } else if wl.pod_running {
             WlStatus::Running

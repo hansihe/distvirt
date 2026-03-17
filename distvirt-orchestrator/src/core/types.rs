@@ -12,7 +12,7 @@ use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::{
     ArtifactPlacementEvent, ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent,
 };
-use crate::sm::{ArtifactId, PodId, ServiceId, WorkerId};
+use crate::sm::{ArtifactId, ArtifactPortId, PodId, ServiceId, WorkerId};
 use crate::types::NamespaceId;
 
 // =============================================================================
@@ -36,6 +36,11 @@ pub enum NamespaceCoreEvent {
         worker_id: GlobalWorkerId,
     },
     ClientCommand(ClientCommand),
+    /// Scheduler determined this artifact is unreachable (all workers with
+    /// access disconnected). Destroy the artifact port so workloads learn.
+    ArtifactInvalidated {
+        artifact_port_id: ArtifactPortId,
+    },
 }
 
 /// Output effects from NamespaceCore after processing an event.
@@ -68,6 +73,14 @@ pub enum SchedulerMessage {
         namespace_id: NamespaceId,
         pod_id: PodId,
     },
+    ArtifactReferenced {
+        namespace_id: NamespaceId,
+        proto_artifact_id: distvirt_worker_protocol::ArtifactId,
+    },
+    ArtifactReleased {
+        namespace_id: NamespaceId,
+        proto_artifact_id: distvirt_worker_protocol::ArtifactId,
+    },
 }
 
 // =============================================================================
@@ -98,6 +111,10 @@ pub(crate) enum InternalNamespaceEvent {
         worker_id: WorkerId,
     },
     ClientCommand(ClientCommand),
+    /// Scheduler broadcast: this artifact is unreachable, destroy its port.
+    ArtifactInvalidated {
+        artifact_port_id: ArtifactPortId,
+    },
 }
 
 /// Worker-reported events using router-internal IDs.
@@ -114,7 +131,7 @@ pub(crate) enum InternalWorkerEvent {
     },
     PodSuspended {
         pod_id: PodId,
-        artifact_id: ArtifactId,
+        artifact_id: ArtifactPortId,
     },
     PodSuspendFailed {
         pod_id: PodId,
@@ -153,11 +170,19 @@ pub(crate) enum InternalSchedulerMessage {
     RequestLease {
         namespace_id: NamespaceId,
         pod_id: PodId,
-        resume_artifact: Option<ArtifactId>,
+        resume_artifact: Option<ArtifactPortId>,
     },
     DropRequest {
         namespace_id: NamespaceId,
         pod_id: PodId,
+    },
+    ArtifactReferenced {
+        namespace_id: NamespaceId,
+        artifact_port_id: ArtifactPortId,
+    },
+    ArtifactReleased {
+        namespace_id: NamespaceId,
+        artifact_port_id: ArtifactPortId,
     },
 }
 
@@ -181,6 +206,16 @@ pub enum SchedulerCoreInput {
     ArtifactEvent {
         worker_id: GlobalWorkerId,
         event: ArtifactPlacementEvent,
+    },
+    /// A workload has set an edge to an artifact port (wants to keep it alive).
+    ArtifactReferenced {
+        proto_artifact_id: distvirt_worker_protocol::ArtifactId,
+        namespace_id: NamespaceId,
+    },
+    /// A workload has removed its edge to an artifact port (no longer needs it).
+    ArtifactReleased {
+        proto_artifact_id: distvirt_worker_protocol::ArtifactId,
+        namespace_id: NamespaceId,
     },
 }
 

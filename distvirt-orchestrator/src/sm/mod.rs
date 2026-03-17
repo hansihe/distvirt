@@ -1,5 +1,6 @@
 use distvirt_sm_router::{Aggregator, IncrementalAggregator, ListAggregator, SmHandler};
 
+use crate::adapter::artifact::ArtifactRefIncrementalAggregator;
 use crate::adapter::dns_registry::{
     ServiceDnsIncrementalAggregator, WorkloadDnsIncrementalAggregator,
 };
@@ -19,7 +20,15 @@ pub use pod::*;
 pub use service::*;
 pub use workload::*;
 
-pub use distvirt_worker_protocol::{ServiceId, WorkerId, ArtifactId};
+pub use distvirt_worker_protocol::{ServiceId, WorkerId};
+
+// Re-export protocol ArtifactId for boundary layer use.
+pub use distvirt_worker_protocol::ArtifactId;
+
+/// Router-internal artifact port ID. Matches the global artifact ID
+/// allocated by the orchestrator. All namespaces share the same ID space.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct ArtifactPortId(pub u64);
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct WorkloadId(pub u64);
@@ -41,7 +50,7 @@ pub enum PodStatus {
     Suspending,
     /// Terminal: pod successfully suspended, artifact available for resume.
     Suspended {
-        artifact_id: ArtifactId,
+        artifact_id: ArtifactPortId,
     },
     /// Terminal: pod exited gracefully (exit code 0). Not counted as failure.
     Finished,
@@ -134,7 +143,7 @@ pub enum ScheduleRequestDelta {
 /// Schedule request emitted by pod to the schedule-request port.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct PodScheduleRequest {
-    pub resume_artifact: Option<ArtifactId>,
+    pub resume_artifact: Option<ArtifactPortId>,
     /// Set to true when the pod is in Suspending state and needs a SuspendPod command.
     pub suspend: bool,
     /// Full workload spec for building protocol commands (LaunchPod/ResumePod).
@@ -269,6 +278,9 @@ pub enum SvcStatus {
 pub enum WorkloadTimerKey {
     #[default]
     RetryBackoff,
+    /// Safety-net timer: if the artifact port doesn't confirm validity
+    /// within ~100ms, treat the artifact as lost.
+    ArtifactConfirm,
 }
 
 /// Backend need level reported by workers to services.
@@ -466,6 +478,20 @@ impl<Id: Clone, V: Clone> Aggregator for IdListAggregator<Id, V> {
     }
 }
 
+/// Aggregates artifact validity for a workload. At most one artifact port
+/// signals validity back. None = no artifact, Some(true) = valid/reachable.
+#[derive(Default)]
+pub struct ArtifactValidAggregator;
+
+impl Aggregator for ArtifactValidAggregator {
+    type Input = (ArtifactPortId, bool);
+    type Output = Option<bool>;
+
+    fn aggregate(&self, inputs: &[(ArtifactPortId, bool)]) -> Option<bool> {
+        inputs.first().map(|(_, v)| *v)
+    }
+}
+
 /// Aggregates the service spec, preserving the management port ID.
 /// Expects at most one spec source.
 #[derive(Default)]
@@ -502,6 +528,7 @@ distvirt_sm_router::router! {
         ScheduleLease(auto),
         Endpoint(EndpointId),
         DnsRegistry(DnsRegistryId),
+        Artifact(ArtifactPortId),
     }
     signals {
         Service::Demand(bool),
@@ -518,6 +545,7 @@ distvirt_sm_router::router! {
         Workload::Status(WlStatus),
         Workload::ConsecutiveFailures(u32),
         Workload::SpecStale(bool),
+        Workload::ArtifactRef(bool),
         Pod::Status(PodStatus),
         Pod::AssignedWorker(Option<WorkerId>),
         Pod::WantedTimers(Vec<PodTimerRequest>),
@@ -527,6 +555,7 @@ distvirt_sm_router::router! {
         Management::WlSpec(WorkloadSpec),
         Management::SvcSpec(ServiceSpec),
         ScheduleLease::Lease(LeaseInfo),
+        Artifact::Valid(bool),
     }
     edges {
         ServiceDemand: Service -> Workload,
@@ -546,12 +575,14 @@ distvirt_sm_router::router! {
         ServiceEndpoints: Service -> Endpoint,
         ServiceDns: Service -> DnsRegistry,
         WorkloadDns: Workload -> DnsRegistry,
+        WorkloadArtifactRef: Workload -> Artifact,
+        ArtifactValidity: Artifact -> Workload,
     }
     events {
         AdminCommand(AdminCmd): Management -> Workload,
         ActivateService(bool): Management -> Service,
         NotifyPodStatus(PodStatus): Worker -> Pod,
-        NotifyPodSuspended(ArtifactId): Worker -> Pod,
+        NotifyPodSuspended(ArtifactPortId): Worker -> Pod,
         WorkloadTimerFired(WorkloadTimerKey): Timer -> Workload,
         ServiceTimerFired(ServiceTimerKey): Timer -> Service,
         PodTimerFired(PodTimerKey): Timer -> Pod,
@@ -636,6 +667,14 @@ distvirt_sm_router::router! {
         DnsRegistry::WorkloadDnsInput {
             sources: [(WorkloadDns, Workload::DnsEntry)],
             incremental_aggregator: WorkloadDnsIncrementalAggregator,
+        },
+        Workload::ArtifactInput {
+            sources: [(ArtifactValidity, Artifact::Valid)],
+            aggregator: ArtifactValidAggregator,
+        },
+        Artifact::RefsInput {
+            sources: [(WorkloadArtifactRef, Workload::ArtifactRef)],
+            incremental_aggregator: ArtifactRefIncrementalAggregator,
         },
     }
 }

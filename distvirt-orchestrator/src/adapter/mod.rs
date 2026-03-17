@@ -1,3 +1,4 @@
+pub(crate) mod artifact;
 pub(crate) mod endpoint_demand;
 pub(crate) mod dns_registry;
 pub(crate) mod endpoint;

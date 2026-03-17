@@ -111,7 +111,7 @@ fn test_basic_preemption() {
     let wl_a_state = h.workload_state("ns", "wl-a");
     assert!(
         wl_a_state.awaiting_suspend
-            || wl_a_state.suspended_artifact.is_some()
+            || wl_a_state.artifact_port.is_some()
             || (!wl_a_state.has_demand && !wl_a_state.pod_running),
         "wl-a should be deactivating/dormant after preemption, got {:?}",
         wl_a_state

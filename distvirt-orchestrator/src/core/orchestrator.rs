@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use super::namespace_boundary::NamespaceWithBoundary;
-use super::scheduler::SchedulerCore;
+use super::scheduler::{SchedulerCore, SchedulerEffects};
 use super::timer_wheel::TimerWheel;
 use super::types::{
     CreateNamespaceInfo, DirectWorkerCommand, NamespaceCoreEvent, OrchestratorEffects,
@@ -25,7 +25,7 @@ use super::types::{
 use super::worker_state::WorkerStateCore;
 use crate::adapter::timer::TimerConfig;
 use crate::core::{GlobalWorkerId, SchedulerDecision};
-use crate::sm::WorkerInfo;
+use crate::sm::{ArtifactPortId, WorkerInfo};
 use crate::types::NamespaceId;
 
 pub struct OrchestratorCore {
@@ -90,8 +90,8 @@ impl OrchestratorCore {
                 self.route_worker_state_effects(ws_effects, &mut effects, now);
             }
             OrchestratorInput::SchedulerEvent(input) => {
-                let decisions = self.scheduler.process(input);
-                self.route_scheduler_decisions(decisions, &mut effects, now);
+                let sched_effects = self.scheduler.process(input);
+                self.route_scheduler_effects(sched_effects, &mut effects, now);
             }
             OrchestratorInput::CreateNamespace { namespace_id } => {
                 if !self.namespaces.contains_key(&namespace_id) {
@@ -406,10 +406,24 @@ impl OrchestratorCore {
                     namespace_id,
                     pod_id,
                 },
+                SchedulerMessage::ArtifactReferenced {
+                    namespace_id,
+                    proto_artifact_id,
+                } => SchedulerCoreInput::ArtifactReferenced {
+                    proto_artifact_id,
+                    namespace_id,
+                },
+                SchedulerMessage::ArtifactReleased {
+                    namespace_id,
+                    proto_artifact_id,
+                } => SchedulerCoreInput::ArtifactReleased {
+                    proto_artifact_id,
+                    namespace_id,
+                },
             };
 
-            let decisions = self.scheduler.process(scheduler_input);
-            self.route_scheduler_decisions(decisions, effects, now);
+            let sched_effects = self.scheduler.process(scheduler_input);
+            self.route_scheduler_effects(sched_effects, effects, now);
         }
     }
 
@@ -420,8 +434,8 @@ impl OrchestratorCore {
         now: Duration,
     ) {
         for update in ws_effects.scheduler_updates {
-            let decisions = self.scheduler.process(update);
-            self.route_scheduler_decisions(decisions, effects, now);
+            let sched_effects = self.scheduler.process(update);
+            self.route_scheduler_effects(sched_effects, effects, now);
         }
 
         if let Some(cmd) = ws_effects.worker_registry_broadcast {
@@ -429,20 +443,20 @@ impl OrchestratorCore {
         }
     }
 
-    fn route_scheduler_decisions(
+    fn route_scheduler_effects(
         &mut self,
-        decisions: Vec<SchedulerDecision>,
+        sched_effects: SchedulerEffects,
         effects: &mut OrchestratorEffects,
         now: Duration,
     ) {
-        for decision in decisions {
+        // Route scheduling decisions to namespaces.
+        for decision in sched_effects.decisions {
             let target_ns_id = match &decision {
                 SchedulerDecision::Grant {
                     namespace_id,
                     worker_id,
                     ..
                 } => {
-                    // Track pod count so the scheduler can tiebreak by load.
                     let ws_effects =
                         self.worker_state
                             .process(WorkerStateCoreEvent::PodCountChange {
@@ -483,6 +497,30 @@ impl OrchestratorCore {
                     "scheduler decisions should not produce new scheduler messages"
                 );
             }
+        }
+
+        // Broadcast artifact invalidations to ALL namespaces.
+        for artifact_port_id in sched_effects.artifact_invalidations {
+            let ns_ids: Vec<_> = self.namespaces.keys().cloned().collect();
+            for ns_id in ns_ids {
+                if let Some(ns) = self.namespaces.get_mut(&ns_id) {
+                    let ns_effects = ns.process_event(NamespaceCoreEvent::ArtifactInvalidated {
+                        artifact_port_id: ArtifactPortId(artifact_port_id),
+                    });
+                    self.route_namespace_effects(&ns_id, ns_effects, effects, now);
+                }
+            }
+        }
+
+        // Route DeleteArtifact commands to workers.
+        for cmd in sched_effects.delete_commands {
+            effects.worker_commands.push((
+                cmd.worker_id,
+                distvirt_worker_protocol::WorkerCommand::DeleteArtifact {
+                    artifact_id: cmd.artifact_id,
+                    pool_id: cmd.pool_id,
+                },
+            ));
         }
     }
 

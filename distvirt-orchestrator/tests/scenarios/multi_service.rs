@@ -409,7 +409,7 @@ fn test_remove_only_active_service_drops_demand() {
     let state = h.workload_state("ns", "shared");
     assert!(
         state.awaiting_suspend
-            || state.suspended_artifact.is_some()
+            || state.artifact_port.is_some()
             || (!state.has_demand && !state.pod_running),
         "workload should begin deactivation immediately after service removal, got {:?}",
         state,

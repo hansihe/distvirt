@@ -42,14 +42,17 @@ pub struct WorkloadSm {
     /// Whether to suspend the pod instead of destroying it when demand drops.
     /// Updated from WorkloadSpec on each spec delivery.
     pub suspend_on_idle: bool,
-    /// Artifact from a successfully suspended pod. Used to resume on next
-    /// demand cycle instead of cold-booting.
-    pub suspended_artifact: Option<ArtifactId>,
+    /// Artifact port this workload references (if suspended with artifact).
+    /// Set when a pod successfully suspends. The workload sets an edge to
+    /// this port; the port signals back validity once the scheduler confirms.
+    pub artifact_port: Option<ArtifactPortId>,
+    /// Whether the artifact port has confirmed validity (return edge received).
+    pub artifact_confirmed: bool,
+    /// Generation counter for artifact confirmation timer.
+    pub artifact_confirm_gen: u64,
     /// True while the pod is in the process of suspending. Prevents reconcile
     /// from touching the pod until it reaches a terminal state.
     pub awaiting_suspend: bool,
-    /// Counter for generating unique artifact IDs.
-    pub artifact_counter: u64,
 
     /// The image from the last delivered spec. Used to detect pod-affecting
     /// spec changes (only image changes bump spec_version and trigger restarts;
@@ -83,18 +86,23 @@ impl WorkloadSm {
             backoff_generation: 0,
             pod_worker_id: None,
             suspend_on_idle: false,
-            suspended_artifact: None,
+            artifact_port: None,
+            artifact_confirmed: false,
+            artifact_confirm_gen: 0,
             awaiting_suspend: false,
-            artifact_counter: 0,
             current_image: None,
             pod_ip: std::net::Ipv4Addr::UNSPECIFIED,
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn next_artifact_id(&mut self) -> ArtifactId {
-        self.artifact_counter += 1;
-        ArtifactId(self.artifact_counter.to_string())
+    /// Drop the artifact port reference. Called on spec change, scavenge, etc.
+    fn clear_artifact_ref(&mut self, ctx: &mut impl WorkloadCtx) {
+        if self.artifact_port.is_some() {
+            self.artifact_port = None;
+            self.artifact_confirmed = false;
+            ctx.set_workload_artifact_ref_edges(vec![]);
+            ctx.set_artifact_ref(false);
+        }
     }
 }
 
@@ -159,7 +167,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
 
                         // Discard any suspended artifact — it was produced
                         // from the old image and cannot be resumed.
-                        self.suspended_artifact = None;
+                        self.clear_artifact_ref(ctx);
 
                         // If pod is already Running, restart immediately.
                         if self.pod_running {
@@ -175,7 +183,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                             self.destroy_current_pod(ctx);
                         }
                         // Discard stale artifact — cold boot next time.
-                        self.suspended_artifact = None;
+                        self.clear_artifact_ref(ctx);
                     }
                 }
 
@@ -223,7 +231,12 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     // hasn't changed since the pod was launched; otherwise
                     // the artifact is stale and must be discarded.
                     if self.spec_version == self.launched_with_spec_version {
-                        self.suspended_artifact = Some(artifact_id);
+                        let port_id = artifact_id;
+                        self.artifact_port = Some(port_id);
+                        self.artifact_confirmed = false;
+                        self.artifact_confirm_gen += 1;
+                        ctx.set_workload_artifact_ref_edges(vec![port_id]);
+                        ctx.set_artifact_ref(true);
                     }
                     // pod_running already set to false at top of handler
                     // (Suspended is not Running).
@@ -278,7 +291,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.committed_to_boot = false;
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
-                        self.suspended_artifact = None;
+                        self.clear_artifact_ref(ctx);
                         self.destroy_current_pod(ctx);
                         self.reconcile(ctx);
                     }
@@ -295,10 +308,40 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 }
                 self.update_timer_signal(ctx);
             }
+            WorkloadInput::ArtifactInput(valid) => {
+                match valid {
+                    Some(true) => {
+                        self.artifact_confirmed = true;
+                        // May unblock pod creation if reconcile was waiting
+                        // for artifact confirmation.
+                        self.reconcile(ctx);
+                    }
+                    Some(false) | None => {
+                        if self.artifact_port.is_some() {
+                            self.artifact_port = None;
+                            self.artifact_confirmed = false;
+                            ctx.set_workload_artifact_ref_edges(vec![]);
+                            ctx.set_artifact_ref(false);
+                            self.reconcile(ctx);
+                        }
+                    }
+                }
+                self.update_timer_signal(ctx);
+                self.update_status_signals(ctx);
+            }
             WorkloadInput::WorkloadTimerFired(key) => match key {
                 WorkloadTimerKey::RetryBackoff => {
                     if self.in_backoff {
                         self.in_backoff = false;
+                        self.reconcile(ctx);
+                        self.update_timer_signal(ctx);
+                    }
+                }
+                WorkloadTimerKey::ArtifactConfirm => {
+                    if self.artifact_port.is_some() && !self.artifact_confirmed {
+                        self.artifact_port = None;
+                        ctx.set_workload_artifact_ref_edges(vec![]);
+                        ctx.set_artifact_ref(false);
                         self.reconcile(ctx);
                         self.update_timer_signal(ctx);
                     }
@@ -320,6 +363,11 @@ impl WorkloadSm {
     pub(crate) fn on_pod_running(&mut self, ctx: &mut impl WorkloadCtx) {
         self.committed_to_boot = false;
         self.consecutive_failures = 0;
+
+        // Resume confirmed successful — drop artifact reference.
+        // The physical artifact persists (managed by scheduler/adapter);
+        // we just release our claim on it.
+        self.clear_artifact_ref(ctx);
 
         // 1. Spec changed since we launched this pod → restart.
         if self.launched_with_spec_version != self.spec_version {
@@ -353,6 +401,7 @@ impl WorkloadSm {
         // pod_running is already false — set by PodStatusInput handler at
         // the top (Finished is not Running).
         self.awaiting_suspend = false;
+        self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
 
         // Remove ownership edge — pod is terminal (Finished),
@@ -378,6 +427,7 @@ impl WorkloadSm {
         // pod_running is already false — set by PodStatusInput handler at
         // the top (Failed is not Running).
         self.awaiting_suspend = false;
+        self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
 
         // Remove ownership edge — pod is already terminal (Failed),
@@ -425,8 +475,9 @@ impl WorkloadSm {
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
 
-        // Discard any suspended artifact — it was on the lost worker.
-        self.suspended_artifact = None;
+        // Do NOT clear artifact_port — the artifact may still be reachable
+        // via a shared pool. The scheduler will broadcast ArtifactInvalidated
+        // if unreachable.
 
         // Do NOT increment consecutive_failures — this is infrastructure, not app failure.
         // Do NOT enter in_backoff — allow immediate rescheduling.
@@ -442,7 +493,7 @@ impl WorkloadSm {
 
     /// Abandon the current pod by removing the ownership edge.
     /// The pod will drive itself to a terminal state and self-destruct.
-    /// Any suspended artifact is discarded (this is a hard kill).
+    /// Any artifact reference is cleared (this is a hard kill).
     pub(crate) fn destroy_current_pod(&mut self, ctx: &mut impl WorkloadCtx) {
         if self.pod_id.is_some() {
             ctx.set_pod_ownership_edges(vec![]);
@@ -453,20 +504,27 @@ impl WorkloadSm {
         // cleared by PodStatusInput([]) and PodWorkerInput([]) when the
         // abandoned pod removes its reverse edges and self-destructs.
         self.awaiting_suspend = false;
-        self.suspended_artifact = None;
+        self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
     }
 
     pub(crate) fn update_timer_signal(&self, ctx: &mut impl WorkloadCtx) {
+        let mut timers = vec![];
         if self.in_backoff {
-            ctx.set_wanted_timers(vec![TimerRequest {
+            timers.push(TimerRequest {
                 key: WorkloadTimerKey::RetryBackoff,
                 generation: self.backoff_generation,
                 duration: std::time::Duration::from_millis(500),
-            }]);
-        } else {
-            ctx.set_wanted_timers(vec![]);
+            });
         }
+        if self.artifact_port.is_some() && !self.artifact_confirmed {
+            timers.push(TimerRequest {
+                key: WorkloadTimerKey::ArtifactConfirm,
+                generation: self.artifact_confirm_gen,
+                duration: std::time::Duration::from_millis(100),
+            });
+        }
+        ctx.set_wanted_timers(timers);
     }
 
     pub(crate) fn update_status_signals(&self, ctx: &mut impl WorkloadCtx) {
@@ -478,7 +536,7 @@ impl WorkloadSm {
             WlStatus::RetryBackoff
         } else if self.awaiting_suspend {
             WlStatus::Suspending
-        } else if self.suspended_artifact.is_some() && self.pod_id.is_none() {
+        } else if self.artifact_port.is_some() && self.pod_id.is_none() {
             WlStatus::Suspended
         } else if self.pod_running {
             WlStatus::Running
@@ -510,9 +568,17 @@ impl WorkloadSm {
         self.wants_pod = want_pod;
 
         if want_pod && self.pod_id.is_none() {
-            // Create new pod — resume from artifact if available.
-            let pod = if let Some(artifact_id) = self.suspended_artifact.take() {
-                PodSm::new_from_artifact(artifact_id)
+            if self.artifact_port.is_some() && !self.artifact_confirmed {
+                // Artifact port referenced but not yet confirmed — wait for
+                // confirmation or timeout before creating a pod.
+                return;
+            }
+            // Create new pod — resume from confirmed artifact if available.
+            // Keep the artifact reference until the pod reaches Running
+            // (on_pod_running). This allows retry from the same artifact
+            // if the resume fails.
+            let pod = if let Some(port_id) = self.artifact_port {
+                PodSm::new_from_artifact(port_id)
             } else {
                 PodSm::new()
             };

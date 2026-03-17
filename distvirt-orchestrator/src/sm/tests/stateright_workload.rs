@@ -85,13 +85,19 @@ struct WlNewModelState {
     /// Whether spec has been delivered to the SM.
     spec_present: bool,
     /// Whether a retry backoff timer is pending in the environment.
-    timer_pending: bool,
-    /// Generation of the pending timer (for matching timer fires).
-    timer_generation: u64,
+    backoff_timer_pending: bool,
+    /// Whether an artifact confirm timer is pending in the environment.
+    artifact_timer_pending: bool,
     /// Whether self-destruct was triggered (spec removed).
     self_destructed: bool,
     /// Whether consecutive_failures ever reached max_retries.
     was_ever_max_retries: bool,
+    /// Whether an artifact port exists in the environment (for confirmation).
+    artifact_port_exists: bool,
+    /// Whether the artifact has been confirmed by the environment.
+    artifact_env_confirmed: bool,
+    /// Whether a pod was ever created with resume_artifact (for reachability).
+    ever_resumed: bool,
 }
 
 // ============================================================================
@@ -122,8 +128,14 @@ enum WlNewAction {
     PodSuspended,
     /// Pod gone — delivers PodStatusInput([]) to exercise safety-net cleanup.
     PodGone,
-    /// Retry backoff timer fires (delivers WorkloadTimerFired).
+    /// Retry backoff timer fires (delivers WorkloadTimerFired(RetryBackoff)).
     TimerFired,
+    /// Artifact confirm timer fires (delivers WorkloadTimerFired(ArtifactConfirm)).
+    ArtifactTimeout,
+    /// Artifact confirmed by environment (delivers ArtifactInput(Some(true))).
+    ArtifactConfirm,
+    /// Artifact invalidated by scheduler (delivers ArtifactInput(None)).
+    ArtifactLost,
     /// Admin restart command.
     AdminRestart,
     /// Admin scavenge command.
@@ -191,11 +203,27 @@ fn apply_input(state: &WlNewModelState, input: WorkloadInput) -> WlNewModelState
 
     // Check timer signal to update pending timer state.
     if let Some(ref timers) = effects.wanted_timers {
-        if let Some(req) = timers.first() {
-            next.timer_pending = true;
-            next.timer_generation = req.generation;
-        } else {
-            next.timer_pending = false;
+        next.backoff_timer_pending = timers
+            .iter()
+            .any(|t| t.key == WorkloadTimerKey::RetryBackoff);
+        next.artifact_timer_pending = timers
+            .iter()
+            .any(|t| t.key == WorkloadTimerKey::ArtifactConfirm);
+    }
+
+    // Track artifact port existence from SM state.
+    next.artifact_port_exists = next.sm.artifact_port.is_some();
+    // If SM cleared artifact_port, clear env confirmed too.
+    if !next.artifact_port_exists {
+        next.artifact_env_confirmed = false;
+    }
+
+    // Track if a pod was ever created from an artifact (resume).
+    for create in &effects.pending_creates {
+        if let PendingCreate::Pod(_pod_id, pod_sm) = create {
+            if pod_sm.resume_artifact.is_some() {
+                next.ever_resumed = true;
+            }
         }
     }
 
@@ -239,10 +267,13 @@ impl Model for WlNewModel {
             pod_env: PodEnvState::None,
             demand_count: 0,
             spec_present: false,
-            timer_pending: false,
-            timer_generation: 0,
+            backoff_timer_pending: false,
+            artifact_timer_pending: false,
             self_destructed: false,
             was_ever_max_retries: false,
+            artifact_port_exists: false,
+            artifact_env_confirmed: false,
+            ever_resumed: false,
         }]
     }
 
@@ -269,10 +300,10 @@ impl Model for WlNewModel {
             if state.sm.has_demand
                 || state.sm.pod_id.is_some()
                 || state.sm.committed_to_boot
-                || state.sm.suspended_artifact.is_some()
+                || state.sm.artifact_port.is_some()
             {
                 // Explore image changes when the SM has something active or
-                // holds a suspended artifact. A spec change while an artifact
+                // holds an artifact reference. A spec change while an artifact
                 // exists should invalidate it.
                 actions.push(WlNewAction::ChangeImage);
             }
@@ -315,9 +346,25 @@ impl Model for WlNewModel {
             actions.push(WlNewAction::PodGone);
         }
 
-        // Timer fires.
-        if state.timer_pending {
+        // Backoff timer fires.
+        if state.backoff_timer_pending {
             actions.push(WlNewAction::TimerFired);
+        }
+
+        // Artifact confirm timer fires.
+        if state.artifact_timer_pending {
+            actions.push(WlNewAction::ArtifactTimeout);
+        }
+
+        // Artifact confirmation from environment.
+        if state.artifact_port_exists && !state.artifact_env_confirmed {
+            actions.push(WlNewAction::ArtifactConfirm);
+        }
+
+        // Artifact lost (scheduler broadcasts invalidation).
+        // Available any time an artifact port exists.
+        if state.artifact_port_exists {
+            actions.push(WlNewAction::ArtifactLost);
         }
 
         // Admin commands — available when there's something to act on.
@@ -399,12 +446,15 @@ impl Model for WlNewModel {
                 WorkloadInput::PodStatusInput(vec![PodStatus::Finished]),
             ),
             WlNewAction::PodSuspended => {
-                // Use a synthetic artifact ID based on SM's artifact counter.
-                let artifact_id = ArtifactId((state.sm.artifact_counter + 1).to_string());
-                apply_input(
+                // Use a synthetic artifact port ID.
+                let artifact_port_id = ArtifactPortId(state.sm.artifact_confirm_gen + 1);
+                let s = apply_input(
                     state,
-                    WorkloadInput::PodStatusInput(vec![PodStatus::Suspended { artifact_id }]),
-                )
+                    WorkloadInput::PodStatusInput(vec![PodStatus::Suspended {
+                        artifact_id: artifact_port_id,
+                    }]),
+                );
+                s
             }
             WlNewAction::PodGone => apply_input(state, WorkloadInput::PodStatusInput(vec![])),
             WlNewAction::TimerFired => {
@@ -413,7 +463,34 @@ impl Model for WlNewModel {
                     WorkloadInput::WorkloadTimerFired(WorkloadTimerKey::RetryBackoff),
                 );
                 // Timer consumed.
-                s.timer_pending = false;
+                s.backoff_timer_pending = false;
+                s
+            }
+            WlNewAction::ArtifactTimeout => {
+                let mut s = apply_input(
+                    state,
+                    WorkloadInput::WorkloadTimerFired(WorkloadTimerKey::ArtifactConfirm),
+                );
+                // Timer consumed.
+                s.artifact_timer_pending = false;
+                s
+            }
+            WlNewAction::ArtifactConfirm => {
+                let mut s = apply_input(
+                    state,
+                    WorkloadInput::ArtifactInput(Some(true)),
+                );
+                s.artifact_env_confirmed = s.sm.artifact_confirmed;
+                s
+            }
+            WlNewAction::ArtifactLost => {
+                // Scheduler says artifact is unreachable — deliver None.
+                let mut s = apply_input(
+                    state,
+                    WorkloadInput::ArtifactInput(None),
+                );
+                s.artifact_port_exists = s.sm.artifact_port.is_some();
+                s.artifact_env_confirmed = false;
                 s
             }
             WlNewAction::AdminRestart => {
@@ -467,13 +544,13 @@ impl Model for WlNewModel {
                     true
                 }
             }),
-            // Safety: if in_backoff, timer should be pending.
+            // Safety: if in_backoff, backoff timer should be pending.
             Property::<Self>::always("backoff has timer", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
                 if state.sm.in_backoff {
-                    state.timer_pending
+                    state.backoff_timer_pending
                 } else {
                     true
                 }
@@ -489,7 +566,7 @@ impl Model for WlNewModel {
                     true
                 }
             }),
-            // Safety: dormant state has no timer.
+            // Safety: dormant state has no backoff timer.
             Property::<Self>::always("dormant has no timer", |_model, state| {
                 if state.self_destructed {
                     return true;
@@ -499,7 +576,7 @@ impl Model for WlNewModel {
                     && state.sm.pod_id.is_none()
                     && !state.sm.in_backoff;
                 if is_dormant {
-                    !state.timer_pending
+                    !state.backoff_timer_pending
                 } else {
                     true
                 }
@@ -526,16 +603,15 @@ impl Model for WlNewModel {
                 },
             ),
             // Safety: wants_pod and no pod_id means something is wrong
-            // (reconcile should have created one, unless in_backoff or failed).
-            // Assumption: each action is a full handle() call which always
-            // ends with reconcile(), so the transient state where wants_pod
-            // is true but pod_id is None should never be observable here.
+            // (reconcile should have created one, unless in_backoff, failed,
+            // or waiting for artifact confirmation).
             Property::<Self>::always("wants_pod consistency", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
                 if state.sm.wants_pod && state.sm.pod_id.is_none() {
-                    false
+                    // Allowed if waiting for artifact confirmation.
+                    state.sm.artifact_port.is_some() && !state.sm.artifact_confirmed
                 } else {
                     true
                 }
@@ -548,29 +624,56 @@ impl Model for WlNewModel {
                     true
                 }
             }),
-            // Safety: no suspended artifact while a pod is active.
-            // If a pod exists (pod_id is Some), the suspended_artifact should
-            // have been consumed (taken) during pod creation, or discarded.
-            Property::<Self>::always("no artifact during active pod", |_model, state| {
+            // Safety: running pod has no artifact ref. The artifact reference
+            // is held during resume (pod Pending) but must be dropped once the
+            // pod reaches Running (resume confirmed successful).
+            Property::<Self>::always("running pod has no artifact ref", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
-                if state.sm.pod_id.is_some() {
-                    state.sm.suspended_artifact.is_none()
+                if state.sm.pod_running {
+                    state.sm.artifact_port.is_none()
                 } else {
                     true
                 }
             }),
-            // Safety: a suspended artifact must match the current spec version.
+            // Safety: artifact_confirmed implies artifact_port exists.
+            // Can't be confirmed without a reference.
+            Property::<Self>::always("confirmed implies artifact exists", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.sm.artifact_confirmed {
+                    state.sm.artifact_port.is_some()
+                } else {
+                    true
+                }
+            }),
+            // Safety: artifact confirm timer only when unconfirmed.
+            // The timer is a safety net for missing confirmation — once
+            // confirmed, the timer should be cleared.
+            Property::<Self>::always("artifact timer consistency", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.artifact_timer_pending {
+                    state.sm.artifact_port.is_some() && !state.sm.artifact_confirmed
+                } else {
+                    true
+                }
+            }),
+            // Safety: an artifact reference must match the current spec version.
             // If the image changed since the pod that produced the artifact was
             // launched, the artifact is stale and should have been discarded.
+            // This holds regardless of whether a pod exists (artifact can coexist
+            // with a resume pod in Pending state).
             Property::<Self>::always(
-                "suspended artifact matches current spec",
+                "artifact matches current spec",
                 |_model, state| {
                     if state.self_destructed {
                         return true;
                     }
-                    if state.sm.suspended_artifact.is_some() && state.sm.pod_id.is_none() {
+                    if state.sm.artifact_port.is_some() {
                         state.sm.spec_version == state.sm.launched_with_spec_version
                     } else {
                         true
@@ -586,8 +689,8 @@ impl Model for WlNewModel {
                 if !state.sm.suspend_on_idle {
                     // awaiting_suspend could briefly be true if we just toggled
                     // suspend_on_idle off — but destroy_current_pod clears it.
-                    // suspended_artifact is cleared on true→false transition.
-                    state.sm.suspended_artifact.is_none() && !state.sm.awaiting_suspend
+                    // artifact_port is cleared on true→false transition.
+                    state.sm.artifact_port.is_none() && !state.sm.awaiting_suspend
                 } else {
                     true
                 }
@@ -623,7 +726,12 @@ impl Model for WlNewModel {
         if self.enable_suspend {
             props.push(Property::<Self>::sometimes(
                 "can reach suspended",
-                |_model, state| state.sm.suspended_artifact.is_some(),
+                |_model, state| state.sm.artifact_port.is_some(),
+            ));
+            // Reachability: can resume from artifact (suspend → confirm → demand → resume pod).
+            props.push(Property::<Self>::sometimes(
+                "can resume from artifact",
+                |_model, state| state.ever_resumed,
             ));
         }
 
@@ -637,7 +745,7 @@ impl Model for WlNewModel {
 
 /// Stateright deduplicates states by fingerprint. Without normalization, the
 /// model's monotonically increasing counters (spec_version, backoff_generation,
-/// artifact_counter) and auto-generated IDs (PodId, WorkerId) cause states that
+/// artifact_confirm_gen) and auto-generated IDs (PodId, WorkerId) cause states that
 /// are *behaviorally identical* to hash differently. For example, two states
 /// that differ only in `backoff_generation: 3` vs `backoff_generation: 7` will
 /// produce the exact same successor states (up to counter values), but
@@ -666,12 +774,9 @@ impl Representative for WlNewModelState {
         // backoff_generation: only used to tag timer requests. Our model
         // tracks timer_pending separately and doesn't match on generation.
         s.sm.backoff_generation = 0;
-        s.timer_generation = 0;
 
-        // artifact_counter: generates unique artifact IDs but the handler
-        // never calls next_artifact_id() — artifacts come from external
-        // PodSuspended events.
-        s.sm.artifact_counter = 0;
+        // artifact_confirm_gen: only used to tag timer requests.
+        s.sm.artifact_confirm_gen = 0;
 
         // pod_id inside SM: only used as Some/None check and to set edges.
         // The actual PodId value doesn't affect behavior.
@@ -687,10 +792,10 @@ impl Representative for WlNewModelState {
             PodEnvState::Suspending { .. } => PodEnvState::Suspending { pod_id: PodId(0) },
         };
 
-        // suspended_artifact: only used as Some/None check (has artifact to
-        // resume from?). The actual ArtifactId value doesn't matter.
-        if let Some(_) = s.sm.suspended_artifact {
-            s.sm.suspended_artifact = Some(ArtifactId(0.to_string()));
+        // artifact_port: only used as Some/None check (has artifact to
+        // resume from?). The actual ArtifactPortId value doesn't matter.
+        if let Some(_) = s.sm.artifact_port {
+            s.sm.artifact_port = Some(ArtifactPortId(0));
         }
 
         // pod_worker_id: only used to construct ReadyInfo. The actual WorkerId

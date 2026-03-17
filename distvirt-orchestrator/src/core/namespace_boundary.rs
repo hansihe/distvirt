@@ -13,7 +13,7 @@ use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::TimerConfig;
 use crate::core::{ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
-use crate::sm::{ArtifactId, DRouter, PodId, WorkerId};
+use crate::sm::{ArtifactId, ArtifactPortId, DRouter, PodId, WorkerId};
 use crate::types::{NamespaceId, NamespaceSpec};
 
 use super::namespace::NamespaceCore;
@@ -272,6 +272,12 @@ impl NamespaceWithBoundary {
                 );
                 self.translate_effects(internal_effects, effects);
             }
+            NamespaceCoreEvent::ArtifactInvalidated { artifact_port_id } => {
+                let internal_effects = self.core.process_event(
+                    InternalNamespaceEvent::ArtifactInvalidated { artifact_port_id },
+                );
+                self.translate_effects(internal_effects, effects);
+            }
         }
     }
 
@@ -295,9 +301,12 @@ impl NamespaceWithBoundary {
                 Some(InternalWorkerEvent::PodFailed { pod_id: router_pod_id(&pod_id) })
             }
             WorkerNamespaceEventKind::PodSuspended { pod_id, artifact_id } => {
+                let port_id = ArtifactPortId(
+                    artifact_id.0.parse::<u64>().expect("artifact ID must be numeric"),
+                );
                 Some(InternalWorkerEvent::PodSuspended {
                     pod_id: router_pod_id(&pod_id),
-                    artifact_id,
+                    artifact_id: port_id,
                 })
             }
             WorkerNamespaceEventKind::PodSuspendFailed { pod_id } => {
@@ -380,7 +389,8 @@ impl NamespaceWithBoundary {
                     pod_id,
                     resume_artifact,
                 } => {
-                    let proto_resume_artifact = resume_artifact;
+                    let proto_resume_artifact = resume_artifact
+                        .map(|port_id| ArtifactId(port_id.0.to_string()));
                     effects
                         .scheduler_messages
                         .push(SchedulerMessage::RequestLease {
@@ -398,6 +408,28 @@ impl NamespaceWithBoundary {
                         .push(SchedulerMessage::DropRequest {
                             namespace_id,
                             pod_id,
+                        });
+                }
+                InternalSchedulerMessage::ArtifactReferenced {
+                    namespace_id,
+                    artifact_port_id,
+                } => {
+                    effects
+                        .scheduler_messages
+                        .push(SchedulerMessage::ArtifactReferenced {
+                            namespace_id,
+                            proto_artifact_id: ArtifactId(artifact_port_id.0.to_string()),
+                        });
+                }
+                InternalSchedulerMessage::ArtifactReleased {
+                    namespace_id,
+                    artifact_port_id,
+                } => {
+                    effects
+                        .scheduler_messages
+                        .push(SchedulerMessage::ArtifactReleased {
+                            namespace_id,
+                            proto_artifact_id: ArtifactId(artifact_port_id.0.to_string()),
                         });
                 }
             }
@@ -422,8 +454,9 @@ impl NamespaceWithBoundary {
                     artifact_id,
                     spec,
                 } => {
+                    let proto_artifact_id = ArtifactId(artifact_id.0.to_string());
                     let cmd =
-                        self.build_resume_command(&proto_pod_id(pod_id), &artifact_id, &spec);
+                        self.build_resume_command(&proto_pod_id(pod_id), &proto_artifact_id, &spec);
                     effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Stop { worker_id, pod_id } => {
@@ -435,11 +468,12 @@ impl NamespaceWithBoundary {
                     effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Suspend { worker_id, pod_id } => {
-                    let artifact_id = self.alloc_artifact_id();
+                    let artifact_port_id = self.alloc_artifact_id();
+                    let proto_artifact_id = ArtifactId(artifact_port_id.0.to_string());
                     let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
                         namespace_id: self.core.namespace_id().clone(),
                         pod_id: proto_pod_id(pod_id),
-                        artifact_id,
+                        artifact_id: proto_artifact_id,
                         pool_id: distvirt_worker_protocol::PoolId::from("default"),
                     };
                     effects.worker_commands.push((worker_id, cmd));
@@ -479,11 +513,10 @@ impl NamespaceWithBoundary {
         }
     }
 
-    /// Allocate a new artifact ID for suspend operations.
-    fn alloc_artifact_id(&mut self) -> ArtifactId {
-        let id = ArtifactId(self.next_artifact_counter.to_string());
+    /// Allocate a new artifact port ID for suspend operations.
+    fn alloc_artifact_id(&mut self) -> ArtifactPortId {
         self.next_artifact_counter += 1;
-        id
+        ArtifactPortId(self.next_artifact_counter)
     }
 
     // =========================================================================

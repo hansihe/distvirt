@@ -4,6 +4,48 @@ use super::*;
 // Suspend/Resume tests
 // ============================================================================
 
+/// Helper: create an artifact port, send PodSuspended, propagate, and confirm
+/// the artifact (simulating the adapter/scheduler behavior).
+fn suspend_and_confirm(
+    router: &mut Router,
+    worker: WorkerId,
+    pod_id: PodId,
+    artifact_port_id: ArtifactPortId,
+    workload_id: WorkloadId,
+) {
+    router.create_artifact(artifact_port_id);
+    router.send_notify_pod_suspended(worker, pod_id, artifact_port_id);
+    router.propagate();
+    // Confirm the artifact (simulate adapter behavior).
+    router.set_artifact_validity_edges(artifact_port_id, vec![workload_id]);
+    router.set_artifact_valid(artifact_port_id, true);
+    router.propagate();
+}
+
+/// Helper: create an artifact port and send PodSuspended + propagate,
+/// but do NOT confirm. Workload will be waiting for confirmation.
+fn suspend_without_confirm(
+    router: &mut Router,
+    worker: WorkerId,
+    pod_id: PodId,
+    artifact_port_id: ArtifactPortId,
+) {
+    router.create_artifact(artifact_port_id);
+    router.send_notify_pod_suspended(worker, pod_id, artifact_port_id);
+    router.propagate();
+}
+
+/// Helper: confirm a previously created artifact port.
+fn confirm_artifact(
+    router: &mut Router,
+    artifact_port_id: ArtifactPortId,
+    workload_id: WorkloadId,
+) {
+    router.set_artifact_validity_edges(artifact_port_id, vec![workload_id]);
+    router.set_artifact_valid(artifact_port_id, true);
+    router.propagate();
+}
+
 /// 32. Basic suspend: demand drops on suspend_on_idle workload → pod suspends →
 ///     artifact saved → pod self-destructs.
 #[test]
@@ -30,15 +72,14 @@ fn suspend_on_demand_drop() {
     assert_eq!(pod.status, PodStatus::Suspending);
 
     // Worker completes the suspend.
-    let artifact = ArtifactId(42.to_string());
-    router.send_notify_pod_suspended(_worker, pod_id, artifact.clone());
-    router.propagate();
+    let artifact = ArtifactPortId(42);
+    suspend_without_confirm(&mut router, _worker, pod_id, artifact);
 
-    // Workload should have saved the artifact and reaped the pod.
+    // Workload should have saved the artifact reference and reaped the pod.
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.awaiting_suspend);
     assert!(wl.pod_id.is_none()); // pod reaped
-    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert_eq!(wl.artifact_port, Some(artifact));
 
     // Pod should be gone (self-destructed: terminal + no owner).
     assert!(router.get_pod(&pod_id).is_none());
@@ -53,16 +94,16 @@ fn resume_from_artifact() {
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // Suspend: deactivate → suspend → complete.
+    // Suspend: deactivate → suspend → complete + confirm.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
 
-    let artifact = ArtifactId(100.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    let artifact = ArtifactPortId(100);
+    suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact.clone()));
+    assert_eq!(wl.artifact_port, Some(artifact));
+    assert!(wl.artifact_confirmed);
     assert!(wl.pod_id.is_none());
 
     // Re-activate → demand returns → workload should create pod from artifact.
@@ -78,21 +119,23 @@ fn resume_from_artifact() {
     let new_pod = router.get_pod(&new_pod_id).unwrap();
     assert_eq!(new_pod.resume_artifact, Some(artifact));
 
-    // Artifact consumed from workload state.
-    assert_eq!(wl.suspended_artifact, None);
+    // Artifact reference kept until pod reaches Running.
+    assert_eq!(wl.artifact_port, Some(artifact));
 
     // Make resumed pod running — should become active normally.
     make_pod_running(&mut router, worker, new_pod_id);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
+    // Artifact reference dropped now that pod is Running.
+    assert_eq!(wl.artifact_port, None);
 
     let s1 = router.get_service(&S1).unwrap();
     assert!(matches!(s1.state, ServiceState::Active { .. }));
 }
 
 /// 34. Demand returns during suspend: pod is suspending, demand comes back,
-///     pod completes suspend, workload immediately resumes from artifact.
+///     pod completes suspend, workload waits for confirmation then resumes.
 #[test]
 fn demand_returns_during_suspend() {
     let mut router = Router::new(16);
@@ -119,21 +162,29 @@ fn demand_returns_during_suspend() {
     let pod = router.get_pod(&pod_id).unwrap();
     assert_eq!(pod.status, PodStatus::Suspending); // still suspending
 
-    // Worker completes the suspend.
-    let artifact = ArtifactId(200.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    // Worker completes the suspend (no confirmation yet).
+    let artifact = ArtifactPortId(200);
+    suspend_without_confirm(&mut router, worker, pod_id, artifact);
 
-    // Workload saved artifact, reaped pod, and immediately created new pod
-    // from artifact (because demand is present).
+    // Workload saved artifact, reaped pod, but is waiting for confirmation
+    // before creating a new pod.
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.awaiting_suspend);
-    assert!(wl.pod_id.is_some());
-    assert_ne!(wl.pod_id.unwrap(), pod_id); // new pod
-    assert_eq!(wl.suspended_artifact, None); // consumed
+    assert_eq!(wl.artifact_port, Some(artifact));
+    assert!(!wl.artifact_confirmed);
+    assert!(wl.pod_id.is_none()); // no pod yet — waiting for confirm
 
     // Old pod is gone.
     assert!(router.get_pod(&pod_id).is_none());
+
+    // Confirm the artifact → workload creates new pod from artifact.
+    confirm_artifact(&mut router, artifact, W1);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.pod_id.is_some());
+    assert_ne!(wl.pod_id.unwrap(), pod_id); // new pod
+    // Artifact reference kept until pod reaches Running.
+    assert_eq!(wl.artifact_port, Some(artifact));
 
     // New pod should have the artifact for resume.
     let new_pod = router.get_pod(&wl.pod_id.unwrap()).unwrap();
@@ -176,17 +227,14 @@ fn spec_change_during_suspend() {
     router.propagate();
 
     // Worker completes the suspend.
-    let artifact = ArtifactId(300.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    let artifact = ArtifactPortId(300);
+    suspend_without_confirm(&mut router, worker, pod_id, artifact);
 
-    // Workload should have created a new pod. Since spec changed,
-    // the spec_version != launched_with_spec_version check will catch it
-    // when the pod reaches Running (if it used the old artifact).
-    // But actually, the workload still uses the artifact for resume
-    // since the artifact was saved. The spec mismatch is detected at Running.
+    // Workload should NOT have saved the artifact because spec changed
+    // (spec_version != launched_with_spec_version).
     let wl = router.get_workload(&W1).unwrap();
-    assert!(wl.pod_id.is_some());
+    assert_eq!(wl.artifact_port, None); // stale artifact discarded
+    assert!(wl.pod_id.is_some()); // cold-booted a new pod
     assert_ne!(wl.pod_id.unwrap(), pod_id);
 }
 
@@ -205,7 +253,7 @@ fn worker_loss_on_suspendable_workload() {
     assert!(!wl.pod_running);
     assert!(!wl.in_backoff); // displaced, not failure — no backoff
     assert_eq!(wl.consecutive_failures, 0); // not counted as failure
-    assert_eq!(wl.suspended_artifact, None); // no artifact from a crash
+    assert_eq!(wl.artifact_port, None); // no artifact from a crash
     assert!(wl.wants_pod); // immediately reschedules
 
     // Service should be back to NeedBackend.
@@ -221,15 +269,14 @@ fn destroy_discards_artifact() {
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // Suspend successfully.
+    // Suspend successfully + confirm.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact = ArtifactId(400.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    let artifact = ArtifactPortId(400);
+    suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert_eq!(wl.artifact_port, Some(artifact));
 
     // Re-activate → resumes from artifact.
     router.send_activate_service(mgmt, S1, true);
@@ -243,7 +290,7 @@ fn destroy_discards_artifact() {
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, None); // artifact discarded
+    assert_eq!(wl.artifact_port, None); // artifact discarded
     assert!(wl.pod_id.is_some()); // new pod created (cold boot)
 
     // New pod should NOT have an artifact.
@@ -262,13 +309,12 @@ fn suspend_resume_suspend_cycle() {
     let pod1 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact1 = ArtifactId(500.to_string());
-    router.send_notify_pod_suspended(worker, pod1, artifact1.clone());
-    router.propagate();
+    let artifact1 = ArtifactPortId(500);
+    suspend_and_confirm(&mut router, worker, pod1, artifact1, W1);
 
     assert_eq!(
-        router.get_workload(&W1).unwrap().suspended_artifact,
-        Some(artifact1.clone())
+        router.get_workload(&W1).unwrap().artifact_port,
+        Some(artifact1)
     );
 
     // First resume.
@@ -282,18 +328,21 @@ fn suspend_resume_suspend_cycle() {
     );
     make_pod_running(&mut router, worker, pod2);
 
+    // Clean up consumed artifact port (in real system, adapter handles this).
+    router.destroy_artifact(artifact1);
+    router.propagate();
+
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
 
     // Second suspend.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact2 = ArtifactId(501.to_string());
-    router.send_notify_pod_suspended(worker, pod2, artifact2.clone());
-    router.propagate();
+    let artifact2 = ArtifactPortId(501);
+    suspend_and_confirm(&mut router, worker, pod2, artifact2, W1);
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact2.clone()));
+    assert_eq!(wl.artifact_port, Some(artifact2));
     assert!(wl.pod_id.is_none());
 
     // Second resume.
@@ -316,22 +365,21 @@ fn scavenge_clears_suspended_artifact() {
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // Suspend successfully.
+    // Suspend successfully + confirm.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact = ArtifactId(600.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    let artifact = ArtifactPortId(600);
+    suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert_eq!(wl.artifact_port, Some(artifact));
 
     // Scavenge with no demand — should clear the artifact.
     router.send_admin_command(mgmt, W1, AdminCmd::Scavenge);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, None);
+    assert_eq!(wl.artifact_port, None);
     assert!(wl.pod_id.is_none());
 }
 
@@ -372,7 +420,7 @@ fn suspend_on_idle_disabled_during_suspend() {
     assert!(!wl.awaiting_suspend);
     assert!(!wl.suspend_on_idle);
     assert!(wl.pod_id.is_none()); // pod abandoned
-    assert_eq!(wl.suspended_artifact, None); // no artifact saved
+    assert_eq!(wl.artifact_port, None); // no artifact saved
 
     // Old pod should be gone (abandoned + self-destruct).
     assert!(router.get_pod(&pod_id).is_none());
@@ -387,15 +435,14 @@ fn suspend_on_idle_disabled_discards_artifact() {
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // Suspend successfully.
+    // Suspend successfully + confirm.
     router.send_activate_service(mgmt, S1, false);
     router.propagate();
-    let artifact = ArtifactId(700.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    let artifact = ArtifactPortId(700);
+    suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert_eq!(wl.artifact_port, Some(artifact));
 
     // Spec changes: same image, suspend_on_idle goes false.
     router.set_management_wl_spec(
@@ -411,7 +458,7 @@ fn suspend_on_idle_disabled_discards_artifact() {
     // Artifact should be discarded.
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.suspend_on_idle);
-    assert_eq!(wl.suspended_artifact, None);
+    assert_eq!(wl.artifact_port, None);
 
     // Re-activate → demand returns → cold boot (no artifact).
     router.send_activate_service(mgmt, S1, true);
@@ -460,13 +507,12 @@ fn suspend_on_idle_enabled_with_running_pod() {
     assert!(wl.awaiting_suspend);
     assert!(wl.pod_id.is_some());
 
-    // Complete suspend.
-    let artifact = ArtifactId(800.to_string());
-    router.send_notify_pod_suspended(worker, pod_id, artifact.clone());
-    router.propagate();
+    // Complete suspend + confirm.
+    let artifact = ArtifactPortId(800);
+    suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
 
     let wl = router.get_workload(&W1).unwrap();
-    assert_eq!(wl.suspended_artifact, Some(artifact));
+    assert_eq!(wl.artifact_port, Some(artifact));
     assert!(wl.pod_id.is_none());
 }
 

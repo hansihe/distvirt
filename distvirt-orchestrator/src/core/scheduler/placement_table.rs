@@ -79,4 +79,23 @@ impl PlacementTable {
             })
             .unwrap_or_default()
     }
+
+    /// Returns any single worker that has a Ready copy, along with its pool_id.
+    /// Used for DeleteArtifact — we just need one worker that can delete it.
+    pub(crate) fn any_worker_with_artifact(
+        &self,
+        artifact_id: &distvirt_worker_protocol::ArtifactId,
+    ) -> Option<(&GlobalWorkerId, distvirt_worker_protocol::PoolId)> {
+        self.entries.get(artifact_id).and_then(|workers| {
+            workers.iter().find_map(|(wid, status)| match status {
+                ArtifactStatus::Ready { pool_id, .. } => Some((wid, pool_id.clone())),
+                _ => None,
+            })
+        })
+    }
+
+    /// Remove all entries for a specific artifact.
+    pub(crate) fn remove_artifact(&mut self, artifact_id: &distvirt_worker_protocol::ArtifactId) {
+        self.entries.remove(artifact_id);
+    }
 }

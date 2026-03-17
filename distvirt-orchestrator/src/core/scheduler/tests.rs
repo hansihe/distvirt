@@ -10,7 +10,7 @@ fn grant_immediate_when_worker_available() {
     let mut sched = SchedulerCore::new();
 
     // Add a worker.
-    let decisions = sched.process(SchedulerCoreInput::WorkerUpdate(
+    let effects = sched.process(SchedulerCoreInput::WorkerUpdate(
         GlobalWorkerId::from(1),
         WorkerCandidate {
             worker_id: GlobalWorkerId::from(1),
@@ -20,17 +20,17 @@ fn grant_immediate_when_worker_available() {
             active: true,
         },
     ));
-    assert!(decisions.is_empty());
+    assert!(effects.decisions.is_empty());
 
     // Request lease — should be granted immediately.
-    let decisions = sched.process(SchedulerCoreInput::RequestLease {
+    let effects = sched.process(SchedulerCoreInput::RequestLease {
         namespace_id: ns("test"),
         pod_id: PodId::test(1),
         proto_resume_artifact: None,
     });
-    assert_eq!(decisions.len(), 1);
+    assert_eq!(effects.decisions.len(), 1);
     assert!(matches!(
-        &decisions[0],
+        &effects.decisions[0],
         SchedulerDecision::Grant { worker_id, .. } if *worker_id == GlobalWorkerId::from(1)
     ));
 }
@@ -39,12 +39,12 @@ fn grant_immediate_when_worker_available() {
 fn pend_when_no_workers() {
     let mut sched = SchedulerCore::new();
 
-    let decisions = sched.process(SchedulerCoreInput::RequestLease {
+    let effects = sched.process(SchedulerCoreInput::RequestLease {
         namespace_id: ns("test"),
         pod_id: PodId::test(1),
         proto_resume_artifact: None,
     });
-    assert!(decisions.is_empty(), "should pend when no workers");
+    assert!(effects.decisions.is_empty(), "should pend when no workers");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn retry_pending_on_worker_update() {
     });
 
     // Add worker — should grant the pending request.
-    let decisions = sched.process(SchedulerCoreInput::WorkerUpdate(
+    let effects = sched.process(SchedulerCoreInput::WorkerUpdate(
         GlobalWorkerId::from(1),
         WorkerCandidate {
             worker_id: GlobalWorkerId::from(1),
@@ -69,8 +69,8 @@ fn retry_pending_on_worker_update() {
             active: true,
         },
     ));
-    assert_eq!(decisions.len(), 1);
-    assert!(matches!(&decisions[0], SchedulerDecision::Grant { .. }));
+    assert_eq!(effects.decisions.len(), 1);
+    assert!(matches!(&effects.decisions[0], SchedulerDecision::Grant { .. }));
 }
 
 #[test]
@@ -94,10 +94,10 @@ fn drop_request_revokes_granted() {
         proto_resume_artifact: None,
     });
 
-    let decisions = sched.process(SchedulerCoreInput::DropRequest {
+    let effects = sched.process(SchedulerCoreInput::DropRequest {
         namespace_id: ns("test"),
         pod_id: PodId::test(1),
     });
-    assert_eq!(decisions.len(), 1);
-    assert!(matches!(&decisions[0], SchedulerDecision::Revoke { .. }));
+    assert_eq!(effects.decisions.len(), 1);
+    assert!(matches!(&effects.decisions[0], SchedulerDecision::Revoke { .. }));
 }

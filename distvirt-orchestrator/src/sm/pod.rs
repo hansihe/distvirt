@@ -28,7 +28,7 @@ pub struct PodSm {
     pub intent: PodIntent,
     /// Artifact to resume from (set at creation for resumed pods).
     /// The worker port can read this to know whether to cold-boot or resume.
-    pub resume_artifact: Option<ArtifactId>,
+    pub resume_artifact: Option<ArtifactPortId>,
     /// Generation counter for timer requests.
     pub timer_generation: u64,
     /// Worker assigned via lease signal.
@@ -52,7 +52,7 @@ impl PodSm {
         }
     }
 
-    pub(crate) fn new_from_artifact(artifact_id: ArtifactId) -> Self {
+    pub(crate) fn new_from_artifact(artifact_id: ArtifactPortId) -> Self {
         PodSm {
             status: PodStatus::Pending,
             workload_id: None,
