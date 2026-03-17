@@ -25,6 +25,8 @@ pub struct ServiceSm {
     /// readiness was delivered while the service was idle (the router suppresses
     /// re-delivery of unchanged signals).
     pub last_readiness: Option<ReadyInfo>,
+    /// DNS entry info from spec, signaled to the DnsRegistry port.
+    pub dns_entry: Option<DnsEntryInfo>,
 }
 
 impl ServiceSm {
@@ -40,18 +42,19 @@ impl ServiceSm {
             idle_timer_active: false,
             idle_timeout: std::time::Duration::ZERO,
             last_readiness: None,
+            dns_entry: None,
         }
     }
 
     pub(crate) fn update_timer_signal(&self, ctx: &mut impl ServiceCtx) {
         if self.idle_timer_active {
-            ctx.set_svc_wanted_timers(vec![ServiceTimerRequest {
+            ctx.set_wanted_timers(vec![ServiceTimerRequest {
                 key: ServiceTimerKey::IdleTimeout,
                 generation: self.idle_generation,
                 duration: self.idle_timeout,
             }]);
         } else {
-            ctx.set_svc_wanted_timers(vec![]);
+            ctx.set_wanted_timers(vec![]);
         }
     }
 
@@ -73,14 +76,15 @@ impl ServiceSm {
             ServiceState::NeedBackend => SvcStatus::NeedBackend,
             ServiceState::Active { .. } => SvcStatus::Active,
         };
-        ctx.set_svc_status_signal(status);
-        ctx.set_idle_timer_active_signal(self.idle_timer_active);
+        ctx.set_status(status);
+        ctx.set_idle_timer_active(self.idle_timer_active);
 
         let endpoint_info = match &self.state {
             ServiceState::Active { ready } => Some(ready.clone()),
             _ => None,
         };
         ctx.set_endpoint_info(endpoint_info);
+        ctx.set_dns_entry(self.dns_entry.clone());
     }
 }
 
@@ -88,8 +92,9 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
     type Input = ServiceInput;
 
     fn initialize(&mut self, ctx: &mut C) {
-        ctx.set_service_to_timer_edges(vec![TIMER]);
-        ctx.set_service_to_endpoint_edges(vec![ENDPOINT]);
+        ctx.set_service_timers_edges(vec![TIMER]);
+        ctx.set_service_endpoints_edges(vec![ENDPOINT]);
+        ctx.set_service_dns_edges(vec![DNS_REGISTRY]);
         self.update_status_signals(ctx);
     }
 
@@ -119,6 +124,11 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                 if let Some((_, spec)) = spec_opt {
                     self.has_activation = spec.has_activation;
                     self.idle_timeout = spec.idle_timeout;
+                    // Update DNS entry from spec.
+                    self.dns_entry = match (spec.dns_name, spec.dns_ip) {
+                        (Some(name), Some(ip)) => Some(DnsEntryInfo { name, ip }),
+                        _ => None,
+                    };
                     if !self.has_activation {
                         // Always-on: set demand immediately.
                         ctx.set_demand(true);
@@ -132,7 +142,7 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                         self.idle_timer_active = false;
                         self.update_timer_signal(ctx);
                     }
-                    ctx.set_service_to_workload_edges(vec![spec.workload]);
+                    ctx.set_service_demand_edges(vec![spec.workload]);
                 } else {
                     // Spec removed — self-destruct.
                     ctx.self_destruct();

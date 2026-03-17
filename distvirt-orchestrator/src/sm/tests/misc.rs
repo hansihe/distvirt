@@ -114,7 +114,7 @@ fn finished_pod_self_destructs() {
 
     // Create a standalone pod (no workload owner).
     let pod_id = router.create_pod(PodSm::new());
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
 
@@ -140,7 +140,7 @@ fn worker_identity_in_readiness() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -150,7 +150,7 @@ fn worker_identity_in_readiness() {
     );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -248,7 +248,7 @@ fn pod_tracks_worker_from_input() {
     assert_eq!(pod.worker_id, None);
 
     // Assign worker via edge.
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.propagate();
 
     // Pod should now know its worker.
@@ -256,7 +256,7 @@ fn pod_tracks_worker_from_input() {
     assert_eq!(pod.worker_id, Some(worker));
 
     // Remove worker edge → worker_id cleared.
-    router.set_worker_to_pod_edges(worker, vec![]);
+    router.set_worker_assignment_edges(worker, vec![]);
     router.propagate();
 
     // Pod should have failed (worker lost) and self-destructed (no owner).

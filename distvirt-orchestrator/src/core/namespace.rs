@@ -11,7 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::adapter::backend_need::BackendNeedAdapter;
-use crate::adapter::endpoint::{EndpointAction, EndpointAdapter, RegistryAction};
+use crate::adapter::dns_registry::{DnsRegistryAction, DnsRegistryAdapter};
+use crate::adapter::endpoint::{EndpointAction, EndpointAdapter};
 use crate::adapter::flow_demand::FlowDemandAdapter;
 use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
@@ -21,8 +22,8 @@ use crate::core::ClientCommand;
 use distvirt_sm_router::trace::PanicTracer;
 
 use crate::sm::{
-    AdminCmd, DRouter, ENDPOINT, LeaseInfo, PodId, PodStatus, Router, SCHEDULE_REQUEST,
-    ScheduleLeaseId, TIMER, WorkerId,
+    AdminCmd, DRouter, DNS_REGISTRY, ENDPOINT, LeaseInfo, PodId, PodStatus, Router,
+    SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WorkerId,
 };
 use crate::types::{NamespaceId, NamespaceSpec};
 
@@ -44,6 +45,7 @@ pub(crate) struct Adapters {
     backend_need: BackendNeedAdapter,
     flow_demand: FlowDemandAdapter,
     pub(crate) endpoint: EndpointAdapter,
+    pub(crate) dns_registry: DnsRegistryAdapter,
 }
 
 // =============================================================================
@@ -55,6 +57,7 @@ struct ReconcileActions {
     schedule_deltas: Vec<ScheduleRequestDelta>,
     pod_actions: Vec<PodAssignmentAction>,
     endpoint_actions: Vec<EndpointAction>,
+    dns_registry_actions: Vec<DnsRegistryAction>,
 }
 
 // =============================================================================
@@ -82,6 +85,7 @@ impl NamespaceCore {
         router.create_timer(TIMER);
         router.create_schedule_request(SCHEDULE_REQUEST);
         router.create_endpoint(ENDPOINT);
+        router.create_dns_registry(DNS_REGISTRY);
 
         NamespaceCore {
             namespace_id,
@@ -94,6 +98,7 @@ impl NamespaceCore {
                 backend_need: BackendNeedAdapter::new(),
                 flow_demand: FlowDemandAdapter::new(),
                 endpoint: EndpointAdapter::new(ENDPOINT),
+                dns_registry: DnsRegistryAdapter::new(DNS_REGISTRY),
             },
             leases: HashMap::new(),
             worker_pod_edges: HashMap::new(),
@@ -120,7 +125,8 @@ impl NamespaceCore {
             let has_actions = !actions.timer_actions.is_empty()
                 || !actions.schedule_deltas.is_empty()
                 || !actions.pod_actions.is_empty()
-                || !actions.endpoint_actions.is_empty();
+                || !actions.endpoint_actions.is_empty()
+                || !actions.dns_registry_actions.is_empty();
             self.collect_effects(actions, &mut effects);
             if !has_actions {
                 break;
@@ -310,7 +316,7 @@ impl NamespaceCore {
             },
         );
         self.router
-            .set_schedule_lease_to_pod_edges(lease_id, vec![pod_id]);
+            .set_pod_lease_edges(lease_id, vec![pod_id]);
         self.leases.insert(pod_id, lease_id);
         self.add_pod_to_worker(router_worker_id, pod_id);
         true
@@ -322,7 +328,7 @@ impl NamespaceCore {
         let pods = self.worker_pod_edges.entry(worker_id).or_default();
         pods.insert(pod_id);
         self.router
-            .set_worker_to_pod_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
+            .set_worker_assignment_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
     }
 
     /// Remove a pod from its assigned worker's WorkerToPod edge set and update the router.
@@ -331,7 +337,7 @@ impl NamespaceCore {
             if let Some(pods) = self.worker_pod_edges.get_mut(&worker_id) {
                 pods.remove(&pod_id);
                 self.router
-                    .set_worker_to_pod_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
+                    .set_worker_assignment_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
             }
         }
     }
@@ -343,6 +349,7 @@ impl NamespaceCore {
             schedule_deltas: self.adapters.schedule_request.reconcile(&mut self.router),
             pod_actions: self.adapters.pod_assignment.reconcile(&mut self.router),
             endpoint_actions: self.adapters.endpoint.reconcile(&mut self.router),
+            dns_registry_actions: self.adapters.dns_registry.reconcile(&mut self.router),
         }
     }
 
@@ -380,6 +387,9 @@ impl NamespaceCore {
 
         // Endpoint actions pass through directly (already router-level).
         effects.endpoint_actions.extend(actions.endpoint_actions);
+
+        // DNS registry actions pass through directly.
+        effects.dns_registry_actions.extend(actions.dns_registry_actions);
     }
 
     /// Create a new worker port in the router with the given ID.

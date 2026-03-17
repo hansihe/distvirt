@@ -162,7 +162,7 @@ fn apply_input(state: &WlNewModelState, input: WorkloadInput) -> WlNewModelState
     }
 
     // Check for edge changes (workload_to_pod_edges = [] means pod abandoned).
-    if let Some(ref edges) = effects.workload_to_pod {
+    if let Some(ref edges) = effects.pod_ownership {
         if edges.is_empty() && next.pod_env.pod_id().is_some() {
             // Pod abandoned — in the real system it would self-destruct.
             // For the model, clear pod env immediately.

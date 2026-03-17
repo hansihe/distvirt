@@ -32,7 +32,7 @@ fn setup_workload(
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -42,7 +42,7 @@ fn setup_workload(
     );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -89,10 +89,10 @@ fn new_timer_produces_start() {
     // Pod created, make it fail so workload enters RetryBackoff and requests timer.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
@@ -135,10 +135,10 @@ fn timer_removed_produces_cancel() {
     // Make pod fail → retry backoff timer wanted.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
@@ -188,10 +188,10 @@ fn same_generation_no_action() {
     // Make pod fail → retry timer wanted.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
@@ -226,7 +226,7 @@ fn generation_change_restarts_timer() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -236,7 +236,7 @@ fn generation_change_restarts_timer() {
     );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -250,17 +250,17 @@ fn generation_change_restarts_timer() {
 
     // Activate via BackendNeed traffic.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
 
     // Make pod running.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
     router.propagate();
     let _ = adapter.reconcile(&mut router);
@@ -334,7 +334,7 @@ fn multiple_sm_kinds_in_one_cycle() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -344,7 +344,7 @@ fn multiple_sm_kinds_in_one_cycle() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -358,16 +358,16 @@ fn multiple_sm_kinds_in_one_cycle() {
 
     // Activate via traffic, make pod running.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
     router.propagate();
     let _ = adapter.reconcile(&mut router);
@@ -433,7 +433,7 @@ fn fire_dispatches_workload_timer() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -443,7 +443,7 @@ fn fire_dispatches_workload_timer() {
     );
 
     router.create_service(S1, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -457,10 +457,10 @@ fn fire_dispatches_workload_timer() {
     // Make pod fail to enter RetryBackoff.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
@@ -492,7 +492,7 @@ fn fire_dispatches_service_timer() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -502,7 +502,7 @@ fn fire_dispatches_service_timer() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -515,16 +515,16 @@ fn fire_dispatches_service_timer() {
 
     // Traffic activates → pod running → traffic stops → idle timer active.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
     router.propagate();
 

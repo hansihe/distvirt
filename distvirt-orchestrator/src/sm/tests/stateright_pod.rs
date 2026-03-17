@@ -142,7 +142,7 @@ fn apply_pod_input(state: &PodNewModelState, input: PodInput) -> PodNewModelStat
     }
 
     // Check timer signal changes.
-    if let Some(ref timers) = effects.wanted_pod_timers {
+    if let Some(ref timers) = effects.wanted_timers {
         if let Some(req) = timers.first() {
             next.timer_pending = true;
             next.timer_key = Some(req.key.clone());

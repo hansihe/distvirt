@@ -37,7 +37,7 @@ impl FlowDemandAdapter {
         let key = (worker_id, service_id);
         let port_id = *self.ports.entry(key).or_insert_with(|| {
             let id = router.create_backend_need();
-            router.set_backend_need_to_service_edges(id, vec![service_id]);
+            router.set_traffic_demand_edges(id, vec![service_id]);
             id
         });
         router.set_backend_need_level(port_id, crate::sm::BackendNeed::Traffic);

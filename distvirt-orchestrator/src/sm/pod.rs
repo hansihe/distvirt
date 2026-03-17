@@ -86,21 +86,21 @@ impl PodSm {
         use std::time::Duration;
         match &self.status {
             PodStatus::Pending => {
-                ctx.set_wanted_pod_timers(vec![PodTimerRequest {
+                ctx.set_wanted_timers(vec![PodTimerRequest {
                     key: PodTimerKey::LaunchTimeout,
                     generation: self.timer_generation,
                     duration: Duration::from_secs(30),
                 }]);
             }
             PodStatus::Suspending => {
-                ctx.set_wanted_pod_timers(vec![PodTimerRequest {
+                ctx.set_wanted_timers(vec![PodTimerRequest {
                     key: PodTimerKey::SuspendTimeout,
                     generation: self.timer_generation,
                     duration: Duration::from_secs(30),
                 }]);
             }
             _ => {
-                ctx.set_wanted_pod_timers(vec![]);
+                ctx.set_wanted_timers(vec![]);
             }
         }
     }
@@ -110,8 +110,8 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
     type Input = PodInput;
 
     fn initialize(&mut self, ctx: &mut C) {
-        ctx.set_pod_to_timer_edges(vec![TIMER]);
-        ctx.set_pod_to_schedule_request_edges(vec![SCHEDULE_REQUEST]);
+        ctx.set_pod_timers_edges(vec![TIMER]);
+        ctx.set_pod_schedule_intent_edges(vec![SCHEDULE_REQUEST]);
         ctx.set_schedule_request(self.make_schedule_request());
         self.update_timer_signal(ctx);
     }
@@ -130,7 +130,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                 let new_worker_id = worker.as_ref().map(|(id, _)| *id);
                 if new_worker_id != self.worker_id {
                     self.worker_id = new_worker_id;
-                    ctx.set_worker(self.worker_id);
+                    ctx.set_assigned_worker(self.worker_id);
                 }
 
                 if worker.is_none() && !self.status.is_terminal() {
@@ -151,7 +151,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                 self.intent = new_intent;
 
                 let edges: Vec<WorkloadId> = self.workload_id.into_iter().collect();
-                ctx.set_pod_to_workload_edges(edges);
+                ctx.set_pod_report_edges(edges);
 
                 // React to intent: Running + Suspend → begin suspending.
                 if matches!(
@@ -216,14 +216,14 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     Some(info) if !had_lease && matches!(self.status, PodStatus::Pending) => {
                         // Lease granted — target the assigned worker.
                         self.assigned_worker = Some(info.worker_id);
-                        ctx.set_pod_to_worker_edges(vec![info.worker_id]);
+                        ctx.set_pod_placement_edges(vec![info.worker_id]);
                     }
                     None if had_lease && !self.status.is_terminal() => {
                         // Lease revoked — preemption (infrastructure event).
                         self.assigned_worker = None;
                         self.status = PodStatus::Displaced;
                         ctx.set_status(PodStatus::Displaced);
-                        ctx.set_pod_to_worker_edges(vec![]);
+                        ctx.set_pod_placement_edges(vec![]);
                         self.update_timer_signal(ctx);
                         self.maybe_reap(ctx);
                     }

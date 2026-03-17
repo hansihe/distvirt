@@ -19,7 +19,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -29,7 +29,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -99,11 +99,11 @@ fn pod_removed_drop_delta() {
 
     // Make pod fail → schedule request disappears.
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
 
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
@@ -161,7 +161,7 @@ fn multiple_pods_change() {
     // Two separate management ports for independent workloads.
     let mgmt1 = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt1, vec![W1]);
+    router.set_workload_config_edges(mgmt1, vec![W1]);
     router.set_management_wl_spec(
         mgmt1,
         WorkloadSpec {
@@ -170,7 +170,7 @@ fn multiple_pods_change() {
         },
     );
     router.create_service(S1, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt1, vec![S1]);
+    router.set_service_config_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
         ServiceSpec {
@@ -182,7 +182,7 @@ fn multiple_pods_change() {
 
     let mgmt2 = router.create_management();
     router.create_workload(w2_id, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt2, vec![w2_id]);
+    router.set_workload_config_edges(mgmt2, vec![w2_id]);
     router.set_management_wl_spec(
         mgmt2,
         WorkloadSpec {
@@ -191,7 +191,7 @@ fn multiple_pods_change() {
         },
     );
     router.create_service(s2_id, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt2, vec![s2_id]);
+    router.set_service_config_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(
         mgmt2,
         ServiceSpec {

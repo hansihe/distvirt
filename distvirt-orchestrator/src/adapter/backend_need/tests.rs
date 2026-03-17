@@ -20,7 +20,7 @@ fn setup_activation_service(router: &mut DRouter) -> WorkerId {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -30,7 +30,7 @@ fn setup_activation_service(router: &mut DRouter) -> WorkerId {
     );
 
     router.create_service(S1, ServiceSm::new(true)); // activation mode
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -121,7 +121,7 @@ fn remove_worker_cleans_up() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -132,7 +132,7 @@ fn remove_worker_cleans_up() {
 
     router.create_service(S1, ServiceSm::new(true));
     router.create_service(S2, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1, S2]);
+    router.set_service_config_edges(mgmt, vec![S1, S2]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {

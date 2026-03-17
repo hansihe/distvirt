@@ -17,7 +17,7 @@ fn traffic_triggered_activation() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -27,7 +27,7 @@ fn traffic_triggered_activation() {
     );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -46,7 +46,7 @@ fn traffic_triggered_activation() {
 
     // BackendNeed port reports traffic → service activates.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
@@ -59,7 +59,7 @@ fn traffic_triggered_activation() {
 
     // Make pod running.
     let pod_id = wl.pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
 
@@ -81,7 +81,7 @@ fn idle_timeout_deactivation() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -91,7 +91,7 @@ fn idle_timeout_deactivation() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -104,13 +104,13 @@ fn idle_timeout_deactivation() {
 
     // Traffic activates the service.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     // Make pod running.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
 
@@ -154,7 +154,7 @@ fn traffic_cancels_idle_timer() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -164,7 +164,7 @@ fn traffic_cancels_idle_timer() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -177,12 +177,12 @@ fn traffic_cancels_idle_timer() {
 
     // Traffic → activate → pod running.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
 
@@ -221,7 +221,7 @@ fn idle_timeout_suspend_integration() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -232,7 +232,7 @@ fn idle_timeout_suspend_integration() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -245,12 +245,12 @@ fn idle_timeout_suspend_integration() {
 
     // Traffic → activate → pod running.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
 
@@ -308,7 +308,7 @@ fn worker_loss_removes_backend_need() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -318,7 +318,7 @@ fn worker_loss_removes_backend_need() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -331,12 +331,12 @@ fn worker_loss_removes_backend_need() {
 
     // Traffic → activate → pod running.
     let bn = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![S1]);
     router.set_backend_need_level(bn, BackendNeed::Traffic);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
 
@@ -377,7 +377,7 @@ fn multiple_workers_one_loses_traffic() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -387,7 +387,7 @@ fn multiple_workers_one_loses_traffic() {
     );
 
     router.create_service(S1, ServiceSm::new(true));
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -401,8 +401,8 @@ fn multiple_workers_one_loses_traffic() {
     // Both workers report traffic via separate BackendNeed ports.
     let bn1 = router.create_backend_need();
     let bn2 = router.create_backend_need();
-    router.set_backend_need_to_service_edges(bn1, vec![S1]);
-    router.set_backend_need_to_service_edges(bn2, vec![S1]);
+    router.set_traffic_demand_edges(bn1, vec![S1]);
+    router.set_traffic_demand_edges(bn2, vec![S1]);
     router.set_backend_need_level(bn1, BackendNeed::Traffic);
     router.set_backend_need_level(bn2, BackendNeed::Traffic);
     router.propagate();
@@ -413,7 +413,7 @@ fn multiple_workers_one_loses_traffic() {
 
     // Make pod running.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker1, vec![pod_id]);
+    router.set_worker_assignment_edges(worker1, vec![pod_id]);
     router.send_notify_pod_status(worker1, pod_id, PodStatus::Running);
     router.propagate();
 

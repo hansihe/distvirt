@@ -21,7 +21,7 @@ fn shared_worker_death_independent_failure() {
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
 
-    router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
+    router.set_workload_config_edges(mgmt, vec![W1, W2]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -35,7 +35,7 @@ fn shared_worker_death_independent_failure() {
 
     // S1 → W1, S2 → W2 (different management ports for different specs).
     let mgmt_s1 = router.create_management();
-    router.set_management_to_service_edges(mgmt_s1, vec![S1]);
+    router.set_service_config_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
         ServiceSpec {
@@ -46,7 +46,7 @@ fn shared_worker_death_independent_failure() {
     );
 
     let mgmt_s2 = router.create_management();
-    router.set_management_to_service_edges(mgmt_s2, vec![S2]);
+    router.set_service_config_edges(mgmt_s2, vec![S2]);
     router.set_management_svc_spec(
         mgmt_s2,
         ServiceSpec {
@@ -67,7 +67,7 @@ fn shared_worker_death_independent_failure() {
     assert_ne!(pod1, pod2);
 
     // Both pods on same worker.
-    router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
+    router.set_worker_assignment_edges(worker, vec![pod1, pod2]);
     router.send_notify_pod_status(worker, pod1, PodStatus::Running);
     router.send_notify_pod_status(worker, pod2, PodStatus::Running);
     router.propagate();
@@ -117,7 +117,7 @@ fn shared_worker_death_independent_failure() {
     let worker2 = WK2;
     router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
-    router.set_worker_to_pod_edges(worker2, vec![new_pod1, new_pod2]);
+    router.set_worker_assignment_edges(worker2, vec![new_pod1, new_pod2]);
     router.send_notify_pod_status(worker2, new_pod1, PodStatus::Running);
     router.send_notify_pod_status(worker2, new_pod2, PodStatus::Running);
     router.propagate();
@@ -153,7 +153,7 @@ fn service_retarget_workload() {
     // Create two workloads with specs.
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
+    router.set_workload_config_edges(mgmt, vec![W1, W2]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -165,7 +165,7 @@ fn service_retarget_workload() {
     // One always-on service pointing at W1.
     router.create_service(S1, ServiceSm::new(false));
     let mgmt_s1 = router.create_management();
-    router.set_management_to_service_edges(mgmt_s1, vec![S1]);
+    router.set_service_config_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
         ServiceSpec {
@@ -216,7 +216,7 @@ fn service_retarget_workload() {
 
     // Make W2's pod running.
     let pod2 = wl2.pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod2]);
+    router.set_worker_assignment_edges(worker, vec![pod2]);
     router.send_notify_pod_status(worker, pod2, PodStatus::Running);
     router.propagate();
 
@@ -243,7 +243,7 @@ fn independent_workload_subgraphs() {
     router.create_service(S1, ServiceSm::new(true)); // activation-based
 
     let mgmt1 = router.create_management();
-    router.set_management_to_workload_edges(mgmt1, vec![W1]);
+    router.set_workload_config_edges(mgmt1, vec![W1]);
     router.set_management_wl_spec(
         mgmt1,
         WorkloadSpec {
@@ -251,7 +251,7 @@ fn independent_workload_subgraphs() {
             ..Default::default()
         },
     );
-    router.set_management_to_service_edges(mgmt1, vec![S1]);
+    router.set_service_config_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
         ServiceSpec {
@@ -266,7 +266,7 @@ fn independent_workload_subgraphs() {
     router.create_service(S2, ServiceSm::new(false)); // always-on
 
     let mgmt2 = router.create_management();
-    router.set_management_to_workload_edges(mgmt2, vec![W2]);
+    router.set_workload_config_edges(mgmt2, vec![W2]);
     router.set_management_wl_spec(
         mgmt2,
         WorkloadSpec {
@@ -274,7 +274,7 @@ fn independent_workload_subgraphs() {
             ..Default::default()
         },
     );
-    router.set_management_to_service_edges(mgmt2, vec![S2]);
+    router.set_service_config_edges(mgmt2, vec![S2]);
     router.set_management_svc_spec(
         mgmt2,
         ServiceSpec {
@@ -316,7 +316,7 @@ fn independent_workload_subgraphs() {
     assert!(wl1.pod_id.is_some());
 
     let pod1 = wl1.pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
+    router.set_worker_assignment_edges(worker, vec![pod1, pod2]);
     router.send_notify_pod_status(worker, pod1, PodStatus::Running);
     router.propagate();
 
@@ -357,7 +357,7 @@ fn service_fan_in_with_retarget() {
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1, W2]);
+    router.set_workload_config_edges(mgmt, vec![W1, W2]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -371,7 +371,7 @@ fn service_fan_in_with_retarget() {
     router.create_service(S2, ServiceSm::new(false));
 
     let mgmt_s1 = router.create_management();
-    router.set_management_to_service_edges(mgmt_s1, vec![S1]);
+    router.set_service_config_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
         ServiceSpec {
@@ -382,7 +382,7 @@ fn service_fan_in_with_retarget() {
     );
 
     let mgmt_s2 = router.create_management();
-    router.set_management_to_service_edges(mgmt_s2, vec![S2]);
+    router.set_service_config_edges(mgmt_s2, vec![S2]);
     router.set_management_svc_spec(
         mgmt_s2,
         ServiceSpec {
@@ -442,7 +442,7 @@ fn service_fan_in_with_retarget() {
 
     // Make W2's pod running.
     let pod2 = wl2.pod_id.unwrap();
-    router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
+    router.set_worker_assignment_edges(worker, vec![pod1, pod2]);
     router.send_notify_pod_status(worker, pod2, PodStatus::Running);
     router.propagate();
 
@@ -468,7 +468,7 @@ fn service_self_destructs_on_spec_removal() {
 
     // Use separate mgmt ports so we can remove the service spec independently.
     let mgmt_wl = router.create_management();
-    router.set_management_to_workload_edges(mgmt_wl, vec![W1]);
+    router.set_workload_config_edges(mgmt_wl, vec![W1]);
     router.set_management_wl_spec(
         mgmt_wl,
         WorkloadSpec {
@@ -478,7 +478,7 @@ fn service_self_destructs_on_spec_removal() {
     );
 
     let mgmt_svc = router.create_management();
-    router.set_management_to_service_edges(mgmt_svc, vec![S1]);
+    router.set_service_config_edges(mgmt_svc, vec![S1]);
     router.set_management_svc_spec(
         mgmt_svc,
         ServiceSpec {
@@ -553,7 +553,7 @@ fn full_teardown_cascade() {
     let mgmt_wl = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
     router.create_workload(W2, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt_wl, vec![W1, W2]);
+    router.set_workload_config_edges(mgmt_wl, vec![W1, W2]);
     router.set_management_wl_spec(
         mgmt_wl,
         WorkloadSpec {
@@ -564,7 +564,7 @@ fn full_teardown_cascade() {
 
     let mgmt_s1 = router.create_management();
     router.create_service(S1, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt_s1, vec![S1]);
+    router.set_service_config_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
         ServiceSpec {
@@ -576,7 +576,7 @@ fn full_teardown_cascade() {
 
     let mgmt_s2 = router.create_management();
     router.create_service(S2, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt_s2, vec![S2]);
+    router.set_service_config_edges(mgmt_s2, vec![S2]);
     router.set_management_svc_spec(
         mgmt_s2,
         ServiceSpec {
@@ -592,7 +592,7 @@ fn full_teardown_cascade() {
     let pod2 = router.get_workload(&W2).unwrap().pod_id.unwrap();
 
     // Make both pods running.
-    router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
+    router.set_worker_assignment_edges(worker, vec![pod1, pod2]);
     router.send_notify_pod_status(worker, pod1, PodStatus::Running);
     router.send_notify_pod_status(worker, pod2, PodStatus::Running);
     router.propagate();

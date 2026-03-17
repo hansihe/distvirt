@@ -3,6 +3,7 @@
 //! These types define the inputs and outputs of the core state machines,
 //! free of any async or channel dependencies.
 
+use crate::adapter::dns_registry::DnsRegistryAction;
 use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::{TimerAction, TimerIdentity};
@@ -139,6 +140,7 @@ pub(crate) struct InternalNamespaceEffects {
     pub scheduler_messages: Vec<InternalSchedulerMessage>,
     pub pod_actions: Vec<PodAssignmentAction>,
     pub endpoint_actions: Vec<EndpointAction>,
+    pub dns_registry_actions: Vec<DnsRegistryAction>,
 }
 
 impl InternalNamespaceEffects {
@@ -147,6 +149,7 @@ impl InternalNamespaceEffects {
             && self.scheduler_messages.is_empty()
             && self.pod_actions.is_empty()
             && self.endpoint_actions.is_empty()
+            && self.dns_registry_actions.is_empty()
     }
 }
 

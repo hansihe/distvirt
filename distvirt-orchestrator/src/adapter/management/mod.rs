@@ -72,7 +72,7 @@ impl ManagementAdapter {
 
                 let mgmt_id = router.create_management();
                 router.create_workload(router_id, WorkloadSm::new());
-                router.set_management_to_workload_edges(mgmt_id, vec![router_id]);
+                router.set_workload_config_edges(mgmt_id, vec![router_id]);
                 router.set_management_wl_spec(mgmt_id, Self::to_sm_workload_spec(spec));
 
                 self.proto_to_router_wl.insert(name_str.clone(), router_id);
@@ -104,7 +104,7 @@ impl ManagementAdapter {
             if let Some(&router_id) = self.proto_to_router_svc.get(name_str) {
                 // Update: re-set the spec signal
                 let mgmt_id = self.service_mgmt[&router_id];
-                router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(spec));
+                router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(name_str, spec));
             } else {
                 // Create new service
                 let router_id = crate::sm::ServiceId(self.next_service_id);
@@ -113,8 +113,8 @@ impl ManagementAdapter {
                 let mgmt_id = router.create_management();
                 let has_activation = spec.activation.is_some();
                 router.create_service(router_id, ServiceSm::new(has_activation));
-                router.set_management_to_service_edges(mgmt_id, vec![router_id]);
-                router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(spec));
+                router.set_service_config_edges(mgmt_id, vec![router_id]);
+                router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(name_str, spec));
 
                 self.proto_to_router_svc
                     .insert(name_str.to_owned(), router_id);
@@ -216,7 +216,7 @@ impl ManagementAdapter {
         }
     }
 
-    fn to_sm_service_spec(&self, spec: &crate::types::ServiceSpec) -> SmServiceSpec {
+    fn to_sm_service_spec(&self, name: &str, spec: &crate::types::ServiceSpec) -> SmServiceSpec {
         let workload_router_id = self
             .proto_to_router_wl
             .get(&spec.workload_id.0)
@@ -230,6 +230,8 @@ impl ManagementAdapter {
                 .as_ref()
                 .map(|a| a.idle_timeout)
                 .unwrap_or_default(),
+            dns_name: Some(name.to_owned()),
+            dns_ip: Some(spec.ip),
         }
     }
 }

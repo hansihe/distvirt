@@ -5,8 +5,8 @@ use distvirt_worker_protocol::WorkerCommand;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 
-/// Test: Creating a namespace with a service sends RegistrySync to the worker
-/// with the service's name->IP mapping.
+/// Test: Creating a namespace with a service sends RegistryUpdate to the worker
+/// with the service's name->IP mapping (incremental add from service creation).
 #[test]
 fn test_registry_sync_on_namespace_create() {
     let mut h = TestHarness::new();
@@ -21,15 +21,18 @@ fn test_registry_sync_on_namespace_create() {
 
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
-    // Worker should have received RegistrySync with "echo-svc" → 172.16.0.100.
-    h.assert_worker_received_command_matching(&w1, "RegistrySync with echo-svc entry", |cmd| {
-        match cmd {
-            WorkerCommand::RegistrySync { entries, .. } => entries
+    // Worker should have received RegistryUpdate with "echo-svc" → 172.16.0.100
+    // (service creation produces incremental Add action).
+    h.assert_worker_received_command_matching(
+        &w1,
+        "RegistryUpdate with echo-svc entry",
+        |cmd| match cmd {
+            WorkerCommand::RegistryUpdate { added, .. } => added
                 .iter()
                 .any(|e| e.name == "echo-svc" && e.ip == Ipv4Addr::new(172, 16, 0, 100)),
             _ => false,
-        }
-    });
+        },
+    );
 }
 
 /// Test: Adding a second worker to an active namespace sends RegistrySync to the new worker.
@@ -49,7 +52,8 @@ fn test_registry_sync_sent_to_new_worker() {
     let w2 = h.add_worker();
     h.converge();
 
-    // Second worker should have received RegistrySync with service entries.
+    // Second worker should have received RegistrySync with service entries
+    // (full sync from adapter cache for late-joining workers).
     h.assert_worker_received_command_matching(
         &w2,
         "RegistrySync with echo-svc entry (new worker joining)",
@@ -62,8 +66,8 @@ fn test_registry_sync_sent_to_new_worker() {
     );
 }
 
-/// Test: Adding a service via spec update sends RegistrySync with the new entry.
-/// Removing a service via spec update sends updated RegistrySync without the removed entry.
+/// Test: Adding a service via spec update sends RegistryUpdate with the new entry.
+/// Removing a service via spec update sends RegistryUpdate with the removed entry.
 #[test]
 fn test_registry_update_on_service_change() {
     use distvirt_orchestrator::types::*;
@@ -79,14 +83,14 @@ fn test_registry_update_on_service_change() {
     h.converge();
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
-    // Worker should have received RegistrySync with both services.
+    // Worker should have received RegistryUpdate with both services added.
     h.assert_worker_received_command_matching(
         &w1,
-        "RegistrySync with both svc-a and svc-b",
+        "RegistryUpdate with both svc-a and svc-b",
         |cmd| match cmd {
-            WorkerCommand::RegistrySync { entries, .. } => {
-                let has_a = entries.iter().any(|e| e.name == "svc-a");
-                let has_b = entries.iter().any(|e| e.name == "svc-b");
+            WorkerCommand::RegistryUpdate { added, .. } => {
+                let has_a = added.iter().any(|e| e.name == "svc-a");
+                let has_b = added.iter().any(|e| e.name == "svc-b");
                 has_a && has_b
             }
             _ => false,
@@ -103,27 +107,24 @@ fn test_registry_update_on_service_change() {
     h.update_namespace("ns1", updated_spec);
     h.converge();
 
-    // After removing svc-b, the orchestrator should send a RegistrySync with only svc-a.
-    // Get the last RegistrySync command sent to w1.
+    // After removing svc-b, the orchestrator should send a RegistryUpdate with
+    // svc-b in the removed list.
     let commands = h.worker(&w1).commands();
-    let registry_syncs: Vec<_> = commands
+    let registry_updates: Vec<_> = commands
         .iter()
-        .filter(|cmd| matches!(cmd, WorkerCommand::RegistrySync { .. }))
+        .filter(|cmd| matches!(cmd, WorkerCommand::RegistryUpdate { .. }))
         .collect();
 
-    // The last RegistrySync should have only svc-a.
-    let last_sync = registry_syncs
+    // The last RegistryUpdate should have svc-b removed.
+    let last_update = registry_updates
         .last()
-        .expect("should have at least one RegistrySync");
-    match last_sync {
-        WorkerCommand::RegistrySync { entries, .. } => {
+        .expect("should have at least one RegistryUpdate");
+    match last_update {
+        WorkerCommand::RegistryUpdate { removed, .. } => {
             assert!(
-                entries.iter().any(|e| e.name == "svc-a"),
-                "last RegistrySync should contain svc-a"
-            );
-            assert!(
-                !entries.iter().any(|e| e.name == "svc-b"),
-                "last RegistrySync should NOT contain svc-b after removal"
+                removed.iter().any(|n| n == "svc-b"),
+                "last RegistryUpdate should have svc-b in removed, got: {:?}",
+                removed
             );
         }
         _ => unreachable!(),

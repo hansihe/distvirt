@@ -120,7 +120,7 @@ fn apply_svc_input(state: &SvcNewModelState, input: ServiceInput) -> SvcNewModel
     }
 
     // Check timer signal changes.
-    if let Some(ref timers) = effects.svc_wanted_timers {
+    if let Some(ref timers) = effects.wanted_timers {
         if let Some(req) = timers.first() {
             next.timer_pending = true;
             next.timer_generation = req.generation;

@@ -9,7 +9,8 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
-use crate::adapter::endpoint::{EndpointAction, RegistryAction};
+use crate::adapter::dns_registry::DnsRegistryAction;
+use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::TimerConfig;
 use crate::core::{ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
@@ -139,9 +140,19 @@ impl NamespaceWithBoundary {
                             self.core.create_worker_port(wne.worker_id);
                             self.active_workers.insert(wne.worker_id);
 
-                            // Send initial service registry to the new worker.
-                            let sync_action = self.core.adapters.endpoint.build_registry_sync();
-                            if let Some(cmd) = self.build_registry_command(&sync_action) {
+                            // Send initial DNS registry to the new worker.
+                            let sync_entries = self.core.adapters.dns_registry.build_sync();
+                            if !sync_entries.is_empty() {
+                                let cmd = distvirt_worker_protocol::WorkerCommand::RegistrySync {
+                                    namespace_id: self.core.namespace_id().clone(),
+                                    entries: sync_entries
+                                        .into_iter()
+                                        .map(|(name, ip)| distvirt_worker_protocol::RegistryEntry {
+                                            name,
+                                            ip,
+                                        })
+                                        .collect(),
+                                };
                                 effects.worker_commands.push((wne.worker_id, cmd));
                             }
 
@@ -245,21 +256,10 @@ impl NamespaceWithBoundary {
                 self.translate_effects(internal_effects, effects);
             }
             NamespaceCoreEvent::ClientCommand(cmd) => {
-                // Registry update from UpdateSpec needs boundary handling.
-                if let ClientCommand::UpdateSpec(ref new_spec) = cmd {
-                    let registry_action = self.core.adapters.endpoint.update_registry(
-                        new_spec
-                            .services
-                            .iter()
-                            .map(|(name, spec)| (name.clone(), spec.ip)),
-                    );
-                    if let Some(action) = registry_action {
-                        if let Some(cmd) = self.build_registry_command(&action) {
-                            effects.broadcast_commands.push(cmd);
-                        }
-                    }
-                }
-
+                // DNS registry is now handled by the router — no boundary-level
+                // registry update needed. Service SMs signal their DNS entries
+                // to the DnsRegistry port, and the adapter produces incremental
+                // actions that flow through translate_effects.
                 let internal_effects = self.core.process_event(
                     InternalNamespaceEvent::ClientCommand(cmd),
                 );
@@ -367,6 +367,7 @@ impl NamespaceWithBoundary {
             combined.scheduler_messages.extend(effects.scheduler_messages);
             combined.pod_actions.extend(effects.pod_actions);
             combined.endpoint_actions.extend(effects.endpoint_actions);
+            combined.dns_registry_actions.extend(effects.dns_registry_actions);
         }
         combined
     }
@@ -463,6 +464,31 @@ impl NamespaceWithBoundary {
         for action in internal.endpoint_actions {
             if let Some(cmd) = self.build_endpoint_command(&action) {
                 effects.broadcast_commands.push(cmd);
+            }
+        }
+
+        // Translate DNS registry actions → broadcast commands.
+        if !internal.dns_registry_actions.is_empty() {
+            let mut added = Vec::new();
+            let mut removed = Vec::new();
+            for action in internal.dns_registry_actions {
+                match action {
+                    DnsRegistryAction::Add { name, ip } => {
+                        added.push(distvirt_worker_protocol::RegistryEntry { name, ip });
+                    }
+                    DnsRegistryAction::Remove { name } => {
+                        removed.push(name);
+                    }
+                }
+            }
+            if !added.is_empty() || !removed.is_empty() {
+                effects.broadcast_commands.push(
+                    distvirt_worker_protocol::WorkerCommand::RegistryUpdate {
+                        namespace_id: self.core.namespace_id().clone(),
+                        added,
+                        removed,
+                    },
+                );
             }
         }
     }
@@ -595,42 +621,6 @@ impl NamespaceWithBoundary {
                     namespace_id: self.core.namespace_id().clone(),
                     upserted: vec![endpoint_spec],
                     removed_ips: vec![],
-                })
-            }
-        }
-    }
-
-    fn build_registry_command(
-        &self,
-        action: &RegistryAction,
-    ) -> Option<distvirt_worker_protocol::WorkerCommand> {
-        match action {
-            RegistryAction::Sync { entries } => {
-                Some(distvirt_worker_protocol::WorkerCommand::RegistrySync {
-                    namespace_id: self.core.namespace_id().clone(),
-                    entries: entries
-                        .iter()
-                        .map(|e| distvirt_worker_protocol::RegistryEntry {
-                            name: e.name.clone(),
-                            ip: e.ip,
-                        })
-                        .collect(),
-                })
-            }
-            RegistryAction::Update { added, removed } => {
-                if added.is_empty() && removed.is_empty() {
-                    return None;
-                }
-                Some(distvirt_worker_protocol::WorkerCommand::RegistryUpdate {
-                    namespace_id: self.core.namespace_id().clone(),
-                    added: added
-                        .iter()
-                        .map(|e| distvirt_worker_protocol::RegistryEntry {
-                            name: e.name.clone(),
-                            ip: e.ip,
-                        })
-                        .collect(),
-                    removed: removed.clone(),
                 })
             }
         }

@@ -1,5 +1,8 @@
 use distvirt_sm_router::{Aggregator, IncrementalAggregator, ListAggregator, SmHandler};
 
+use crate::adapter::dns_registry::{
+    ServiceDnsIncrementalAggregator, WorkloadDnsIncrementalAggregator,
+};
 use crate::adapter::pod_assignment::PodAssignmentIncrementalAggregator;
 use crate::adapter::schedule_request::ScheduleRequestIncrementalAggregator;
 use crate::adapter::endpoint::EndpointIncrementalAggregator;
@@ -109,6 +112,20 @@ pub struct TimerId(pub u64);
 /// The singleton timer port ID.
 pub const TIMER: TimerId = TimerId(0);
 
+/// Manual ID for the singleton DNS registry port.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct DnsRegistryId(pub u64);
+
+/// The singleton DNS registry port ID.
+pub const DNS_REGISTRY: DnsRegistryId = DnsRegistryId(0);
+
+/// DNS entry info carried by service/workload signals to the DNS registry port.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DnsEntryInfo {
+    pub name: String,
+    pub ip: std::net::Ipv4Addr,
+}
+
 /// Delta produced by the incremental schedule-request aggregator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScheduleRequestDelta {
@@ -173,6 +190,10 @@ pub struct ServiceSpec {
     pub has_activation: bool,
     /// Per-service idle timeout. Only meaningful when `has_activation` is true.
     pub idle_timeout: std::time::Duration,
+    /// DNS name for registry (e.g. service name from namespace spec).
+    pub dns_name: Option<String>,
+    /// DNS IP for registry (e.g. service VIP from namespace spec).
+    pub dns_ip: Option<std::net::Ipv4Addr>,
 }
 
 /// Worker info produced by the worker port.
@@ -229,7 +250,7 @@ pub enum SvcStatus {
 }
 
 /// Timer key enum for workload-specific timers.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum WorkloadTimerKey {
     #[default]
     RetryBackoff,
@@ -246,7 +267,7 @@ pub enum BackendNeed {
 }
 
 /// Timer key enum for service-specific timers.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum ServiceTimerKey {
     #[default]
     IdleTimeout,
@@ -261,7 +282,7 @@ pub struct ServiceTimerRequest {
 }
 
 /// Timer key enum for pod-specific timers.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum PodTimerKey {
     #[default]
     LaunchTimeout,
@@ -465,23 +486,26 @@ distvirt_sm_router::router! {
         ScheduleRequest(ScheduleRequestId),
         ScheduleLease(auto),
         Endpoint(EndpointId),
+        DnsRegistry(DnsRegistryId),
     }
     signals {
         Service::Demand(bool),
-        Service::SvcWantedTimers(Vec<ServiceTimerRequest>),
-        Service::SvcStatusSignal(SvcStatus),
-        Service::IdleTimerActiveSignal(bool),
+        Service::WantedTimers(Vec<ServiceTimerRequest>),
+        Service::Status(SvcStatus),
+        Service::IdleTimerActive(bool),
         Service::EndpointInfo(Option<ReadyInfo>),
+        Service::DnsEntry(Option<DnsEntryInfo>),
         Workload::Readiness(Option<ReadyInfo>),
+        Workload::DnsEntry(Option<DnsEntryInfo>),
         Workload::PodIntent(PodIntent),
         Workload::PodLaunchSpec(Option<WorkloadSpec>),
         Workload::WantedTimers(Vec<TimerRequest>),
-        Workload::WlStatusSignal(WlStatus),
-        Workload::ConsecutiveFailuresSignal(u32),
-        Workload::SpecStaleSignal(bool),
+        Workload::Status(WlStatus),
+        Workload::ConsecutiveFailures(u32),
+        Workload::SpecStale(bool),
         Pod::Status(PodStatus),
-        Pod::Worker(Option<WorkerId>),
-        Pod::WantedPodTimers(Vec<PodTimerRequest>),
+        Pod::AssignedWorker(Option<WorkerId>),
+        Pod::WantedTimers(Vec<PodTimerRequest>),
         Pod::ScheduleRequest(PodScheduleRequest),
         Worker::Info(WorkerInfo),
         BackendNeed::Level(BackendNeed),
@@ -490,21 +514,23 @@ distvirt_sm_router::router! {
         ScheduleLease::Lease(LeaseInfo),
     }
     edges {
-        ServiceToWorkload: Service -> Workload,
-        WorkloadToService: Workload -> Service,
-        WorkloadToPod: Workload -> Pod,
-        PodToWorkload: Pod -> Workload,
-        WorkerToPod: Worker -> Pod,
-        BackendNeedToService: BackendNeed -> Service,
-        ManagementToWorkload: Management -> Workload,
-        ManagementToService: Management -> Service,
-        WorkloadToTimer: Workload -> Timer,
-        ServiceToTimer: Service -> Timer,
-        PodToTimer: Pod -> Timer,
-        PodToScheduleRequest: Pod -> ScheduleRequest,
-        ScheduleLeaseToPod: ScheduleLease -> Pod,
-        PodToWorker: Pod -> Worker,
-        ServiceToEndpoint: Service -> Endpoint,
+        ServiceDemand: Service -> Workload,
+        WorkloadReadiness: Workload -> Service,
+        PodOwnership: Workload -> Pod,
+        PodReport: Pod -> Workload,
+        WorkerAssignment: Worker -> Pod,
+        TrafficDemand: BackendNeed -> Service,
+        WorkloadConfig: Management -> Workload,
+        ServiceConfig: Management -> Service,
+        WorkloadTimers: Workload -> Timer,
+        ServiceTimers: Service -> Timer,
+        PodTimers: Pod -> Timer,
+        PodScheduleIntent: Pod -> ScheduleRequest,
+        PodLease: ScheduleLease -> Pod,
+        PodPlacement: Pod -> Worker,
+        ServiceEndpoints: Service -> Endpoint,
+        ServiceDns: Service -> DnsRegistry,
+        WorkloadDns: Workload -> DnsRegistry,
     }
     events {
         AdminCommand(AdminCmd): Management -> Workload,
@@ -521,72 +547,80 @@ distvirt_sm_router::router! {
     }
     inputs {
         Workload::DemandInput {
-            sources: [(ServiceToWorkload, Service::Demand)],
+            sources: [(ServiceDemand, Service::Demand)],
             aggregator: DemandAggregator,
         },
         Workload::SpecInput {
-            sources: [(ManagementToWorkload, Management::WlSpec)],
+            sources: [(WorkloadConfig, Management::WlSpec)],
             aggregator: SpecAggregator,
         },
         Workload::PodStatusInput {
-            sources: [(PodToWorkload, Pod::Status)],
+            sources: [(PodReport, Pod::Status)],
             aggregator: ListAggregator<PodId, PodStatus>,
         },
         Workload::PodWorkerInput {
-            sources: [(PodToWorkload, Pod::Worker)],
+            sources: [(PodReport, Pod::AssignedWorker)],
             aggregator: ListAggregator<PodId, Option<WorkerId>>,
         },
         Service::ReadinessInput {
-            sources: [(WorkloadToService, Workload::Readiness)],
+            sources: [(WorkloadReadiness, Workload::Readiness)],
             aggregator: ListAggregator<WorkloadId, Option<ReadyInfo>>,
         },
         Service::SvcSpecInput {
-            sources: [(ManagementToService, Management::SvcSpec)],
+            sources: [(ServiceConfig, Management::SvcSpec)],
             aggregator: SvcSpecAggregator,
         },
         Service::BackendNeedInput {
-            sources: [(BackendNeedToService, BackendNeed::Level)],
+            sources: [(TrafficDemand, BackendNeed::Level)],
             aggregator: BackendNeedAggregator,
         },
         Pod::WorkerInput {
-            sources: [(WorkerToPod, Worker::Info)],
+            sources: [(WorkerAssignment, Worker::Info)],
             aggregator: WorkerAssignmentAggregator,
         },
         Pod::OwnerInput {
-            sources: [(WorkloadToPod, Workload::PodIntent)],
+            sources: [(PodOwnership, Workload::PodIntent)],
             aggregator: OwnerAggregator,
         },
         Pod::LaunchSpecInput {
-            sources: [(WorkloadToPod, Workload::PodLaunchSpec)],
+            sources: [(PodOwnership, Workload::PodLaunchSpec)],
             aggregator: LaunchSpecAggregator,
         },
         Pod::LeaseInput {
-            sources: [(ScheduleLeaseToPod, ScheduleLease::Lease)],
+            sources: [(PodLease, ScheduleLease::Lease)],
             aggregator: LeaseAggregator,
         },
         Worker::AssignedPodsInput {
-            sources: [(PodToWorker, Pod::ScheduleRequest)],
+            sources: [(PodPlacement, Pod::ScheduleRequest)],
             incremental_aggregator: PodAssignmentIncrementalAggregator,
         },
         ScheduleRequest::PodRequestsInput {
-            sources: [(PodToScheduleRequest, Pod::ScheduleRequest)],
+            sources: [(PodScheduleIntent, Pod::ScheduleRequest)],
             incremental_aggregator: ScheduleRequestIncrementalAggregator,
         },
         Timer::WorkloadTimersInput {
-            sources: [(WorkloadToTimer, Workload::WantedTimers)],
+            sources: [(WorkloadTimers, Workload::WantedTimers)],
             incremental_aggregator: WorkloadTimerIncrementalAggregator,
         },
         Timer::ServiceTimersInput {
-            sources: [(ServiceToTimer, Service::SvcWantedTimers)],
+            sources: [(ServiceTimers, Service::WantedTimers)],
             incremental_aggregator: ServiceTimerIncrementalAggregator,
         },
         Timer::PodTimersInput {
-            sources: [(PodToTimer, Pod::WantedPodTimers)],
+            sources: [(PodTimers, Pod::WantedTimers)],
             incremental_aggregator: PodTimerIncrementalAggregator,
         },
         Endpoint::ServiceEndpointsInput {
-            sources: [(ServiceToEndpoint, Service::EndpointInfo)],
+            sources: [(ServiceEndpoints, Service::EndpointInfo)],
             incremental_aggregator: EndpointIncrementalAggregator,
+        },
+        DnsRegistry::ServiceDnsInput {
+            sources: [(ServiceDns, Service::DnsEntry)],
+            incremental_aggregator: ServiceDnsIncrementalAggregator,
+        },
+        DnsRegistry::WorkloadDnsInput {
+            sources: [(WorkloadDns, Workload::DnsEntry)],
+            incremental_aggregator: WorkloadDnsIncrementalAggregator,
         },
     }
 }

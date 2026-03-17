@@ -20,7 +20,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -30,7 +30,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -49,12 +49,12 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
 fn make_pod_running(router: &mut DRouter, worker: crate::sm::WorkerId, pod_id: PodId) {
     // Grant lease
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
 
     // Assign worker to pod
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.propagate();
 
     // Notify running
@@ -185,7 +185,7 @@ fn multiple_services_change() {
     // Two independent workloads + services.
     let mgmt1 = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt1, vec![W1]);
+    router.set_workload_config_edges(mgmt1, vec![W1]);
     router.set_management_wl_spec(
         mgmt1,
         WorkloadSpec {
@@ -194,7 +194,7 @@ fn multiple_services_change() {
         },
     );
     router.create_service(S1, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt1, vec![S1]);
+    router.set_service_config_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
         ServiceSpec {
@@ -206,7 +206,7 @@ fn multiple_services_change() {
 
     let mgmt2 = router.create_management();
     router.create_workload(w2_id, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt2, vec![w2_id]);
+    router.set_workload_config_edges(mgmt2, vec![w2_id]);
     router.set_management_wl_spec(
         mgmt2,
         WorkloadSpec {
@@ -215,7 +215,7 @@ fn multiple_services_change() {
         },
     );
     router.create_service(s2_id, ServiceSm::new(false));
-    router.set_management_to_service_edges(mgmt2, vec![s2_id]);
+    router.set_service_config_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(
         mgmt2,
         ServiceSpec {
@@ -232,14 +232,14 @@ fn multiple_services_change() {
 
     // Make both pods running.
     let lease1 = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease1, vec![pod1]);
+    router.set_pod_lease_edges(lease1, vec![pod1]);
     router.set_schedule_lease_lease(lease1, crate::sm::LeaseInfo { worker_id: worker });
     let lease2 = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease2, vec![pod2]);
+    router.set_pod_lease_edges(lease2, vec![pod2]);
     router.set_schedule_lease_lease(lease2, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
 
-    router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
+    router.set_worker_assignment_edges(worker, vec![pod1, pod2]);
     router.propagate();
 
     router.send_notify_pod_status(worker, pod1, crate::sm::PodStatus::Running);

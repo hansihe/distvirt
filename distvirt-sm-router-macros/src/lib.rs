@@ -15,11 +15,6 @@ mod validate;
 /// router! {
 ///     // -- Optional flags (before any section) --
 ///
-///     // Makes all generated fields and methods `pub`. Without this, internal
-///     // fields are private and only the public API is exposed. Useful for
-///     // test assertions that inspect router internals.
-///     expose_internals_for_testing
-///
 ///     // Enables model checking support: adds Clone/Hash/Eq bounds on SM and
 ///     // signal types, generates RouterSnapshot, step-by-step propagation
 ///     // methods, and signal/edge/instance accessors. See the `model_check`

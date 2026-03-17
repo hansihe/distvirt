@@ -12,7 +12,7 @@ use crate::sm::{
 mod tests;
 
 /// Identifies a specific timer instance across all SM kinds.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TimerIdentity {
     Workload(WorkloadId, WorkloadTimerKey),
     Service(ServiceId, ServiceTimerKey),

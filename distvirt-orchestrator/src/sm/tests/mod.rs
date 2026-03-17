@@ -107,7 +107,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -117,7 +117,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -141,7 +141,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
 /// Helper: schedule a pod to a worker by creating a lease port.
 fn schedule_pod(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
     let lease = router.create_schedule_lease();
-    router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
+    router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, LeaseInfo { worker_id: worker });
     router.propagate();
     lease
@@ -150,7 +150,7 @@ fn schedule_pod(router: &mut Router, worker: WorkerId, pod_id: PodId) -> Schedul
 /// Helper: make a pending pod Running (schedule + worker assignment + status).
 fn make_pod_running(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
     let lease = schedule_pod(router, worker, pod_id);
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Running);
     router.propagate();
     lease
@@ -159,7 +159,7 @@ fn make_pod_running(router: &mut Router, worker: WorkerId, pod_id: PodId) -> Sch
 /// Helper: make a pending pod fail via worker notification.
 fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
     let lease = schedule_pod(router, worker, pod_id);
-    router.set_worker_to_pod_edges(worker, vec![pod_id]);
+    router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
     router.propagate();
     lease
@@ -176,7 +176,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::with_max_retries(max_retries));
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -186,7 +186,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     );
 
     router.create_service(S1, ServiceSm::new(false)); // always-on
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {
@@ -216,7 +216,7 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.set_management_to_workload_edges(mgmt, vec![W1]);
+    router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
@@ -227,7 +227,7 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
     );
 
     router.create_service(S1, ServiceSm::new(true)); // activation-based
-    router.set_management_to_service_edges(mgmt, vec![S1]);
+    router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
         ServiceSpec {

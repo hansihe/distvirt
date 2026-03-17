@@ -62,7 +62,7 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
 
     let mgmt = core.router_mut().create_management();
     core.router_mut().create_workload(W1, WorkloadSm::new());
-    core.router_mut().set_management_to_workload_edges(mgmt, vec![W1]);
+    core.router_mut().set_workload_config_edges(mgmt, vec![W1]);
     core.router_mut().set_management_wl_spec(
         mgmt,
         crate::sm::WorkloadSpec {
@@ -72,7 +72,7 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
     );
 
     core.router_mut().create_service(S1, ServiceSm::new(false));
-    core.router_mut().set_management_to_service_edges(mgmt, vec![S1]);
+    core.router_mut().set_service_config_edges(mgmt, vec![S1]);
     core.router_mut().set_management_svc_spec(
         mgmt,
         ServiceSpec {

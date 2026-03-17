@@ -97,7 +97,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
     type Input = WorkloadInput;
 
     fn initialize(&mut self, ctx: &mut C) {
-        ctx.set_workload_to_timer_edges(vec![TIMER]);
+        ctx.set_workload_timers_edges(vec![TIMER]);
         self.update_status_signals(ctx);
     }
 
@@ -118,7 +118,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.in_backoff = false;
                 }
 
-                ctx.set_workload_to_service_edges(demand.service_ids);
+                ctx.set_workload_readiness_edges(demand.service_ids);
                 self.reconcile(ctx);
                 self.update_timer_signal(ctx);
             }
@@ -197,7 +197,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.pod_worker_id = None;
                     self.awaiting_suspend = false;
                     self.committed_to_boot = false;
-                    ctx.set_workload_to_pod_edges(vec![]);
+                    ctx.set_pod_ownership_edges(vec![]);
                     ctx.set_pod_intent(PodIntent::None);
                     ctx.set_readiness(None);
                 }
@@ -211,7 +211,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.awaiting_suspend = false;
                     ctx.set_readiness(None);
                     // Remove edge → pod will self-destruct (terminal + no owner).
-                    ctx.set_workload_to_pod_edges(vec![]);
+                    ctx.set_pod_ownership_edges(vec![]);
                     ctx.set_pod_intent(PodIntent::None);
                     self.pod_id = None;
                     // Reconcile may create a new pod if demand returned during suspend.
@@ -336,7 +336,7 @@ impl WorkloadSm {
 
         // Remove ownership edge — pod is terminal (Finished),
         // so removing the edge triggers self-destruct.
-        ctx.set_workload_to_pod_edges(vec![]);
+        ctx.set_pod_ownership_edges(vec![]);
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
         // pod_worker_id will be cleared by PodWorkerInput signal propagation.
@@ -361,7 +361,7 @@ impl WorkloadSm {
 
         // Remove ownership edge — pod is already terminal (Failed),
         // so removing the edge triggers self-destruct (terminal + no owner).
-        ctx.set_workload_to_pod_edges(vec![]);
+        ctx.set_pod_ownership_edges(vec![]);
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
         // pod_worker_id will be cleared by PodWorkerInput signal propagation.
@@ -400,7 +400,7 @@ impl WorkloadSm {
 
         // Remove ownership edge — pod is terminal (Displaced),
         // so removing the edge triggers self-destruct.
-        ctx.set_workload_to_pod_edges(vec![]);
+        ctx.set_pod_ownership_edges(vec![]);
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
 
@@ -424,7 +424,7 @@ impl WorkloadSm {
     /// Any suspended artifact is discarded (this is a hard kill).
     pub(crate) fn destroy_current_pod(&mut self, ctx: &mut impl WorkloadCtx) {
         if self.pod_id.is_some() {
-            ctx.set_workload_to_pod_edges(vec![]);
+            ctx.set_pod_ownership_edges(vec![]);
             ctx.set_pod_intent(PodIntent::None);
             self.pod_id = None;
         }
@@ -468,9 +468,9 @@ impl WorkloadSm {
         } else {
             WlStatus::Dormant
         };
-        ctx.set_wl_status_signal(status);
-        ctx.set_consecutive_failures_signal(self.consecutive_failures);
-        ctx.set_spec_stale_signal(
+        ctx.set_status(status);
+        ctx.set_consecutive_failures(self.consecutive_failures);
+        ctx.set_spec_stale(
             self.pod_id.is_some() && self.launched_with_spec_version != self.spec_version,
         );
     }
@@ -498,7 +498,7 @@ impl WorkloadSm {
             let pod_id = ctx.create_pod(pod);
             self.pod_id = Some(pod_id);
             self.launched_with_spec_version = self.spec_version;
-            ctx.set_workload_to_pod_edges(vec![pod_id]);
+            ctx.set_pod_ownership_edges(vec![pod_id]);
             ctx.set_pod_intent(PodIntent::Want);
         } else if want_pod && self.pod_id.is_some() {
             ctx.set_pod_intent(PodIntent::Want);
@@ -511,7 +511,7 @@ impl WorkloadSm {
             } else {
                 // Abandon pod (remove edge). Pod will drive itself to
                 // terminal and self-destruct.
-                ctx.set_workload_to_pod_edges(vec![]);
+                ctx.set_pod_ownership_edges(vec![]);
                 ctx.set_pod_intent(PodIntent::None);
                 self.pod_id = None;
                 ctx.set_readiness(None);

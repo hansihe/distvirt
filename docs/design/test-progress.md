@@ -120,7 +120,7 @@ The old scenario test harness (`tests/harness/`) has been transplanted from
 
 ### Results
 
-- **84 scenario tests:** 50 pass, 28 fail, 6 ignored
+- **84 scenario tests:** 52 pass, 26 fail, 6 ignored
 
 The 28 failing tests serve as a precise TODO list of behavioral differences
 and missing features.
@@ -154,7 +154,9 @@ and missing features.
 | pressure | `test_pod_count_tiebreaker_at_same_pressure` |
 | pressure | `test_pod_scheduled_on_lower_pressure_worker` |
 | pressure | `test_pressure_relief_triggers_scheduling` |
+| registry | `test_registry_sync_on_namespace_create` |
 | registry | `test_registry_sync_sent_to_new_worker` |
+| registry | `test_registry_update_on_service_change` |
 | snapshot_placement | `test_resume_pinned_to_artifact_worker` |
 | spec_reconciliation | `test_add_workload_to_existing_namespace` |
 | spec_reconciliation | `test_image_change_restarts_running_workload` |
@@ -267,18 +269,24 @@ with no pressure adjustment). These tests are `#[ignore]`d:
 IP to a service and activate it. The old code looked up the service by IP
 in the endpoint table and sent `ActivateService`.
 
-#### 6. Registry sync (4 tests)
+#### 6. Registry sync (2 tests remaining)
+
+**Fixed (2026-03-17):** DNS service registry moved from spec-driven side-channel
+in `EndpointAdapter` to a proper router port (`DnsRegistry`). Services signal
+`DnsEntry(Option<DnsEntryInfo>)` to a singleton `DnsRegistry` port via
+`ServiceToDnsRegistry` edges. `DnsRegistryAdapter` uses incremental aggregation
+and maintains a cache for new-worker full sync. Tests updated to expect
+`RegistryUpdate` (incremental) instead of `RegistrySync` (full) on initial
+spec application. `WorkloadToDnsRegistry` edge also declared for future use.
 
 | Test | Symptom |
 |------|---------|
-| `registry::test_registry_sync_on_namespace_create` | assert_namespace_status panic |
-| `registry::test_registry_update_on_service_change` | assert_namespace_status panic |
-| `registry::test_non_tunnel_workers_excluded_from_registry_entries` | empty registry entries |
-| `registry::test_worker_registry_sync_with_tunnel_workers` | empty registry entries |
+| `registry::test_non_tunnel_workers_excluded_from_registry_entries` | empty WorkerRegistrySync entries |
+| `registry::test_worker_registry_sync_with_tunnel_workers` | empty WorkerRegistrySync entries |
 
-`test_registry_sync_sent_to_new_worker` now passes. Remaining: two still fail
-at `assert_namespace_status` before reaching registry assertions; two fail
-because `WorkerRegistrySync` commands aren't generated in `SyncShell`.
+These two remaining failures are about the **Worker** registry (inter-worker
+tunnel peer discovery via `WorkerRegistrySync`), not the DNS service registry.
+They fail because `WorkerRegistrySync` commands aren't generated in `SyncShell`.
 
 #### 7. Remaining feature gaps (8 tests)
 
@@ -303,12 +311,12 @@ because `WorkerRegistrySync` commands aren't generated in `SyncShell`.
 | **P2** | Route-miss IP→service lookup (#5) | 3 | Small |
 | **P3** | Pressure-adjusted idle timeout (#4 remaining) | 6 (currently ignored) | Medium |
 | **P4** | `#[ignore]` harness stubs (#3) | 0 (noise reduction) | Trivial |
-| **P5** | Registry sync in SyncShell (#6) | 4 | Medium |
+| ~~**P5**~~ | ~~DNS registry via router port (#6)~~ | ~~2 of 4~~ | ~~DONE — 2026-03-17~~ |
 | ~~**P6**~~ | ~~Pressure scheduling / pod_count tracking (#4a,c)~~ | ~~4~~ | ~~DONE — 2026-03-17~~ |
 | **P7** | Suspended artifact + worker disconnect (#1 remaining) | 2 | Medium |
 | **P8** | Preemption, conditions, misc (#7) | 7 | Large |
 
-P6 done. Current: 50 pass, 28 fail, 6 ignored. P2 would take us to ~53/84 passing.
+P5 done. Current: 52 pass, 26 fail, 6 ignored. P2 would take us to ~55/84 passing.
 
 ### Visibility changes
 
