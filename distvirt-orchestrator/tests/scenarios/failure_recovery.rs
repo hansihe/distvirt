@@ -252,7 +252,7 @@ fn test_resume_failure_falls_back_to_cold_launch() {
         .send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
             namespace_id: "ns1".into(),
             ip: svc_ip,
-            service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
+            service_id: Some(h.proto_service_id("ns1", "web-svc")),
         });
     h.converge();
 

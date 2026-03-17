@@ -10,7 +10,8 @@ use super::*;
 fn traffic_triggered_activation() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -73,7 +74,8 @@ fn traffic_triggered_activation() {
 fn idle_timeout_deactivation() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -145,7 +147,8 @@ fn idle_timeout_deactivation() {
 fn traffic_cancels_idle_timer() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -211,7 +214,8 @@ fn traffic_cancels_idle_timer() {
 fn idle_timeout_suspend_integration() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -223,6 +227,7 @@ fn idle_timeout_suspend_integration() {
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: true,
+            ..Default::default()
         },
     );
 
@@ -296,7 +301,8 @@ fn idle_timeout_suspend_integration() {
 fn worker_loss_removes_backend_need() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -361,8 +367,10 @@ fn worker_loss_removes_backend_need() {
 fn multiple_workers_one_loses_traffic() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker1 = router.create_worker();
-    let worker2 = router.create_worker();
+    let worker1 = WK1;
+    let worker2 = WK2;
+    router.create_worker(worker1);
+    router.create_worker(worker2);
     router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);

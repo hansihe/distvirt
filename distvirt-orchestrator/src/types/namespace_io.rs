@@ -35,7 +35,7 @@ pub enum NamespaceInput {
     },
     StreamLogs {
         client_id: ClientId,
-        service_id: Option<ServiceId>,
+        service_id: Option<String>,
     },
     LaunchPod {
         workload_id: WorkloadId,
@@ -127,16 +127,16 @@ pub enum WorkerEvent {
         size_bytes: u64,
     },
     ServiceBackendNeed {
-        service_id: ServiceId,
+        service_id: String,
         need: BackendNeed,
     },
     EndpointActivation {
         ip: std::net::Ipv4Addr,
-        service_id: Option<ServiceId>,
+        service_id: Option<String>,
     },
     EndpointFlowStatus {
         ip: std::net::Ipv4Addr,
-        service_id: Option<ServiceId>,
+        service_id: Option<String>,
         has_active_flows: bool,
     },
 }

@@ -22,6 +22,19 @@ pub struct ServiceId(pub u64);
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct WorkloadId(pub u64);
 
+/// Worker identity — used by the router, the global scheduler, and the protocol.
+/// A single type for all three contexts. Values are allocated by the orchestrator
+/// shell on worker connect and flow through unchanged.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct WorkerId(pub u64);
+
+#[cfg(test)]
+impl WorkerId {
+    pub(crate) fn test(id: u64) -> Self {
+        WorkerId(id)
+    }
+}
+
 /// Readiness info broadcast from workload to services.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReadyInfo {
@@ -114,6 +127,9 @@ pub struct PodScheduleRequest {
     pub resume_artifact: Option<ArtifactId>,
     /// Set to true when the pod is in Suspending state and needs a SuspendPod command.
     pub suspend: bool,
+    /// Full workload spec for building protocol commands (LaunchPod/ResumePod).
+    /// Flows through the signal graph: Management → Workload → Pod → Worker port.
+    pub spec: Option<WorkloadSpec>,
 }
 
 /// Lease info signaled from a per-pod ScheduleLease port.
@@ -132,12 +148,22 @@ impl Default for LeaseInfo {
 }
 
 /// Workload spec delivered by management port.
+///
+/// Carries the full launch-relevant data so that the spec flows through the
+/// router signal graph and downstream actions can build protocol commands
+/// without consulting side caches.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct WorkloadSpec {
     pub image: String,
     /// If true, suspend the pod instead of destroying it when demand drops.
     /// Enables fast resume from snapshot on re-activation.
     pub suspend_on_idle: bool,
+    /// Pod network configuration for LaunchPod/ResumePod commands.
+    pub network: Option<distvirt_worker_protocol::PodNetworkConfig>,
+    /// Container specs for LaunchPod commands.
+    pub containers: Vec<distvirt_worker_protocol::ContainerSpec>,
+    /// Resource requirements for LaunchPod commands.
+    pub resources: Option<distvirt_worker_protocol::ResourceRequirements>,
 }
 
 /// Service spec delivered by management port.
@@ -323,6 +349,19 @@ impl Aggregator for OwnerAggregator {
     }
 }
 
+/// Aggregates launch spec from owner workload. Expects at most one source.
+#[derive(Default)]
+pub struct LaunchSpecAggregator;
+
+impl Aggregator for LaunchSpecAggregator {
+    type Input = (WorkloadId, Option<WorkloadSpec>);
+    type Output = Option<WorkloadSpec>;
+
+    fn aggregate(&self, inputs: &[(WorkloadId, Option<WorkloadSpec>)]) -> Option<WorkloadSpec> {
+        inputs.first().and_then(|(_, spec)| spec.clone())
+    }
+}
+
 /// Aggregates BackendNeed from multiple workers. Returns the "hottest" need.
 /// Priority: Active > Traffic > None.
 #[derive(Default)]
@@ -419,7 +458,7 @@ distvirt_sm_router::router! {
         Pod(auto, PodSm),
     }
     ports {
-        Worker(auto),
+        Worker(WorkerId),
         BackendNeed(auto),
         Management(auto),
         Timer(TimerId),
@@ -435,6 +474,7 @@ distvirt_sm_router::router! {
         Service::EndpointInfo(Option<ReadyInfo>),
         Workload::Readiness(Option<ReadyInfo>),
         Workload::PodIntent(PodIntent),
+        Workload::PodLaunchSpec(Option<WorkloadSpec>),
         Workload::WantedTimers(Vec<TimerRequest>),
         Workload::WlStatusSignal(WlStatus),
         Workload::ConsecutiveFailuresSignal(u32),
@@ -515,6 +555,10 @@ distvirt_sm_router::router! {
         Pod::OwnerInput {
             sources: [(WorkloadToPod, Workload::PodIntent)],
             aggregator: OwnerAggregator,
+        },
+        Pod::LaunchSpecInput {
+            sources: [(WorkloadToPod, Workload::PodLaunchSpec)],
+            aggregator: LaunchSpecAggregator,
         },
         Pod::LeaseInput {
             sources: [(ScheduleLeaseToPod, ScheduleLease::Lease)],

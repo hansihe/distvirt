@@ -8,13 +8,7 @@ use super::router_propagate::*;
 use super::router_setters::*;
 use super::snapshot;
 
-fn gen_clone_impls(
-    def: &TopologyDef,
-    _instance_fields: &[TokenStream],
-    _instance_inits: &[TokenStream],
-    _fields: &[TokenStream],
-    _inits: &[TokenStream],
-) -> TokenStream {
+fn gen_clone_impls(def: &TopologyDef) -> TokenStream {
     // RouterInstances Clone impl
     let mut inst_clone_fields = Vec::new();
     let mut inst_where_bounds = Vec::new();
@@ -84,13 +78,10 @@ fn gen_clone_impls(
         router_clone_fields.push(quote! { #f: self.#f.clone() });
     }
 
-    // Edges (fwd + rev)
+    // Edges
     for edge in &def.edges {
-        let snake = edge_snake(edge);
-        let fwd = format_ident!("{}_fwd", snake);
-        let rev = format_ident!("{}_rev", snake);
-        router_clone_fields.push(quote! { #fwd: self.#fwd.clone() });
-        router_clone_fields.push(quote! { #rev: self.#rev.clone() });
+        let f = format_ident!("{}", edge_snake(edge));
+        router_clone_fields.push(quote! { #f: self.#f.clone() });
     }
 
     // Pending creates
@@ -118,6 +109,7 @@ fn gen_clone_impls(
     router_clone_fields.push(quote! { dedup_wave: Vec::new() });
     router_clone_fields.push(quote! { dedup_seen: std::collections::BTreeSet::new() });
     router_clone_fields.push(quote! { event_wave: Vec::new() });
+    router_clone_fields.push(quote! { aggregate_scratch: ::distvirt_sm_router::UntypedVec::new() });
 
     let router_clone = quote! {
         impl<__Tracer: ::distvirt_sm_router::trace::Tracer + Clone, __IdAlloc: ::distvirt_sm_router::IdAllocator<NodeKind> + Clone>
@@ -186,18 +178,14 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
         inits.push(quote! { #state_field: std::collections::BTreeMap::new() });
     }
 
-    // Edges (fwd + rev)
+    // Edges
     for edge in &def.edges {
-        let snake = edge_snake(edge);
-        let fwd = format_ident!("{}_fwd", snake);
-        let rev = format_ident!("{}_rev", snake);
+        let f = format_ident!("{}", edge_snake(edge));
         let src_id = node_id_type(def, &edge.source);
         let tgt_id = node_id_type(def, &edge.target);
         let vis = &field_vis;
-        fields.push(quote! { #vis #fwd: std::collections::BTreeMap<#src_id, Vec<#tgt_id>> });
-        fields.push(quote! { #vis #rev: std::collections::BTreeMap<#tgt_id, std::collections::BTreeSet<#src_id>> });
-        inits.push(quote! { #fwd: std::collections::BTreeMap::new() });
-        inits.push(quote! { #rev: std::collections::BTreeMap::new() });
+        fields.push(quote! { #vis #f: ::distvirt_sm_router::EdgeMap<#src_id, #tgt_id> });
+        inits.push(quote! { #f: ::distvirt_sm_router::EdgeMap::new() });
     }
 
     // Pending creates
@@ -231,6 +219,7 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     fields.push(quote! { dedup_wave: Vec<DirtyInput> });
     fields.push(quote! { dedup_seen: std::collections::BTreeSet<DirtyInput> });
     fields.push(quote! { event_wave: Vec<PendingEvent> });
+    fields.push(quote! { aggregate_scratch: ::distvirt_sm_router::UntypedVec });
     inits.push(quote! { dirty: std::collections::VecDeque::new() });
     inits.push(quote! { pending_events: std::collections::VecDeque::new() });
     inits.push(quote! { depth_limit });
@@ -238,6 +227,7 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     inits.push(quote! { dedup_wave: Vec::new() });
     inits.push(quote! { dedup_seen: std::collections::BTreeSet::new() });
     inits.push(quote! { event_wave: Vec::new() });
+    inits.push(quote! { aggregate_scratch: ::distvirt_sm_router::UntypedVec::new() });
     // tracer init is handled separately for each constructor
 
     // Collect methods by visibility category
@@ -345,7 +335,7 @@ pub(super) fn gen_router_module(def: &TopologyDef) -> TokenStream {
     let snapshot_tokens = snapshot::gen_snapshot(def);
 
     let clone_impls = if def.model_checkable {
-        gen_clone_impls(def, &instance_fields, &instance_inits, &fields, &inits)
+        gen_clone_impls(def)
     } else {
         quote! {}
     };

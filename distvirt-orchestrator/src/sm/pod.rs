@@ -33,6 +33,9 @@ pub struct PodSm {
     pub timer_generation: u64,
     /// Worker assigned via lease signal.
     pub assigned_worker: Option<WorkerId>,
+    /// Launch spec received from owner workload via signal graph.
+    /// Included in PodScheduleRequest so it flows to the worker port.
+    pub launch_spec: Option<WorkloadSpec>,
 }
 
 impl PodSm {
@@ -45,6 +48,7 @@ impl PodSm {
             resume_artifact: None,
             timer_generation: 0,
             assigned_worker: None,
+            launch_spec: None,
         }
     }
 
@@ -57,6 +61,16 @@ impl PodSm {
             resume_artifact: Some(artifact_id),
             timer_generation: 0,
             assigned_worker: None,
+            launch_spec: None,
+        }
+    }
+
+    /// Build a PodScheduleRequest with the current state.
+    fn make_schedule_request(&self) -> PodScheduleRequest {
+        PodScheduleRequest {
+            resume_artifact: self.resume_artifact,
+            suspend: matches!(self.status, PodStatus::Suspending),
+            spec: self.launch_spec.clone(),
         }
     }
 
@@ -98,15 +112,19 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
     fn initialize(&mut self, ctx: &mut C) {
         ctx.set_pod_to_timer_edges(vec![TIMER]);
         ctx.set_pod_to_schedule_request_edges(vec![SCHEDULE_REQUEST]);
-        ctx.set_schedule_request(PodScheduleRequest {
-            resume_artifact: self.resume_artifact,
-            ..Default::default()
-        });
+        ctx.set_schedule_request(self.make_schedule_request());
         self.update_timer_signal(ctx);
     }
 
     fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         match input {
+            PodInput::LaunchSpecInput(spec) => {
+                if self.launch_spec != spec {
+                    self.launch_spec = spec;
+                    // Re-emit schedule request with updated spec.
+                    ctx.set_schedule_request(self.make_schedule_request());
+                }
+            }
             PodInput::WorkerInput(worker) => {
                 // Track assigned worker.
                 let new_worker_id = worker.as_ref().map(|(id, _)| *id);
@@ -143,10 +161,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     self.timer_generation += 1;
                     self.status = PodStatus::Suspending;
                     ctx.set_status(PodStatus::Suspending);
-                    ctx.set_schedule_request(PodScheduleRequest {
-                        resume_artifact: self.resume_artifact,
-                        suspend: true,
-                    });
+                    ctx.set_schedule_request(self.make_schedule_request());
                     self.update_timer_signal(ctx);
                 }
 

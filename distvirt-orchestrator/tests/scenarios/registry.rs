@@ -95,7 +95,7 @@ fn test_registry_update_on_service_change() {
 
     // Now remove svc-b by updating the spec.
     let mut updated_spec = spec.clone();
-    updated_spec.services.remove(&ServiceId::from("svc-b"));
+    updated_spec.services.remove("svc-b");
     // Also remove the workload for svc-b since it's no longer needed.
     updated_spec
         .workloads

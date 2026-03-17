@@ -6,12 +6,15 @@ use crate::sm::{
 
 const W1: WorkloadId = WorkloadId(1);
 const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
+const WK1: crate::sm::WorkerId = crate::sm::WorkerId(1);
+const WK2: crate::sm::WorkerId = crate::sm::WorkerId(2);
 
 /// Set up a router with a workload (always-on service), propagate initial state.
 /// Returns (worker, pod_id).
 fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, crate::sm::PodId) {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -86,6 +89,7 @@ fn pod_appears_launch() {
             worker_id,
             pod_id: launched_pod,
             request,
+            ..
         } => {
             assert_eq!(*worker_id, worker);
             assert_eq!(*launched_pod, pod_id);
@@ -174,9 +178,11 @@ fn multiple_workers() {
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
 
-    let worker1 = router.create_worker();
+    let worker1 = WK1;
+    router.create_worker(worker1);
     router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
-    let worker2 = router.create_worker();
+    let worker2 = WK2;
+    router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
 
     // Two separate management ports, each with its own workload+service.

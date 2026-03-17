@@ -353,11 +353,11 @@ impl SyncShell {
     /// for all existing namespaces. After `drain()`, the worker will be fully
     /// active in all namespaces.
     pub fn add_worker(&mut self, config: MockWorkerConfig) -> GlobalWorkerId {
-        let worker_id = GlobalWorkerId(self.next_worker_id);
+        let worker_id = crate::sm::WorkerId(self.next_worker_id);
         self.next_worker_id += 1;
 
         let proto_worker_id =
-            distvirt_worker_protocol::WorkerId::from(format!("w-{}", worker_id.0));
+            distvirt_worker_protocol::WorkerId::from(worker_id.0);
 
         self.workers.insert(
             worker_id,

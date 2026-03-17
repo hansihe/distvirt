@@ -8,6 +8,22 @@ use std::net::Ipv4Addr;
 use crate::types::*;
 use crate::worker_protocol_capnp as schema;
 
+// --- u64 ID ↔ Text helpers ---
+// The Cap'n Proto schema uses Text fields for IDs. Now that PodId, WorkerId,
+// ServiceId, ArtifactId are u64 newtypes, we serialize them as decimal strings
+// on the wire for backwards compatibility.
+
+fn write_u64_id(v: u64) -> String {
+    v.to_string()
+}
+
+fn read_u64_id(s: &str) -> capnp::Result<u64> {
+    s.parse::<u64>().map_err(|_| capnp::Error {
+        kind: capnp::ErrorKind::Failed,
+        extra: format!("invalid u64 ID: {:?}", s),
+    })
+}
+
 // --- Scalar Helpers ---
 
 pub fn write_ipv4(builder: &mut schema::ipv4_addr::Builder<'_>, addr: &Ipv4Addr) {
@@ -370,14 +386,14 @@ pub fn write_endpoint_placement(
     builder: &mut schema::endpoint_placement::Builder<'_>,
     val: &EndpointPlacement,
 ) {
-    builder.set_worker_id(val.worker_id.as_ref());
+    builder.set_worker_id(&write_u64_id(val.worker_id.0));
 }
 
 pub fn read_endpoint_placement(
     reader: schema::endpoint_placement::Reader<'_>,
 ) -> capnp::Result<EndpointPlacement> {
     Ok(EndpointPlacement {
-        worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
+        worker_id: WorkerId(read_u64_id(reader.get_worker_id()?.to_str()?)?),
     })
 }
 
@@ -421,7 +437,7 @@ pub fn write_endpoint_spec(builder: schema::endpoint_spec::Builder<'_>, val: &En
             backend,
         } => {
             let mut svc = b.init_service();
-            svc.set_service_id(service_id.as_ref());
+            svc.set_service_id(&write_u64_id(service_id.0));
             write_service_policy(&mut svc.reborrow().init_policy(), policy);
             match backend {
                 Some(be) => {
@@ -466,7 +482,7 @@ pub fn read_endpoint_spec(
                 None
             };
             EndpointKind::Service {
-                service_id: ServiceId::from(svc.get_service_id()?.to_str()?),
+                service_id: ServiceId(read_u64_id(svc.get_service_id()?.to_str()?)?),
                 policy: read_service_policy(svc.get_policy()?)?,
                 backend,
             }
@@ -622,7 +638,7 @@ pub fn write_worker_accepted(
     builder: &mut schema::worker_accepted::Builder<'_>,
     val: &WorkerAccepted,
 ) {
-    builder.set_worker_id(val.worker_id.as_ref());
+    builder.set_worker_id(&write_u64_id(val.worker_id.0));
     builder.set_tunnel_encrypted(val.tunnel_encrypted);
     let mut adapters = builder.reborrow().init_adapters(val.adapters.len() as u32);
     for (i, ac) in val.adapters.iter().enumerate() {
@@ -658,7 +674,7 @@ pub fn read_worker_accepted(
         });
     }
     Ok(WorkerAccepted {
-        worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
+        worker_id: WorkerId(read_u64_id(reader.get_worker_id()?.to_str()?)?),
         adapters: v,
         tunnel_encrypted: reader.get_tunnel_encrypted(),
         pools,
@@ -717,7 +733,7 @@ pub fn write_worker_peer_info(
     builder: &mut schema::worker_peer_info::Builder<'_>,
     val: &WorkerPeerInfo,
 ) {
-    builder.set_worker_id(val.worker_id.as_ref());
+    builder.set_worker_id(&write_u64_id(val.worker_id.0));
     builder.set_endpoint(&val.endpoint);
     builder.set_public_key(&val.public_key);
     let mut segments = builder.reborrow().init_segments(val.segments.len() as u32);
@@ -740,7 +756,7 @@ pub fn read_worker_peer_info(
         segments.push(segments_list.get(i));
     }
     Ok(WorkerPeerInfo {
-        worker_id: WorkerId::from(reader.get_worker_id()?.to_str()?),
+        worker_id: WorkerId(read_u64_id(reader.get_worker_id()?.to_str()?)?),
         endpoint: reader.get_endpoint()?.to_string()?,
         public_key,
         segments,
@@ -803,7 +819,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
         } => {
             let mut b = builder.init_launch_pod();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
             write_pod_network_config(&mut b.reborrow().init_network(), network);
             let mut list = b.reborrow().init_containers(containers.len() as u32);
             for (i, spec) in containers.iter().enumerate() {
@@ -823,7 +839,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
         } => {
             let mut b = builder.init_stop_pod();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
             b.set_graceful(*graceful);
         }
         WorkerCommand::AddWireGuardPeer {
@@ -856,8 +872,8 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
         } => {
             let mut b = builder.init_suspend_pod();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
-            b.set_snapshot_id(artifact_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
+            b.set_snapshot_id(&write_u64_id(artifact_id.0));
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::ResumePod {
@@ -869,8 +885,8 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
         } => {
             let mut b = builder.init_resume_pod();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
-            b.set_snapshot_id(artifact_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
+            b.set_snapshot_id(&write_u64_id(artifact_id.0));
             write_pod_network_config(&mut b.reborrow().init_network(), network);
             b.set_pool_id(pool_id.as_ref());
         }
@@ -879,7 +895,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
             pool_id,
         } => {
             let mut b = builder.init_delete_snapshot();
-            b.set_snapshot_id(artifact_id.as_ref());
+            b.set_snapshot_id(&write_u64_id(artifact_id.0));
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerCommand::WorkerRegistrySync { workers } => {
@@ -899,9 +915,9 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
         } => {
             let mut b = builder.init_transfer_artifact();
             b.set_transfer_id(*transfer_id);
-            b.set_source_artifact_id(source_artifact_id.as_ref());
+            b.set_source_artifact_id(&write_u64_id(source_artifact_id.0));
             b.set_source_pool_id(source_pool_id.as_ref());
-            b.set_dest_artifact_id(dest_artifact_id.as_ref());
+            b.set_dest_artifact_id(&write_u64_id(dest_artifact_id.0));
             b.set_dest_pool_id(dest_pool_id.as_ref());
             match dest_endpoint {
                 Some(ep) => b.set_dest_endpoint(ep),
@@ -1007,7 +1023,7 @@ pub fn read_worker_command(
             };
             Ok(WorkerCommand::LaunchPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 network: read_pod_network_config(r.get_network()?)?,
                 containers,
                 resources,
@@ -1017,7 +1033,7 @@ pub fn read_worker_command(
             let r = r?;
             Ok(WorkerCommand::StopPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 graceful: r.get_graceful(),
             })
         }
@@ -1067,8 +1083,8 @@ pub fn read_worker_command(
             let r = r?;
             Ok(WorkerCommand::SuspendPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
+                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1076,8 +1092,8 @@ pub fn read_worker_command(
             let r = r?;
             Ok(WorkerCommand::ResumePod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
+                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
                 network: read_pod_network_config(r.get_network()?)?,
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
@@ -1085,7 +1101,7 @@ pub fn read_worker_command(
         DeleteSnapshot(r) => {
             let r = r?;
             Ok(WorkerCommand::DeleteArtifact {
-                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
+                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1108,9 +1124,9 @@ pub fn read_worker_command(
             };
             Ok(WorkerCommand::TransferArtifact {
                 transfer_id: r.get_transfer_id(),
-                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
+                source_artifact_id: ArtifactId(read_u64_id(r.get_source_artifact_id()?.to_str()?)?),
                 source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
-                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
+                dest_artifact_id: ArtifactId(read_u64_id(r.get_dest_artifact_id()?.to_str()?)?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 dest_endpoint,
             })
@@ -1175,7 +1191,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_pod_running();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
         }
         WorkerEvent::PodExited {
             namespace_id,
@@ -1184,7 +1200,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_pod_exited();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
             b.set_exit_code(*exit_code);
         }
         WorkerEvent::PodFailed {
@@ -1194,7 +1210,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_pod_failed();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
             b.set_error(error);
         }
         WorkerEvent::ShuttingDown => {
@@ -1209,7 +1225,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_pod_log_stream_error();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
             b.set_container_id(container_id);
             b.set_phase(phase);
             b.set_error(error);
@@ -1221,7 +1237,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_service_backend_need();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_service_id(service_id.as_ref());
+            b.set_service_id(&write_u64_id(service_id.0));
             b.set_need(write_backend_need(need));
         }
         WorkerEvent::PodSuspended {
@@ -1233,8 +1249,8 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_pod_suspended();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
-            b.set_snapshot_id(artifact_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
+            b.set_snapshot_id(&write_u64_id(artifact_id.0));
             b.set_snapshot_size_bytes(*artifact_size_bytes);
             b.set_pool_id(pool_id.as_ref());
         }
@@ -1245,7 +1261,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_pod_suspend_failed();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_pod_id(pod_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
             b.set_error(error);
         }
         WorkerEvent::TunnelStatus {
@@ -1253,7 +1269,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
             status,
         } => {
             let mut b = builder.init_tunnel_status();
-            b.set_peer_worker_id(peer_worker_id.as_ref());
+            b.set_peer_worker_id(&write_u64_id(peer_worker_id.0));
             match status {
                 TunnelPeerStatus::Connected => {
                     b.set_connected(());
@@ -1294,7 +1310,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_artifact_write_started();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_artifact_id(artifact_id.as_ref());
+            b.set_artifact_id(&write_u64_id(artifact_id.0));
             b.set_pool_id(pool_id.as_ref());
         }
         WorkerEvent::ArtifactWriteCommitted {
@@ -1305,7 +1321,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_artifact_write_committed();
             b.set_namespace_id(namespace_id.as_ref());
-            b.set_artifact_id(artifact_id.as_ref());
+            b.set_artifact_id(&write_u64_id(artifact_id.0));
             b.set_pool_id(pool_id.as_ref());
             b.set_size_bytes(*size_bytes);
         }
@@ -1319,9 +1335,9 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_artifact_transfer_received();
             b.set_transfer_id(*transfer_id);
-            b.set_source_artifact_id(source_artifact_id.as_ref());
+            b.set_source_artifact_id(&write_u64_id(source_artifact_id.0));
             b.set_source_pool_id(source_pool_id.as_ref());
-            b.set_dest_artifact_id(dest_artifact_id.as_ref());
+            b.set_dest_artifact_id(&write_u64_id(dest_artifact_id.0));
             b.set_dest_pool_id(dest_pool_id.as_ref());
             b.set_size_bytes(*size_bytes);
         }
@@ -1335,9 +1351,9 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
         } => {
             let mut b = builder.init_transfer_failed();
             b.set_transfer_id(*transfer_id);
-            b.set_source_artifact_id(source_artifact_id.as_ref());
+            b.set_source_artifact_id(&write_u64_id(source_artifact_id.0));
             b.set_source_pool_id(source_pool_id.as_ref());
-            b.set_dest_artifact_id(dest_artifact_id.as_ref());
+            b.set_dest_artifact_id(&write_u64_id(dest_artifact_id.0));
             b.set_dest_pool_id(dest_pool_id.as_ref());
             b.set_error(error);
         }
@@ -1358,7 +1374,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
             match service_id {
                 Some(sid) => {
                     b.set_has_service_id(true);
-                    b.set_service_id(sid.as_ref());
+                    b.set_service_id(&write_u64_id(sid.0));
                 }
                 None => b.set_has_service_id(false),
             }
@@ -1376,7 +1392,7 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
             match service_id {
                 Some(sid) => {
                     b.set_has_service_id(true);
-                    b.set_service_id(sid.as_ref());
+                    b.set_service_id(&write_u64_id(sid.0));
                 }
                 None => b.set_has_service_id(false),
             }
@@ -1426,14 +1442,14 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::PodRunning {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
             })
         }
         PodExited(r) => {
             let r = r?;
             Ok(WorkerEvent::PodExited {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 exit_code: r.get_exit_code(),
             })
         }
@@ -1441,7 +1457,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::PodFailed {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 error: r.get_error()?.to_string()?,
             })
         }
@@ -1450,7 +1466,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::PodLogStreamError {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 container_id: r.get_container_id()?.to_string()?,
                 phase: r.get_phase()?.to_string()?,
                 error: r.get_error()?.to_string()?,
@@ -1464,7 +1480,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ServiceBackendNeed {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                service_id: ServiceId::from(r.get_service_id()?.to_str()?),
+                service_id: ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?),
                 need: read_backend_need(r.get_need()?)?,
             })
         }
@@ -1476,8 +1492,8 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::PodSuspended {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
-                artifact_id: ArtifactId::from(r.get_snapshot_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
+                artifact_id: ArtifactId(read_u64_id(r.get_snapshot_id()?.to_str()?)?),
                 artifact_size_bytes: r.get_snapshot_size_bytes(),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
@@ -1486,13 +1502,13 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::PodSuspendFailed {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                pod_id: PodId::from(r.get_pod_id()?.to_str()?),
+                pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 error: r.get_error()?.to_string()?,
             })
         }
         TunnelStatus(r) => {
             let r = r?;
-            let peer_worker_id = WorkerId::from(r.get_peer_worker_id()?.to_str()?);
+            let peer_worker_id = WorkerId(read_u64_id(r.get_peer_worker_id()?.to_str()?)?);
             let status = match r.which()? {
                 schema::tunnel_status_evt::Connected(()) => TunnelPeerStatus::Connected,
                 schema::tunnel_status_evt::Disconnected(d) => TunnelPeerStatus::Disconnected {
@@ -1536,7 +1552,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ArtifactWriteStarted {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
+                artifact_id: ArtifactId(read_u64_id(r.get_artifact_id()?.to_str()?)?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
             })
         }
@@ -1544,7 +1560,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ArtifactWriteCommitted {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
-                artifact_id: ArtifactId::from(r.get_artifact_id()?.to_str()?),
+                artifact_id: ArtifactId(read_u64_id(r.get_artifact_id()?.to_str()?)?),
                 pool_id: PoolId::from(r.get_pool_id()?.to_str()?),
                 size_bytes: r.get_size_bytes(),
             })
@@ -1553,9 +1569,9 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::ArtifactTransferReceived {
                 transfer_id: r.get_transfer_id(),
-                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
+                source_artifact_id: ArtifactId(read_u64_id(r.get_source_artifact_id()?.to_str()?)?),
                 source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
-                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
+                dest_artifact_id: ArtifactId(read_u64_id(r.get_dest_artifact_id()?.to_str()?)?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 size_bytes: r.get_size_bytes(),
             })
@@ -1564,9 +1580,9 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
             let r = r?;
             Ok(WorkerEvent::TransferFailed {
                 transfer_id: r.get_transfer_id(),
-                source_artifact_id: ArtifactId::from(r.get_source_artifact_id()?.to_str()?),
+                source_artifact_id: ArtifactId(read_u64_id(r.get_source_artifact_id()?.to_str()?)?),
                 source_pool_id: PoolId::from(r.get_source_pool_id()?.to_str()?),
-                dest_artifact_id: ArtifactId::from(r.get_dest_artifact_id()?.to_str()?),
+                dest_artifact_id: ArtifactId(read_u64_id(r.get_dest_artifact_id()?.to_str()?)?),
                 dest_pool_id: PoolId::from(r.get_dest_pool_id()?.to_str()?),
                 error: r.get_error()?.to_string()?,
             })
@@ -1582,7 +1598,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
         EndpointActivation(r) => {
             let r = r?;
             let service_id = if r.get_has_service_id() {
-                Some(ServiceId::from(r.get_service_id()?.to_str()?))
+                Some(ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?))
             } else {
                 None
             };
@@ -1595,7 +1611,7 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
         EndpointFlowStatus(r) => {
             let r = r?;
             let service_id = if r.get_has_service_id() {
-                Some(ServiceId::from(r.get_service_id()?.to_str()?))
+                Some(ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?))
             } else {
                 None
             };
@@ -1616,7 +1632,7 @@ pub fn write_log_stream_header(
     val: &LogStreamHeader,
 ) {
     builder.set_namespace_id(val.namespace_id.as_ref());
-    builder.set_pod_id(val.pod_id.as_ref());
+    builder.set_pod_id(&write_u64_id(val.pod_id.0));
     builder.set_container_id(&val.container_id);
 }
 
@@ -1625,7 +1641,7 @@ pub fn read_log_stream_header(
 ) -> capnp::Result<LogStreamHeader> {
     Ok(LogStreamHeader {
         namespace_id: NamespaceId::from(reader.get_namespace_id()?.to_str()?),
-        pod_id: PodId::from(reader.get_pod_id()?.to_str()?),
+        pod_id: PodId(read_u64_id(reader.get_pod_id()?.to_str()?)?),
         container_id: reader.get_container_id()?.to_string()?,
     })
 }

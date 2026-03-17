@@ -41,7 +41,7 @@ pub enum ClientCommand {
     },
     StreamLogs {
         namespace_id: NamespaceId,
-        service_id: Option<ServiceId>,
+        service_id: Option<String>,
     },
     Connect {
         namespace_id: NamespaceId,
@@ -83,7 +83,7 @@ pub enum ClientEvent {
     },
     LogChunk {
         namespace_id: NamespaceId,
-        service_id: ServiceId,
+        service_id: String,
         data: Vec<u8>,
     },
     Error {
@@ -134,7 +134,7 @@ pub struct NamespaceStatusReport {
     pub namespace_id: NamespaceId,
     pub status: NamespaceStatus,
     pub workloads: BTreeMap<WorkloadId, WorkloadStatusReport>,
-    pub services: BTreeMap<ServiceId, ServiceStatusReport>,
+    pub services: BTreeMap<String, ServiceStatusReport>,
     pub pods: BTreeMap<PodId, PodStatusReport>,
 }
 

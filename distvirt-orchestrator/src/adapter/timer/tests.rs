@@ -8,6 +8,7 @@ use crate::sm::{
 
 const W1: WorkloadId = WorkloadId(1);
 const S1: ServiceId = ServiceId(1);
+const WK1: crate::sm::WorkerId = crate::sm::WorkerId(1);
 
 fn test_config() -> TimerConfig {
     TimerConfig {
@@ -24,7 +25,8 @@ fn setup_workload(
     router: &mut DRouter,
     adapter: &mut TimerAdapter,
 ) -> (crate::sm::ManagementId, crate::sm::WorkerId) {
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -217,7 +219,8 @@ fn generation_change_restarts_timer() {
     let mut adapter = TimerAdapter::new(test_config());
 
     // Set up activation-based service so we can trigger idle timer generation changes.
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -324,7 +327,8 @@ fn multiple_sm_kinds_in_one_cycle() {
     let mut adapter = TimerAdapter::new(test_config());
 
     // Set up activation-based service.
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -422,7 +426,8 @@ fn fire_dispatches_workload_timer() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let adapter = TimerAdapter::new(test_config());
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -480,7 +485,8 @@ fn fire_dispatches_service_timer() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let adapter = TimerAdapter::new(test_config());
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

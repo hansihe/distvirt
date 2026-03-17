@@ -10,7 +10,7 @@ use super::*;
 pub struct NamespaceSpec {
     pub network: NetworkConfig,
     pub workloads: BTreeMap<WorkloadId, WorkloadSpec>,
-    pub services: BTreeMap<ServiceId, ServiceSpec>,
+    pub services: BTreeMap<String, ServiceSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

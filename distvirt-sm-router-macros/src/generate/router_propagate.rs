@@ -16,18 +16,18 @@ pub(super) fn gen_connectivity_check(def: &TopologyDef, ev: &EventDef) -> TokenS
                 || (e.source == ev.receiver && e.target == ev.sender)
         })
         .map(|e| {
-            let rev = format_ident!("{}_rev", edge_snake(e));
+            let edge_field = format_ident!("{}", edge_snake(e));
             if e.source == ev.sender && e.target == ev.receiver {
-                // sender is source: check rev map (O(log n) BTreeSet lookup)
+                // sender is source: check sources map (O(log n) BTreeSet lookup)
                 quote! {
-                    if let Some(sources) = self.#rev.get(&receiver_id) {
+                    if let Some(sources) = self.#edge_field.sources(&receiver_id) {
                         if sources.contains(&sender_id) { return true; }
                     }
                 }
             } else {
-                // sender is target: check rev map
+                // sender is target: check sources map
                 quote! {
-                    if let Some(sources) = self.#rev.get(&sender_id) {
+                    if let Some(sources) = self.#edge_field.sources(&sender_id) {
                         if sources.contains(&receiver_id) { return true; }
                     }
                 }
@@ -60,7 +60,7 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
             let node_state = signal_state_field(&inp.node);
 
             let diff_blocks: Vec<_> = inp.sources.iter().map(|sp| {
-                let rev = format_ident!("{}_rev", to_snake_case(&sp.edge.to_string()));
+                let edge_field = format_ident!("{}", to_snake_case(&sp.edge.to_string()));
                 let source_node_state = signal_state_field(&sp.node);
                 let out_f = out_field_name(&sp.signal);
                 let prev_f = prev_field_name(inp, sp);
@@ -68,92 +68,38 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
                 let sig = def.signals.iter().find(|s| s.node == sp.node && s.signal == sp.signal).unwrap();
                 let vt = &sig.value_type;
 
-                // Build the input expression for agg calls — wrap in enum variant for multi-source
-                let make_input = if multi_source {
+                // Build the make_input closure — wraps in enum variant for multi-source,
+                // or constructs a tuple for single-source
+                let make_input_closure = if multi_source {
                     let enum_name = format_ident!("{}Source", inp.input_name);
                     let variant_name = format_ident!("{}{}", sp.node, sp.signal);
-                    quote! { #enum_name::#variant_name }
+                    quote! { |id: &#src_id_type, val: &#vt| #enum_name::#variant_name(*id, val.clone()) }
                 } else {
-                    quote! {} // will be used as tuple constructor
+                    quote! { |id: &#src_id_type, val: &#vt| (*id, val.clone()) }
                 };
 
-                if multi_source {
-                    quote! {
-                        {
-                            let mut current: std::collections::BTreeMap<#src_id_type, #vt> = std::collections::BTreeMap::new();
-                            if let Some(sources) = self.#rev.get(&target_id) {
-                                for &source_id in sources {
-                                    if let Some(state) = self.#source_node_state.get(&source_id) {
-                                        current.insert(source_id, state.#out_f.clone());
-                                    }
+                quote! {
+                    {
+                        let mut current: std::collections::BTreeMap<#src_id_type, #vt> = std::collections::BTreeMap::new();
+                        if let Some(sources) = self.#edge_field.sources(&target_id) {
+                            for &source_id in sources {
+                                if let Some(state) = self.#source_node_state.get(&source_id) {
+                                    current.insert(source_id, state.#out_f.clone());
                                 }
                             }
-
-                            let prev = &self.#node_state.get(&target_id).unwrap().#prev_f;
-
-                            // Added or changed
-                            for (id, val) in &current {
-                                match prev.get(id) {
-                                    None => {
-                                        let input = #make_input(*id, val.clone());
-                                        if let Some(out) = agg.added(&input) { outputs.push(out); }
-                                    }
-                                    Some(old) if old != val => {
-                                        let old_input = #make_input(*id, old.clone());
-                                        let new_input = #make_input(*id, val.clone());
-                                        if let Some(out) = agg.changed(&old_input, &new_input) { outputs.push(out); }
-                                    }
-                                    _ => {} // unchanged
-                                }
-                            }
-                            // Removed
-                            for (id, val) in prev {
-                                if !current.contains_key(id) {
-                                    let input = #make_input(*id, val.clone());
-                                    if let Some(out) = agg.removed(&input) { outputs.push(out); }
-                                }
-                            }
-
-                            // Update prev
-                            self.#node_state.get_mut(&target_id).unwrap().#prev_f = current;
                         }
-                    }
-                } else {
-                    quote! {
-                        {
-                            let mut current: std::collections::BTreeMap<#src_id_type, #vt> = std::collections::BTreeMap::new();
-                            if let Some(sources) = self.#rev.get(&target_id) {
-                                for &source_id in sources {
-                                    if let Some(state) = self.#source_node_state.get(&source_id) {
-                                        current.insert(source_id, state.#out_f.clone());
-                                    }
-                                }
-                            }
 
-                            let prev = &self.#node_state.get(&target_id).unwrap().#prev_f;
+                        let prev = &self.#node_state.get(&target_id).unwrap().#prev_f;
+                        ::distvirt_sm_router::incremental_diff(
+                            &current,
+                            prev,
+                            &agg,
+                            #make_input_closure,
+                            &mut outputs,
+                        );
 
-                            // Added or changed
-                            for (id, val) in &current {
-                                match prev.get(id) {
-                                    None => {
-                                        if let Some(out) = agg.added(&(*id, val.clone())) { outputs.push(out); }
-                                    }
-                                    Some(old) if old != val => {
-                                        if let Some(out) = agg.changed(&(*id, old.clone()), &(*id, val.clone())) { outputs.push(out); }
-                                    }
-                                    _ => {} // unchanged
-                                }
-                            }
-                            // Removed
-                            for (id, val) in prev {
-                                if !current.contains_key(id) {
-                                    if let Some(out) = agg.removed(&(*id, val.clone())) { outputs.push(out); }
-                                }
-                            }
-
-                            // Update prev
-                            self.#node_state.get_mut(&target_id).unwrap().#prev_f = current;
-                        }
+                        // Update prev
+                        self.#node_state.get_mut(&target_id).unwrap().#prev_f = current;
                     }
                 }
             }).collect();
@@ -167,19 +113,31 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
                 }
             });
         } else {
-            // Batch aggregator: existing logic
+            // Batch aggregator: collect into reusable scratch buffer, then aggregate
+            let input_type = if multi_source {
+                let enum_name = format_ident!("{}Source", inp.input_name);
+                quote! { #enum_name }
+            } else {
+                // For single-source, we know the concrete tuple type
+                let sp = &inp.sources[0];
+                let src_id = node_id_type(def, &sp.node);
+                let sig = def.signals.iter().find(|s| s.node == sp.node && s.signal == sp.signal).unwrap();
+                let vt = &sig.value_type;
+                quote! { (#src_id, #vt) }
+            };
+
             let collect_code: Vec<_> = inp
                 .sources
                 .iter()
                 .map(|sp| {
-                    let rev = format_ident!("{}_rev", to_snake_case(&sp.edge.to_string()));
+                    let edge_field = format_ident!("{}", to_snake_case(&sp.edge.to_string()));
                     let source_node_state = signal_state_field(&sp.node);
                     let out_f = out_field_name(&sp.signal);
                     if multi_source {
                         let enum_name = format_ident!("{}Source", inp.input_name);
                         let variant_name = format_ident!("{}{}", sp.node, sp.signal);
                         quote! {
-                            if let Some(sources) = self.#rev.get(&target_id) {
+                            if let Some(sources) = self.#edge_field.sources(&target_id) {
                                 for &source_id in sources {
                                     if let Some(state) = self.#source_node_state.get(&source_id) {
                                         inputs.push(#enum_name::#variant_name(source_id, state.#out_f.clone()));
@@ -189,7 +147,7 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
                         }
                     } else {
                         quote! {
-                            if let Some(sources) = self.#rev.get(&target_id) {
+                            if let Some(sources) = self.#edge_field.sources(&target_id) {
                                 for &source_id in sources {
                                     if let Some(state) = self.#source_node_state.get(&source_id) {
                                         inputs.push((source_id, state.#out_f.clone()));
@@ -201,16 +159,9 @@ pub(super) fn gen_aggregate_methods(def: &TopologyDef, methods: &mut Vec<TokenSt
                 })
                 .collect();
 
-            let vec_type = if multi_source {
-                let enum_name = format_ident!("{}Source", inp.input_name);
-                quote! { Vec<#enum_name> }
-            } else {
-                quote! { Vec<_> }
-            };
-
             methods.push(quote! {
-                fn #method(&self, target_id: #target_id_type) -> <#agg as ::distvirt_sm_router::Aggregator>::Output {
-                    let mut inputs: #vec_type = Vec::new();
+                fn #method(&mut self, target_id: #target_id_type) -> <#agg as ::distvirt_sm_router::Aggregator>::Output {
+                    let mut inputs = self.aggregate_scratch.typed_view::<#input_type>();
                     #(#collect_code)*
                     <#agg as Default>::default().aggregate(&inputs)
                 }
@@ -363,143 +314,83 @@ pub(super) fn gen_propagate(
             let node_str = inp.node.to_string();
             let input_str = inp.input_name.to_string();
 
+            // Trace snippet for delivered input (shared across all paths)
+            let trace_delivered = quote! {
+                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
+                    node: #node_str,
+                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
+                    input: #input_str,
+                    value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
+                });
+            };
+
+            // Node-type-dependent: existence check and delivery action.
+            // `deliver` is a block expression consuming `result` and returning
+            // `bool` (true = SM self-destructed, always false for ports).
+            let (existence_check, deliver) = if is_sm_node(def, &inp.node) {
+                let sm = def.state_machines.iter().find(|s| s.name == inp.node).unwrap();
+                let input_enum = format_ident!("{}Input", sm.name);
+                let ctx_name = format_ident!("{}CtxConcrete", sm.name);
+                let input_variant = &inp.input_name;
+                let apply = format_ident!("apply_{}_effects", to_snake_case(&inp.node.to_string()));
+
+                (
+                    quote! { !self.instances.#instances.contains_key(&target_id) },
+                    quote! {{
+                        let effects = {
+                            let sm = self.instances.#instances.get_mut(&target_id).unwrap();
+                            let mut ctx = #ctx_name::new(target_id, &mut self.id_alloc);
+                            sm.handle(#input_enum::#input_variant(result), &mut ctx);
+                            ctx.into_effects()
+                        };
+                        self.#apply(target_id, effects)
+                    }}
+                )
+            } else {
+                let port_input_enum = format_ident!("{}PortInput", inp.node);
+                let input_variant = &inp.input_name;
+                let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&inp.node.to_string()));
+
+                (
+                    quote! { !self.instances.#instances.contains(&target_id) },
+                    quote! {{
+                        self.#pending_field.push((target_id, #port_input_enum::#input_variant(result)));
+                        false
+                    }}
+                )
+            };
+
             if inp.aggregator.is_incremental() {
-                // Incremental aggregator path
-                if is_sm_node(def, &inp.node) {
-                    let sm = def.state_machines.iter().find(|s| s.name == inp.node).unwrap();
-                    let input_enum = format_ident!("{}Input", sm.name);
-                    let ctx_name = format_ident!("{}CtxConcrete", sm.name);
-                    let input_variant = &inp.input_name;
-                    let apply = format_ident!("apply_{}_effects", to_snake_case(&inp.node.to_string()));
-
-                    quote! {
-                        DirtyInput::#variant(target_id) => {
-                            if !self.instances.#instances.contains_key(&target_id) {
-                                return;
-                            }
-                            let results = self.#aggregate(target_id);
-                            for result in results {
-                                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
-                                    node: #node_str,
-                                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
-                                    input: #input_str,
-                                    value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
-                                });
-                                let effects = {
-                                    let sm = self.instances.#instances.get_mut(&target_id).unwrap();
-                                    let mut ctx = #ctx_name::new(target_id, &mut self.id_alloc);
-                                    sm.handle(#input_enum::#input_variant(result), &mut ctx);
-                                    ctx.into_effects()
-                                };
-                                let destroyed = self.#apply(target_id, effects);
-                                if destroyed { return; }
-                            }
-                        }
-                    }
-                } else {
-                    let port_input_enum = format_ident!("{}PortInput", inp.node);
-                    let input_variant = &inp.input_name;
-                    let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&inp.node.to_string()));
-
-                    quote! {
-                        DirtyInput::#variant(target_id) => {
-                            if !self.instances.#instances.contains(&target_id) {
-                                return;
-                            }
-                            let results = self.#aggregate(target_id);
-                            for result in results {
-                                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
-                                    node: #node_str,
-                                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
-                                    input: #input_str,
-                                    value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
-                                });
-                                self.#pending_field.push((target_id, #port_input_enum::#input_variant(result)));
-                            }
+                quote! {
+                    DirtyInput::#variant(target_id) => {
+                        if #existence_check { return; }
+                        let results = self.#aggregate(target_id);
+                        for result in results {
+                            #trace_delivered
+                            let destroyed: bool = #deliver;
+                            if destroyed { return; }
                         }
                     }
                 }
             } else {
-                // Batch aggregator path (existing logic)
                 let node_state = signal_state_field(&inp.node);
                 let in_f = in_field_name(&inp.input_name);
 
-                if is_sm_node(def, &inp.node) {
-                    let sm = def
-                        .state_machines
-                        .iter()
-                        .find(|s| s.name == inp.node)
-                        .unwrap();
-                    let input_enum = format_ident!("{}Input", sm.name);
-                    let ctx_name = format_ident!("{}CtxConcrete", sm.name);
-                    let input_variant = &inp.input_name;
-                    let apply = format_ident!(
-                        "apply_{}_effects",
-                        to_snake_case(&inp.node.to_string())
-                    );
-
-                    quote! {
-                        DirtyInput::#variant(target_id) => {
-                            if !self.instances.#instances.contains_key(&target_id) {
-                                return;
-                            }
-                            let result = self.#aggregate(target_id);
-                            if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
-                                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
-                                    node: #node_str,
-                                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
-                                    input: #input_str,
-                                });
-                                return;
-                            }
-                            self.#node_state.get_mut(&target_id).unwrap().#in_f = Some(result.clone());
-
-                            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
+                quote! {
+                    DirtyInput::#variant(target_id) => {
+                        if #existence_check { return; }
+                        let result = self.#aggregate(target_id);
+                        if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
+                            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
                                 node: #node_str,
                                 id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
                                 input: #input_str,
-                                value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
                             });
-
-                            let effects = {
-                                let sm = self.instances.#instances.get_mut(&target_id).unwrap();
-                                let mut ctx = #ctx_name::new(target_id, &mut self.id_alloc);
-                                sm.handle(#input_enum::#input_variant(result), &mut ctx);
-                                ctx.into_effects()
-                            };
-                            self.#apply(target_id, effects);
+                            return;
                         }
-                    }
-                } else {
-                    let port_input_enum = format_ident!("{}PortInput", inp.node);
-                    let input_variant = &inp.input_name;
-                    let pending_field = format_ident!("{}_pending_inputs", to_snake_case(&inp.node.to_string()));
-
-                    quote! {
-                        DirtyInput::#variant(target_id) => {
-                            if !self.instances.#instances.contains(&target_id) {
-                                return;
-                            }
-                            let result = self.#aggregate(target_id);
-                            if self.#node_state.get(&target_id).and_then(|s| s.#in_f.as_ref()) == Some(&result) {
-                                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputSuppressed {
-                                    node: #node_str,
-                                    id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
-                                    input: #input_str,
-                                });
-                                return;
-                            }
-                            self.#node_state.get_mut(&target_id).unwrap().#in_f = Some(result.clone());
-
-                            self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::InputDelivered {
-                                node: #node_str,
-                                id: ::distvirt_sm_router::trace::DebugValue::Borrowed(&target_id as &(dyn std::fmt::Debug + Send + Sync)),
-                                input: #input_str,
-                                value: ::distvirt_sm_router::trace::DebugValue::Borrowed(&result as &(dyn std::fmt::Debug + Send + Sync)),
-                            });
-
-                            self.#pending_field.push((target_id, #port_input_enum::#input_variant(result)));
-                        }
+                        self.#node_state.get_mut(&target_id).unwrap().#in_f = Some(result.clone());
+                        #trace_delivered
+                        #deliver;
                     }
                 }
             }

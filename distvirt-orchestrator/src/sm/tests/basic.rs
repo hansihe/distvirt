@@ -57,7 +57,8 @@ fn demand_aggregation() {
 fn reactive_readiness_edges() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -127,7 +128,8 @@ fn reactive_readiness_edges() {
 fn pod_lifecycle() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -189,7 +191,8 @@ fn pod_lifecycle() {
 fn worker_loss_via_port_removal() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -328,7 +331,8 @@ fn service_spec_creates_edges_reactively() {
 fn admin_restart_event() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -381,7 +385,8 @@ fn full_end_to_end() {
     router.create_timer(TIMER);
 
     // Infrastructure.
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -491,7 +496,8 @@ fn full_end_to_end() {
 fn handler_driven_pod_creation() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

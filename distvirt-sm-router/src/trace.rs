@@ -1,60 +1,51 @@
-//! # Propagation Tracing
+//! # Tracing
 //!
-//! Observability for the signal router. The [`Tracer`] trait receives a single
-//! [`TraceEvent`] callback at every decision point during propagation — signal
-//! changes, edge changes, input deliveries, event routing, SM lifecycle.
+//! Observability for the signal router. The [`Tracer`] trait receives a
+//! [`TraceEvent`] callback at every decision point during propagation —
+//! signal changes, edge changes, input deliveries, event routing, SM lifecycle.
+//!
+//! ## Quick start
+//!
+//! In tests, use [`PanicTracer`] to automatically dump the full propagation
+//! trace when an assertion fails:
+//!
+//! ```rust,ignore
+//! use distvirt_sm_router::trace::PanicTracer;
+//!
+//! let tracer = PanicTracer::new();
+//! let mut router = Router::new_traced(16, tracer);
+//! // ... if any assertion panics, the trace is printed to stderr
+//! ```
+//!
+//! For programmatic inspection, use [`RecordingTracer`]:
+//!
+//! ```rust,ignore
+//! use distvirt_sm_router::trace::RecordingTracer;
+//!
+//! let tracer = RecordingTracer::new();
+//! let mut router = Router::new_traced(16, tracer);
+//! router.propagate();
+//! println!("{}", router.tracer);  // indented tree output
+//! let summary = router.tracer.summary();
+//! assert_eq!(summary.inputs_delivered, 3);
+//! ```
 //!
 //! ## Key types
 //!
-//! - [`TraceEvent<'a>`]: An enum representing one trace event. When `'a` is a
-//!   concrete lifetime it borrows `&dyn Debug` values cheaply (zero formatting
-//!   cost). Calling [`TraceEvent::into_owned`] formats all debug values and
-//!   returns a `TraceEvent<'static>` that can be stored.
-//!
-//! - [`DebugValue<'a>`]: Either a borrowed `&'a dyn Debug` or an owned `String`.
-//!   Used inside `TraceEvent` for all dynamic values (IDs, signal values, etc.).
-//!
 //! - [`Tracer`]: One method — `fn trace(&mut self, event: TraceEvent<'_>)`.
 //!
-//! ## Built-in tracers
+//! - [`TraceEvent<'a>`]: An enum with one variant per trace point. When `'a`
+//!   is a concrete lifetime, it borrows `&dyn Debug` values cheaply (zero
+//!   formatting cost). Call [`.into_owned()`](TraceEvent::into_owned) to
+//!   format and store as `TraceEvent<'static>`.
 //!
-//! - [`NoopTracer`]: Does nothing. Default. Zero-cost when monomorphized.
-//! - [`RecordingTracer`]: Captures all events into a `Vec<TraceEvent<'static>>`.
-//!   Implements `Display` for human-readable indented tree output.
-//! - [`RingTracer`]: Bounded rolling buffer. Always recording, oldest events
-//!   evicted. Use `.snapshot()` to grab current contents on error.
-//! - [`PanicTracer`]: Recording tracer that auto-dumps the trace on panic
-//!   (via `Drop` + `std::thread::panicking()`).
+//! - [`DebugValue<'a>`]: Either a borrowed `&'a dyn Debug` or an owned
+//!   `String`. Used inside `TraceEvent` for all dynamic values (IDs, signal
+//!   values, etc.).
 //!
-//! ## Utilities
+//! ## Event ordering
 //!
-//! - [`TraceSummary`]: Compact stats (counts of rounds, deliveries, creates,
-//!   etc.) computed from a `&[TraceEvent<'static>]`. Has its own `Display`.
-//! - [`fmt_trace_tree`]: Formats trace events as an indented tree showing
-//!   causality (effects indented under the handler that caused them).
-//!
-//! ## Composition
-//!
-//! With a single `trace()` method, composition is trivial — just delegate:
-//!
-//! ```rust,ignore
-//! struct NodeFilter<T: Tracer> {
-//!     node: &'static str,
-//!     inner: T,
-//! }
-//!
-//! impl<T: Tracer> Tracer for NodeFilter<T> {
-//!     fn trace(&mut self, event: TraceEvent<'_>) {
-//!         if event.node() == Some(self.node) {
-//!             self.inner.trace(event);
-//!         }
-//!     }
-//! }
-//! ```
-//!
-//! ## Ordering guarantees
-//!
-//! Within a `propagate()` call, events arrive in this order:
+//! Within a `propagate()` call, trace events arrive in this order:
 //!
 //! ```text
 //! PropagateStart
@@ -76,53 +67,80 @@
 //! └─ PropagateEnd(total_rounds)
 //! ```
 //!
-//! ## Extension ideas
+//! The `EffectsStart`/`EffectsEnd` bracketing lets you build a causality DAG:
+//! every signal change, edge change, or event queued between these brackets
+//! was caused by the preceding `InputDelivered` or `EventDelivered`.
 //!
-//! The `Tracer` trait + `TraceEvent` enum are the base facility. Some downstream
-//! uses they enable:
+//! ## Built-in tracers
 //!
-//! - **Selective/filtered tracing**: The `NodeFilter` example above costs nothing
-//!   for filtered-out events — `event.node()` is a `&'static str` comparison,
-//!   no formatting happens. Chain multiple filters, or build an allowlist tracer
-//!   that only records events for specific SM types or signal names.
+//! - [`NoopTracer`]: Does nothing. Default when using `Router::new()`.
+//!   The empty `trace()` method monomorphizes away entirely — zero cost.
 //!
-//! - **Causality analysis**: `EffectsStart`/`EffectsEnd` bracketing lets you
-//!   build a causality DAG post-hoc: "this signal change was an effect of this
-//!   handler invocation, which was caused by this input delivery, which was
-//!   triggered by this earlier signal change." Walk backwards from any unexpected
-//!   state to find its root cause.
+//! - [`RecordingTracer`]: Captures all events into a `Vec<TraceEvent<'static>>`.
+//!   Implements `Display` for human-readable indented tree output. Use
+//!   `.summary()` for compact stats, `.clear()` between propagations.
 //!
-//! - **State diffing**: `SignalChanged`/`EdgeChanged` entries are exactly the diff
-//!   between pre- and post-propagate states. A utility could format a compact
-//!   summary: "this propagate() changed 3 signals, added 2 edges, created 1 SM."
-//!   (See [`TraceSummary`] for a starting point.)
+//! - [`RingTracer`]: Bounded rolling buffer — oldest events evicted when
+//!   capacity is reached. Memory is bounded and predictable. Call
+//!   `.snapshot()` to grab recent history on error.
 //!
-//! - **Performance profiling**: Count rounds, deliveries, suppressions per SM
-//!   type to find hot spots or excessive cascade depth. The `RingTracer` is
-//!   useful here — profile the last N events without unbounded memory growth.
+//! - [`PanicTracer`]: Recording tracer that auto-dumps to stderr on panic
+//!   (via `Drop` + `std::thread::panicking()`). Recommended for tests.
+//!
+//! ## Utilities
+//!
+//! - [`TraceSummary`]: Compact statistics (rounds, deliveries, suppressions,
+//!   creates, destroys, violations) computed from `&[TraceEvent<'static>]`.
+//!   Has its own `Display`.
+//!
+//! - [`fmt_trace_tree`] / [`write_trace_tree`]: Format trace events as an
+//!   indented tree showing causality. Effects are indented under the handler
+//!   invocation that caused them.
+//!
+//! ## Writing custom tracers
+//!
+//! Implement the single `trace()` method. Composition is trivial — delegate:
+//!
+//! ```rust,ignore
+//! // Filter by node type:
+//! struct NodeFilter<T: Tracer> {
+//!     node: &'static str,
+//!     inner: T,
+//! }
+//!
+//! impl<T: Tracer> Tracer for NodeFilter<T> {
+//!     fn trace(&mut self, event: TraceEvent<'_>) {
+//!         if event.node() == Some(self.node) {
+//!             self.inner.trace(event);
+//!         }
+//!     }
+//! }
+//!
+//! // Multiplex to two tracers:
+//! struct TeeTracer<A: Tracer, B: Tracer>(A, B);
+//!
+//! impl<A: Tracer, B: Tracer> Tracer for TeeTracer<A, B> {
+//!     fn trace(&mut self, event: TraceEvent<'_>) {
+//!         self.1.trace(event.clone().into_owned()); // clone for second
+//!         self.0.trace(event);
+//!     }
+//! }
+//! ```
+//!
+//! Filtering is cheap — `event.node()` returns a `&'static str`, no formatting
+//! happens until `.into_owned()` is called. Unlogged events pay zero
+//! formatting cost.
 //!
 //! ## Invariants
 //!
-//! Invariants are boolean expressions declared on signals in the `router!` macro's
-//! `invariants {}` block. They may be transiently violated during propagation
-//! (intermediate states are inconsistent by nature), but at quiescence — after all
-//! rounds complete — violations are checked and emitted as [`TraceEvent::InvariantViolation`]
-//! events. Tracers can act on violations: [`PanicTracer`] dumps the full trace,
-//! [`RingTracer`] provides recent history for debugging, and production tracers can
-//! log or alert.
+//! Invariants are boolean expressions declared on signals in the `router!`
+//! macro's `invariants {}` block. They may be transiently violated during
+//! propagation, but at quiescence — after all rounds complete — violations
+//! are checked and emitted as [`TraceEvent::InvariantViolation`] events.
 //!
-//! - **Invariant-based alerting**: `InvariantViolation` events are emitted at
-//!   quiescence for any signal whose declared invariant expression evaluates to
-//!   `false`. Test tracers can dump the full causality trace on violation,
-//!   production tracers can log/alert, and `PanicTracer` auto-dumps context.
-//!
-//! - **Production structured logging**: A tracer that writes to `tracing`/`log`
-//!   crate, filtering by severity (e.g., only lifecycle events and errors).
-//!   Since formatting is deferred via `DebugValue`, unlogged events pay zero
-//!   formatting cost.
-//!
-//! - **Multiplexing**: A `TeeTracer<A, B>` that forwards each event to two
-//!   inner tracers. With a single `trace()` method this is straightforward.
+//! Tracers can act on violations: [`PanicTracer`] dumps the full trace and
+//! the program panics, [`RingTracer`] preserves recent history for debugging,
+//! and production tracers can log or alert.
 
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Display, Write as FmtWrite};

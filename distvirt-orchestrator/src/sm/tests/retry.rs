@@ -210,7 +210,8 @@ fn failed_recovery_via_restart() {
 fn failed_recovery_via_demand_cycle() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
@@ -308,7 +309,8 @@ fn failed_ignores_new_demand() {
 fn backoff_cleared_on_demand_drop() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();
@@ -456,7 +458,8 @@ fn scavenge_during_backoff() {
 fn scavenge_during_failed() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
 
     let mgmt = router.create_management();

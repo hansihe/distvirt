@@ -125,6 +125,10 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
             WorkloadInput::SpecInput(spec_opt) => {
                 let new_has_spec = spec_opt.is_some();
 
+                // Forward the full spec to pods via signal graph.
+                let launch_spec = spec_opt.as_ref().map(|(_, s)| s.clone());
+                ctx.set_pod_launch_spec(launch_spec);
+
                 if let Some((_, ref spec)) = spec_opt {
                     // --- Update suspend_on_idle from spec ---
                     let old_suspend_on_idle = self.suspend_on_idle;

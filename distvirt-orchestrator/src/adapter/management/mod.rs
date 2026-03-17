@@ -100,7 +100,7 @@ impl ManagementAdapter {
 
         // New or updated services
         for (name, spec) in &new.services {
-            let name_str = name.as_ref();
+            let name_str = name.as_str();
             if let Some(&router_id) = self.proto_to_router_svc.get(name_str) {
                 // Update: re-set the spec signal
                 let mgmt_id = self.service_mgmt[&router_id];
@@ -126,7 +126,7 @@ impl ManagementAdapter {
 
         // Removed services
         for name in old_services.keys() {
-            let name_str = name.as_ref();
+            let name_str = name.as_str();
             if !new.services.contains_key(name) {
                 if let Some(router_id) = self.proto_to_router_svc.remove(name_str) {
                     self.router_to_proto_svc.remove(&router_id);
@@ -187,7 +187,7 @@ impl ManagementAdapter {
         }
     }
 
-    fn to_sm_workload_spec(spec: &crate::types::WorkloadSpec) -> SmWorkloadSpec {
+    pub(crate) fn to_sm_workload_spec(spec: &crate::types::WorkloadSpec) -> SmWorkloadSpec {
         SmWorkloadSpec {
             image: spec
                 .containers
@@ -195,6 +195,24 @@ impl ManagementAdapter {
                 .map(|c| c.image_ref.clone())
                 .unwrap_or_default(),
             suspend_on_idle: spec.suspend_on_idle,
+            network: Some(spec.network.clone()),
+            containers: spec.containers.clone(),
+            resources: spec.resources.as_ref().map(|r| {
+                distvirt_worker_protocol::ResourceRequirements {
+                    requests: r.requests.as_ref().map(|v| {
+                        distvirt_worker_protocol::ResourceValues {
+                            memory_mib: v.memory_mb,
+                            vcpus: v.vcpus,
+                        }
+                    }),
+                    limits: r.limits.as_ref().map(|v| {
+                        distvirt_worker_protocol::ResourceValues {
+                            memory_mib: v.memory_mb,
+                            vcpus: v.vcpus,
+                        }
+                    }),
+                }
+            }),
         }
     }
 

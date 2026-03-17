@@ -223,7 +223,7 @@ fn test_delete_during_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
     h.assert_workload_resuming("ns", "web");
@@ -264,7 +264,7 @@ fn test_spec_change_during_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(distvirt_worker_protocol::ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
     h.assert_workload_resuming("ns", "web");

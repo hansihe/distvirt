@@ -764,8 +764,8 @@ mod lease_tests {
     #[test]
     fn test_grant_release_round_trip() {
         let mut table = LeaseTable::default();
-        let pod_id = PodId("pod-1".into());
-        let worker_id = WorkerId("w-0".into());
+        let pod_id = PodId(1);
+        let worker_id = WorkerId(0);
 
         table.grant(
             pod_id.clone(),
@@ -786,10 +786,10 @@ mod lease_tests {
     #[test]
     fn test_double_release_returns_none() {
         let mut table = LeaseTable::default();
-        let pod_id = PodId("pod-1".into());
+        let pod_id = PodId(1);
         table.grant(
             pod_id.clone(),
-            WorkerId("w-0".into()),
+            WorkerId(0),
             LeaseIntent::PodLaunch,
             128,
         );
@@ -800,12 +800,12 @@ mod lease_tests {
     #[test]
     fn test_leased_memory_mb_sums_correctly() {
         let mut table = LeaseTable::default();
-        let w0 = WorkerId("w-0".into());
-        let w1 = WorkerId("w-1".into());
+        let w0 = WorkerId(0);
+        let w1 = WorkerId(1);
 
-        table.grant(PodId("p-1".into()), w0.clone(), LeaseIntent::PodLaunch, 128);
-        table.grant(PodId("p-2".into()), w0.clone(), LeaseIntent::PodLaunch, 256);
-        table.grant(PodId("p-3".into()), w1.clone(), LeaseIntent::PodLaunch, 64);
+        table.grant(PodId(1), w0.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId(2), w0.clone(), LeaseIntent::PodLaunch, 256);
+        table.grant(PodId(3), w1.clone(), LeaseIntent::PodLaunch, 64);
 
         assert_eq!(table.leased_memory_mb(&w0), 384);
         assert_eq!(table.leased_memory_mb(&w1), 64);
@@ -814,12 +814,12 @@ mod lease_tests {
     #[test]
     fn test_release_worker_leases() {
         let mut table = LeaseTable::default();
-        let w0 = WorkerId("w-0".into());
-        let w1 = WorkerId("w-1".into());
+        let w0 = WorkerId(0);
+        let w1 = WorkerId(1);
 
-        table.grant(PodId("p-1".into()), w0.clone(), LeaseIntent::PodLaunch, 128);
-        table.grant(PodId("p-2".into()), w0.clone(), LeaseIntent::PodLaunch, 128);
-        table.grant(PodId("p-3".into()), w1.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId(1), w0.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId(2), w0.clone(), LeaseIntent::PodLaunch, 128);
+        table.grant(PodId(3), w1.clone(), LeaseIntent::PodLaunch, 128);
 
         let released = table.release_worker_leases(&w0);
         assert_eq!(released.len(), 2);
@@ -830,12 +830,12 @@ mod lease_tests {
     #[test]
     fn test_resume_intent() {
         let mut table = LeaseTable::default();
-        let pod_id = PodId("pod-1".into());
-        let artifact_id = ArtifactId("art-1".into());
+        let pod_id = PodId(1);
+        let artifact_id = ArtifactId(1);
 
         table.grant(
             pod_id.clone(),
-            WorkerId("w-0".into()),
+            WorkerId(0),
             LeaseIntent::PodResume {
                 artifact_id: artifact_id.clone(),
             },

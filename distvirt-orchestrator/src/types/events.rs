@@ -11,7 +11,7 @@ pub enum SmNamespaceEvent {
         event: SmWorkloadEvent,
     },
     Service {
-        service_id: ServiceId,
+        service_id: String,
         workload_id: WorkloadId,
         event: SmServiceEvent,
     },

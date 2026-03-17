@@ -80,11 +80,10 @@ fn gen_snapshot_clone(def: &TopologyDef) -> TokenStream {
         }
     }
 
-    // Edges (forward only)
+    // Edges (forward only in snapshot)
     for edge in &def.edges {
-        let snake = edge_snake(edge);
-        let fwd = format_ident!("{}_fwd", snake);
-        clone_fields.push(quote! { #fwd: self.#fwd.clone() });
+        let f = format_ident!("{}_fwd", edge_snake(edge));
+        clone_fields.push(quote! { #f: self.#f.clone() });
     }
 
     // ID allocator snapshot
@@ -178,29 +177,15 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
         from_snapshot_fields.push(quote! { #f: snapshot.#f.clone() });
     }
 
-    // Edges (forward in snapshot, rebuild both fwd + rev in from_snapshot)
+    // Edges (forward only in snapshot, reconstruct EdgeMap via from_fwd in from_snapshot)
     for edge in &def.edges {
-        let snake = edge_snake(edge);
-        let fwd = format_ident!("{}_fwd", snake);
-        let rev = format_ident!("{}_rev", snake);
+        let edge_field = format_ident!("{}", edge_snake(edge));
+        let fwd = format_ident!("{}_fwd", edge_snake(edge));
 
-        snapshot_fields.push(quote! { #fwd: self.#fwd.clone() });
+        snapshot_fields.push(quote! { #fwd: self.#edge_field.fwd().clone() });
 
-        from_snapshot_fields.push(quote! { #fwd: snapshot.#fwd.clone() });
-
-        // Rebuild reverse map from forward map
         from_snapshot_fields.push(quote! {
-            #rev: {
-                let mut rev_map = std::collections::BTreeMap::new();
-                for (src, targets) in &snapshot.#fwd {
-                    for tgt in targets {
-                        rev_map.entry(*tgt)
-                            .or_insert_with(std::collections::BTreeSet::new)
-                            .insert(*src);
-                    }
-                }
-                rev_map
-            }
+            #edge_field: ::distvirt_sm_router::EdgeMap::from_fwd(snapshot.#fwd.clone())
         });
     }
 
@@ -218,6 +203,7 @@ fn gen_snapshot_methods(def: &TopologyDef) -> TokenStream {
     transient_inits.push(quote! { dedup_wave: Vec::new() });
     transient_inits.push(quote! { dedup_seen: std::collections::BTreeSet::new() });
     transient_inits.push(quote! { event_wave: Vec::new() });
+    transient_inits.push(quote! { aggregate_scratch: ::distvirt_sm_router::UntypedVec::new() });
 
     // Port pending input queues
     for port in &def.ports {

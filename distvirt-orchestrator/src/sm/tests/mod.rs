@@ -16,6 +16,8 @@ const S2: ServiceId = ServiceId(2);
 const S3: ServiceId = ServiceId(3);
 const W1: WorkloadId = WorkloadId(1);
 const W2: WorkloadId = WorkloadId(2);
+const WK1: WorkerId = WorkerId(1);
+const WK2: WorkerId = WorkerId(2);
 
 // ============================================================================
 // Test helpers
@@ -98,7 +100,8 @@ fn assert_no_timer_output(router: &mut Router) {
 /// Use send_activate_service(mgmt, S1, false) to drop demand.
 fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, WorkerId, PodId) {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -166,7 +169,8 @@ fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) -> Sche
 /// service, a running pod, and return (mgmt, worker).
 fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementId, WorkerId) {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -205,7 +209,8 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
 /// activation-based service, a running pod, and return (mgmt, worker).
 fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, WorkerId) {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -217,6 +222,7 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: true,
+            ..Default::default()
         },
     );
 

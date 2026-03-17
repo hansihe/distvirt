@@ -167,7 +167,8 @@ fn scavenge_idle_workload() {
     // Start fresh for a clean scavenge scenario.
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

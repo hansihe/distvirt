@@ -3,9 +3,9 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-// --- ID Newtypes ---
+// --- String-based ID Newtypes ---
 
-macro_rules! define_id_newtype {
+macro_rules! define_string_id_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -35,12 +35,33 @@ macro_rules! define_id_newtype {
     };
 }
 
-define_id_newtype!(NamespaceId);
-define_id_newtype!(WorkerId);
-define_id_newtype!(PodId);
-define_id_newtype!(ServiceId);
-define_id_newtype!(PoolId);
-define_id_newtype!(ArtifactId);
+// --- u64-based ID Newtypes ---
+
+macro_rules! define_u64_id_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub u64);
+
+        impl From<u64> for $name {
+            fn from(v: u64) -> Self { $name(v) }
+        }
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+}
+
+define_string_id_newtype!(NamespaceId);
+define_string_id_newtype!(PoolId);
+
+define_u64_id_newtype!(WorkerId);
+define_u64_id_newtype!(PodId);
+define_u64_id_newtype!(ServiceId);
+define_u64_id_newtype!(ArtifactId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkConfig {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 /// Workload is Suspending (handler suppresses SuspendPod response).
 /// Inject EndpointActivation (DemandUp). Then inject PodSuspended.
@@ -45,7 +45,7 @@ fn test_demand_during_suspend_immediate_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
 
@@ -152,7 +152,7 @@ fn test_demand_up_during_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_a_ip,
-        service_id: Some(ServiceId::from("svc-a")),
+        service_id: Some(h.proto_service_id("ns", "svc-a")),
     });
     h.converge();
     h.assert_workload_resuming("ns", "shared");
@@ -166,7 +166,7 @@ fn test_demand_up_during_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(h.proto_service_id("ns", "svc-b")),
     });
     h.converge();
     h.assert_workload_resuming("ns", "shared");

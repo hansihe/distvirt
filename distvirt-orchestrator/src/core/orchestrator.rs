@@ -596,7 +596,7 @@ mod tests {
                 worker_id: GlobalWorkerId::test(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
-                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
             },
             Duration::ZERO,
         );
@@ -621,7 +621,7 @@ mod tests {
                 worker_id: GlobalWorkerId::test(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
-                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
             },
             Duration::ZERO,
         );
@@ -647,7 +647,7 @@ mod tests {
                 worker_id: GlobalWorkerId::test(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
-                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
             },
             Duration::ZERO,
         );
@@ -690,7 +690,7 @@ mod tests {
                 worker_id: GlobalWorkerId::test(1),
                 capabilities: test_caps(),
                 tunnel_info: None,
-                proto_worker_id: distvirt_worker_protocol::WorkerId::from("w-1"),
+                proto_worker_id: distvirt_worker_protocol::WorkerId::from(1u64),
             },
             Duration::ZERO,
         );

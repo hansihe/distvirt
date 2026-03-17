@@ -1,17 +1,20 @@
 use super::*;
 use crate::sm::{
-    BackendNeed, DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
-    WorkloadSm, WorkloadSpec,
+    BackendNeed, DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkerId,
+    WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
 const S1: ServiceId = ServiceId(1);
 const S2: ServiceId = ServiceId(2);
+const WK1: WorkerId = WorkerId(1);
+const WK2: WorkerId = WorkerId(2);
 
 /// Set up a router with one service (activation mode) and one worker.
 fn setup_activation_service(router: &mut DRouter) -> WorkerId {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -88,7 +91,8 @@ fn push_need_reuses_port() {
 fn multiple_workers_separate_ports() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let worker1 = setup_activation_service(&mut router);
-    let worker2 = router.create_worker();
+    let worker2 = WK2;
+    router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
 
     let mut adapter = BackendNeedAdapter::new();
@@ -107,9 +111,11 @@ fn multiple_workers_separate_ports() {
 fn remove_worker_cleans_up() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
-    let worker1 = router.create_worker();
+    let worker1 = WK1;
+    router.create_worker(worker1);
     router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
-    let worker2 = router.create_worker();
+    let worker2 = WK2;
+    router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

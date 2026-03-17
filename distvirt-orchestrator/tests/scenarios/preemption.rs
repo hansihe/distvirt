@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ActivatorConfig, ServiceId, ServicePolicy, WorkerEvent};
+use distvirt_worker_protocol::{ActivatorConfig,  ServicePolicy, WorkerEvent};
 
 /// Namespace with two activation-based workloads: "wl-a" (service "svc-a") and "wl-b" (service "svc-b").
 /// Both have suspend_on_idle=true and activation.
@@ -48,7 +48,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
 
     let mut services = BTreeMap::new();
     services.insert(
-        ServiceId::from("svc-a"),
+        "svc-a".to_string(),
         ServiceSpec {
             workload_id: wl_a,
             ip: Ipv4Addr::new(172, 16, 0, 100),
@@ -57,7 +57,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
         },
     );
     services.insert(
-        ServiceId::from("svc-b"),
+        "svc-b".to_string(),
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
@@ -102,7 +102,7 @@ fn test_basic_preemption() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(h.proto_service_id("ns", "svc-b")),
     });
     h.converge();
 
@@ -161,7 +161,7 @@ fn test_no_preemption_of_active_traffic_workloads() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(h.proto_service_id("ns", "svc-b")),
     });
     h.converge();
 
@@ -227,7 +227,7 @@ fn test_preempted_workload_can_reactivate() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(h.proto_service_id("ns", "svc-b")),
     });
     h.converge();
 
@@ -252,7 +252,7 @@ fn test_preempted_workload_can_reactivate() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_a_ip,
-        service_id: Some(ServiceId::from("svc-a")),
+        service_id: Some(h.proto_service_id("ns", "svc-a")),
     });
     h.converge();
 

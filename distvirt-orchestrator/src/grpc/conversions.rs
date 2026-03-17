@@ -23,7 +23,7 @@ pub(super) fn convert_proto_spec(spec: proto::NamespaceSpec) -> Result<Namespace
 
     let mut services = BTreeMap::new();
     for (id, svc) in spec.services {
-        services.insert(ServiceId(id), convert_proto_service_spec(svc)?);
+        services.insert(id, convert_proto_service_spec(svc)?);
     }
 
     Ok(NamespaceSpec {
@@ -317,7 +317,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
             .unwrap_or((None, None));
 
         services.insert(
-            svc_id.0.clone(),
+            svc_id.clone(),
             proto::ServiceStatusReport {
                 workload_id: svc.workload_id.0.clone(),
                 state: Some(convert_service_state_from_strings(
@@ -337,10 +337,10 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
     let mut pods: HashMap<String, proto::PodStatusReportEntry> = HashMap::new();
     for (pod_id, pod) in &report.pods {
         pods.insert(
-            pod_id.0.clone(),
+            pod_id.0.to_string(),
             proto::PodStatusReportEntry {
                 workload_id: pod.workload_id.0.clone(),
-                worker_id: pod.worker_id.0.clone(),
+                worker_id: pod.worker_id.0.to_string(),
                 ip: pod.ip.clone(),
                 state: match pod.state {
                     PodStatus::Launching => proto::PodState::Launching as i32,
@@ -369,12 +369,12 @@ fn convert_workload_state_from_strings(
 ) -> proto::WorkloadState {
     let state = match state {
         "launching" => proto::workload_state::State::Launching(proto::WorkloadLaunching {
-            pod_id: pod_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
-            worker_id: worker_id.as_ref().map(|w| w.0.clone()).unwrap_or_default(),
+            pod_id: pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default(),
+            worker_id: worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default(),
         }),
         "running" => proto::workload_state::State::Running(proto::WorkloadRunning {
-            pod_id: pod_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
-            worker_id: worker_id.as_ref().map(|w| w.0.clone()).unwrap_or_default(),
+            pod_id: pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default(),
+            worker_id: worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default(),
         }),
         "waiting_for_capacity" => {
             proto::workload_state::State::WaitingForCapacity(proto::WorkloadWaitingForCapacity {})
@@ -394,8 +394,8 @@ fn convert_service_state_from_strings(
         "idle" => proto::service_state::State::Idle(proto::ServiceIdle {}),
         "need_backend" => proto::service_state::State::NeedBackend(proto::ServiceNeedBackend {}),
         "active" => proto::service_state::State::Active(proto::ServiceActive {
-            pod_id: pod_id.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
-            worker_id: worker_id.as_ref().map(|w| w.0.clone()).unwrap_or_default(),
+            pod_id: pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default(),
+            worker_id: worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default(),
             backend_need: convert_backend_need(backend_need),
         }),
         _ => proto::service_state::State::Pending(proto::ServicePending {}),
@@ -433,14 +433,14 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
                 }
                 SmWorkloadEvent::PodLaunching { pod_id, worker_id } => {
                     proto::workload_event::Event::PodLaunching(proto::WorkloadPodLaunching {
-                        pod_id: pod_id.0,
-                        worker_id: worker_id.0,
+                        pod_id: pod_id.0.to_string(),
+                        worker_id: worker_id.0.to_string(),
                     })
                 }
                 SmWorkloadEvent::PodRunning { pod_id, worker_id } => {
                     proto::workload_event::Event::PodRunning(proto::WorkloadPodRunning {
-                        pod_id: pod_id.0,
-                        worker_id: worker_id.0,
+                        pod_id: pod_id.0.to_string(),
+                        worker_id: worker_id.0.to_string(),
                     })
                 }
                 SmWorkloadEvent::PodStopped { exit_code } => {
@@ -453,16 +453,16 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
                 }
                 SmWorkloadEvent::PodSuspending { pod_id, worker_id } => {
                     proto::workload_event::Event::PodSuspending(proto::WorkloadPodSuspending {
-                        pod_id: pod_id.0,
-                        worker_id: worker_id.0,
+                        pod_id: pod_id.0.to_string(),
+                        worker_id: worker_id.0.to_string(),
                     })
                 }
                 SmWorkloadEvent::PodSuspended {
                     worker_id,
                     artifact_id,
                 } => proto::workload_event::Event::PodSuspended(proto::WorkloadPodSuspended {
-                    worker_id: worker_id.0,
-                    snapshot_id: artifact_id.0,
+                    worker_id: worker_id.0.to_string(),
+                    snapshot_id: artifact_id.0.to_string(),
                 }),
                 SmWorkloadEvent::PodSuspendFailed { reason } => {
                     proto::workload_event::Event::PodSuspendFailed(
@@ -471,8 +471,8 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
                 }
                 SmWorkloadEvent::PodResuming { pod_id, worker_id } => {
                     proto::workload_event::Event::PodResuming(proto::WorkloadPodResuming {
-                        pod_id: pod_id.0,
-                        worker_id: worker_id.0,
+                        pod_id: pod_id.0.to_string(),
+                        worker_id: worker_id.0.to_string(),
                     })
                 }
             };
@@ -543,8 +543,8 @@ pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::Names
                 timestamp_unix_ms: now_ms,
                 event: Some(proto::namespace_event::Event::ServiceEvent(
                     proto::ServiceEvent {
-                        service_id: service_id.0,
-                        workload_id: workload_id.0,
+                        service_id: service_id.clone(),
+                        workload_id: workload_id.0.clone(),
                         event: Some(inner),
                     },
                 )),

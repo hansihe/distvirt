@@ -1,16 +1,18 @@
 use super::*;
 use crate::sm::{
-    DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId, WorkloadSm,
-    WorkloadSpec,
+    DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkerId, WorkloadId,
+    WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
 const S1: ServiceId = ServiceId(1);
+const WK1: WorkerId = WorkerId(1);
 
 /// Set up a router with one activation-mode service and one worker.
 fn setup(router: &mut DRouter) -> WorkerId {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

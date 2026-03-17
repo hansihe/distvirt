@@ -153,19 +153,9 @@ pub(super) fn gen_remove_methods(def: &TopologyDef, methods: &mut Vec<TokenStrea
             .iter()
             .filter(|e| e.target == port.name)
             .map(|edge| {
-                let fwd = format_ident!("{}_fwd", edge_snake(edge));
-                let rev = format_ident!("{}_rev", edge_snake(edge));
+                let edge_field = format_ident!("{}", edge_snake(edge));
                 quote! {
-                    if let Some(sources) = self.#rev.remove(&id) {
-                        for source_id in sources {
-                            if let Some(targets) = self.#fwd.get_mut(&source_id) {
-                                targets.retain(|t| *t != id);
-                                if targets.is_empty() {
-                                    self.#fwd.remove(&source_id);
-                                }
-                            }
-                        }
-                    }
+                    self.#edge_field.remove_target(&id);
                 }
             })
             .collect();

@@ -107,7 +107,8 @@ fn finished_vs_failed_backoff_behavior() {
 fn finished_pod_self_destructs() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -132,7 +133,8 @@ fn finished_pod_self_destructs() {
 fn worker_identity_in_readiness() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -209,7 +211,8 @@ fn worker_identity_updates_on_new_worker() {
     let new_pod = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // New worker takes over.
-    let worker2 = router.create_worker();
+    let worker2 = WK2;
+    router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
     make_pod_running(&mut router, worker2, new_pod);
 
@@ -232,7 +235,8 @@ fn worker_identity_updates_on_new_worker() {
 fn pod_tracks_worker_from_input() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

@@ -451,7 +451,7 @@ fn dangling_edges_target_dies_source_unaffected() {
 
     // expose_internals_for_testing allows direct field access
     // Dangling edge remains — source is unaffected.
-    assert!(router.alpha_to_beta_fwd.get(&A1).unwrap().contains(&B1));
+    assert!(router.alpha_to_beta.targets(&A1).unwrap().contains(&B1));
 }
 
 #[test]
@@ -634,19 +634,19 @@ fn port_removal_cleans_incoming_edges() {
     router.set_beta_to_gamma_edges(B1, vec![G1]);
 
     // Verify edges are set up (expose_internals_for_testing allows field access)
-    assert!(router.beta_to_gamma_fwd.get(&B1).unwrap().contains(&G1));
-    assert!(router.beta_to_gamma_rev.get(&G1).unwrap().contains(&B1));
+    assert!(router.beta_to_gamma.targets(&B1).unwrap().contains(&G1));
+    assert!(router.beta_to_gamma.sources(&G1).unwrap().contains(&B1));
 
     // Remove gamma — should clean up incoming edges
     router.destroy_gamma(G1);
 
     assert!(
         router
-            .beta_to_gamma_fwd
-            .get(&B1)
+            .beta_to_gamma
+            .targets(&B1)
             .map_or(true, |v| v.is_empty())
     );
-    assert!(!router.beta_to_gamma_rev.contains_key(&G1));
+    assert!(router.beta_to_gamma.sources(&G1).is_none());
 }
 
 // ============================================================================
@@ -1127,7 +1127,7 @@ fn sm_handler_sets_edges_and_signals_atomically() {
     );
 
     // Verify the edge was actually created
-    assert!(router.beta_to_alpha_fwd.get(&B1).unwrap().contains(&A1));
+    assert!(router.beta_to_alpha.targets(&B1).unwrap().contains(&A1));
 }
 
 // ============================================================================
@@ -1556,16 +1556,16 @@ fn sm_self_destruct_cleans_multiple_edge_types() {
     // BetaToAlpha forward edges should be cleaned up
     assert!(
         router
-            .beta_to_alpha_fwd
-            .get(&B1)
+            .beta_to_alpha
+            .targets(&B1)
             .map_or(true, |v| v.is_empty())
     );
 
     // BetaToGamma forward edges should be cleaned up
     assert!(
         router
-            .beta_to_gamma_fwd
-            .get(&B1)
+            .beta_to_gamma
+            .targets(&B1)
             .map_or(true, |v| v.is_empty())
     );
 
@@ -2563,7 +2563,7 @@ mod initialize_tests {
         router.propagate();
 
         // Edge should exist after propagate
-        assert!(router.parent_to_child_fwd.get(&P1).unwrap().contains(&C1));
+        assert!(router.parent_to_child.targets(&P1).unwrap().contains(&C1));
 
         // Propagate should deliver through the edge
         router.set_parent_flag(P1, true);

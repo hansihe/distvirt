@@ -246,7 +246,7 @@ mod tests {
     fn pod_running_classifies_as_namespace() {
         let event = WorkerEvent::PodRunning {
             namespace_id: distvirt_worker_protocol::NamespaceId::from("ns1"),
-            pod_id: distvirt_worker_protocol::PodId::from("pod1"),
+            pod_id: distvirt_worker_protocol::PodId::from(1u64),
         };
         match classify(GlobalWorkerId::test(1), event) {
             ClassifiedWorkerEvent::Namespace { namespace_id, .. } => {
@@ -273,7 +273,7 @@ mod tests {
     fn artifact_write_classifies_as_scheduler() {
         let event = WorkerEvent::ArtifactWriteStarted {
             namespace_id: distvirt_worker_protocol::NamespaceId::from("ns1"),
-            artifact_id: distvirt_worker_protocol::ArtifactId::from("a1"),
+            artifact_id: distvirt_worker_protocol::ArtifactId::from(1u64),
             pool_id: distvirt_worker_protocol::PoolId::from("p1"),
         };
         assert!(matches!(

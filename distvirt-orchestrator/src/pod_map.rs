@@ -99,15 +99,15 @@ mod tests {
     use super::*;
     use crate::types::WorkloadId;
 
-    fn wid(s: &str) -> WorkerId {
-        WorkerId(s.into())
+    fn wid(n: u64) -> WorkerId {
+        WorkerId(n)
     }
 
-    fn pid(s: &str) -> PodId {
-        PodId(s.into())
+    fn pid(n: u64) -> PodId {
+        PodId(n)
     }
 
-    fn info(worker: &str, workload: &str) -> PodInfo {
+    fn info(worker: u64, workload: &str) -> PodInfo {
         PodInfo {
             worker_id: wid(worker),
             workload_id: WorkloadId(workload.into()),
@@ -159,42 +159,42 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
+        m.insert(pid(1), info(1, "wl1"));
         assert_eq!(m.len(), 1);
-        assert!(m.contains(&pid("p1")));
-        assert_eq!(m.get(&pid("p1")).unwrap().worker_id, wid("w1"));
-        assert_eq!(m.worker_pod_count(&wid("w1")), 1);
+        assert!(m.contains(&pid(1)));
+        assert_eq!(m.get(&pid(1)).unwrap().worker_id, wid(1));
+        assert_eq!(m.worker_pod_count(&wid(1)), 1);
         assert_consistency(&m);
     }
 
     #[test]
     fn insert_multiple_same_worker() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        m.insert(pid("p2"), info("w1", "wl2"));
+        m.insert(pid(1), info(1, "wl1"));
+        m.insert(pid(2), info(1, "wl2"));
         assert_eq!(m.len(), 2);
-        assert_eq!(m.worker_pod_count(&wid("w1")), 2);
+        assert_eq!(m.worker_pod_count(&wid(1)), 2);
         assert_consistency(&m);
     }
 
     #[test]
     fn insert_multiple_different_workers() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        m.insert(pid("p2"), info("w2", "wl2"));
-        assert_eq!(m.worker_pod_count(&wid("w1")), 1);
-        assert_eq!(m.worker_pod_count(&wid("w2")), 1);
+        m.insert(pid(1), info(1, "wl1"));
+        m.insert(pid(2), info(2, "wl2"));
+        assert_eq!(m.worker_pod_count(&wid(1)), 1);
+        assert_eq!(m.worker_pod_count(&wid(2)), 1);
         assert_consistency(&m);
     }
 
     #[test]
     fn remove_decrements_count() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        m.insert(pid("p2"), info("w1", "wl2"));
-        let removed = m.remove(&pid("p1"));
+        m.insert(pid(1), info(1, "wl1"));
+        m.insert(pid(2), info(1, "wl2"));
+        let removed = m.remove(&pid(1));
         assert!(removed.is_some());
-        assert_eq!(m.worker_pod_count(&wid("w1")), 1);
+        assert_eq!(m.worker_pod_count(&wid(1)), 1);
         assert_eq!(m.len(), 1);
         assert_consistency(&m);
     }
@@ -202,9 +202,9 @@ mod tests {
     #[test]
     fn remove_last_clears_worker() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        m.remove(&pid("p1"));
-        assert_eq!(m.worker_pod_count(&wid("w1")), 0);
+        m.insert(pid(1), info(1, "wl1"));
+        m.remove(&pid(1));
+        assert_eq!(m.worker_pod_count(&wid(1)), 0);
         assert!(m.is_empty());
         assert_consistency(&m);
     }
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn remove_nonexistent() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        assert!(m.remove(&pid("p999")).is_none());
+        m.insert(pid(1), info(1, "wl1"));
+        assert!(m.remove(&pid(999)).is_none());
         assert_eq!(m.len(), 1);
         assert_consistency(&m);
     }
@@ -221,20 +221,20 @@ mod tests {
     #[test]
     fn remove_worker_pods_returns_correct_ids() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        m.insert(pid("p2"), info("w1", "wl2"));
-        m.insert(pid("p3"), info("w2", "wl3"));
-        let removed = m.remove_worker_pods(&wid("w1"));
-        assert_eq!(removed, vec![pid("p1"), pid("p2")]);
+        m.insert(pid(1), info(1, "wl1"));
+        m.insert(pid(2), info(1, "wl2"));
+        m.insert(pid(3), info(2, "wl3"));
+        let removed = m.remove_worker_pods(&wid(1));
+        assert_eq!(removed, vec![pid(1), pid(2)]);
         assert_eq!(m.len(), 1);
-        assert_eq!(m.worker_pod_count(&wid("w1")), 0);
+        assert_eq!(m.worker_pod_count(&wid(1)), 0);
         assert_consistency(&m);
     }
 
     #[test]
     fn remove_worker_pods_empty() {
         let mut m = PodMap::new();
-        let removed = m.remove_worker_pods(&wid("w_unknown"));
+        let removed = m.remove_worker_pods(&wid(999));
         assert!(removed.is_empty());
         assert_consistency(&m);
     }
@@ -242,11 +242,11 @@ mod tests {
     #[test]
     fn clear_resets_everything() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
-        m.insert(pid("p2"), info("w2", "wl2"));
+        m.insert(pid(1), info(1, "wl1"));
+        m.insert(pid(2), info(2, "wl2"));
         m.clear();
         assert!(m.is_empty());
-        assert_eq!(m.worker_pod_count(&wid("w1")), 0);
+        assert_eq!(m.worker_pod_count(&wid(1)), 0);
         assert_consistency(&m);
     }
 
@@ -254,9 +254,9 @@ mod tests {
     #[cfg(debug_assertions)]
     fn duplicate_insert_panics_debug() {
         let mut m = PodMap::new();
-        m.insert(pid("p1"), info("w1", "wl1"));
+        m.insert(pid(1), info(1, "wl1"));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            m.insert(pid("p1"), info("w2", "wl2"));
+            m.insert(pid(1), info(2, "wl2"));
         }));
         assert!(
             result.is_err(),

@@ -5,7 +5,7 @@ use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 #[allow(unused_imports)]
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{BackendNeed,  WorkerCommand, WorkerEvent};
 
 /// Two services back same workload. Activate A → workload launches.
 /// Activate B → workload already running.
@@ -24,11 +24,14 @@ fn test_two_services_one_workload_shared_demand() {
     h.assert_service_idle("ns", "svc-a");
     h.assert_service_idle("ns", "svc-b");
 
+    let svc_a_id = h.proto_service_id("ns", "svc-a");
+    let svc_b_id = h.proto_service_id("ns", "svc-b");
+
     // Activate svc-a → workload launches
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("svc-a")),
+        service_id: Some(svc_a_id),
     });
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -38,7 +41,7 @@ fn test_two_services_one_workload_shared_demand() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(svc_b_id),
     });
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -51,7 +54,7 @@ fn test_two_services_one_workload_shared_demand() {
     // (even though svc-b is in NeedBackend, it has issued DemandUp).
     h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("svc-a"),
+        service_id: svc_a_id,
         need: BackendNeed::None,
     });
     h.converge();
@@ -70,11 +73,14 @@ fn test_service_activation_while_already_running() {
     h.create_namespace("ns", multi_service_spec());
     h.converge();
 
+    let svc_a_id = h.proto_service_id("ns", "svc-a");
+    let svc_b_id = h.proto_service_id("ns", "svc-b");
+
     // Activate svc-a
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("svc-a")),
+        service_id: Some(svc_a_id),
     });
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -87,7 +93,7 @@ fn test_service_activation_while_already_running() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(svc_b_id),
     });
     h.converge();
 
@@ -152,7 +158,7 @@ fn test_add_service_to_running_workload() {
     // Add a second always-on service via spec update.
     let mut new_spec = always_on_spec();
     new_spec.services.insert(
-        ServiceId::from("echo-svc-2"),
+        "echo-svc-2".to_string(),
         ServiceSpec {
             workload_id: WorkloadId("echo".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
@@ -201,18 +207,20 @@ fn test_add_service_to_suspended_workload() {
     h.create_namespace("ns", activation_spec(timeout));
     h.converge();
 
+    let web_svc_id = h.proto_service_id("ns", "web-svc");
+
     // Activate → running → idle → suspended
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(web_svc_id),
     });
     h.converge();
     h.assert_workload_running("ns", "web");
 
     h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
+        service_id: web_svc_id,
         need: BackendNeed::None,
     });
     h.converge();
@@ -223,7 +231,7 @@ fn test_add_service_to_suspended_workload() {
     // Add a second activation service via spec update.
     let mut new_spec = activation_spec(timeout);
     new_spec.services.insert(
-        ServiceId::from("web-svc-2"),
+        "web-svc-2".to_string(),
         ServiceSpec {
             workload_id: WorkloadId("web".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
@@ -247,6 +255,8 @@ fn test_add_service_to_suspended_workload() {
     // New service should be Idle (activation service, workload is Suspended).
     h.assert_service_idle("ns", "web-svc-2");
 
+    let web_svc_2_id = h.proto_service_id("ns", "web-svc-2");
+
     // EndpointSync or EndpointUpdate should have been sent including the new service.
     h.assert_worker_received_command_matching(
         &w1,
@@ -266,7 +276,7 @@ fn test_add_service_to_suspended_workload() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
-        service_id: Some(ServiceId::from("web-svc-2")),
+        service_id: Some(web_svc_2_id),
     });
     h.converge();
     h.assert_workload_running("ns", "web");
@@ -312,17 +322,20 @@ fn test_remove_service_updates_demand() {
     h.create_namespace("ns", multi_service_spec());
     h.converge();
 
+    let svc_a_id = h.proto_service_id("ns", "svc-a");
+    let svc_b_id = h.proto_service_id("ns", "svc-b");
+
     // Activate both services.
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("svc-a")),
+        service_id: Some(svc_a_id),
     });
     h.converge();
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
-        service_id: Some(ServiceId::from("svc-b")),
+        service_id: Some(svc_b_id),
     });
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -331,7 +344,7 @@ fn test_remove_service_updates_demand() {
 
     // Remove svc-b via spec update.
     let mut new_spec = multi_service_spec();
-    new_spec.services.remove(&ServiceId::from("svc-b"));
+    new_spec.services.remove(&"svc-b".to_string());
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -355,7 +368,7 @@ fn test_remove_service_updates_demand() {
     let ns = h.namespace("ns");
     let spec = ns.current_spec().unwrap();
     assert!(
-        !spec.services.contains_key(&ServiceId::from("svc-b")),
+        !spec.services.contains_key(&"svc-b".to_string()),
         "removed service 'svc-b' should not exist"
     );
 }
@@ -369,11 +382,13 @@ fn test_remove_only_active_service_drops_demand() {
     h.create_namespace("ns", multi_service_spec());
     h.converge();
 
+    let svc_a_id = h.proto_service_id("ns", "svc-a");
+
     // Activate svc-a only.
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("svc-a")),
+        service_id: Some(svc_a_id),
     });
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -382,7 +397,7 @@ fn test_remove_only_active_service_drops_demand() {
 
     // Remove svc-a (the only service with demand) via spec update.
     let mut new_spec = multi_service_spec();
-    new_spec.services.remove(&ServiceId::from("svc-a"));
+    new_spec.services.remove(&"svc-a".to_string());
     h.update_namespace("ns", new_spec);
     h.converge();
 

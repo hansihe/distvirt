@@ -146,15 +146,13 @@ impl TestHarness {
         let wl = self.workload_state(ns_id, wl_name);
         let ns = self.namespace(ns_id);
         wl.pod_id
-            .and_then(|pid| ns.router_pod_to_proto(&pid).cloned())
+            .and_then(|pid| ns.router_pod_to_proto(&pid))
     }
 
     /// Get the GlobalWorkerId for the worker hosting a workload.
     pub fn workload_global_worker_id(&self, ns_id: &str, wl_name: &str) -> Option<GlobalWorkerId> {
         let wl = self.workload_state(ns_id, wl_name);
-        let ns = self.namespace(ns_id);
         wl.pod_worker_id
-            .and_then(|wid| ns.router_worker_to_global(&wid))
     }
 
     pub fn workload_status(&self, ns_id: &str, wl_name: &str) -> WlStatus {
@@ -213,13 +211,22 @@ impl TestHarness {
     // Service helpers
     // =========================================================================
 
+    /// Look up the protocol ServiceId (u64) for a service name.
+    /// The management adapter assigns numeric IDs when applying the namespace spec.
+    pub fn proto_service_id(&self, ns_id: &str, svc_name: &str) -> distvirt_worker_protocol::ServiceId {
+        let ns = self.namespace(ns_id);
+        let router_svc_id = ns.management().lookup_service(svc_name)
+            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_name, ns_id));
+        distvirt_worker_protocol::ServiceId(router_svc_id.0)
+    }
+
     pub fn service_ip(&self, ns_id: &str, svc_id: &str) -> std::net::Ipv4Addr {
         let ns = self.namespace(ns_id);
         let spec = ns
             .current_spec()
             .unwrap_or_else(|| panic!("namespace '{}' has no spec", ns_id));
         spec.services
-            .get(&ServiceId::from(svc_id))
+            .get(svc_id)
             .unwrap_or_else(|| {
                 panic!(
                     "service '{}' not found in namespace '{}' spec",
@@ -232,7 +239,7 @@ impl TestHarness {
     fn workload_for_service(&self, ns_id: &str, svc_id: &str) -> String {
         let ns = self.namespace(ns_id);
         let spec = ns.current_spec().unwrap();
-        let svc_spec = spec.services.get(&ServiceId::from(svc_id)).unwrap();
+        let svc_spec = spec.services.get(svc_id).unwrap();
         svc_spec.workload_id.0.clone()
     }
 
@@ -252,7 +259,7 @@ impl TestHarness {
             WorkerEvent::EndpointActivation {
                 namespace_id,
                 ip: svc_ip,
-                service_id: Some(distvirt_worker_protocol::ServiceId::from(svc_id)),
+                service_id: Some(self.proto_service_id(ns_id, svc_id)),
             },
         );
         self.converge();
@@ -273,7 +280,7 @@ impl TestHarness {
             worker_id,
             WorkerEvent::ServiceBackendNeed {
                 namespace_id,
-                service_id: distvirt_worker_protocol::ServiceId::from(svc_id),
+                service_id: self.proto_service_id(ns_id, svc_id),
                 need: distvirt_worker_protocol::BackendNeed::None,
             },
         );
@@ -285,7 +292,7 @@ impl TestHarness {
         let spec = ns.current_spec().unwrap();
         let svc_spec = spec
             .services
-            .get(&ServiceId::from(svc_id))
+            .get(svc_id)
             .unwrap_or_else(|| {
                 panic!(
                     "service '{}' not found in namespace '{}' spec",

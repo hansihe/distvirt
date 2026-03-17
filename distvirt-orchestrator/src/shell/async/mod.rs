@@ -240,10 +240,10 @@ impl Shell {
             anyhow::bail!("worker authentication failed");
         }
 
-        let global_id = GlobalWorkerId(self.next_worker_id);
+        let global_id = crate::sm::WorkerId(self.next_worker_id);
         self.next_worker_id += 1;
         let proto_worker_id =
-            distvirt_worker_protocol::WorkerId::from(format!("w-{}", global_id.0));
+            distvirt_worker_protocol::WorkerId::from(global_id.0);
 
         conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
             worker_id: proto_worker_id.clone(),

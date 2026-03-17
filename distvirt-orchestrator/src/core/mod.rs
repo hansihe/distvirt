@@ -22,17 +22,9 @@ pub mod worker_state;
 // =============================================================================
 
 /// Numeric worker ID assigned by the shell on connect.
-/// Used by scheduler, state tracker, and inter-task messages.
-/// Distinct from protocol `WorkerId(String)` and router `sm_new::WorkerId(u64)`.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct GlobalWorkerId(pub u64);
-
-#[cfg(test)]
-impl GlobalWorkerId {
-    pub(crate) fn test(id: u64) -> Self {
-        GlobalWorkerId(id)
-    }
-}
+/// Now unified with the router's `sm::WorkerId` — the same value flows
+/// through the scheduler, the router, and the wire protocol.
+pub type GlobalWorkerId = crate::sm::WorkerId;
 
 // =============================================================================
 // Scheduler interface
@@ -83,9 +75,9 @@ pub struct WorkerNamespaceEvent {
     pub event: WorkerNamespaceEventKind,
 }
 
-/// Worker-reported namespace-scoped events. Uses **protocol string IDs** so the
-/// reader can fill these directly from wire data without ID translation.
-/// The namespace task translates protocol IDs → router IDs.
+/// Worker-reported namespace-scoped events. Uses protocol u64 IDs so the
+/// reader can fill these directly from wire data.
+/// The namespace boundary translates protocol IDs → router IDs (trivial u64 copy).
 pub enum WorkerNamespaceEventKind {
     PodRunning {
         pod_id: distvirt_worker_protocol::PodId,

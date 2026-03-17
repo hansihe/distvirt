@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use distvirt_worker_protocol::{BackendNeed, ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{BackendNeed,  WorkerCommand, WorkerEvent};
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
@@ -68,7 +68,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns1".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns1", "web-svc")),
     });
     h.converge();
     h.assert_workload_running("ns1", "web");
@@ -97,7 +97,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     // Idle → suspend.
     h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
         namespace_id: "ns1".into(),
-        service_id: ServiceId::from("web-svc"),
+        service_id: h.proto_service_id("ns1", "web-svc"),
         need: BackendNeed::None,
     });
     h.converge();
@@ -120,7 +120,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns1".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns1", "web-svc")),
     });
     h.converge();
     h.assert_workload_running("ns1", "web");
@@ -275,7 +275,7 @@ fn test_route_miss_demand_leak() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
     h.assert_workload_running("ns", "web");
@@ -293,7 +293,7 @@ fn test_route_miss_demand_leak() {
     // Step 4: Signal no more traffic → start idle timer.
     h.worker(&w1).send_event(WorkerEvent::ServiceBackendNeed {
         namespace_id: "ns".into(),
-        service_id: ServiceId::from("web-svc"),
+        service_id: h.proto_service_id("ns", "web-svc"),
         need: BackendNeed::None,
     });
     h.converge();

@@ -12,7 +12,7 @@ fn ns(name: &str) -> NamespaceId {
 }
 
 fn test_proto_worker_id(gid: GlobalWorkerId) -> distvirt_worker_protocol::WorkerId {
-    distvirt_worker_protocol::WorkerId::from(format!("w-{}", gid.0))
+    distvirt_worker_protocol::WorkerId(gid.0)
 }
 
 fn test_timer_config() -> TimerConfig {

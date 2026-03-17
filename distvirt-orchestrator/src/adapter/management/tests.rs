@@ -71,7 +71,7 @@ fn make_namespace_spec(
             .collect(),
         services: services
             .into_iter()
-            .map(|(n, s)| (distvirt_worker_protocol::ServiceId::from(n), s))
+            .map(|(n, s)| (n.to_string(), s))
             .collect(),
     }
 }

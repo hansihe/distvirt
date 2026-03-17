@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-use distvirt_orchestrator::types::ServiceId;
 use distvirt_worker_protocol::BackendNeed;
 
 // ---------------------------------------------------------------------------
@@ -316,7 +315,7 @@ fn test_reactivation_cancels_shortened_idle_timer() {
         "web-svc",
         distvirt_worker_protocol::WorkerEvent::ServiceBackendNeed {
             namespace_id: "ns".into(),
-            service_id: ServiceId::from("web-svc"),
+            service_id: h.proto_service_id("ns", "web-svc"),
             need: BackendNeed::Active,
         },
     );

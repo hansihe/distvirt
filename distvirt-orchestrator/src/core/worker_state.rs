@@ -264,7 +264,7 @@ mod tests {
                 pools: vec![],
             },
             tunnel_info: None,
-            proto_worker_id: distvirt_worker_protocol::WorkerId::from(format!("w-{}", id)),
+            proto_worker_id: distvirt_worker_protocol::WorkerId::from(id),
         }
     }
 

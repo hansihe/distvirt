@@ -1,8 +1,10 @@
-//! Boundary adapter: translates between protocol string IDs and router-internal u64 IDs.
+//! Boundary adapter: translates between protocol IDs and router-internal IDs.
 //!
-//! `NamespaceWithBoundary` wraps `NamespaceCore` + `IdMaps` and presents
-//! the same external API (proto IDs in, proto IDs out) while the core only
-//! sees router IDs internally.
+//! With unified worker IDs (GlobalWorkerId = sm::WorkerId), the boundary layer
+//! is very thin:
+//! - Pod, Artifact, and Worker IDs all pass through directly
+//! - Pending worker lifecycle (before NamespaceCreated) still matters
+//! - Protocol command building (LaunchPod, StopPod, etc.) still lives here
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -21,109 +23,27 @@ use super::types::{
 };
 
 // =============================================================================
-// Bidirectional ID mappings
+// ID conversion helpers (same u64 value, different newtypes)
 // =============================================================================
 
-struct IdMaps {
-    // Worker: global ↔ router
-    global_to_router_worker: HashMap<GlobalWorkerId, WorkerId>,
-    router_to_global_worker: HashMap<WorkerId, GlobalWorkerId>,
-    // Pod: protocol ↔ router
-    proto_to_router_pod: HashMap<distvirt_worker_protocol::PodId, PodId>,
-    router_to_proto_pod: HashMap<PodId, distvirt_worker_protocol::PodId>,
-    // Artifact: protocol ↔ router
-    proto_to_router_artifact: HashMap<distvirt_worker_protocol::ArtifactId, ArtifactId>,
-    router_to_proto_artifact: HashMap<ArtifactId, distvirt_worker_protocol::ArtifactId>,
-    next_artifact_counter: u64,
+fn proto_pod_id(router_id: PodId) -> distvirt_worker_protocol::PodId {
+    distvirt_worker_protocol::PodId(router_id.0)
 }
 
-impl IdMaps {
-    fn new() -> Self {
-        IdMaps {
-            global_to_router_worker: HashMap::new(),
-            router_to_global_worker: HashMap::new(),
-            proto_to_router_pod: HashMap::new(),
-            router_to_proto_pod: HashMap::new(),
-            proto_to_router_artifact: HashMap::new(),
-            router_to_proto_artifact: HashMap::new(),
-            next_artifact_counter: 0,
-        }
-    }
+fn router_pod_id(proto_id: &distvirt_worker_protocol::PodId) -> PodId {
+    PodId(proto_id.0)
+}
 
-    fn insert_worker(&mut self, global: GlobalWorkerId, router: WorkerId) {
-        self.global_to_router_worker.insert(global, router);
-        self.router_to_global_worker.insert(router, global);
-    }
+fn proto_artifact_id(router_id: ArtifactId) -> distvirt_worker_protocol::ArtifactId {
+    distvirt_worker_protocol::ArtifactId(router_id.0)
+}
 
-    fn remove_worker_by_global(&mut self, global: &GlobalWorkerId) -> Option<WorkerId> {
-        if let Some(router) = self.global_to_router_worker.remove(global) {
-            self.router_to_global_worker.remove(&router);
-            Some(router)
-        } else {
-            None
-        }
-    }
+fn router_artifact_id(proto_id: &distvirt_worker_protocol::ArtifactId) -> ArtifactId {
+    ArtifactId(proto_id.0)
+}
 
-    fn insert_pod(&mut self, proto: distvirt_worker_protocol::PodId, router: PodId) {
-        self.proto_to_router_pod.insert(proto.clone(), router);
-        self.router_to_proto_pod.insert(router, proto);
-    }
-
-    fn remove_pod_by_router(&mut self, router: &PodId) -> Option<distvirt_worker_protocol::PodId> {
-        if let Some(proto) = self.router_to_proto_pod.remove(router) {
-            self.proto_to_router_pod.remove(&proto);
-            Some(proto)
-        } else {
-            None
-        }
-    }
-
-    fn assign_proto_pod_id(&mut self, router_pod_id: PodId) -> distvirt_worker_protocol::PodId {
-        if let Some(existing) = self.router_to_proto_pod.get(&router_pod_id) {
-            return existing.clone();
-        }
-        let proto_id = distvirt_worker_protocol::PodId::from(format!("{:?}", router_pod_id));
-        self.insert_pod(proto_id.clone(), router_pod_id);
-        proto_id
-    }
-
-    fn get_or_create_router_artifact(
-        &mut self,
-        proto: &distvirt_worker_protocol::ArtifactId,
-    ) -> ArtifactId {
-        if let Some(&router_id) = self.proto_to_router_artifact.get(proto) {
-            return router_id;
-        }
-        let router_id = ArtifactId(self.next_artifact_counter);
-        self.next_artifact_counter += 1;
-        self.proto_to_router_artifact
-            .insert(proto.clone(), router_id);
-        self.router_to_proto_artifact
-            .insert(router_id, proto.clone());
-        router_id
-    }
-
-    fn get_proto_artifact(
-        &self,
-        router: &ArtifactId,
-    ) -> &distvirt_worker_protocol::ArtifactId {
-        self.router_to_proto_artifact.get(router).expect(
-            "router ArtifactId has no protocol mapping — artifact was never registered at the namespace boundary",
-        )
-    }
-
-    /// Allocate a new artifact ID pair (proto + router) for a suspend operation.
-    fn create_artifact_id(&mut self) -> (distvirt_worker_protocol::ArtifactId, ArtifactId) {
-        let router_id = ArtifactId(self.next_artifact_counter);
-        self.next_artifact_counter += 1;
-        let proto_id =
-            distvirt_worker_protocol::ArtifactId::from(format!("artifact-{}", router_id.0));
-        self.proto_to_router_artifact
-            .insert(proto_id.clone(), router_id);
-        self.router_to_proto_artifact
-            .insert(router_id, proto_id.clone());
-        (proto_id, router_id)
-    }
+fn proto_worker_id(router_id: WorkerId) -> distvirt_worker_protocol::WorkerId {
+    distvirt_worker_protocol::WorkerId(router_id.0)
 }
 
 // =============================================================================
@@ -131,7 +51,6 @@ impl IdMaps {
 // =============================================================================
 
 struct PendingWorkerCore {
-    proto_worker_id: distvirt_worker_protocol::WorkerId,
     info: crate::sm::WorkerInfo,
 }
 
@@ -141,22 +60,21 @@ struct PendingWorkerCore {
 
 pub struct NamespaceWithBoundary {
     core: NamespaceCore,
-    ids: IdMaps,
     pending_workers: HashMap<GlobalWorkerId, PendingWorkerCore>,
     active_workers: HashSet<GlobalWorkerId>,
-    proto_worker_ids: HashMap<GlobalWorkerId, distvirt_worker_protocol::WorkerId>,
     deferred_grants: Vec<(PodId, GlobalWorkerId)>,
+    /// Artifact ID allocator (for suspend operations that create new artifacts).
+    next_artifact_counter: u64,
 }
 
 impl NamespaceWithBoundary {
     pub fn new(namespace_id: NamespaceId, timer_config: TimerConfig) -> Self {
         NamespaceWithBoundary {
             core: NamespaceCore::new(namespace_id, timer_config),
-            ids: IdMaps::new(),
             pending_workers: HashMap::new(),
             active_workers: HashSet::new(),
-            proto_worker_ids: HashMap::new(),
             deferred_grants: Vec::new(),
+            next_artifact_counter: 0,
         }
     }
 
@@ -164,11 +82,10 @@ impl NamespaceWithBoundary {
     pub(crate) fn from_core(core: NamespaceCore) -> Self {
         NamespaceWithBoundary {
             core,
-            ids: IdMaps::new(),
             pending_workers: HashMap::new(),
             active_workers: HashSet::new(),
-            proto_worker_ids: HashMap::new(),
             deferred_grants: Vec::new(),
+            next_artifact_counter: 0,
         }
     }
 
@@ -188,28 +105,26 @@ impl NamespaceWithBoundary {
         match event {
             NamespaceCoreEvent::WorkerConnected {
                 worker_id,
-                proto_worker_id,
+                proto_worker_id: _,
                 info,
             } => {
                 // Stage as pending — no core event yet.
                 self.pending_workers.insert(
                     worker_id,
                     PendingWorkerCore {
-                        proto_worker_id,
                         info,
                     },
                 );
             }
             NamespaceCoreEvent::WorkerDisconnected { worker_id } => {
-                self.active_workers.remove(&worker_id);
-                self.proto_worker_ids.remove(&worker_id);
+                let was_active = self.active_workers.remove(&worker_id);
                 // Discard any deferred grants for this worker.
                 self.deferred_grants.retain(|(_, w)| *w != worker_id);
 
-                if let Some(router_worker_id) = self.ids.remove_worker_by_global(&worker_id) {
+                if was_active {
                     let internal_effects = self.core.process_event(
                         InternalNamespaceEvent::WorkerDeactivated {
-                            worker_id: router_worker_id,
+                            worker_id,
                         },
                     );
                     self.translate_effects(internal_effects, effects);
@@ -220,12 +135,9 @@ impl NamespaceWithBoundary {
                 match &wne.event {
                     WorkerNamespaceEventKind::NamespaceCreated => {
                         if let Some(pending) = self.pending_workers.remove(&wne.worker_id) {
-                            // Create router worker port and register in IdMaps.
-                            let router_worker_id = self.core.create_worker_port();
-                            self.ids.insert_worker(wne.worker_id, router_worker_id);
+                            // Create router worker port with the same ID.
+                            self.core.create_worker_port(wne.worker_id);
                             self.active_workers.insert(wne.worker_id);
-                            self.proto_worker_ids
-                                .insert(wne.worker_id, pending.proto_worker_id);
 
                             // Send initial service registry to the new worker.
                             let sync_action = self.core.adapters.endpoint.build_registry_sync();
@@ -236,7 +148,7 @@ impl NamespaceWithBoundary {
                             // Activate worker in core.
                             let internal_effects = self.core.process_event(
                                 InternalNamespaceEvent::WorkerActivated {
-                                    worker_id: router_worker_id,
+                                    worker_id: wne.worker_id,
                                     info: pending.info,
                                 },
                             );
@@ -253,7 +165,7 @@ impl NamespaceWithBoundary {
                             self.deferred_grants.retain(|(_, w)| *w != wne.worker_id);
                             if !deferred.is_empty() {
                                 let internal_effects = self.process_deferred_grants(
-                                    router_worker_id,
+                                    wne.worker_id,
                                     deferred,
                                 );
                                 self.translate_effects(internal_effects, effects);
@@ -274,22 +186,19 @@ impl NamespaceWithBoundary {
                     _ => {}
                 }
 
-                // Translate worker event to internal form.
-                let router_worker_id = match self.ids.global_to_router_worker.get(&wne.worker_id) {
-                    Some(&id) => id,
-                    None => {
-                        eprintln!(
-                            "warning: unknown global worker {:?}, dropping event",
-                            wne.worker_id
-                        );
-                        return;
-                    }
-                };
+                // Worker must be active to process events.
+                if !self.active_workers.contains(&wne.worker_id) {
+                    eprintln!(
+                        "warning: unknown global worker {:?}, dropping event",
+                        wne.worker_id
+                    );
+                    return;
+                }
 
-                if let Some(internal_event) = self.translate_worker_event(router_worker_id, wne.event) {
+                if let Some(internal_event) = self.translate_worker_event(wne.worker_id, wne.event) {
                     let internal_effects = self.core.process_event(
                         InternalNamespaceEvent::WorkerEvent {
-                            worker_id: router_worker_id,
+                            worker_id: wne.worker_id,
                             event: internal_event,
                         },
                     );
@@ -302,20 +211,17 @@ impl NamespaceWithBoundary {
                     pod_id,
                     worker_id,
                 } => {
-                    match self.ids.global_to_router_worker.get(&worker_id) {
-                        Some(&router_worker_id) => {
-                            let internal_effects = self.core.process_event(
-                                InternalNamespaceEvent::SchedulerGrant {
-                                    worker_id: router_worker_id,
-                                    pod_id,
-                                },
-                            );
-                            self.translate_effects(internal_effects, effects);
-                        }
-                        None => {
-                            // Worker not registered yet (NamespaceCreated pending).
-                            self.deferred_grants.push((pod_id, worker_id));
-                        }
+                    if self.active_workers.contains(&worker_id) {
+                        let internal_effects = self.core.process_event(
+                            InternalNamespaceEvent::SchedulerGrant {
+                                worker_id,
+                                pod_id,
+                            },
+                        );
+                        self.translate_effects(internal_effects, effects);
+                    } else {
+                        // Worker not registered yet (NamespaceCreated pending).
+                        self.deferred_grants.push((pod_id, worker_id));
                     }
                 }
                 SchedulerDecision::Revoke {
@@ -345,7 +251,7 @@ impl NamespaceWithBoundary {
                         new_spec
                             .services
                             .iter()
-                            .map(|(name, spec)| (name.as_ref().to_owned(), spec.ip)),
+                            .map(|(name, spec)| (name.clone(), spec.ip)),
                     );
                     if let Some(action) = registry_action {
                         if let Some(cmd) = self.build_registry_command(&action) {
@@ -365,49 +271,33 @@ impl NamespaceWithBoundary {
     /// Translate a protocol-level worker event to an internal worker event.
     fn translate_worker_event(
         &mut self,
-        router_worker_id: WorkerId,
+        worker_id: WorkerId,
         event: WorkerNamespaceEventKind,
     ) -> Option<InternalWorkerEvent> {
         match event {
-            WorkerNamespaceEventKind::PodRunning { pod_id: ref proto_id } => {
-                let &router_id = self.ids.proto_to_router_pod.get(proto_id)?;
-                Some(InternalWorkerEvent::PodRunning { pod_id: router_id })
+            WorkerNamespaceEventKind::PodRunning { pod_id } => {
+                Some(InternalWorkerEvent::PodRunning { pod_id: router_pod_id(&pod_id) })
             }
-            WorkerNamespaceEventKind::PodExited {
-                pod_id: ref proto_id,
-                exit_code,
-            } => {
-                let &router_id = self.ids.proto_to_router_pod.get(proto_id)?;
+            WorkerNamespaceEventKind::PodExited { pod_id, exit_code } => {
                 Some(InternalWorkerEvent::PodExited {
-                    pod_id: router_id,
+                    pod_id: router_pod_id(&pod_id),
                     exit_code,
                 })
             }
-            WorkerNamespaceEventKind::PodFailed { pod_id: ref proto_id } => {
-                let &router_id = self.ids.proto_to_router_pod.get(proto_id)?;
-                Some(InternalWorkerEvent::PodFailed { pod_id: router_id })
+            WorkerNamespaceEventKind::PodFailed { pod_id } => {
+                Some(InternalWorkerEvent::PodFailed { pod_id: router_pod_id(&pod_id) })
             }
-            WorkerNamespaceEventKind::PodSuspended {
-                pod_id: ref proto_id,
-                ref artifact_id,
-            } => {
-                let &router_id = self.ids.proto_to_router_pod.get(proto_id)?;
-                let router_artifact = self.ids.get_or_create_router_artifact(artifact_id);
+            WorkerNamespaceEventKind::PodSuspended { pod_id, artifact_id } => {
                 Some(InternalWorkerEvent::PodSuspended {
-                    pod_id: router_id,
-                    artifact_id: router_artifact,
+                    pod_id: router_pod_id(&pod_id),
+                    artifact_id: router_artifact_id(&artifact_id),
                 })
             }
-            WorkerNamespaceEventKind::PodSuspendFailed { pod_id: ref proto_id } => {
-                let &router_id = self.ids.proto_to_router_pod.get(proto_id)?;
-                Some(InternalWorkerEvent::PodSuspendFailed { pod_id: router_id })
+            WorkerNamespaceEventKind::PodSuspendFailed { pod_id } => {
+                Some(InternalWorkerEvent::PodSuspendFailed { pod_id: router_pod_id(&pod_id) })
             }
-            WorkerNamespaceEventKind::ServiceBackendNeed {
-                ref service_id,
-                ref need,
-            } => {
-                let router_svc_id =
-                    self.core.management().lookup_service(service_id.as_ref())?;
+            WorkerNamespaceEventKind::ServiceBackendNeed { service_id, need } => {
+                let router_svc_id = crate::sm::ServiceId(service_id.0);
                 let sm_need = match need {
                     distvirt_worker_protocol::BackendNeed::None => crate::sm::BackendNeed::None,
                     distvirt_worker_protocol::BackendNeed::Traffic => {
@@ -426,14 +316,11 @@ impl NamespaceWithBoundary {
                 service_id: Some(ref proto_svc_id),
                 ..
             } => {
-                if self
-                    .core
-                    .management()
-                    .lookup_service(proto_svc_id.as_ref())
-                    .is_some()
-                {
+                let router_svc_id = crate::sm::ServiceId(proto_svc_id.0);
+                // Look up the service name from the router ID for the core.
+                if let Some(svc_name) = self.core.management().service_proto_name(&router_svc_id) {
                     Some(InternalWorkerEvent::EndpointActivation {
-                        service_name: proto_svc_id.as_ref().to_string(),
+                        service_name: svc_name.to_string(),
                     })
                 } else {
                     None
@@ -447,10 +334,9 @@ impl NamespaceWithBoundary {
                 has_active_flows,
                 ..
             } => {
-                let router_svc_id =
-                    self.core.management().lookup_service(proto_svc_id.as_ref())?;
+                let router_svc_id = crate::sm::ServiceId(proto_svc_id.0);
                 Some(InternalWorkerEvent::EndpointFlowStatus {
-                    worker_id: router_worker_id,
+                    worker_id,
                     service_id: router_svc_id,
                     has_active_flows,
                 })
@@ -466,14 +352,14 @@ impl NamespaceWithBoundary {
     /// Process deferred grants for a newly activated worker.
     fn process_deferred_grants(
         &mut self,
-        router_worker_id: WorkerId,
+        worker_id: WorkerId,
         pod_ids: Vec<PodId>,
     ) -> super::types::InternalNamespaceEffects {
         let mut combined = super::types::InternalNamespaceEffects::default();
         for pod_id in pod_ids {
             let effects = self.core.process_event(
                 InternalNamespaceEvent::SchedulerGrant {
-                    worker_id: router_worker_id,
+                    worker_id,
                     pod_id,
                 },
             );
@@ -506,8 +392,7 @@ impl NamespaceWithBoundary {
                     resume_artifact,
                 } => {
                     let proto_resume_artifact = resume_artifact
-                        .as_ref()
-                        .map(|art_id| self.ids.get_proto_artifact(art_id).clone());
+                        .map(proto_artifact_id);
                     effects
                         .scheduler_messages
                         .push(SchedulerMessage::RequestLease {
@@ -531,68 +416,47 @@ impl NamespaceWithBoundary {
         }
 
         // Translate pod assignment actions → worker commands.
-        let mut pods_to_clean: Vec<PodId> = Vec::new();
-
+        // Worker IDs are now unified — no mapping needed.
         for action in internal.pod_actions {
             match action {
                 PodAssignmentAction::Launch {
                     worker_id,
                     pod_id,
-                    request,
+                    spec,
+                    ..
                 } => {
-                    if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
-                        let proto_pod_id = self.ids.assign_proto_pod_id(pod_id);
-                        let cmd = self.build_launch_command(pod_id, &proto_pod_id, &request);
-                        effects.worker_commands.push((global_id, cmd));
-                    }
+                    let cmd = self.build_launch_command(&proto_pod_id(pod_id), &spec);
+                    effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Resume {
                     worker_id,
                     pod_id,
                     artifact_id,
+                    spec,
                 } => {
-                    if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
-                        let proto_pod_id = self.ids.assign_proto_pod_id(pod_id);
-                        let proto_artifact_id = self.ids.get_proto_artifact(&artifact_id).clone();
-                        let cmd =
-                            self.build_resume_command(pod_id, &proto_pod_id, &proto_artifact_id);
-                        effects.worker_commands.push((global_id, cmd));
-                    }
+                    let cmd =
+                        self.build_resume_command(&proto_pod_id(pod_id), &proto_artifact_id(artifact_id), &spec);
+                    effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Stop { worker_id, pod_id } => {
-                    if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
-                        if let Some(proto_pod_id) = self.ids.router_to_proto_pod.get(&pod_id) {
-                            let cmd = distvirt_worker_protocol::WorkerCommand::StopPod {
-                                namespace_id: self.core.namespace_id().clone(),
-                                pod_id: proto_pod_id.clone(),
-                                graceful: true,
-                            };
-                            effects.worker_commands.push((global_id, cmd));
-                        }
-                    }
-                    pods_to_clean.push(pod_id);
+                    let cmd = distvirt_worker_protocol::WorkerCommand::StopPod {
+                        namespace_id: self.core.namespace_id().clone(),
+                        pod_id: proto_pod_id(pod_id),
+                        graceful: true,
+                    };
+                    effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Suspend { worker_id, pod_id } => {
-                    if let Some(&global_id) = self.ids.router_to_global_worker.get(&worker_id) {
-                        let proto_pod_id = self.ids.router_to_proto_pod.get(&pod_id).cloned();
-                        if let Some(proto_pod_id) = proto_pod_id {
-                            let (proto_artifact_id, _router_artifact_id) =
-                                self.ids.create_artifact_id();
-                            let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
-                                namespace_id: self.core.namespace_id().clone(),
-                                pod_id: proto_pod_id,
-                                artifact_id: proto_artifact_id,
-                                pool_id: distvirt_worker_protocol::PoolId::from("default"),
-                            };
-                            effects.worker_commands.push((global_id, cmd));
-                        }
-                    }
+                    let artifact_id = self.alloc_artifact_id();
+                    let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
+                        namespace_id: self.core.namespace_id().clone(),
+                        pod_id: proto_pod_id(pod_id),
+                        artifact_id: proto_artifact_id(artifact_id),
+                        pool_id: distvirt_worker_protocol::PoolId::from("default"),
+                    };
+                    effects.worker_commands.push((worker_id, cmd));
                 }
             }
-        }
-
-        for pod_id in pods_to_clean {
-            self.ids.remove_pod_by_router(&pod_id);
         }
 
         // Translate endpoint actions → broadcast commands.
@@ -603,35 +467,35 @@ impl NamespaceWithBoundary {
         }
     }
 
+    /// Allocate a new artifact ID for suspend operations.
+    fn alloc_artifact_id(&mut self) -> ArtifactId {
+        let id = ArtifactId(self.next_artifact_counter);
+        self.next_artifact_counter += 1;
+        id
+    }
+
     // =========================================================================
-    // Command building (moved from NamespaceCore)
+    // Command building
     // =========================================================================
 
     fn build_launch_command(
         &self,
-        router_pod_id: PodId,
         proto_pod_id: &distvirt_worker_protocol::PodId,
-        _request: &crate::sm::PodScheduleRequest,
+        spec: &Option<crate::sm::WorkloadSpec>,
     ) -> distvirt_worker_protocol::WorkerCommand {
-        let workload_id = self
-            .core
-            .router()
-            .get_pod(&router_pod_id)
-            .and_then(|pod| pod.workload_id);
-
-        let spec = workload_id.and_then(|wid| self.core.workload_specs().get(&wid));
-
         let network = spec
-            .map(|s| s.network.clone())
+            .as_ref()
+            .and_then(|s| s.network.clone())
             .unwrap_or_else(default_pod_network);
-        let containers = spec.map(|s| s.containers.clone()).unwrap_or_default();
-        let resources = spec
-            .and_then(|s| s.resources.as_ref())
-            .map(convert_resources);
+        let containers = spec
+            .as_ref()
+            .map(|s| s.containers.clone())
+            .unwrap_or_default();
+        let resources = spec.as_ref().and_then(|s| s.resources.clone());
 
         distvirt_worker_protocol::WorkerCommand::LaunchPod {
             namespace_id: self.core.namespace_id().clone(),
-            pod_id: proto_pod_id.clone(),
+            pod_id: *proto_pod_id,
             network,
             containers,
             resources,
@@ -640,25 +504,19 @@ impl NamespaceWithBoundary {
 
     fn build_resume_command(
         &self,
-        router_pod_id: PodId,
         proto_pod_id: &distvirt_worker_protocol::PodId,
         proto_artifact_id: &distvirt_worker_protocol::ArtifactId,
+        spec: &Option<crate::sm::WorkloadSpec>,
     ) -> distvirt_worker_protocol::WorkerCommand {
-        let workload_id = self
-            .core
-            .router()
-            .get_pod(&router_pod_id)
-            .and_then(|pod| pod.workload_id);
-
-        let network = workload_id
-            .and_then(|wid| self.core.workload_specs().get(&wid))
-            .map(|spec| spec.network.clone())
+        let network = spec
+            .as_ref()
+            .and_then(|s| s.network.clone())
             .unwrap_or_else(default_pod_network);
 
         distvirt_worker_protocol::WorkerCommand::ResumePod {
             namespace_id: self.core.namespace_id().clone(),
-            pod_id: proto_pod_id.clone(),
-            artifact_id: proto_artifact_id.clone(),
+            pod_id: *proto_pod_id,
+            artifact_id: *proto_artifact_id,
             network,
             pool_id: distvirt_worker_protocol::PoolId::from("default"),
         }
@@ -675,7 +533,7 @@ impl NamespaceWithBoundary {
             .as_ref()?
             .services
             .iter()
-            .find(|(k, _)| k.as_ref() == proto_name)
+            .find(|(k, _)| k.as_str() == proto_name)
             .map(|(_, spec)| spec)?;
         Some((proto_name, spec))
     }
@@ -696,18 +554,17 @@ impl NamespaceWithBoundary {
                     .map(|wl| wl.network.ip)
                     .unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-                let global_wid = self.ids.router_to_global_worker.get(&ready.worker_id)?;
-                let proto_wid = self.proto_worker_ids.get(global_wid)?;
-
                 let endpoint_spec = distvirt_worker_protocol::EndpointSpec {
                     ip: svc_spec.ip,
                     kind: distvirt_worker_protocol::EndpointKind::Service {
-                        service_id: distvirt_worker_protocol::ServiceId::from(proto_name),
+                        service_id: distvirt_worker_protocol::ServiceId::from(
+                            self.core.management().lookup_service(proto_name)?.0
+                        ),
                         policy: svc_spec.policy.clone(),
                         backend: Some(distvirt_worker_protocol::EndpointPodBackend {
                             pod_ip,
                             placement: Some(distvirt_worker_protocol::EndpointPlacement {
-                                worker_id: proto_wid.clone(),
+                                worker_id: proto_worker_id(ready.worker_id),
                             }),
                             ready: true,
                         }),
@@ -726,7 +583,9 @@ impl NamespaceWithBoundary {
                 let endpoint_spec = distvirt_worker_protocol::EndpointSpec {
                     ip: svc_spec.ip,
                     kind: distvirt_worker_protocol::EndpointKind::Service {
-                        service_id: distvirt_worker_protocol::ServiceId::from(proto_name),
+                        service_id: distvirt_worker_protocol::ServiceId::from(
+                            self.core.management().lookup_service(proto_name)?.0
+                        ),
                         policy: svc_spec.policy.clone(),
                         backend: None,
                     },
@@ -801,41 +660,13 @@ impl NamespaceWithBoundary {
         self.core.current_spec()
     }
 
-    /// Map a router-internal WorkerId to a GlobalWorkerId (for test use).
-    pub fn router_worker_to_global(
-        &self,
-        router_wid: &WorkerId,
-    ) -> Option<GlobalWorkerId> {
-        self.ids.router_to_global_worker.get(router_wid).copied()
-    }
-
-    /// Map a router-internal PodId to a protocol PodId (for test use).
+    /// Map a router-internal PodId to a protocol PodId.
     pub fn router_pod_to_proto(
         &self,
         router_pid: &PodId,
-    ) -> Option<&distvirt_worker_protocol::PodId> {
-        self.ids.router_to_proto_pod.get(router_pid)
-    }
-}
-
-fn convert_resources(
-    r: &crate::types::ResourceRequirements,
-) -> distvirt_worker_protocol::ResourceRequirements {
-    distvirt_worker_protocol::ResourceRequirements {
-        requests: r
-            .requests
-            .as_ref()
-            .map(|v| distvirt_worker_protocol::ResourceValues {
-                memory_mib: v.memory_mb,
-                vcpus: v.vcpus,
-            }),
-        limits: r
-            .limits
-            .as_ref()
-            .map(|v| distvirt_worker_protocol::ResourceValues {
-                memory_mib: v.memory_mb,
-                vcpus: v.vcpus,
-            }),
+    ) -> Option<distvirt_worker_protocol::PodId> {
+        // With u64 IDs, this is a trivial conversion — the pod always has a protocol ID.
+        Some(proto_pod_id(*router_pid))
     }
 }
 

@@ -6,12 +6,14 @@ use crate::sm::{
 
 const W1: WorkloadId = WorkloadId(1);
 const S1: ServiceId = ServiceId(1);
+const WK1: crate::sm::WorkerId = crate::sm::WorkerId(1);
 
 /// Set up a router with a workload and always-on service, propagate initial state.
 /// Returns (worker_id, pod_id).
 fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_endpoint(ENDPOINT);
@@ -171,7 +173,8 @@ fn stable_state_no_actions() {
 fn multiple_services_change() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_endpoint(ENDPOINT);

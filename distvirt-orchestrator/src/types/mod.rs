@@ -26,7 +26,7 @@ mod states;
 pub use distvirt_worker_protocol::{
     ActivatorConfig, ArtifactId, BackendNeed, ContainerConfig, ContainerSpec, EndpointKind,
     EndpointPlacement, EndpointPodBackend, EndpointSpec, NamespaceId, NetworkConfig, PodId,
-    PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, RegistryEntry, ServiceBackend, ServiceId,
+    PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, RegistryEntry, ServiceBackend,
     ServicePolicy, WorkerCommand, WorkerId,
 };
 
@@ -53,7 +53,7 @@ pub struct ClientId(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TimerKey {
     IdleTimeout {
-        service_id: ServiceId,
+        service_id: distvirt_worker_protocol::ServiceId,
     },
     LaunchTimeout {
         workload_id: WorkloadId,

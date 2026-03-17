@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 use distvirt_orchestrator::types::NamespaceStatus;
-use distvirt_worker_protocol::{ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 // === Tests from activation.rs ===
 
@@ -59,7 +59,7 @@ fn test_activation_pending_condition_lifecycle() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
 
@@ -92,7 +92,7 @@ fn test_activation_pending_condition_lifecycle() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
 
@@ -120,7 +120,7 @@ fn test_activation_pending_in_status_report() {
     h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
         namespace_id: "ns".into(),
         ip: svc_ip,
-        service_id: Some(ServiceId::from("web-svc")),
+        service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
     h.converge();
 

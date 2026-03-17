@@ -46,7 +46,7 @@ pub(super) fn gen_auto_id_types(def: &TopologyDef) -> TokenStream {
             types.push(quote! {
                 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
                 #[allow(dead_code)]
-                pub struct #id_name(u64);
+                pub struct #id_name(pub u64);
             });
         }
     }
@@ -57,7 +57,7 @@ pub(super) fn gen_auto_id_types(def: &TopologyDef) -> TokenStream {
             types.push(quote! {
                 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
                 #[allow(dead_code)]
-                pub struct #id_name(u64);
+                pub struct #id_name(pub u64);
             });
         }
     }

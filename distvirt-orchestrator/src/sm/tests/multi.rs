@@ -10,7 +10,8 @@ use super::*;
 fn shared_worker_death_independent_failure() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -113,7 +114,8 @@ fn shared_worker_death_independent_failure() {
     assert_ne!(new_pod1, new_pod2);
 
     // New worker — recover both.
-    let worker2 = router.create_worker();
+    let worker2 = WK2;
+    router.create_worker(worker2);
     router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
     router.set_worker_to_pod_edges(worker2, vec![new_pod1, new_pod2]);
     router.send_notify_pod_status(worker2, new_pod1, PodStatus::Running);
@@ -141,7 +143,8 @@ fn shared_worker_death_independent_failure() {
 fn service_retarget_workload() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -230,7 +233,8 @@ fn service_retarget_workload() {
 fn independent_workload_subgraphs() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -344,7 +348,8 @@ fn independent_workload_subgraphs() {
 fn service_fan_in_with_retarget() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
@@ -539,7 +544,8 @@ fn workload_self_destructs_on_spec_removal() {
 fn full_teardown_cascade() {
     let mut router = Router::new(16);
     router.create_timer(TIMER);
-    let worker = router.create_worker();
+    let worker = WK1;
+    router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
 

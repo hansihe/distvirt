@@ -27,10 +27,10 @@ pub(super) fn gen_signal_setters(
                     .iter()
                     .filter(|sp| sp.node == sig.node && sp.signal == sig.signal)
                     .map(move |sp| {
-                        let edge_fwd = format_ident!("{}_fwd", to_snake_case(&sp.edge.to_string()));
+                        let edge_field = format_ident!("{}", to_snake_case(&sp.edge.to_string()));
                         let dv = dirty_variant(inp);
                         quote! {
-                            if let Some(targets) = self.#edge_fwd.get(&id) {
+                            if let Some(targets) = self.#edge_field.targets(&id) {
                                 for &target_id in targets {
                                     self.dirty.push_back(DirtyInput::#dv(target_id));
                                 }
@@ -91,8 +91,7 @@ pub(super) fn gen_edge_setters(
 ) {
     for edge in &def.edges {
         let method = format_ident!("set_{}_edges", edge_snake(edge));
-        let fwd = format_ident!("{}_fwd", edge_snake(edge));
-        let rev = format_ident!("{}_rev", edge_snake(edge));
+        let edge_field = format_ident!("{}", edge_snake(edge));
         let src_id = node_id_type(def, &edge.source);
         let tgt_id = node_id_type(def, &edge.target);
 
@@ -111,70 +110,16 @@ pub(super) fn gen_edge_setters(
 
         let body = quote! {
             fn #method(&mut self, source: #src_id, new_targets: impl IntoIterator<Item = #tgt_id>) {
-                let new_targets: Vec<#tgt_id> = new_targets.into_iter().collect();
-
-                // Fast path: clearing all edges — skip BTreeSet diff
-                if new_targets.is_empty() {
-                    if let Some(old_targets) = self.#fwd.remove(&source) {
-                        if old_targets.is_empty() {
-                            return;
-                        }
-                        self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
-                            edge: #edge_str,
-                            source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &(dyn std::fmt::Debug + Send + Sync)),
-                            added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&Vec::<#tgt_id>::new() as &(dyn std::fmt::Debug + Send + Sync)),
-                            removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&old_targets as &(dyn std::fmt::Debug + Send + Sync)),
-                        });
-                        for tgt in &old_targets {
-                            if let Some(sources) = self.#rev.get_mut(tgt) {
-                                sources.remove(&source);
-                                if sources.is_empty() {
-                                    self.#rev.remove(tgt);
-                                }
-                            }
-                            #(#dirty_enqueues)*
-                        }
-                        return;
+                if let Some(diff) = self.#edge_field.set_edges(source, new_targets) {
+                    self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
+                        edge: #edge_str,
+                        source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &(dyn std::fmt::Debug + Send + Sync)),
+                        added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&diff.added as &(dyn std::fmt::Debug + Send + Sync)),
+                        removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&diff.removed as &(dyn std::fmt::Debug + Send + Sync)),
+                    });
+                    for tgt in diff.all_changed() {
+                        #(#dirty_enqueues)*
                     }
-                    return;
-                }
-
-                let old_set: std::collections::BTreeSet<#tgt_id> = self.#fwd
-                    .get(&source)
-                    .map(|v| v.iter().copied().collect())
-                    .unwrap_or_default();
-                let new_set: std::collections::BTreeSet<#tgt_id> = new_targets.iter().copied().collect();
-
-                let removed: Vec<#tgt_id> = old_set.difference(&new_set).copied().collect();
-                let added: Vec<#tgt_id> = new_set.difference(&old_set).copied().collect();
-
-                if removed.is_empty() && added.is_empty() {
-                    return;
-                }
-
-                self.tracer.trace(::distvirt_sm_router::trace::TraceEvent::EdgeChanged {
-                    edge: #edge_str,
-                    source: ::distvirt_sm_router::trace::DebugValue::Borrowed(&source as &(dyn std::fmt::Debug + Send + Sync)),
-                    added: ::distvirt_sm_router::trace::DebugValue::Borrowed(&added as &(dyn std::fmt::Debug + Send + Sync)),
-                    removed: ::distvirt_sm_router::trace::DebugValue::Borrowed(&removed as &(dyn std::fmt::Debug + Send + Sync)),
-                });
-
-                self.#fwd.insert(source, new_targets);
-
-                for &tgt in &removed {
-                    if let Some(sources) = self.#rev.get_mut(&tgt) {
-                        sources.remove(&source);
-                        if sources.is_empty() {
-                            self.#rev.remove(&tgt);
-                        }
-                    }
-                }
-                for &tgt in &added {
-                    self.#rev.entry(tgt).or_default().insert(source);
-                }
-
-                for tgt in removed.iter().chain(added.iter()) {
-                    #(#dirty_enqueues)*
                 }
             }
         };

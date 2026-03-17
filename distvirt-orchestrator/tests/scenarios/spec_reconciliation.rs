@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ServiceId, WorkerCommand};
+use distvirt_worker_protocol::{WorkerCommand};
 
 /// Running workload. Update spec with different image. Workload stops and relaunches.
 #[test]
@@ -107,7 +107,7 @@ fn test_add_workload_to_existing_namespace() {
         },
     );
     new_spec.services.insert(
-        ServiceId::from("svc-b"),
+        "svc-b".to_string(),
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
@@ -140,7 +140,7 @@ fn test_remove_workload_from_namespace() {
     // Remove echo-b: create spec with only echo-a
     let mut new_spec = always_on_two_workloads_spec();
     new_spec.workloads.remove(&WorkloadId("echo-b".to_string()));
-    new_spec.services.remove(&ServiceId::from("svc-b"));
+    new_spec.services.remove(&"svc-b".to_string());
     h.update_namespace("ns", new_spec);
     h.converge();
 

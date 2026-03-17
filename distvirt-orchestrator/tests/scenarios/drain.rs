@@ -105,7 +105,7 @@ fn test_drain_single_worker_no_scheduling() {
         .send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
             namespace_id: "ns".into(),
             ip: svc_ip,
-            service_id: Some(ServiceId::from("web-svc")),
+            service_id: Some(h.proto_service_id("ns", "web-svc")),
         });
     h.converge();
     h.assert_workload_waiting_for_capacity("ns", "web");

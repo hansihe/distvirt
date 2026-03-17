@@ -74,8 +74,6 @@ pub struct NamespaceCore {
     pod_worker: HashMap<PodId, WorkerId>,
 
     pub(crate) current_spec: Option<NamespaceSpec>,
-
-    pub(crate) workload_specs: HashMap<crate::sm::WorkloadId, crate::types::WorkloadSpec>,
 }
 
 impl NamespaceCore {
@@ -101,7 +99,6 @@ impl NamespaceCore {
             worker_pod_edges: HashMap::new(),
             pod_worker: HashMap::new(),
             current_spec: None,
-            workload_specs: HashMap::new(),
         }
     }
 
@@ -139,40 +136,50 @@ impl NamespaceCore {
             InternalNamespaceEvent::WorkerEvent { worker_id, event } => {
                 match event {
                     InternalWorkerEvent::PodRunning { pod_id } => {
-                        self.router.send_notify_pod_status(
-                            worker_id,
-                            pod_id,
-                            PodStatus::Running,
-                        );
+                        if self.router.get_pod(&pod_id).is_some() {
+                            self.router.send_notify_pod_status(
+                                worker_id,
+                                pod_id,
+                                PodStatus::Running,
+                            );
+                        }
                     }
                     InternalWorkerEvent::PodExited { pod_id, exit_code } => {
-                        let status = if exit_code == 0 {
-                            PodStatus::Finished
-                        } else {
-                            PodStatus::Failed
-                        };
-                        self.router.send_notify_pod_status(worker_id, pod_id, status);
+                        if self.router.get_pod(&pod_id).is_some() {
+                            let status = if exit_code == 0 {
+                                PodStatus::Finished
+                            } else {
+                                PodStatus::Failed
+                            };
+                            self.router.send_notify_pod_status(worker_id, pod_id, status);
+                        }
                     }
                     InternalWorkerEvent::PodFailed { pod_id } => {
-                        self.router.send_notify_pod_status(
-                            worker_id,
-                            pod_id,
-                            PodStatus::Failed,
-                        );
+                        if self.router.get_pod(&pod_id).is_some() {
+                            self.router.send_notify_pod_status(
+                                worker_id,
+                                pod_id,
+                                PodStatus::Failed,
+                            );
+                        }
                     }
                     InternalWorkerEvent::PodSuspended { pod_id, artifact_id } => {
-                        self.router.send_notify_pod_suspended(
-                            worker_id,
-                            pod_id,
-                            artifact_id,
-                        );
+                        if self.router.get_pod(&pod_id).is_some() {
+                            self.router.send_notify_pod_suspended(
+                                worker_id,
+                                pod_id,
+                                artifact_id,
+                            );
+                        }
                     }
                     InternalWorkerEvent::PodSuspendFailed { pod_id } => {
-                        self.router.send_notify_pod_status(
-                            worker_id,
-                            pod_id,
-                            PodStatus::Failed,
-                        );
+                        if self.router.get_pod(&pod_id).is_some() {
+                            self.router.send_notify_pod_status(
+                                worker_id,
+                                pod_id,
+                                PodStatus::Failed,
+                            );
+                        }
                     }
                     InternalWorkerEvent::ServiceBackendNeed { service_id, need } => {
                         self.adapters.backend_need.push_need(
@@ -255,13 +262,6 @@ impl NamespaceCore {
                     self.current_spec.as_ref(),
                     &new_spec,
                 );
-
-                self.workload_specs.clear();
-                for (name, wl_spec) in &new_spec.workloads {
-                    if let Some(router_id) = self.adapters.management.lookup_workload(&name.0) {
-                        self.workload_specs.insert(router_id, wl_spec.clone());
-                    }
-                }
 
                 self.current_spec = Some(new_spec);
             }
@@ -374,16 +374,17 @@ impl NamespaceCore {
             }
         }
 
-        // Pod assignment actions pass through directly (already router-level).
+        // Pod assignment actions — spec now flows through the signal graph
+        // (Workload::PodLaunchSpec → Pod::LaunchSpecInput → PodScheduleRequest → Worker port).
         effects.pod_actions.extend(actions.pod_actions);
 
         // Endpoint actions pass through directly (already router-level).
         effects.endpoint_actions.extend(actions.endpoint_actions);
     }
 
-    /// Create a new worker port in the router, returning its router-internal WorkerId.
-    pub(crate) fn create_worker_port(&mut self) -> WorkerId {
-        self.router.create_worker()
+    /// Create a new worker port in the router with the given ID.
+    pub(crate) fn create_worker_port(&mut self, id: WorkerId) {
+        self.router.create_worker(id);
     }
 
     // =========================================================================
@@ -415,8 +416,4 @@ impl NamespaceCore {
         &self.namespace_id
     }
 
-    /// Access the workload specs.
-    pub(crate) fn workload_specs(&self) -> &HashMap<crate::sm::WorkloadId, crate::types::WorkloadSpec> {
-        &self.workload_specs
-    }
 }
