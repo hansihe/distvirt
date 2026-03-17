@@ -32,7 +32,4 @@ name = "distvirt-orchestrator"
 path = "src/main.rs"
 
 [[test]]
-name = "shell_integration"
-
-[[test]]
 name = "e2e"

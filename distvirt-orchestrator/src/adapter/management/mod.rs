@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{
+use crate::sm::{
     AdminCmd, DRouter, ManagementId, ServiceSm, ServiceSpec as SmServiceSpec, WorkloadId,
     WorkloadSm, WorkloadSpec as SmWorkloadSpec,
 };
@@ -19,14 +19,14 @@ pub struct ManagementAdapter {
     /// Router ID → protocol name
     router_to_proto_wl: HashMap<WorkloadId, String>,
     /// Protocol name → router ID
-    proto_to_router_svc: HashMap<String, crate::sm_new::ServiceId>,
+    proto_to_router_svc: HashMap<String, crate::sm::ServiceId>,
     /// Router ID → protocol name
-    router_to_proto_svc: HashMap<crate::sm_new::ServiceId, String>,
+    router_to_proto_svc: HashMap<crate::sm::ServiceId, String>,
 
     /// Management port per workload
     workload_mgmt: HashMap<WorkloadId, ManagementId>,
     /// Management port per service
-    service_mgmt: HashMap<crate::sm_new::ServiceId, ManagementId>,
+    service_mgmt: HashMap<crate::sm::ServiceId, ManagementId>,
 }
 
 impl ManagementAdapter {
@@ -107,7 +107,7 @@ impl ManagementAdapter {
                 router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(spec));
             } else {
                 // Create new service
-                let router_id = crate::sm_new::ServiceId(self.next_service_id);
+                let router_id = crate::sm::ServiceId(self.next_service_id);
                 self.next_service_id += 1;
 
                 let mgmt_id = router.create_management();
@@ -144,7 +144,7 @@ impl ManagementAdapter {
     }
 
     /// Look up a service's router ID by protocol name.
-    pub fn lookup_service(&self, proto_name: &str) -> Option<crate::sm_new::ServiceId> {
+    pub fn lookup_service(&self, proto_name: &str) -> Option<crate::sm::ServiceId> {
         self.proto_to_router_svc.get(proto_name).copied()
     }
 
@@ -155,7 +155,7 @@ impl ManagementAdapter {
 
     /// Look up a service's protocol name by router ID.
     #[allow(dead_code)]
-    pub(crate) fn service_proto_name(&self, id: &crate::sm_new::ServiceId) -> Option<&str> {
+    pub(crate) fn service_proto_name(&self, id: &crate::sm::ServiceId) -> Option<&str> {
         self.router_to_proto_svc.get(id).map(|s| s.as_str())
     }
 

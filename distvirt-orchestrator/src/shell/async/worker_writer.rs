@@ -1,0 +1,18 @@
+//! Per-connection wire encoder for the new async shell.
+//!
+//! Identical to `task/worker_writer.rs` — re-used here so shell_new/
+//! is self-contained.
+
+use distvirt_worker_protocol::{OrchestratorWriter, WorkerCommand};
+use tokio::sync::mpsc;
+
+/// Writer task: receives fully-formed protocol WorkerCommands and sends them on the wire.
+/// Exits on channel close or write error.
+pub(crate) async fn run(mut rx: mpsc::Receiver<WorkerCommand>, mut writer: OrchestratorWriter) {
+    while let Some(cmd) = rx.recv().await {
+        if let Err(e) = writer.send_command(&cmd).await {
+            eprintln!("worker writer error: {e}");
+            break;
+        }
+    }
+}

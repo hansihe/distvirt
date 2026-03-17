@@ -1,5 +1,5 @@
 use super::*;
-use crate::sm_new::{
+use crate::sm::{
     BackendNeed, DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
     WorkloadSm, WorkloadSpec,
 };

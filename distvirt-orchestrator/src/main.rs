@@ -1,8 +1,8 @@
 use clap::Parser;
 use distvirt_client_protocol::DistvirtClientServer;
+use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::config::OrchestratorConfig;
 use distvirt_orchestrator::grpc::DistvirtClientService;
-use distvirt_orchestrator::shell::OrchestratorShell;
 use distvirt_worker_protocol::OrchestratorConnection;
 
 #[derive(Parser)]
@@ -29,28 +29,20 @@ async fn main() -> anyhow::Result<()> {
     let config_str = std::fs::read_to_string(&cli.config)?;
     let config: OrchestratorConfig = toml::from_str(&config_str)?;
 
-    let pool_configs: Vec<distvirt_worker_protocol::PoolInfo> = config
-        .pools
-        .iter()
-        .map(|pc| distvirt_worker_protocol::PoolInfo {
-            pool_id: distvirt_worker_protocol::PoolId::from(pc.pool_id.as_str()),
-            path: pc.path.clone(),
-            capacity_bytes: 0,
-            available_bytes: 0,
-        })
-        .collect();
     let worker_secret = cli
         .worker_secret
         .or(config.workers.secret)
         .expect("worker secret must be set via --worker-secret or workers.secret in config");
     let client_secret = cli.client_secret.or(config.grpc.secret);
-    let mut shell = OrchestratorShell::new(
-        config.wireguard.listen_port,
-        config.tunnels.encrypted,
-        pool_configs,
-        worker_secret,
-    );
-    let handle = shell.handle();
+
+    let timer_config = TimerConfig {
+        retry_backoff: std::time::Duration::from_secs(5),
+        launch_timeout: std::time::Duration::from_secs(60),
+        suspend_timeout: std::time::Duration::from_secs(60),
+        idle_timeout: std::time::Duration::from_secs(30),
+    };
+    let (handle, shell_handle) =
+        distvirt_orchestrator::shell::r#async::spawn(worker_secret, timer_config);
 
     // Start gRPC server.
     let grpc_addr = config.grpc.listen.parse()?;
@@ -78,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Start worker TCP listener.
+    let worker_handle = handle.clone();
     let worker_listener = tokio::net::TcpListener::bind(&config.workers.listen).await?;
     log::info!("Worker listener on {}", config.workers.listen);
     tokio::spawn(async move {
@@ -85,10 +78,10 @@ async fn main() -> anyhow::Result<()> {
             match worker_listener.accept().await {
                 Ok((socket, addr)) => {
                     log::info!("worker connection from {}", addr);
-                    let handle = handle.clone();
+                    let handle = worker_handle.clone();
                     tokio::spawn(async move {
                         match OrchestratorConnection::connect(socket).await {
-                            Ok(conn) => handle.submit_worker_connection(conn),
+                            Ok(conn) => handle.worker_connection(conn),
                             Err(e) => log::error!("worker connection setup failed: {}", e),
                         }
                     });
@@ -98,6 +91,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Run shell message loop (blocks until shutdown).
-    shell.run().await
+    // Wait for shell to complete.
+    shell_handle.await?;
+
+    Ok(())
 }

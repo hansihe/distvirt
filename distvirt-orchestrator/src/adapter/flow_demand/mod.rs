@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{BackendNeedId, DRouter, ServiceId, WorkerId};
+use crate::sm::{BackendNeedId, DRouter, ServiceId, WorkerId};
 
 #[cfg(test)]
 mod tests;
@@ -40,7 +40,7 @@ impl FlowDemandAdapter {
             router.set_backend_need_to_service_edges(id, vec![service_id]);
             id
         });
-        router.set_backend_need_level(port_id, crate::sm_new::BackendNeed::Traffic);
+        router.set_backend_need_level(port_id, crate::sm::BackendNeed::Traffic);
     }
 
     /// A worker reports no active flows for a service. Sets the level to None
@@ -53,7 +53,7 @@ impl FlowDemandAdapter {
     ) {
         let key = (worker_id, service_id);
         if let Some(&port_id) = self.ports.get(&key) {
-            router.set_backend_need_level(port_id, crate::sm_new::BackendNeed::None);
+            router.set_backend_need_level(port_id, crate::sm::BackendNeed::None);
         }
     }
 

@@ -687,11 +687,6 @@ impl LeaseTable {
     }
 }
 
-// Re-export SM-owned types so `use crate::types::*` still works.
-pub use crate::sm::pod::{PodSlot, PodState};
-pub use crate::sm::service::ServiceState;
-pub use crate::sm::workload::{PendingIntent, RetiredPod, WorkloadState};
-
 // --- Domain Enums ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

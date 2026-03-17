@@ -1,11 +1,11 @@
 use super::*;
-use crate::sm_new::{
+use crate::sm::{
     DRouter, LeaseInfo, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
     WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
-const S1: crate::sm_new::ServiceId = crate::sm_new::ServiceId(1);
+const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
 
 /// Set up a router with a workload (always-on service), propagate initial state.
 /// Returns (worker, pod_id).
@@ -125,7 +125,7 @@ fn pod_disappears_stop() {
 
     // Make pod fail → it leaves the worker's assigned pods.
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
     let actions = adapter.reconcile(&mut router);
@@ -181,7 +181,7 @@ fn multiple_workers() {
 
     // Two separate management ports, each with its own workload+service.
     let w2_id = WorkloadId(2);
-    let s2_id = crate::sm_new::ServiceId(2);
+    let s2_id = crate::sm::ServiceId(2);
 
     let mgmt1 = router.create_management();
     router.create_workload(W1, WorkloadSm::new());

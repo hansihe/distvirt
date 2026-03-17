@@ -79,8 +79,8 @@ fn test_demand_during_suspend_immediate_resume() {
     assert!(
         matches!(
             status,
-            distvirt_orchestrator::sm_new::WlStatus::Launching
-                | distvirt_orchestrator::sm_new::WlStatus::Running
+            distvirt_orchestrator::sm::WlStatus::Launching
+                | distvirt_orchestrator::sm::WlStatus::Running
         ),
         "Expected Resuming/Launching or Running after demand-during-suspend, got {:?}",
         status

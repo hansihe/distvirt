@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{ArtifactId, DRouter, PodId, PodScheduleRequest, WorkerId, WorkerPortInput};
+use crate::sm::{ArtifactId, DRouter, PodId, PodScheduleRequest, WorkerId, WorkerPortInput};
 
 #[cfg(test)]
 mod tests;

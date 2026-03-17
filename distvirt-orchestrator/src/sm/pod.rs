@@ -1,267 +1,238 @@
-use std::time::Duration;
+use super::*;
+use distvirt_sm_router::SmHandler;
 
-use crate::types::*;
+// ---- Pod SM ----
+//
+// A pod manages the lifecycle of a single "running thing" from creation to
+// terminal state. The lifecycle is linear and non-circular:
+//
+//   Pending → Running → Suspending → Suspended(artifact)  [terminal]
+//                     → Failed                             [terminal]
+//            → Failed                                      [terminal]
+//
+// Terminal states wait for reaping: the pod self-destructs only when it is
+// in a terminal state AND has no owner. This gives the workload time to
+// read the terminal status (e.g. extract artifact_id from Suspended).
+//
+// Two paths to pod death:
+//   Natural:  pod reaches terminal → workload reads status → workload
+//             removes edge (reap) → pod self-destructs.
+//   Abandon:  workload removes edge → pod drives itself to terminal
+//             (owner loss while live = failure) → pod self-destructs.
 
-pub const LAUNCH_TIMEOUT_SECS: u64 = 60;
-pub const SUSPEND_TIMEOUT_SECS: u64 = 30;
-pub const RESUME_TIMEOUT_SECS: u64 = 60;
-
-/// Input events for the pod lifecycle state machine.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PodInput {
-    PodRunning,
-    /// Pod is gone. `worker_lost` suppresses artifact deletion for Resuming pods
-    /// (the artifact may be on a different worker; namespace layer handles cleanup).
-    PodGone {
-        worker_lost: bool,
-    },
-    PodSuspended {
-        artifact_id: ArtifactId,
-    },
-    PodSuspendFailed,
-    TimerFired {
-        timer_key: TimerKey,
-    },
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PodSm {
+    pub status: PodStatus,
+    pub workload_id: Option<WorkloadId>,
+    pub worker_id: Option<WorkerId>,
+    pub intent: PodIntent,
+    /// Artifact to resume from (set at creation for resumed pods).
+    /// The worker port can read this to know whether to cold-boot or resume.
+    pub resume_artifact: Option<ArtifactId>,
+    /// Generation counter for timer requests.
+    pub timer_generation: u64,
+    /// Worker assigned via lease signal.
+    pub assigned_worker: Option<WorkerId>,
 }
 
-/// Side-effect outputs from pod lifecycle transitions.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PodOutput {
-    TimerSet(TimerKey, Duration),
-    TimerCancel(TimerKey),
-    DeleteArtifact {
-        artifact_id: ArtifactId,
-    },
-    SuspendRequest {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        artifact_id: ArtifactId,
-    },
-}
-
-/// Result of a pod lifecycle step, consumed by the workload coordinator.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PodOutcome {
-    /// Pod is now Running.
-    Running,
-    /// Pod is gone (exited/failed/killed).
-    Gone,
-    /// Pod suspended successfully.
-    Suspended { artifact_id: ArtifactId },
-    /// Pod suspend failed (pod is dead).
-    SuspendFailed,
-    /// A timeout fired. Caller should retire the pod (send StopPod).
-    TimedOut,
-    /// No state change (stale timer, wrong state).
-    Noop,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PodState {
-    Launching {
-        launch_timeout: TimerKey,
-    },
-    Running,
-    Suspending {
-        artifact_id: ArtifactId,
-        suspend_timeout: TimerKey,
-    },
-    Resuming {
-        artifact_id: ArtifactId,
-        resume_timeout: TimerKey,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PodSlot {
-    pub pod_id: PodId,
-    pub worker_id: WorkerId,
-    pub pod_state: PodState,
-}
-
-impl PodSlot {
-    /// Create a new pod in Launching state with its launch timeout.
-    pub fn new_launching(
-        pod_id: PodId,
-        worker_id: WorkerId,
-        workload_id: &WorkloadId,
-    ) -> (Self, Vec<PodOutput>) {
-        let launch_timeout = TimerKey::LaunchTimeout {
-            workload_id: workload_id.clone(),
-            pod_id: pod_id.clone(),
-        };
-        let outputs = vec![PodOutput::TimerSet(
-            launch_timeout.clone(),
-            Duration::from_secs(LAUNCH_TIMEOUT_SECS),
-        )];
-        (
-            PodSlot {
-                pod_id,
-                worker_id,
-                pod_state: PodState::Launching { launch_timeout },
-            },
-            outputs,
-        )
+impl PodSm {
+    pub(crate) fn new() -> Self {
+        PodSm {
+            status: PodStatus::Pending,
+            workload_id: None,
+            worker_id: None,
+            intent: PodIntent::None,
+            resume_artifact: None,
+            timer_generation: 0,
+            assigned_worker: None,
+        }
     }
 
-    /// Create a new pod in Resuming state with its resume timeout.
-    pub fn new_resuming(
-        pod_id: PodId,
-        worker_id: WorkerId,
-        workload_id: &WorkloadId,
-        artifact_id: ArtifactId,
-    ) -> (Self, Vec<PodOutput>) {
-        let resume_timeout = TimerKey::ResumeTimeout {
-            workload_id: workload_id.clone(),
-            pod_id: pod_id.clone(),
-        };
-        let outputs = vec![PodOutput::TimerSet(
-            resume_timeout.clone(),
-            Duration::from_secs(RESUME_TIMEOUT_SECS),
-        )];
-        (
-            PodSlot {
-                pod_id,
-                worker_id,
-                pod_state: PodState::Resuming {
-                    artifact_id,
-                    resume_timeout,
-                },
-            },
-            outputs,
-        )
+    pub(crate) fn new_from_artifact(artifact_id: ArtifactId) -> Self {
+        PodSm {
+            status: PodStatus::Pending,
+            workload_id: None,
+            worker_id: None,
+            intent: PodIntent::None,
+            resume_artifact: Some(artifact_id),
+            timer_generation: 0,
+            assigned_worker: None,
+        }
     }
 
-    /// Initiate suspension of a Running pod. Transitions to Suspending state.
-    pub fn initiate_suspend(
-        &mut self,
-        workload_id: &WorkloadId,
-        artifact_id: ArtifactId,
-    ) -> Vec<PodOutput> {
-        assert!(
-            matches!(self.pod_state, PodState::Running),
-            "initiate_suspend called on non-Running pod"
-        );
-        let suspend_timeout = TimerKey::SuspendTimeout {
-            workload_id: workload_id.clone(),
-            pod_id: self.pod_id.clone(),
-        };
-        self.pod_state = PodState::Suspending {
-            artifact_id: artifact_id.clone(),
-            suspend_timeout: suspend_timeout.clone(),
-        };
-        vec![
-            PodOutput::TimerSet(suspend_timeout, Duration::from_secs(SUSPEND_TIMEOUT_SECS)),
-            PodOutput::SuspendRequest {
-                pod_id: self.pod_id.clone(),
-                worker_id: self.worker_id.clone(),
-                artifact_id,
-            },
-        ]
+    /// Self-destruct if terminal and no owner (the reaping rule).
+    pub(crate) fn maybe_reap(&self, ctx: &mut impl PodCtx) {
+        if self.status.is_terminal() && self.workload_id.is_none() {
+            ctx.self_destruct();
+        }
     }
 
-    /// Process a pod lifecycle event. Returns the outcome and side-effect outputs.
-    ///
-    /// The caller (workload SM) interprets the outcome for workload-level transitions
-    /// and converts `PodOutput`s into `WorkloadOutput`s.
-    pub fn step(&mut self, input: PodInput) -> (PodOutcome, Vec<PodOutput>) {
-        let mut outputs = Vec::new();
-        let outcome = match input {
-            PodInput::PodRunning => {
-                match std::mem::replace(&mut self.pod_state, PodState::Running) {
-                    PodState::Launching { launch_timeout } => {
-                        outputs.push(PodOutput::TimerCancel(launch_timeout));
-                        PodOutcome::Running
-                    }
-                    PodState::Resuming {
-                        artifact_id,
-                        resume_timeout,
-                    } => {
-                        outputs.push(PodOutput::TimerCancel(resume_timeout));
-                        outputs.push(PodOutput::DeleteArtifact { artifact_id });
-                        PodOutcome::Running
-                    }
-                    other => {
-                        self.pod_state = other;
-                        PodOutcome::Noop
-                    }
+    /// Update the timer signal based on current pod status.
+    pub(crate) fn update_timer_signal(&self, ctx: &mut impl PodCtx) {
+        use std::time::Duration;
+        match &self.status {
+            PodStatus::Pending => {
+                ctx.set_wanted_pod_timers(vec![PodTimerRequest {
+                    key: PodTimerKey::LaunchTimeout,
+                    generation: self.timer_generation,
+                    duration: Duration::from_secs(30),
+                }]);
+            }
+            PodStatus::Suspending => {
+                ctx.set_wanted_pod_timers(vec![PodTimerRequest {
+                    key: PodTimerKey::SuspendTimeout,
+                    generation: self.timer_generation,
+                    duration: Duration::from_secs(30),
+                }]);
+            }
+            _ => {
+                ctx.set_wanted_pod_timers(vec![]);
+            }
+        }
+    }
+}
+
+impl<C: PodCtx> SmHandler<C> for PodSm {
+    type Input = PodInput;
+
+    fn initialize(&mut self, ctx: &mut C) {
+        ctx.set_pod_to_timer_edges(vec![TIMER]);
+        ctx.set_pod_to_schedule_request_edges(vec![SCHEDULE_REQUEST]);
+        ctx.set_schedule_request(PodScheduleRequest {
+            resume_artifact: self.resume_artifact,
+            ..Default::default()
+        });
+        self.update_timer_signal(ctx);
+    }
+
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
+        match input {
+            PodInput::WorkerInput(worker) => {
+                // Track assigned worker.
+                let new_worker_id = worker.as_ref().map(|(id, _)| *id);
+                if new_worker_id != self.worker_id {
+                    self.worker_id = new_worker_id;
+                    ctx.set_worker(self.worker_id);
+                }
+
+                if worker.is_none() && !self.status.is_terminal() {
+                    // Worker lost — pod displaced by infrastructure.
+                    self.status = PodStatus::Displaced;
+                    ctx.set_status(PodStatus::Displaced);
+                    self.update_timer_signal(ctx);
+                    self.maybe_reap(ctx);
                 }
             }
-            PodInput::PodGone { worker_lost } => match &self.pod_state {
-                PodState::Launching { launch_timeout } => {
-                    outputs.push(PodOutput::TimerCancel(launch_timeout.clone()));
-                    PodOutcome::Gone
-                }
-                PodState::Running => PodOutcome::Gone,
-                PodState::Suspending {
-                    suspend_timeout, ..
-                } => {
-                    outputs.push(PodOutput::TimerCancel(suspend_timeout.clone()));
-                    PodOutcome::Gone
-                }
-                PodState::Resuming {
-                    artifact_id,
-                    resume_timeout,
-                } => {
-                    outputs.push(PodOutput::TimerCancel(resume_timeout.clone()));
-                    if !worker_lost {
-                        outputs.push(PodOutput::DeleteArtifact {
-                            artifact_id: artifact_id.clone(),
-                        });
-                    }
-                    PodOutcome::Gone
-                }
-            },
-            PodInput::PodSuspended { artifact_id } => match &self.pod_state {
-                PodState::Suspending {
-                    artifact_id: aid, ..
-                } if *aid == artifact_id => {
-                    // Use mem::replace to take ownership of the state fields.
-                    if let PodState::Suspending {
-                        artifact_id,
-                        suspend_timeout,
-                    } = std::mem::replace(&mut self.pod_state, PodState::Running)
-                    {
-                        outputs.push(PodOutput::TimerCancel(suspend_timeout));
-                        PodOutcome::Suspended { artifact_id }
-                    } else {
-                        unreachable!()
-                    }
-                }
-                _ => PodOutcome::Noop,
-            },
-            PodInput::PodSuspendFailed => match &self.pod_state {
-                PodState::Suspending {
-                    artifact_id,
-                    suspend_timeout,
-                } => {
-                    outputs.push(PodOutput::TimerCancel(suspend_timeout.clone()));
-                    outputs.push(PodOutput::DeleteArtifact {
-                        artifact_id: artifact_id.clone(),
+            PodInput::OwnerInput(owner) => {
+                let had_owner = self.workload_id.is_some();
+                let (new_wl, new_intent) = match owner {
+                    Some((wl, intent)) => (Some(wl), intent),
+                    None => (None, PodIntent::None),
+                };
+                self.workload_id = new_wl;
+                self.intent = new_intent;
+
+                let edges: Vec<WorkloadId> = self.workload_id.into_iter().collect();
+                ctx.set_pod_to_workload_edges(edges);
+
+                // React to intent: Running + Suspend → begin suspending.
+                if matches!(
+                    (&self.status, &self.intent),
+                    (PodStatus::Running, PodIntent::Suspend)
+                ) {
+                    self.timer_generation += 1;
+                    self.status = PodStatus::Suspending;
+                    ctx.set_status(PodStatus::Suspending);
+                    ctx.set_schedule_request(PodScheduleRequest {
+                        resume_artifact: self.resume_artifact,
+                        suspend: true,
                     });
-                    PodOutcome::SuspendFailed
+                    self.update_timer_signal(ctx);
                 }
-                _ => PodOutcome::Noop,
-            },
-            PodInput::TimerFired { timer_key } => match &self.pod_state {
-                PodState::Launching { launch_timeout } if *launch_timeout == timer_key => {
-                    PodOutcome::TimedOut
+
+                // Lost owner while in a live state → drive to terminal.
+                // (In a real system this would go through a shutdown sequence
+                // with worker interaction; simplified to immediate here.)
+                if had_owner && self.workload_id.is_none() && !self.status.is_terminal() {
+                    self.status = PodStatus::Failed;
+                    ctx.set_status(PodStatus::Failed);
+                    self.update_timer_signal(ctx);
                 }
-                PodState::Suspending {
-                    suspend_timeout, ..
-                } if *suspend_timeout == timer_key => PodOutcome::TimedOut,
-                PodState::Resuming {
-                    artifact_id,
-                    resume_timeout,
-                } if *resume_timeout == timer_key => {
-                    outputs.push(PodOutput::DeleteArtifact {
+
+                self.maybe_reap(ctx);
+            }
+            PodInput::NotifyPodStatus(new_status) => {
+                // Only accept valid worker-reported status transitions.
+                // Pending and Suspending are SM-internal states (managed by
+                // initialization and OwnerInput respectively), so they are
+                // rejected here. This prevents inconsistent state from
+                // out-of-order or stale worker notifications.
+                let accept = !self.status.is_terminal()
+                    && match &new_status {
+                        // Worker reports pod is running. Only valid from Pending.
+                        PodStatus::Running => matches!(self.status, PodStatus::Pending),
+                        // Worker reports failure or graceful exit. Valid from any
+                        // non-terminal state.
+                        PodStatus::Failed | PodStatus::Finished => true,
+                        // All other statuses are SM-internal or use dedicated
+                        // inputs (NotifyPodSuspended).
+                        _ => false,
+                    };
+                if accept {
+                    self.status = new_status.clone();
+                    ctx.set_status(new_status);
+                    self.update_timer_signal(ctx);
+                    self.maybe_reap(ctx);
+                }
+            }
+            PodInput::NotifyPodSuspended(artifact_id) => {
+                if matches!(self.status, PodStatus::Suspending) {
+                    self.status = PodStatus::Suspended {
                         artifact_id: artifact_id.clone(),
-                    });
-                    PodOutcome::TimedOut
+                    };
+                    ctx.set_status(PodStatus::Suspended { artifact_id });
+                    self.update_timer_signal(ctx);
+                    self.maybe_reap(ctx);
                 }
-                _ => PodOutcome::Noop,
+            }
+            PodInput::LeaseInput(lease) => {
+                let had_lease = self.assigned_worker.is_some();
+                match lease {
+                    Some(info) if !had_lease && matches!(self.status, PodStatus::Pending) => {
+                        // Lease granted — target the assigned worker.
+                        self.assigned_worker = Some(info.worker_id);
+                        ctx.set_pod_to_worker_edges(vec![info.worker_id]);
+                    }
+                    None if had_lease && !self.status.is_terminal() => {
+                        // Lease revoked — preemption (infrastructure event).
+                        self.assigned_worker = None;
+                        self.status = PodStatus::Displaced;
+                        ctx.set_status(PodStatus::Displaced);
+                        ctx.set_pod_to_worker_edges(vec![]);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
+                    }
+                    _ => {}
+                }
+            }
+            PodInput::PodTimerFired(key) => match key {
+                PodTimerKey::LaunchTimeout => {
+                    if matches!(self.status, PodStatus::Pending) {
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
+                    }
+                }
+                PodTimerKey::SuspendTimeout => {
+                    if matches!(self.status, PodStatus::Suspending) {
+                        self.status = PodStatus::Failed;
+                        ctx.set_status(PodStatus::Failed);
+                        self.update_timer_signal(ctx);
+                        self.maybe_reap(ctx);
+                    }
+                }
             },
-        };
-        (outcome, outputs)
+        }
     }
 }

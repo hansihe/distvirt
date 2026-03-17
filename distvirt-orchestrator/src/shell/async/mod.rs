@@ -7,8 +7,8 @@
 //! Timers are driven via the core's `TimerWheel` — the shell queries
 //! `next_deadline()` and sleeps until that instant, then calls `advance_to()`.
 
-pub(crate) mod worker_reader;
-pub(crate) mod worker_writer;
+mod worker_reader;
+mod worker_writer;
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -32,7 +32,7 @@ use crate::types::NamespaceId;
 // Shell event — everything the shell can receive
 // =============================================================================
 
-pub(crate) enum ShellEvent {
+enum ShellEvent {
     /// External command (worker connection, namespace create/destroy).
     Command(ShellCommand),
     /// Namespace-scoped event from a worker reader.
@@ -49,7 +49,7 @@ pub(crate) enum ShellEvent {
 }
 
 /// Commands sent to the shell from external callers.
-pub(crate) enum ShellCommand {
+enum ShellCommand {
     WorkerConnection {
         conn: OrchestratorConnection,
     },
@@ -67,7 +67,7 @@ pub(crate) enum ShellCommand {
 // =============================================================================
 
 #[derive(Clone)]
-pub(crate) struct ShellHandle {
+pub struct ShellHandle {
     tx: mpsc::Sender<ShellEvent>,
 }
 
@@ -345,7 +345,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Spawn the new async shell. Returns (handle, join_handle).
-pub(crate) fn spawn(
+pub fn spawn(
     worker_secret: String,
     timer_config: TimerConfig,
 ) -> (ShellHandle, JoinHandle<()>) {

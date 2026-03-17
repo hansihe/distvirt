@@ -8,5 +8,5 @@ pub use test_harness::TestHarness;
 // Re-export MockWorkerConfig from the SyncShell module so scenario tests
 // can use it without knowing the internal path.
 pub mod mock_worker {
-    pub use distvirt_orchestrator::shell_new::sync::MockWorkerConfig;
+    pub use distvirt_orchestrator::shell::sync::MockWorkerConfig;
 }

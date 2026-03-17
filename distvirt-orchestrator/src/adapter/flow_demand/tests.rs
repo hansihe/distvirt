@@ -1,7 +1,7 @@
 use super::*;
-use crate::sm_new::{
-    BackendNeed, DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId,
-    WorkloadSm, WorkloadSpec,
+use crate::sm::{
+    DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId, WorkloadSm,
+    WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);

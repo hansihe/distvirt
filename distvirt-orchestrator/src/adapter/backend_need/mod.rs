@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::sm_new::{BackendNeedId, DRouter, ServiceId, WorkerId};
+use crate::sm::{BackendNeedId, DRouter, ServiceId, WorkerId};
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +32,7 @@ impl BackendNeedAdapter {
         router: &mut DRouter,
         worker_id: WorkerId,
         service_id: ServiceId,
-        need: crate::sm_new::BackendNeed,
+        need: crate::sm::BackendNeed,
     ) {
         let key = (worker_id, service_id);
         let port_id = *self.ports.entry(key).or_insert_with(|| {

@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::sm_new::{AdminCmd, DRouter, SCHEDULE_REQUEST, TIMER};
+use crate::sm::{AdminCmd, DRouter, SCHEDULE_REQUEST, TIMER};
 use crate::types::{ActivationSpec, NamespaceSpec, ServiceSpec, WorkloadSpec};
 
 use super::ManagementAdapter;

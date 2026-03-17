@@ -6,11 +6,7 @@
 use distvirt_worker_protocol::NamespaceId;
 use tokio::sync::mpsc;
 
-use crate::{
-    adapter::timer::TimerIdentity,
-    sm_new::{PodId, WorkerInfo},
-    types::NamespaceSpec,
-};
+use crate::{sm::PodId, types::NamespaceSpec};
 
 pub mod namespace;
 pub mod orchestrator;
@@ -40,37 +36,6 @@ impl GlobalWorkerId {
 // =============================================================================
 // Scheduler interface
 // =============================================================================
-
-/// Sent by namespace tasks to the global scheduler.
-pub(crate) enum SchedulerInput {
-    /// Register a namespace's reply channel with the scheduler.
-    RegisterNamespace {
-        namespace_id: NamespaceId,
-        reply_tx: mpsc::Sender<SchedulerDecision>,
-    },
-    /// Unregister a namespace from the scheduler.
-    UnregisterNamespace { namespace_id: NamespaceId },
-    RequestLease {
-        namespace_id: NamespaceId,
-        pod_id: PodId,
-        /// Protocol artifact ID for resume affinity (converted at namespace boundary).
-        /// None for cold-boot pods.
-        proto_resume_artifact: Option<distvirt_worker_protocol::ArtifactId>,
-    },
-    DropRequest {
-        namespace_id: NamespaceId,
-        pod_id: PodId,
-    },
-    /// Worker state changed (from WorkerStateTracker).
-    WorkerUpdate(GlobalWorkerId, scheduler::WorkerCandidate),
-    /// Worker disconnected.
-    WorkerRemoved(GlobalWorkerId),
-    /// Artifact placement event from a worker.
-    ArtifactEvent {
-        worker_id: GlobalWorkerId,
-        event: ArtifactPlacementEvent,
-    },
-}
 
 /// Artifact placement events reported by workers.
 pub enum ArtifactPlacementEvent {
@@ -111,30 +76,6 @@ pub enum SchedulerDecision {
 // =============================================================================
 // Namespace task interface
 // =============================================================================
-
-/// Everything a namespace task can receive.
-pub(crate) enum NamespaceEvent {
-    /// Worker protocol event routed by a worker reader task.
-    WorkerEvent(WorkerNamespaceEvent),
-    /// Scheduler decided on a lease.
-    SchedulerDecision(SchedulerDecision),
-    /// A tokio timer fired.
-    TimerFired {
-        identity: TimerIdentity,
-        generation: u64,
-    },
-    /// A worker was added to this namespace.
-    WorkerConnected {
-        worker_id: GlobalWorkerId,
-        proto_worker_id: distvirt_worker_protocol::WorkerId,
-        info: WorkerInfo,
-        writer: WorkerWriterHandle,
-    },
-    /// A worker was removed from this namespace.
-    WorkerDisconnected { worker_id: GlobalWorkerId },
-    /// Client management command.
-    ClientCommand(ClientCommand),
-}
 
 pub struct WorkerNamespaceEvent {
     pub worker_id: GlobalWorkerId,

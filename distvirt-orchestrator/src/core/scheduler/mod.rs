@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::core::scheduler::placement_table::PlacementTable;
 use crate::core::{GlobalWorkerId, SchedulerDecision};
-use crate::sm_new::PodId;
+use crate::sm::PodId;
 use crate::types::{NamespaceId, PressureBand};
 
 use super::types::SchedulerCoreInput;
@@ -16,7 +16,7 @@ mod placement_table;
 
 /// Snapshot of a single worker's scheduling-relevant state.
 /// Passed in by the shell — not owned by the adapter.
-pub(crate) struct WorkerCandidate {
+pub struct WorkerCandidate {
     pub worker_id: GlobalWorkerId,
     pub max_pressure_band: PressureBand,
     pub pod_count: usize,

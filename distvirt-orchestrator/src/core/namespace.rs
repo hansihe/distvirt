@@ -17,7 +17,7 @@ use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
 use crate::core::{ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
 use distvirt_sm_router::trace::PanicTracer;
 
-use crate::sm_new::{
+use crate::sm::{
     AdminCmd, DRouter, ENDPOINT, LeaseInfo, PodId, PodStatus, Router, SCHEDULE_REQUEST,
     ScheduleLeaseId, TIMER, WorkerId,
 };
@@ -52,10 +52,8 @@ struct IdMaps {
     proto_to_router_pod: HashMap<distvirt_worker_protocol::PodId, PodId>,
     router_to_proto_pod: HashMap<PodId, distvirt_worker_protocol::PodId>,
     // Artifact: protocol ↔ router
-    proto_to_router_artifact:
-        HashMap<distvirt_worker_protocol::ArtifactId, crate::sm_new::ArtifactId>,
-    router_to_proto_artifact:
-        HashMap<crate::sm_new::ArtifactId, distvirt_worker_protocol::ArtifactId>,
+    proto_to_router_artifact: HashMap<distvirt_worker_protocol::ArtifactId, crate::sm::ArtifactId>,
+    router_to_proto_artifact: HashMap<crate::sm::ArtifactId, distvirt_worker_protocol::ArtifactId>,
     next_artifact_counter: u64,
 }
 
@@ -112,11 +110,11 @@ impl IdMaps {
     fn get_or_create_router_artifact(
         &mut self,
         proto: &distvirt_worker_protocol::ArtifactId,
-    ) -> crate::sm_new::ArtifactId {
+    ) -> crate::sm::ArtifactId {
         if let Some(&router_id) = self.proto_to_router_artifact.get(proto) {
             return router_id;
         }
-        let router_id = crate::sm_new::ArtifactId(self.next_artifact_counter);
+        let router_id = crate::sm::ArtifactId(self.next_artifact_counter);
         self.next_artifact_counter += 1;
         self.proto_to_router_artifact
             .insert(proto.clone(), router_id);
@@ -127,7 +125,7 @@ impl IdMaps {
 
     fn get_proto_artifact(
         &self,
-        router: &crate::sm_new::ArtifactId,
+        router: &crate::sm::ArtifactId,
     ) -> &distvirt_worker_protocol::ArtifactId {
         self.router_to_proto_artifact.get(router).expect(
             "router ArtifactId has no protocol mapping — artifact was never registered at the namespace boundary",
@@ -137,11 +135,8 @@ impl IdMaps {
     /// Allocate a new artifact ID pair (proto + router) for a suspend operation.
     fn create_artifact_id(
         &mut self,
-    ) -> (
-        distvirt_worker_protocol::ArtifactId,
-        crate::sm_new::ArtifactId,
-    ) {
-        let router_id = crate::sm_new::ArtifactId(self.next_artifact_counter);
+    ) -> (distvirt_worker_protocol::ArtifactId, crate::sm::ArtifactId) {
+        let router_id = crate::sm::ArtifactId(self.next_artifact_counter);
         self.next_artifact_counter += 1;
         let proto_id =
             distvirt_worker_protocol::ArtifactId::from(format!("artifact-{}", router_id.0));
@@ -170,7 +165,7 @@ struct ReconcileActions {
 
 struct PendingWorkerCore {
     proto_worker_id: distvirt_worker_protocol::WorkerId,
-    info: crate::sm_new::WorkerInfo,
+    info: crate::sm::WorkerInfo,
 }
 
 // =============================================================================
@@ -203,7 +198,7 @@ pub struct NamespaceCore {
 
     current_spec: Option<NamespaceSpec>,
 
-    workload_specs: HashMap<crate::sm_new::WorkloadId, crate::types::WorkloadSpec>,
+    workload_specs: HashMap<crate::sm::WorkloadId, crate::types::WorkloadSpec>,
 }
 
 impl NamespaceCore {
@@ -395,13 +390,13 @@ impl NamespaceCore {
                         {
                             let sm_need = match need {
                                 distvirt_worker_protocol::BackendNeed::None => {
-                                    crate::sm_new::BackendNeed::None
+                                    crate::sm::BackendNeed::None
                                 }
                                 distvirt_worker_protocol::BackendNeed::Traffic => {
-                                    crate::sm_new::BackendNeed::Traffic
+                                    crate::sm::BackendNeed::Traffic
                                 }
                                 distvirt_worker_protocol::BackendNeed::Active => {
-                                    crate::sm_new::BackendNeed::Active
+                                    crate::sm::BackendNeed::Active
                                 }
                             };
                             self.adapters.backend_need.push_need(
@@ -766,7 +761,7 @@ impl NamespaceCore {
         &self,
         router_pod_id: PodId,
         proto_pod_id: &distvirt_worker_protocol::PodId,
-        _request: &crate::sm_new::PodScheduleRequest,
+        _request: &crate::sm::PodScheduleRequest,
     ) -> distvirt_worker_protocol::WorkerCommand {
         let workload_id = self
             .router
@@ -794,7 +789,7 @@ impl NamespaceCore {
 
     fn lookup_service_spec(
         &self,
-        service_id: &crate::sm_new::ServiceId,
+        service_id: &crate::sm::ServiceId,
     ) -> Option<(&str, &crate::types::ServiceSpec)> {
         let proto_name = self.adapters.management.service_proto_name(service_id)?;
         let spec = self
@@ -951,7 +946,7 @@ impl NamespaceCore {
     /// Map a router-internal WorkerId to a GlobalWorkerId (for test use).
     pub fn router_worker_to_global(
         &self,
-        router_wid: &crate::sm_new::WorkerId,
+        router_wid: &crate::sm::WorkerId,
     ) -> Option<GlobalWorkerId> {
         self.ids.router_to_global_worker.get(router_wid).copied()
     }
@@ -959,7 +954,7 @@ impl NamespaceCore {
     /// Map a router-internal PodId to a protocol PodId (for test use).
     pub fn router_pod_to_proto(
         &self,
-        router_pid: &crate::sm_new::PodId,
+        router_pid: &crate::sm::PodId,
     ) -> Option<&distvirt_worker_protocol::PodId> {
         self.ids.router_to_proto_pod.get(router_pid)
     }

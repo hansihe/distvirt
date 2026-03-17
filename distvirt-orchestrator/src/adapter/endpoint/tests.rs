@@ -1,5 +1,5 @@
 use super::*;
-use crate::sm_new::{
+use crate::sm::{
     DRouter, ENDPOINT, PodId, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo,
     WorkloadId, WorkloadSm, WorkloadSpec,
 };
@@ -9,7 +9,7 @@ const S1: ServiceId = ServiceId(1);
 
 /// Set up a router with a workload and always-on service, propagate initial state.
 /// Returns (worker_id, pod_id).
-fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
+fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -44,11 +44,11 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
 }
 
 /// Make a pod reach Running state so the service becomes Active.
-fn make_pod_running(router: &mut DRouter, worker: crate::sm_new::WorkerId, pod_id: PodId) {
+fn make_pod_running(router: &mut DRouter, worker: crate::sm::WorkerId, pod_id: PodId) {
     // Grant lease
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
+    router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
 
     // Assign worker to pod
@@ -56,7 +56,7 @@ fn make_pod_running(router: &mut DRouter, worker: crate::sm_new::WorkerId, pod_i
     router.propagate();
 
     // Notify running
-    router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Running);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
     router.propagate();
 }
 
@@ -124,7 +124,7 @@ fn service_leaves_active_remove() {
     let _ = adapter.reconcile(&mut router);
 
     // Pod fails → service goes to NeedBackend.
-    router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
     let actions = adapter.reconcile(&mut router);
@@ -230,17 +230,17 @@ fn multiple_services_change() {
     // Make both pods running.
     let lease1 = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease1, vec![pod1]);
-    router.set_schedule_lease_lease(lease1, crate::sm_new::LeaseInfo { worker_id: worker });
+    router.set_schedule_lease_lease(lease1, crate::sm::LeaseInfo { worker_id: worker });
     let lease2 = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease2, vec![pod2]);
-    router.set_schedule_lease_lease(lease2, crate::sm_new::LeaseInfo { worker_id: worker });
+    router.set_schedule_lease_lease(lease2, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
 
     router.set_worker_to_pod_edges(worker, vec![pod1, pod2]);
     router.propagate();
 
-    router.send_notify_pod_status(worker, pod1, crate::sm_new::PodStatus::Running);
-    router.send_notify_pod_status(worker, pod2, crate::sm_new::PodStatus::Running);
+    router.send_notify_pod_status(worker, pod1, crate::sm::PodStatus::Running);
+    router.send_notify_pod_status(worker, pod2, crate::sm::PodStatus::Running);
     router.propagate();
 
     let mut adapter = EndpointAdapter::new(ENDPOINT);

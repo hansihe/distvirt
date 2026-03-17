@@ -25,7 +25,7 @@ use super::types::{
 use super::worker_state::WorkerStateCore;
 use crate::adapter::timer::TimerConfig;
 use crate::core::{GlobalWorkerId, SchedulerDecision};
-use crate::sm_new::WorkerInfo;
+use crate::sm::WorkerInfo;
 use crate::types::NamespaceId;
 
 pub struct OrchestratorCore {

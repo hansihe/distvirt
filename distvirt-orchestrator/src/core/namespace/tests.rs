@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::adapter::timer::TimerConfig;
 use crate::core::WorkerNamespaceEvent;
 use crate::core::types::NamespaceCoreEvent;
-use crate::sm_new::{ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm};
+use crate::sm::{ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm};
 use crate::types::NamespaceId;
 
 use super::*;
@@ -26,7 +26,7 @@ fn test_timer_config() -> TimerConfig {
 }
 
 const W1: WorkloadId = WorkloadId(1);
-const S1: crate::sm_new::ServiceId = crate::sm_new::ServiceId(1);
+const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
 
 /// Create a NamespaceCore with a pre-configured workload+service.
 fn create_configured_core() -> (NamespaceCore, GlobalWorkerId, PodId) {
@@ -38,7 +38,7 @@ fn create_configured_core() -> (NamespaceCore, GlobalWorkerId, PodId) {
     core.router.set_management_to_workload_edges(mgmt, vec![W1]);
     core.router.set_management_wl_spec(
         mgmt,
-        crate::sm_new::WorkloadSpec {
+        crate::sm::WorkloadSpec {
             image: "app:v1".into(),
             ..Default::default()
         },

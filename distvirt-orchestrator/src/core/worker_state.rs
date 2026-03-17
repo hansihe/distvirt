@@ -17,7 +17,7 @@ use super::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects}
 
 /// Tunnel configuration reported by a worker during handshake.
 #[derive(Clone, Debug)]
-pub(crate) struct WorkerTunnelInfo {
+pub struct WorkerTunnelInfo {
     pub listen_port: u16,
     pub public_key: [u8; 32],
 }

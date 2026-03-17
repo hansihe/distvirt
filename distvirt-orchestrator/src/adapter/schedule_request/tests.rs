@@ -1,15 +1,15 @@
 use super::*;
-use crate::sm_new::{
+use crate::sm::{
     DRouter, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo, WorkloadId, WorkloadSm,
     WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
-const S1: crate::sm_new::ServiceId = crate::sm_new::ServiceId(1);
+const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
 
 /// Set up a router with a workload (always-on service), propagate initial state.
 /// Returns (worker, pod_id).
-fn setup_workload(router: &mut DRouter) -> (crate::sm_new::WorkerId, PodId) {
+fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     router.create_timer(TIMER);
     let worker = router.create_worker();
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
@@ -101,11 +101,11 @@ fn pod_removed_drop_delta() {
     // Make pod fail → schedule request disappears.
     let lease = router.create_schedule_lease();
     router.set_schedule_lease_to_pod_edges(lease, vec![pod_id]);
-    router.set_schedule_lease_lease(lease, crate::sm_new::LeaseInfo { worker_id: worker });
+    router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
 
     router.set_worker_to_pod_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm_new::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
     let deltas = adapter.reconcile(&mut router);
@@ -157,7 +157,7 @@ fn multiple_pods_change() {
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let w2_id = WorkloadId(2);
-    let s2_id = crate::sm_new::ServiceId(2);
+    let s2_id = crate::sm::ServiceId(2);
 
     // Two separate management ports for independent workloads.
     let mgmt1 = router.create_management();

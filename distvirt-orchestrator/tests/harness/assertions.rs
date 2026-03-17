@@ -1,5 +1,5 @@
 use distvirt_orchestrator::core::GlobalWorkerId;
-use distvirt_orchestrator::sm_new::{SvcStatus, WlStatus};
+use distvirt_orchestrator::sm::{SvcStatus, WlStatus};
 use distvirt_orchestrator::types::NamespaceId;
 
 use super::test_harness::TestHarness;

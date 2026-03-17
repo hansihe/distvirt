@@ -1,264 +1,192 @@
-use crate::types::*;
+use super::*;
+use distvirt_sm_router::SmHandler;
+
+// ---- Service SM ----
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServiceState {
+    /// Has activation, currently idle (no demand signal).
     Idle,
+    /// Wants a backend — demand signal is true.
     NeedBackend,
-    Active {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        backend_need: BackendNeed,
-        idle_timer: Option<TimerKey>,
-    },
+    /// Active with a ready backend.
+    Active { ready: ReadyInfo },
 }
 
-impl ServiceState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ServiceState::Idle => "idle",
-            ServiceState::NeedBackend => "need_backend",
-            ServiceState::Active { .. } => "active",
-        }
-    }
-}
-
-pub struct ServiceStateMachine {
-    pub service_id: ServiceId,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ServiceSm {
     pub state: ServiceState,
-    pub workload_id: WorkloadId,
     pub has_activation: bool,
+    pub idle_generation: u64,
+    pub idle_timer_active: bool,
     pub idle_timeout: std::time::Duration,
-    /// Active conditions for observability (key → message).
-    pub conditions: std::collections::BTreeMap<String, String>,
+    /// Cached readiness from the workload. Stored regardless of service state
+    /// so that an Idle→NeedBackend transition can skip straight to Active when
+    /// readiness was delivered while the service was idle (the router suppresses
+    /// re-delivery of unchanged signals).
+    pub last_readiness: Option<ReadyInfo>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ServiceInput {
-    WorkloadReady {
-        pod_id: PodId,
-        worker_id: WorkerId,
-        backend: ServiceBackend,
-    },
-    WorkloadUnready,
-    ServiceActivation,
-    ServiceBackendNeed {
-        need: BackendNeed,
-    },
-    TimerFired {
-        timer_key: TimerKey,
-    },
-    ForceDeactivate,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ServiceOutput {
-    /// The endpoint spec for this service changed; broadcast an update.
-    EndpointChanged,
-    TimerSet(TimerKey, std::time::Duration),
-    TimerCancel(TimerKey),
-    ConditionSet {
-        key: String,
-        message: String,
-    },
-    ConditionClear {
-        key: String,
-    },
-    IdleTimerStarted {
-        timeout: std::time::Duration,
-    },
-    IdleTimerCancelled {
-        reason: IdleTimerCancelReason,
-    },
-    IdleTimeoutFired,
-    Deactivated {
-        reason: ServiceDeactivationReason,
-    },
-    Activated {
-        trigger: ServiceActivationTrigger,
-    },
-    BackendReady,
-}
-
-impl ServiceStateMachine {
-    pub fn new(
-        service_id: ServiceId,
-        workload_id: WorkloadId,
-        has_activation: bool,
-        idle_timeout: std::time::Duration,
-    ) -> Self {
-        let initial_state = if has_activation {
-            ServiceState::Idle
-        } else {
-            ServiceState::NeedBackend
-        };
-        ServiceStateMachine {
-            service_id,
-            state: initial_state,
-            workload_id,
+impl ServiceSm {
+    pub(crate) fn new(has_activation: bool) -> Self {
+        ServiceSm {
+            state: if has_activation {
+                ServiceState::Idle
+            } else {
+                ServiceState::NeedBackend
+            },
             has_activation,
-            idle_timeout,
-            conditions: std::collections::BTreeMap::new(),
+            idle_generation: 0,
+            idle_timer_active: false,
+            idle_timeout: std::time::Duration::ZERO,
+            last_readiness: None,
         }
     }
 
-    pub fn is_active(&self) -> bool {
-        matches!(self.state, ServiceState::Active { .. })
+    pub(crate) fn update_timer_signal(&self, ctx: &mut impl ServiceCtx) {
+        if self.idle_timer_active {
+            ctx.set_svc_wanted_timers(vec![ServiceTimerRequest {
+                key: ServiceTimerKey::IdleTimeout,
+                generation: self.idle_generation,
+                duration: self.idle_timeout,
+            }]);
+        } else {
+            ctx.set_svc_wanted_timers(vec![]);
+        }
     }
 
-    pub fn active_backend_need(&self) -> Option<&BackendNeed> {
-        match &self.state {
-            ServiceState::Active { backend_need, .. } => Some(backend_need),
+    /// Transition from Idle to NeedBackend (or directly to Active if readiness
+    /// is already cached). Call this instead of setting `self.state = NeedBackend`
+    /// directly from Idle.
+    fn activate(&mut self) {
+        debug_assert!(matches!(self.state, ServiceState::Idle));
+        if let Some(info) = self.last_readiness.clone() {
+            self.state = ServiceState::Active { ready: info };
+        } else {
+            self.state = ServiceState::NeedBackend;
+        }
+    }
+
+    pub(crate) fn update_status_signals(&self, ctx: &mut impl ServiceCtx) {
+        let status = match &self.state {
+            ServiceState::Idle => SvcStatus::Idle,
+            ServiceState::NeedBackend => SvcStatus::NeedBackend,
+            ServiceState::Active { .. } => SvcStatus::Active,
+        };
+        ctx.set_svc_status_signal(status);
+        ctx.set_idle_timer_active_signal(self.idle_timer_active);
+
+        let endpoint_info = match &self.state {
+            ServiceState::Active { ready } => Some(ready.clone()),
             _ => None,
-        }
+        };
+        ctx.set_endpoint_info(endpoint_info);
+    }
+}
+
+impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
+    type Input = ServiceInput;
+
+    fn initialize(&mut self, ctx: &mut C) {
+        ctx.set_service_to_timer_edges(vec![TIMER]);
+        ctx.set_service_to_endpoint_edges(vec![ENDPOINT]);
+        self.update_status_signals(ctx);
     }
 
-    pub fn active_worker_id(&self) -> Option<&WorkerId> {
-        match &self.state {
-            ServiceState::Active { worker_id, .. } => Some(worker_id),
-            _ => None,
-        }
-    }
-
-    /// Returns true if this service currently wants a backend (i.e., contributes demand).
-    /// True for NeedBackend and Active states.
-    pub fn wants_backend(&self) -> bool {
-        matches!(
-            self.state,
-            ServiceState::NeedBackend | ServiceState::Active { .. }
-        )
-    }
-
-    pub fn step(&mut self, input: ServiceInput, _namespace_id: &NamespaceId) -> Vec<ServiceOutput> {
-        let mut outputs = Vec::new();
-
+    fn handle(&mut self, input: Self::Input, ctx: &mut C) {
         match input {
-            ServiceInput::WorkloadReady {
-                pod_id,
-                worker_id,
-                backend: _,
-            } => match &self.state {
-                ServiceState::NeedBackend => {
-                    self.state = ServiceState::Active {
-                        pod_id: pod_id.clone(),
-                        worker_id: worker_id.clone(),
-                        backend_need: BackendNeed::Active,
-                        idle_timer: None,
-                    };
-                    outputs.push(ServiceOutput::BackendReady);
-                    outputs.push(ServiceOutput::ConditionClear {
-                        key: "activation-pending".into(),
-                    });
-                    outputs.push(ServiceOutput::EndpointChanged);
+            ServiceInput::ReadinessInput(readiness_list) => {
+                let ready = readiness_list.into_iter().next().flatten();
+                self.last_readiness = ready.clone();
+                match (&self.state, ready) {
+                    (ServiceState::NeedBackend, Some(info)) => {
+                        self.state = ServiceState::Active { ready: info };
+                    }
+                    (ServiceState::Active { .. }, None) => {
+                        self.state = ServiceState::NeedBackend;
+                        if self.idle_timer_active {
+                            self.idle_timer_active = false;
+                            self.update_timer_signal(ctx);
+                        }
+                    }
+                    (ServiceState::Active { .. }, Some(info)) => {
+                        self.state = ServiceState::Active { ready: info };
+                    }
+                    _ => {}
+                }
+            }
+            ServiceInput::SvcSpecInput(spec_opt) => {
+                if let Some((_, spec)) = spec_opt {
+                    self.has_activation = spec.has_activation;
+                    self.idle_timeout = spec.idle_timeout;
+                    if !self.has_activation {
+                        // Always-on: set demand immediately.
+                        ctx.set_demand(true);
+                        if matches!(self.state, ServiceState::Idle) {
+                            self.activate();
+                        }
+                    }
+                    // The idle timer is only meaningful with has_activation.
+                    // Clear it to avoid stale timer state after a spec change.
+                    if self.idle_timer_active && !self.has_activation {
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
+                    }
+                    ctx.set_service_to_workload_edges(vec![spec.workload]);
+                } else {
+                    // Spec removed — self-destruct.
+                    ctx.self_destruct();
+                }
+            }
+            ServiceInput::ActivateService(active) => {
+                if self.has_activation {
+                    ctx.set_demand(active);
+                    if active && matches!(self.state, ServiceState::Idle) {
+                        self.activate();
+                    } else if !active {
+                        self.state = ServiceState::Idle;
+                        ctx.set_demand(false);
+                        if self.idle_timer_active {
+                            self.idle_timer_active = false;
+                            self.update_timer_signal(ctx);
+                        }
+                    }
+                }
+            }
+            ServiceInput::BackendNeedInput(need) => match (&self.state, &need) {
+                (ServiceState::Active { .. }, BackendNeed::None) if self.has_activation => {
+                    if !self.idle_timer_active {
+                        self.idle_timer_active = true;
+                        self.idle_generation += 1;
+                        self.update_timer_signal(ctx);
+                    }
+                }
+                (ServiceState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
+                    if self.idle_timer_active {
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
+                    }
+                }
+                (ServiceState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
+                    ctx.set_demand(true);
+                    self.activate();
                 }
                 _ => {}
             },
-            ServiceInput::WorkloadUnready => {
-                match std::mem::replace(&mut self.state, ServiceState::NeedBackend) {
-                    ServiceState::Active { idle_timer, .. } => {
-                        if let Some(tk) = idle_timer {
-                            outputs.push(ServiceOutput::TimerCancel(tk));
-                        }
-                        outputs.push(ServiceOutput::EndpointChanged);
-                        // Both activation and always-on services go to NeedBackend.
-                        // The workload SM handles restart/retry; the service keeps
-                        // its demand signal through the restart.
-                        self.state = ServiceState::NeedBackend;
-                    }
-                    ServiceState::NeedBackend => {
-                        // Already NeedBackend — no state change needed.
-                        self.state = ServiceState::NeedBackend;
-                    }
-                    other => {
-                        // Restore state if not applicable.
-                        self.state = other;
-                    }
-                }
-            }
-            ServiceInput::ServiceActivation => {
-                if matches!(self.state, ServiceState::Idle) {
-                    self.state = ServiceState::NeedBackend;
-                    outputs.push(ServiceOutput::Activated {
-                        trigger: ServiceActivationTrigger::Traffic,
-                    });
-                    outputs.push(ServiceOutput::ConditionSet {
-                        key: "activation-pending".into(),
-                        message: "waiting for backend to become ready".into(),
-                    });
-                }
-            }
-            ServiceInput::ServiceBackendNeed { need } => {
-                if let ServiceState::Active {
-                    ref mut backend_need,
-                    ref mut idle_timer,
-                    ..
-                } = self.state
-                {
-                    *backend_need = need.clone();
-                    match need {
-                        BackendNeed::None => {
-                            if self.has_activation && idle_timer.is_none() {
-                                let timer_key = TimerKey::IdleTimeout {
-                                    service_id: self.service_id.clone(),
-                                };
-                                outputs.push(ServiceOutput::TimerSet(
-                                    timer_key.clone(),
-                                    self.idle_timeout,
-                                ));
-                                *idle_timer = Some(timer_key);
-                                outputs.push(ServiceOutput::IdleTimerStarted {
-                                    timeout: self.idle_timeout,
-                                });
-                            }
-                        }
-                        BackendNeed::Traffic | BackendNeed::Active => {
-                            if let Some(timer_key) = idle_timer.take() {
-                                outputs.push(ServiceOutput::TimerCancel(timer_key));
-                                outputs.push(ServiceOutput::IdleTimerCancelled {
-                                    reason: IdleTimerCancelReason::NewTraffic,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            ServiceInput::TimerFired { timer_key } => {
-                if let ServiceState::Active {
-                    ref idle_timer,
-                    ref backend_need,
-                    ..
-                } = self.state
-                {
-                    if idle_timer.as_ref() == Some(&timer_key)
-                        && *backend_need == BackendNeed::None
+            ServiceInput::ServiceTimerFired(key) => match key {
+                ServiceTimerKey::IdleTimeout => {
+                    if matches!(self.state, ServiceState::Active { .. })
+                        && self.idle_timer_active
                         && self.has_activation
                     {
-                        outputs.push(ServiceOutput::IdleTimeoutFired);
-                        outputs.push(ServiceOutput::Deactivated {
-                            reason: ServiceDeactivationReason::IdleTimeout,
-                        });
-                        outputs.push(ServiceOutput::EndpointChanged);
                         self.state = ServiceState::Idle;
+                        ctx.set_demand(false);
+                        self.idle_timer_active = false;
+                        self.update_timer_signal(ctx);
                     }
                 }
-            }
-            ServiceInput::ForceDeactivate => {
-                if let ServiceState::Active { ref idle_timer, .. } = self.state {
-                    if let Some(tk) = idle_timer.clone() {
-                        outputs.push(ServiceOutput::TimerCancel(tk));
-                    }
-                    outputs.push(ServiceOutput::Deactivated {
-                        reason: ServiceDeactivationReason::ForceDeactivate,
-                    });
-                    outputs.push(ServiceOutput::EndpointChanged);
-                    if self.has_activation {
-                        self.state = ServiceState::Idle;
-                    } else {
-                        self.state = ServiceState::NeedBackend;
-                    }
-                }
-            }
+            },
         }
-
-        outputs
+        self.update_status_signals(ctx);
     }
 }

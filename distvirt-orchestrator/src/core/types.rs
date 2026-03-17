@@ -9,7 +9,7 @@ use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::{
     ArtifactPlacementEvent, ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent,
 };
-use crate::sm_new::PodId;
+use crate::sm::PodId;
 use crate::types::NamespaceId;
 
 // =============================================================================
@@ -27,7 +27,7 @@ pub enum NamespaceCoreEvent {
     WorkerConnected {
         worker_id: GlobalWorkerId,
         proto_worker_id: distvirt_worker_protocol::WorkerId,
-        info: crate::sm_new::WorkerInfo,
+        info: crate::sm::WorkerInfo,
     },
     WorkerDisconnected {
         worker_id: GlobalWorkerId,

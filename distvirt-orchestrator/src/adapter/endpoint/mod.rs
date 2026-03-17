@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use crate::sm_new::{DRouter, EndpointId, EndpointPortInput, ReadyInfo, ServiceId};
+use crate::sm::{DRouter, EndpointId, EndpointPortInput, ReadyInfo, ServiceId};
 
 #[cfg(test)]
 mod tests;

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::sm_new::{
+use crate::sm::{
     DRouter, PodId, PodTimerKey, ServiceId, ServiceTimerKey, TIMER, TimerPortInput, WorkloadId,
     WorkloadTimerKey,
 };

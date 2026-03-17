@@ -4,8 +4,8 @@ use std::time::Duration;
 use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::core::namespace::NamespaceCore;
 use distvirt_orchestrator::core::{ClientCommand, GlobalWorkerId};
-use distvirt_orchestrator::shell_new::sync::{MockWorkerConfig, SyncShell};
-use distvirt_orchestrator::sm_new::{ServiceSm, ServiceState, SvcStatus, WlStatus, WorkloadSm};
+use distvirt_orchestrator::shell::sync::{MockWorkerConfig, SyncShell};
+use distvirt_orchestrator::sm::{ServiceSm, ServiceState, SvcStatus, WlStatus, WorkloadSm};
 use distvirt_orchestrator::types::NamespaceSpec;
 use distvirt_worker_protocol::{NamespaceId, PsiMetrics, ServiceId, WorkerCommand, WorkerEvent};
 
