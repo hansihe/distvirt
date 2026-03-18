@@ -4,8 +4,9 @@ use std::time::Duration;
 use distvirt_sm_router::IncrementalAggregator;
 
 use crate::sm::{
-    DRouter, PodId, PodTimerKey, PodTimerRequest, ServiceId, ServiceTimerKey, ServiceTimerRequest,
+    DRouter, EndpointId, PodId, PodTimerKey, PodTimerRequest,
     TIMER, TimerPortInput, TimerRequest, WorkloadId, WorkloadTimerKey,
+    endpoint::{EndpointTimerKey, EndpointTimerRequest},
 };
 
 #[cfg(test)]
@@ -15,7 +16,7 @@ mod tests;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TimerIdentity {
     Workload(WorkloadId, WorkloadTimerKey),
-    Service(ServiceId, ServiceTimerKey),
+    Endpoint(EndpointId, EndpointTimerKey),
     Pod(PodId, PodTimerKey),
 }
 
@@ -63,7 +64,7 @@ impl TimerAdapter {
             .filter(|(timer_id, _)| *timer_id == TIMER)
             .flat_map(|(_, input)| match input {
                 TimerPortInput::WorkloadTimersInput(actions) => actions,
-                TimerPortInput::ServiceTimersInput(actions) => actions,
+                TimerPortInput::EndpointTimersInput(actions) => actions,
                 TimerPortInput::PodTimersInput(actions) => actions,
             })
             .collect();
@@ -76,8 +77,8 @@ impl TimerAdapter {
             TimerIdentity::Workload(wl_id, key) => {
                 router.send_workload_timer_fired(TIMER, *wl_id, key.clone());
             }
-            TimerIdentity::Service(svc_id, key) => {
-                router.send_service_timer_fired(TIMER, *svc_id, key.clone());
+            TimerIdentity::Endpoint(ep_id, key) => {
+                router.send_endpoint_timer_fired(TIMER, *ep_id, key.clone());
             }
             TimerIdentity::Pod(pod_id, key) => {
                 router.send_pod_timer_fired(TIMER, *pod_id, key.clone());
@@ -119,11 +120,11 @@ impl TimerRequestInfo for TimerRequest {
     }
 }
 
-impl TimerRequestInfo for ServiceTimerRequest {
-    type SmId = ServiceId;
-    type Key = ServiceTimerKey;
+impl TimerRequestInfo for EndpointTimerRequest {
+    type SmId = EndpointId;
+    type Key = EndpointTimerKey;
 
-    fn key(&self) -> &ServiceTimerKey {
+    fn key(&self) -> &EndpointTimerKey {
         &self.key
     }
     fn generation(&self) -> u64 {
@@ -132,8 +133,8 @@ impl TimerRequestInfo for ServiceTimerRequest {
     fn duration(&self) -> Duration {
         self.duration
     }
-    fn make_identity(sm_id: ServiceId, key: ServiceTimerKey) -> TimerIdentity {
-        TimerIdentity::Service(sm_id, key)
+    fn make_identity(sm_id: EndpointId, key: EndpointTimerKey) -> TimerIdentity {
+        TimerIdentity::Endpoint(sm_id, key)
     }
 }
 
@@ -263,5 +264,5 @@ impl<R: TimerRequestInfo> IncrementalAggregator for TimerIncrementalAggregator<R
 
 /// Type aliases for the router declaration.
 pub type WorkloadTimerIncrementalAggregator = TimerIncrementalAggregator<TimerRequest>;
-pub type ServiceTimerIncrementalAggregator = TimerIncrementalAggregator<ServiceTimerRequest>;
+pub type EndpointTimerIncrementalAggregator = TimerIncrementalAggregator<EndpointTimerRequest>;
 pub type PodTimerIncrementalAggregator = TimerIncrementalAggregator<PodTimerRequest>;

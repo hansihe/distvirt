@@ -205,7 +205,7 @@ struct ActivatorConfig {
 # - Session-aware activators (H2) use active -- "work is in progress." They
 #   know exactly when the last session ends.
 #
-# Reported via WorkerEvent.serviceBackendNeed.
+# Reported via WorkerEvent.endpointDemand.
 enum BackendNeed {
   none @0;
   # No meaningful traffic. The backend may be released / scaled to zero.
@@ -682,22 +682,14 @@ struct EndpointUpdateCmd {
   removedIps @2 :List(Ipv4Addr);
 }
 
-struct EndpointActivationEvt {
+struct EndpointDemandTrafficEvt {
   namespaceId @0 :Text;
   ip @1 :Ipv4Addr;
   hasServiceId @2 :Bool;
   serviceId @3 :Text;
 }
 
-struct EndpointFlowStatusEvt {
-  namespaceId @0 :Text;
-  ip @1 :Ipv4Addr;
-  hasActiveFlows @2 :Bool;
-  hasServiceId @3 :Bool;
-  serviceId @4 :Text;
-}
-
-struct EndpointDemandEvt {
+struct EndpointDemandActiveEvt {
   namespaceId @0 :Text;
   ip @1 :Ipv4Addr;
   active @2 :Bool;
@@ -823,52 +815,6 @@ struct PodLogStreamErrorEvt {
   error @4 :Text;
 }
 
-# --- Service Activation Signaling ---
-#
-# Services use one of two mutually exclusive signaling paths to tell
-# the orchestrator that a backend pod is needed:
-#
-# 1. ServiceActivation — for services WITHOUT a protocol activator.
-#    Fires on the first frame arrival. Simple "traffic detected" signal.
-#
-# 2. ServiceBackendNeed — for services WITH a protocol activator
-#    (ActivatorConfig). The activator inspects traffic at the protocol
-#    level and signals a nuanced need level (none/traffic/active).
-#
-# Both paths serve the same purpose (telling the orchestrator to
-# schedule a backend), but they never fire for the same service.
-
-# Traffic arrived at a service with no backend (or whose backend isn't ready).
-#
-# The service entity buffers frames per its ServicePolicy and emits
-# this event so the orchestrator can schedule a pod, assign it as the
-# backend, and eventually send WorkerCommand.serviceReady.
-#
-# Debounced per service to avoid event floods.
-#
-# This is the primary activation signal for services without a
-# protocol activator. Services with an activator use
-# WorkerEvent.serviceBackendNeed instead for more nuanced signaling.
-struct ServiceActivationEvt {
-  namespaceId @0 :Text;
-  serviceId @1 :Text;
-  dstIp @2 :Ipv4Addr;
-  # The service's IP that received traffic.
-}
-
-# A protocol activator is signaling its backend need level.
-#
-# Only emitted for services that have an ActivatorConfig in their
-# ServicePolicy. The orchestrator should use this to decide when to
-# schedule or release backend pods.
-#
-# See BackendNeed for the signal semantics (pulse vs. level).
-struct ServiceBackendNeedEvt {
-  namespaceId @0 :Text;
-  serviceId @1 :Text;
-  need @2 :BackendNeed;
-}
-
 # The pod has been successfully suspended and its snapshot written to disk.
 #
 # The VM has been killed. The snapshot can be used to resume the pod
@@ -896,22 +842,6 @@ struct PodSuspendFailedEvt {
   error @2 :Text;
 }
 
-# The fabric received a frame for a pod IP that can't be delivered locally.
-#
-# Fires for both unknown destinations (no route entry) and placeholders
-# (route entry exists but destination is RouteDestination.placeholder).
-# For placeholders, the fabric applies the basic buffer policy before
-# reporting the miss.
-#
-# This is the pod-to-pod activation path -- simpler and more limited
-# than service activation. The orchestrator can respond by scheduling a
-# suspended pod, updating the route from placeholder to remote worker, etc.
-struct FabricRouteMissEvt {
-  namespaceId @0 :Text;
-  dstIp @1 :Ipv4Addr;
-  dstMac @2 :MacAddr;
-}
-
 # --- Control Stream: Events (worker -> orchestrator) ---
 
 # Events emitted by the worker back to the orchestrator.
@@ -934,30 +864,26 @@ struct WorkerEvent {
     shuttingDown @6 :Void;
     # Acknowledges a WorkerCommand.shutdown. The worker is tearing down.
     podLogStreamError @7 :PodLogStreamErrorEvt;
-    serviceActivation @8 :ServiceActivationEvt;
-    serviceBackendNeed @9 :ServiceBackendNeedEvt;
-    fabricRouteMiss @10 :FabricRouteMissEvt;
-    podSuspended @11 :PodSuspendedEvt;
-    podSuspendFailed @12 :PodSuspendFailedEvt;
-    tunnelStatus @13 :TunnelStatusEvt;
+    podSuspended @8 :PodSuspendedEvt;
+    podSuspendFailed @9 :PodSuspendFailedEvt;
+    tunnelStatus @10 :TunnelStatusEvt;
     # Status of a tunnel connection to a peer worker.
-    workerCondition @14 :WorkerConditionEvt;
+    workerCondition @11 :WorkerConditionEvt;
     # Worker-scoped condition assert/deassert (level-triggered status).
-    poolCapacityUpdate @15 :PoolCapacityUpdateEvt;
+    poolCapacityUpdate @12 :PoolCapacityUpdateEvt;
     # Periodic update of storage pool capacity from the worker.
-    artifactWriteStarted @16 :ArtifactWriteStartedEvt;
+    artifactWriteStarted @13 :ArtifactWriteStartedEvt;
     # An artifact write has begun on a storage pool.
-    artifactWriteCommitted @17 :ArtifactWriteCommittedEvt;
+    artifactWriteCommitted @14 :ArtifactWriteCommittedEvt;
     # An artifact write has completed and is durable.
-    artifactTransferReceived @18 :ArtifactTransferReceivedEvt;
+    artifactTransferReceived @15 :ArtifactTransferReceivedEvt;
     # An artifact transfer has been received and written to disk.
-    transferFailed @19 :TransferFailedEvt;
+    transferFailed @16 :TransferFailedEvt;
     # An artifact transfer has failed.
-    pressureUpdate @20 :PressureUpdateEvt;
+    pressureUpdate @17 :PressureUpdateEvt;
     # Periodic PSI pressure metrics from the worker.
-    endpointActivation @21 :EndpointActivationEvt;
-    endpointFlowStatus @22 :EndpointFlowStatusEvt;
-    endpointDemand @23 :EndpointDemandEvt;
+    endpointDemandTraffic @18 :EndpointDemandTrafficEvt;
+    endpointDemandActive @19 :EndpointDemandActiveEvt;
   }
 }
 

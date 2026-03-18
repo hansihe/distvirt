@@ -1,4 +1,5 @@
 use super::*;
+use super::super::endpoint::EndpointState;
 
 /// 1. Demand aggregation: 3 activation-based services → 1 workload, toggle demand.
 #[test]
@@ -7,9 +8,9 @@ fn demand_aggregation() {
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new());
-    router.create_service(S1, ServiceSm::new(true));
-    router.create_service(S2, ServiceSm::new(true));
-    router.create_service(S3, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
+    router.create_service(S2, ServiceSm::new());
+    router.create_service(S3, ServiceSm::new());
 
     // Deliver specs through management port — services get edges to W1.
     let mgmt = router.create_management();
@@ -64,8 +65,8 @@ fn reactive_readiness_edges() {
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
-    router.create_service(S1, ServiceSm::new(false)); // always-on
-    router.create_service(S2, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new()); // always-on
+    router.create_service(S2, ServiceSm::new());
 
     // Deliver workload spec.
     router.set_workload_config_edges(mgmt, vec![W1]);
@@ -94,8 +95,9 @@ fn reactive_readiness_edges() {
     assert!(wl.has_demand);
 
     // Both services should be in NeedBackend (demand set, no readiness yet).
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::NeedBackend);
 
     // Workload created a pod in reconcile(). Wire worker and make it running.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -104,13 +106,15 @@ fn reactive_readiness_edges() {
     router.propagate();
 
     // Both services should be active now (readiness propagated via reactive edges).
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
+    let ep_id = router.get_service(&S2).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 
     // Add a third service — it should immediately get readiness.
-    router.create_service(S3, ServiceSm::new(false));
+    router.create_service(S3, ServiceSm::new());
 
     // Use same mgmt port, update edges to include S3.
     router.set_service_config_edges(mgmt, vec![S1, S2, S3]);
@@ -118,8 +122,9 @@ fn reactive_readiness_edges() {
 
     // S3 got its spec, set demand + edges, workload re-aggregated,
     // readiness propagated to all three services including S3.
-    let s3 = router.get_service(&S3).unwrap();
-    assert!(matches!(s3.state, ServiceState::Active { .. }));
+    let ep_id = router.get_service(&S3).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 }
 
 /// 3. Pod lifecycle through signals: workload creates pod in handler,
@@ -150,7 +155,7 @@ fn pod_lifecycle() {
     assert!(!wl.has_demand);
 
     // Add an always-on service with demand.
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -181,8 +186,9 @@ fn pod_lifecycle() {
     assert!(wl.pod_running);
 
     // Readiness should have propagated to S1.
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 }
 
 /// 4. Worker port removal: worker dies, pod sees empty WorkerInput,
@@ -207,7 +213,7 @@ fn worker_loss_via_port_removal() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -226,8 +232,9 @@ fn worker_loss_via_port_removal() {
     router.propagate();
 
     // Verify everything is active.
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 
     // No timers wanted while running.
     assert_no_timers_wanted(&mut router);
@@ -247,8 +254,9 @@ fn worker_loss_via_port_removal() {
     assert_no_timers_wanted(&mut router);
 
     // Service should be back to NeedBackend.
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::NeedBackend);
 }
 
 /// 5. Spec delivery via management port: init and update use same path.
@@ -301,7 +309,7 @@ fn service_spec_creates_edges_reactively() {
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new());
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
 
     // Management port delivers service spec that points at W1.
     let mgmt = router.create_management();
@@ -322,8 +330,9 @@ fn service_spec_creates_edges_reactively() {
     assert!(wl.has_demand);
 
     // Service should be in NeedBackend (always-on with demand set).
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::NeedBackend);
 }
 
 /// 7. Admin command event: management port sends restart to workload.
@@ -347,7 +356,7 @@ fn admin_restart_event() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -397,8 +406,8 @@ fn full_end_to_end() {
 
     // Create SMs.
     router.create_workload(W1, WorkloadSm::new());
-    router.create_service(S1, ServiceSm::new(false));
-    router.create_service(S2, ServiceSm::new(true)); // activation-based
+    router.create_service(S1, ServiceSm::new());
+    router.create_service(S2, ServiceSm::new()); // activation-based
 
     // Wire management → SMs.
     router.set_workload_config_edges(mgmt_wl, vec![W1]);
@@ -437,8 +446,9 @@ fn full_end_to_end() {
     let pod_id = wl.pod_id.unwrap();
 
     // S2 (activation) is idle — no demand yet.
-    let s2 = router.get_service(&S2).unwrap();
-    assert_eq!(s2.state, ServiceState::Idle);
+    let ep_id = router.get_service(&S2).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
 
     // Wire worker to pod and start it.
     router.set_worker_assignment_edges(worker, vec![pod_id]);
@@ -446,12 +456,14 @@ fn full_end_to_end() {
     router.propagate();
 
     // S1 should be active (always-on, backend ready).
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 
     // S2 should still be Idle (has_activation=true, no activation event sent).
-    let s2 = router.get_service(&S2).unwrap();
-    assert_eq!(s2.state, ServiceState::Idle);
+    let ep_id = router.get_service(&S2).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
 
     // Activate S2 via event.
     router.send_activate_service(mgmt_s2, S2, true);
@@ -460,12 +472,13 @@ fn full_end_to_end() {
     // S2 should now be in NeedBackend (demand set) or Active (readiness already available).
     // Since workload already has readiness and S2 is now connected via demand,
     // the workload will re-aggregate demand (2 services now) and re-target readiness edges.
-    let s2 = router.get_service(&S2).unwrap();
+    let ep_id = router.get_service(&S2).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
     // S2 transitions Idle→NeedBackend on activation. Then it receives readiness
     // from the workload (which already has a running pod), so NeedBackend→Active.
     assert!(
-        matches!(s2.state, ServiceState::Active { .. })
-            || matches!(s2.state, ServiceState::NeedBackend)
+        matches!(ep.state, EndpointState::Active { .. })
+            || matches!(ep.state, EndpointState::NeedBackend)
     );
 
     // No timers requested while running normally.
@@ -487,8 +500,9 @@ fn full_end_to_end() {
     assert_no_timers_wanted(&mut router);
 
     // S1 goes back to NeedBackend.
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::NeedBackend);
 }
 
 /// 9. Workload creates pod directly from handler when it has spec + demand.
@@ -514,7 +528,7 @@ fn handler_driven_pod_creation() {
     );
 
     // Always-on service
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -544,8 +558,9 @@ fn handler_driven_pod_creation() {
     router.propagate();
 
     // Service is active.
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 
     let pod = router.get_pod(&pod_id).unwrap();
     assert_eq!(pod.status, PodStatus::Running);
@@ -575,7 +590,7 @@ fn handler_and_router_share_id_counter() {
     );
 
     // Create service to give workload demand → workload creates pod in handler.
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,

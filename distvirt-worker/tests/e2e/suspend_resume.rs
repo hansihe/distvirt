@@ -886,10 +886,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Wait for the TCP activator to detect the SYN and signal activation
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(
-            e,
-            WorkerEvent::EndpointActivation { .. }
-        )
+        matches!(e, WorkerEvent::EndpointActivation { .. })
     })
     .await?;
 

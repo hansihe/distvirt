@@ -7,7 +7,8 @@ use distvirt_worker_protocol::WorkerEvent;
 
 use crate::{
     core::{
-        ArtifactPlacementEvent, GlobalWorkerId, WorkerNamespaceEvent, WorkerNamespaceEventKind,
+        ArtifactPlacementEvent, EndpointDemandSignal, GlobalWorkerId, WorkerNamespaceEvent,
+        WorkerNamespaceEventKind,
     },
     types::NamespaceId,
 };
@@ -102,17 +103,21 @@ pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> Classif
         ),
         WorkerEvent::NamespaceDestroyed { .. } => ClassifiedWorkerEvent::Ignored,
 
-        // Endpoint events
-        WorkerEvent::EndpointActivation {
+        // Endpoint events — both map to a unified EndpointDemand variant.
+        WorkerEvent::EndpointDemandTraffic {
             namespace_id,
             ip,
             service_id,
         } => ns_event(
             &namespace_id,
             worker_id,
-            WorkerNamespaceEventKind::EndpointActivation { ip, service_id },
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip,
+                service_id,
+                signal: EndpointDemandSignal::Traffic,
+            },
         ),
-        WorkerEvent::EndpointDemand {
+        WorkerEvent::EndpointDemandActive {
             namespace_id,
             ip,
             service_id,
@@ -123,7 +128,7 @@ pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> Classif
             WorkerNamespaceEventKind::EndpointDemand {
                 ip,
                 service_id,
-                active,
+                signal: EndpointDemandSignal::Active { active },
             },
         ),
 

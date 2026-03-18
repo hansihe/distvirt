@@ -112,7 +112,7 @@ impl ManagementAdapter {
 
                 let mgmt_id = router.create_management();
                 let has_activation = spec.activation.is_some();
-                router.create_service(router_id, ServiceSm::new(has_activation));
+                router.create_service(router_id, ServiceSm::new());
                 router.set_service_config_edges(mgmt_id, vec![router_id]);
                 router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(name_str, spec));
 

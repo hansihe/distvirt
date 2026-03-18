@@ -1337,12 +1337,12 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
             write_psi_metrics(b.reborrow().init_memory(), memory);
             write_psi_metrics(b.reborrow().init_io(), io);
         }
-        WorkerEvent::EndpointActivation {
+        WorkerEvent::EndpointDemandTraffic {
             namespace_id,
             ip,
             service_id,
         } => {
-            let mut b = builder.init_endpoint_activation();
+            let mut b = builder.init_endpoint_demand_traffic();
             b.set_namespace_id(namespace_id.as_ref());
             write_ipv4(&mut b.reborrow().init_ip(), ip);
             match service_id {
@@ -1353,13 +1353,13 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
                 None => b.set_has_service_id(false),
             }
         }
-        WorkerEvent::EndpointDemand {
+        WorkerEvent::EndpointDemandActive {
             namespace_id,
             ip,
             service_id,
             active,
         } => {
-            let mut b = builder.init_endpoint_demand();
+            let mut b = builder.init_endpoint_demand_active();
             b.set_namespace_id(namespace_id.as_ref());
             write_ipv4(&mut b.reborrow().init_ip(), ip);
             b.set_active(*active);
@@ -1446,18 +1446,6 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
                 error: r.get_error()?.to_string()?,
             })
         }
-        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
-        ServiceActivation(_) => Err(capnp::Error::failed(
-            "received deprecated event variant: ServiceActivation".into(),
-        )),
-        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
-        ServiceBackendNeed(_) => Err(capnp::Error::failed(
-            "received deprecated event variant: ServiceBackendNeed".into(),
-        )),
-        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
-        FabricRouteMiss(_) => Err(capnp::Error::failed(
-            "received deprecated event variant: FabricRouteMiss".into(),
-        )),
         PodSuspended(r) => {
             let r = r?;
             Ok(WorkerEvent::PodSuspended {
@@ -1565,31 +1553,27 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
                 io: read_psi_metrics(r.get_io()?),
             })
         }
-        EndpointActivation(r) => {
+        EndpointDemandTraffic(r) => {
             let r = r?;
             let service_id = if r.get_has_service_id() {
                 Some(ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?))
             } else {
                 None
             };
-            Ok(WorkerEvent::EndpointActivation {
+            Ok(WorkerEvent::EndpointDemandTraffic {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 ip: read_ipv4(r.get_ip()?),
                 service_id,
             })
         }
-        // Deprecated event variant — removed from Rust types but still in Cap'n Proto schema.
-        EndpointFlowStatus(_) => Err(capnp::Error::failed(
-            "received deprecated event variant: EndpointFlowStatus".into(),
-        )),
-        EndpointDemand(r) => {
+        EndpointDemandActive(r) => {
             let r = r?;
             let service_id = if r.get_has_service_id() {
                 Some(ServiceId(read_u64_id(r.get_service_id()?.to_str()?)?))
             } else {
                 None
             };
-            Ok(WorkerEvent::EndpointDemand {
+            Ok(WorkerEvent::EndpointDemandActive {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 ip: read_ipv4(r.get_ip()?),
                 service_id,

@@ -1,8 +1,16 @@
 use super::*;
+use super::super::endpoint::{EndpointState};
 
 // ============================================================================
 // Multi-workload tests
 // ============================================================================
+
+/// Helper: get the EndpointState for a service by looking up its endpoint.
+fn get_endpoint_state(router: &Router, service_id: &ServiceId) -> EndpointState {
+    let svc = router.get_service(service_id).unwrap();
+    let ep_id = svc.endpoint_id.unwrap();
+    router.get_endpoint(&ep_id).unwrap().state.clone()
+}
 
 /// 53. Two workloads sharing a worker — worker dies, both workloads fail
 ///     independently and can recover on a new worker without interference.
@@ -30,8 +38,8 @@ fn shared_worker_death_independent_failure() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false));
-    router.create_service(S2, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
+    router.create_service(S2, ServiceSm::new());
 
     // S1 → W1, S2 → W2 (different management ports for different specs).
     let mgmt_s1 = router.create_management();
@@ -73,10 +81,8 @@ fn shared_worker_death_independent_failure() {
     router.propagate();
 
     // Both services should be active.
-    let s1 = router.get_service(&S1).unwrap();
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 
     // Both workloads should report the correct worker.
     let wl1 = router.get_workload(&W1).unwrap();
@@ -99,10 +105,8 @@ fn shared_worker_death_independent_failure() {
     assert_eq!(wl2.consecutive_failures, 0);
 
     // Both services should be back to NeedBackend.
-    let s1 = router.get_service(&S1).unwrap();
-    let s2 = router.get_service(&S2).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
-    assert_eq!(s2.state, ServiceState::NeedBackend);
+    assert_eq!(get_endpoint_state(&router, &S1), EndpointState::NeedBackend);
+    assert_eq!(get_endpoint_state(&router, &S2), EndpointState::NeedBackend);
 
     // Both should have immediately created new pods (no backoff timer needed).
     let wl1 = router.get_workload(&W1).unwrap();
@@ -131,10 +135,8 @@ fn shared_worker_death_independent_failure() {
     assert_eq!(wl2.consecutive_failures, 0);
 
     // Both services active again.
-    let s1 = router.get_service(&S1).unwrap();
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 }
 
 /// 54. Service retargeting: service spec changes from workload W1 to W2.
@@ -163,7 +165,7 @@ fn service_retarget_workload() {
     );
 
     // One always-on service pointing at W1.
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     let mgmt_s1 = router.create_management();
     router.set_service_config_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
@@ -188,8 +190,7 @@ fn service_retarget_workload() {
     let pod1 = wl1.pod_id.unwrap();
     make_pod_running(&mut router, worker, pod1);
 
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
 
     // Retarget S1 from W1 → W2.
     router.set_management_svc_spec(
@@ -221,8 +222,7 @@ fn service_retarget_workload() {
     router.propagate();
 
     // S1 should be active with W2's readiness.
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
 
     let wl2 = router.get_workload(&W2).unwrap();
     assert!(wl2.pod_running);
@@ -240,7 +240,7 @@ fn independent_workload_subgraphs() {
 
     // W1 + S1 subgraph.
     router.create_workload(W1, WorkloadSm::new());
-    router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.create_service(S1, ServiceSm::new()); // activation-based
 
     let mgmt1 = router.create_management();
     router.set_workload_config_edges(mgmt1, vec![W1]);
@@ -263,7 +263,7 @@ fn independent_workload_subgraphs() {
 
     // W2 + S2 subgraph.
     router.create_workload(W2, WorkloadSm::new());
-    router.create_service(S2, ServiceSm::new(false)); // always-on
+    router.create_service(S2, ServiceSm::new()); // always-on
 
     let mgmt2 = router.create_management();
     router.set_workload_config_edges(mgmt2, vec![W2]);
@@ -298,14 +298,12 @@ fn independent_workload_subgraphs() {
     let pod2 = wl2.pod_id.unwrap();
     make_pod_running(&mut router, worker, pod2);
 
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 
     // W1 is still idle — W2's activity doesn't affect it.
     let wl1 = router.get_workload(&W1).unwrap();
     assert!(!wl1.has_demand);
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::Idle);
+    assert_eq!(get_endpoint_state(&router, &S1), EndpointState::Idle);
 
     // Activate S1 — now W1 also gets demand.
     router.send_activate_service(mgmt1, S1, true);
@@ -321,10 +319,8 @@ fn independent_workload_subgraphs() {
     router.propagate();
 
     // Both active, independent.
-    let s1 = router.get_service(&S1).unwrap();
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 
     // Deactivate S1 — only W1 affected.
     router.send_activate_service(mgmt1, S1, false);
@@ -336,10 +332,8 @@ fn independent_workload_subgraphs() {
     assert!(wl1.pod_id.is_none());
     assert!(wl2.pod_running); // W2 unaffected
 
-    let s1 = router.get_service(&S1).unwrap();
-    let s2 = router.get_service(&S2).unwrap();
-    assert_eq!(s1.state, ServiceState::Idle);
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert_eq!(get_endpoint_state(&router, &S1), EndpointState::Idle);
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 }
 
 /// 56. Multiple services sharing a workload, one retargets away — demand
@@ -367,8 +361,8 @@ fn service_fan_in_with_retarget() {
     );
 
     // Two always-on services both pointing at W1.
-    router.create_service(S1, ServiceSm::new(false));
-    router.create_service(S2, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
+    router.create_service(S2, ServiceSm::new());
 
     let mgmt_s1 = router.create_management();
     router.set_service_config_edges(mgmt_s1, vec![S1]);
@@ -406,10 +400,8 @@ fn service_fan_in_with_retarget() {
     make_pod_running(&mut router, worker, pod1);
 
     // Both services active via W1.
-    let s1 = router.get_service(&S1).unwrap();
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 
     // Retarget S2 from W1 → W2.
     router.set_management_svc_spec(
@@ -433,12 +425,10 @@ fn service_fan_in_with_retarget() {
     assert!(wl2.pod_id.is_some());
 
     // S1 should still be active (W1 still has a running pod).
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
 
     // S2 should be NeedBackend (W2's pod is Pending, no readiness yet).
-    let s2 = router.get_service(&S2).unwrap();
-    assert_eq!(s2.state, ServiceState::NeedBackend);
+    assert_eq!(get_endpoint_state(&router, &S2), EndpointState::NeedBackend);
 
     // Make W2's pod running.
     let pod2 = wl2.pod_id.unwrap();
@@ -447,8 +437,7 @@ fn service_fan_in_with_retarget() {
     router.propagate();
 
     // Now S2 should also be active.
-    let s2 = router.get_service(&S2).unwrap();
-    assert!(matches!(s2.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 
     // Both workloads running on same worker.
     let wl1 = router.get_workload(&W1).unwrap();
@@ -464,7 +453,7 @@ fn service_self_destructs_on_spec_removal() {
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_workload(W1, WorkloadSm::new());
-    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S1, ServiceSm::new()); // always-on
 
     // Use separate mgmt ports so we can remove the service spec independently.
     let mgmt_wl = router.create_management();
@@ -517,8 +506,7 @@ fn workload_self_destructs_on_spec_removal() {
     let pod_id = wl.pod_id.unwrap();
 
     // Service is active.
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
 
     // Remove management port — workload spec becomes None.
     router.destroy_management(mgmt);
@@ -563,7 +551,7 @@ fn full_teardown_cascade() {
     );
 
     let mgmt_s1 = router.create_management();
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt_s1, vec![S1]);
     router.set_management_svc_spec(
         mgmt_s1,
@@ -575,7 +563,7 @@ fn full_teardown_cascade() {
     );
 
     let mgmt_s2 = router.create_management();
-    router.create_service(S2, ServiceSm::new(false));
+    router.create_service(S2, ServiceSm::new());
     router.set_service_config_edges(mgmt_s2, vec![S2]);
     router.set_management_svc_spec(
         mgmt_s2,

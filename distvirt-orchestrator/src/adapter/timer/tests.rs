@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use super::*;
 use crate::sm::{
-    DRouter, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, WorkerInfo, WorkloadId,
-    WorkloadSm, WorkloadSpec,
+    DRouter, EndpointId, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, WorkerInfo,
+    WorkloadId, WorkloadSm, WorkloadSpec,
+    endpoint::{EndpointState, EndpointTimerKey},
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -41,7 +42,7 @@ fn setup_workload(
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S1, ServiceSm::new()); // always-on
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -57,6 +58,15 @@ fn setup_workload(
     let _ = adapter.reconcile(router).0;
 
     (mgmt, worker)
+}
+
+/// Helper to get the EndpointId for service S1.
+fn get_endpoint_id(router: &DRouter) -> EndpointId {
+    router
+        .get_service(&S1)
+        .unwrap()
+        .endpoint_id
+        .expect("service should have created an endpoint")
 }
 
 // ============================================================================
@@ -235,7 +245,7 @@ fn generation_change_restarts_timer() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.create_service(S1, ServiceSm::new()); // activation-based
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -248,9 +258,11 @@ fn generation_change_restarts_timer() {
     router.propagate();
     let _ = adapter.reconcile(&mut router).0;
 
+    let ep_id = get_endpoint_id(&router);
+
     // Activate via BackendNeed traffic.
     let bn = router.create_backend_need();
-    router.set_traffic_demand_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![ep_id]);
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
 
@@ -273,7 +285,7 @@ fn generation_change_restarts_timer() {
         actions.iter().any(|a| matches!(
             a,
             TimerAction::Start {
-                identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
+                identity: TimerIdentity::Endpoint(_, EndpointTimerKey::IdleTimeout),
                 ..
             }
         )),
@@ -289,7 +301,7 @@ fn generation_change_restarts_timer() {
         actions.iter().any(|a| matches!(
             a,
             TimerAction::Cancel {
-                identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
+                identity: TimerIdentity::Endpoint(_, EndpointTimerKey::IdleTimeout),
             }
         )),
         "expected idle timer Cancel, got {:?}",
@@ -304,7 +316,7 @@ fn generation_change_restarts_timer() {
         matches!(
             a,
             TimerAction::Start {
-                identity: TimerIdentity::Service(_, ServiceTimerKey::IdleTimeout),
+                identity: TimerIdentity::Endpoint(_, EndpointTimerKey::IdleTimeout),
                 ..
             }
         )
@@ -343,7 +355,7 @@ fn multiple_sm_kinds_in_one_cycle() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -356,9 +368,11 @@ fn multiple_sm_kinds_in_one_cycle() {
     router.propagate();
     let _ = adapter.reconcile(&mut router).0;
 
+    let ep_id = get_endpoint_id(&router);
+
     // Activate via traffic, make pod running.
     let bn = router.create_backend_need();
-    router.set_traffic_demand_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![ep_id]);
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
 
@@ -380,14 +394,14 @@ fn multiple_sm_kinds_in_one_cycle() {
     let (actions, _) = adapter.reconcile(&mut router);
 
     // Should have actions for multiple SM kinds.
-    let has_service_timer = actions.iter().any(|a| {
+    let has_endpoint_timer = actions.iter().any(|a| {
         matches!(
             a,
             TimerAction::Start {
-                identity: TimerIdentity::Service(..),
+                identity: TimerIdentity::Endpoint(..),
                 ..
             } | TimerAction::Cancel {
-                identity: TimerIdentity::Service(..),
+                identity: TimerIdentity::Endpoint(..),
             }
         )
     });
@@ -411,8 +425,8 @@ fn multiple_sm_kinds_in_one_cycle() {
     );
     // At least one of the SM kinds should have timer activity.
     assert!(
-        has_service_timer || has_workload_timer,
-        "expected timer actions from service or workload, got {:?}",
+        has_endpoint_timer || has_workload_timer,
+        "expected timer actions from endpoint or workload, got {:?}",
         actions
     );
 }
@@ -442,7 +456,7 @@ fn fire_dispatches_workload_timer() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -481,7 +495,7 @@ fn fire_dispatches_workload_timer() {
 }
 
 #[test]
-fn fire_dispatches_service_timer() {
+fn fire_dispatches_endpoint_timer() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_timer(TIMER);
     let adapter = TimerAdapter::new(test_config());
@@ -501,7 +515,7 @@ fn fire_dispatches_service_timer() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -513,9 +527,11 @@ fn fire_dispatches_service_timer() {
     );
     router.propagate();
 
+    let ep_id = get_endpoint_id(&router);
+
     // Traffic activates → pod running → traffic stops → idle timer active.
     let bn = router.create_backend_need();
-    router.set_traffic_demand_edges(bn, vec![S1]);
+    router.set_traffic_demand_edges(bn, vec![ep_id]);
     router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
     router.propagate();
 
@@ -531,17 +547,17 @@ fn fire_dispatches_service_timer() {
     router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
     router.propagate();
 
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(s1.idle_timer_active);
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(ep.idle_timer_active);
 
     // Fire idle timer via adapter.
     adapter.fire(
         &mut router,
-        &TimerIdentity::Service(S1, ServiceTimerKey::IdleTimeout),
+        &TimerIdentity::Endpoint(ep_id, EndpointTimerKey::IdleTimeout),
     );
     router.propagate();
 
-    // Service should deactivate (back to Idle).
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, crate::sm::ServiceState::Idle);
+    // Endpoint should deactivate (back to Idle).
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
 }

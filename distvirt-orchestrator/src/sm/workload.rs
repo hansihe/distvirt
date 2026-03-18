@@ -131,7 +131,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.in_backoff = false;
                 }
 
-                ctx.set_workload_readiness_edges(demand.service_ids);
+                ctx.set_endpoint_readiness_edges(demand.endpoint_ids);
                 self.reconcile(ctx);
                 self.update_timer_signal(ctx);
             }

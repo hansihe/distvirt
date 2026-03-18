@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm::{
-    DRouter, DNS_REGISTRY, ENDPOINT, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER,
-    WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, DNS_REGISTRY, FABRIC_ENDPOINT, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec,
+    TIMER, WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -11,7 +11,7 @@ const S1: ServiceId = ServiceId(1);
 fn setup_with_dns(router: &mut DRouter) -> DnsRegistryAdapter {
     router.create_timer(TIMER);
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_endpoint(ENDPOINT);
+    router.create_fabric_endpoint(FABRIC_ENDPOINT);
     router.create_dns_registry(DNS_REGISTRY);
 
     let adapter = DnsRegistryAdapter::new(DNS_REGISTRY);
@@ -32,7 +32,7 @@ fn service_with_dns_produces_add_action() {
         ..Default::default()
     });
 
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(mgmt, ServiceSpec {
         workload: W1,
@@ -73,7 +73,7 @@ fn service_removal_produces_remove_action() {
         ..Default::default()
     });
 
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(mgmt, ServiceSpec {
         workload: W1,
@@ -115,7 +115,7 @@ fn no_dns_info_no_actions() {
     });
 
     // Service without DNS info.
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(mgmt, ServiceSpec {
         workload: W1,

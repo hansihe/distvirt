@@ -29,7 +29,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, crate::sm::PodI
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S1, ServiceSm::new()); // always-on
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -199,7 +199,7 @@ fn multiple_workers() {
             ..Default::default()
         },
     );
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
@@ -220,7 +220,7 @@ fn multiple_workers() {
             ..Default::default()
         },
     );
-    router.create_service(s2_id, ServiceSm::new(false));
+    router.create_service(s2_id, ServiceSm::new());
     router.set_service_config_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(
         mgmt2,

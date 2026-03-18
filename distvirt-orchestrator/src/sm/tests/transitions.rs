@@ -63,9 +63,10 @@ fn demand_fluctuation_during_launch() {
     assert!(wl.pod_running);
     assert!(wl.pod_id.is_some());
 
-    // Service should be active.
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    // Endpoint should be active.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert!(matches!(ep.state, endpoint::EndpointState::Active { .. }));
 }
 
 /// 13. Spec changes during pod launch — detected at Running, triggers restart.
@@ -132,8 +133,9 @@ fn spec_change_while_running_restarts_immediately() {
     assert!(!wl.pod_running); // new pod is Pending
 
     // Readiness should be cleared.
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    assert_eq!(ep.state, endpoint::EndpointState::NeedBackend);
 }
 
 /// 15. Scavenge with no demand — idle workload deactivated.
@@ -184,7 +186,7 @@ fn scavenge_idle_workload() {
     );
 
     // Activation-based service.
-    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,

@@ -56,11 +56,12 @@ fn test_activation_pending_condition_lifecycle() {
 
     // Send EndpointActivation manually (activate_service helper asserts Running, which won't happen).
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
-        namespace_id: "ns".into(),
-        ip: svc_ip,
-        service_id: Some(h.proto_service_id("ns", "web-svc")),
-    });
+    h.worker(&w1)
+        .send_event(WorkerEvent::EndpointDemandTraffic {
+            namespace_id: "ns".into(),
+            ip: svc_ip,
+            service_id: Some(h.proto_service_id("ns", "web-svc")),
+        });
     h.converge();
 
     // Workload is Launching (hung), service should be in NeedBackend with condition set.
@@ -89,7 +90,7 @@ fn test_activation_pending_condition_lifecycle() {
     h.assert_service_condition_clear("ns", "web-svc", "activation-pending");
 
     // Re-activate — ResumePod is also hung, so condition should reappear.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
@@ -117,7 +118,7 @@ fn test_activation_pending_in_status_report() {
 
     // Send activation manually so we can observe mid-flow.
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),

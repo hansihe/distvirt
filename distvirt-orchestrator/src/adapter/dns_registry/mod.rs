@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use distvirt_sm_router::IncrementalAggregator;
 
-use crate::sm::{DRouter, DnsRegistryId, DnsRegistryPortInput, DnsEntryInfo, ServiceId, WorkloadId};
+use crate::sm::{DRouter, DnsRegistryId, DnsRegistryPortInput, DnsEntryInfo, EndpointId, WorkloadId};
 
 #[cfg(test)]
 mod tests;
@@ -41,7 +41,7 @@ impl DnsRegistryAdapter {
             .into_iter()
             .filter(|(id, _)| *id == self.dns_registry_id)
             .flat_map(|(_, input)| match input {
-                DnsRegistryPortInput::ServiceDnsInput(actions) => actions,
+                DnsRegistryPortInput::EndpointDnsInput(actions) => actions,
                 DnsRegistryPortInput::WorkloadDnsInput(actions) => actions,
             })
             .collect();
@@ -117,12 +117,12 @@ fn dns_changed(
     }
 }
 
-/// Incremental aggregator for Service → DnsRegistry inputs.
+/// Incremental aggregator for Endpoint → DnsRegistry inputs.
 #[derive(Default)]
-pub struct ServiceDnsIncrementalAggregator;
+pub struct EndpointDnsIncrementalAggregator;
 
-impl IncrementalAggregator for ServiceDnsIncrementalAggregator {
-    type Input = (ServiceId, Option<DnsEntryInfo>);
+impl IncrementalAggregator for EndpointDnsIncrementalAggregator {
+    type Input = (EndpointId, Option<DnsEntryInfo>);
     type Output = Vec<DnsRegistryAction>;
 
     fn added(&self, (_, info): &Self::Input) -> Option<Self::Output> {

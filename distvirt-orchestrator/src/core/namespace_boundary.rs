@@ -154,8 +154,8 @@ impl NamespaceWithBoundary {
                                 let mut endpoints: Vec<distvirt_worker_protocol::EndpointSpec> = Vec::new();
 
                                 // Service endpoints
-                                for (service_id, info) in self.core.adapters.endpoint.build_service_sync() {
-                                    endpoints.push(Self::build_endpoint_spec_from_info(&service_id, &info));
+                                for (_endpoint_id, info) in self.core.adapters.endpoint.build_service_sync() {
+                                    endpoints.push(Self::build_endpoint_spec_from_info(&info));
                                 }
 
                                 // WireGuard peer endpoints
@@ -344,35 +344,9 @@ impl NamespaceWithBoundary {
             WorkerNamespaceEventKind::PodSuspendFailed { pod_id } => {
                 Some(InternalWorkerEvent::PodSuspendFailed { pod_id: router_pod_id(&pod_id) })
             }
-            WorkerNamespaceEventKind::EndpointActivation {
-                service_id: Some(ref proto_svc_id),
-                ..
-            } => {
-                // Look up the service name from the router ID for the core.
-                if let Some(svc_name) = self.core.management().service_proto_name(proto_svc_id) {
-                    Some(InternalWorkerEvent::EndpointActivation {
-                        service_name: svc_name.to_string(),
-                    })
-                } else {
-                    None
-                }
+            WorkerNamespaceEventKind::EndpointDemand { ip, signal, .. } => {
+                Some(InternalWorkerEvent::EndpointDemand { ip, signal })
             }
-            WorkerNamespaceEventKind::EndpointActivation {
-                service_id: None, ..
-            } => None,
-            WorkerNamespaceEventKind::EndpointDemand {
-                service_id: Some(ref proto_svc_id),
-                active,
-                ..
-            } => {
-                Some(InternalWorkerEvent::EndpointDemand {
-                    service_id: *proto_svc_id,
-                    active,
-                })
-            }
-            WorkerNamespaceEventKind::EndpointDemand {
-                service_id: None, ..
-            } => None,
             WorkerNamespaceEventKind::NamespaceCreated
             | WorkerNamespaceEventKind::NamespaceFailed { .. } => unreachable!(),
         }
@@ -626,13 +600,12 @@ impl NamespaceWithBoundary {
 
     /// Build an EndpointSpec from self-contained ServiceEndpointInfo.
     fn build_endpoint_spec_from_info(
-        service_id: &crate::sm::ServiceId,
         info: &crate::sm::ServiceEndpointInfo,
     ) -> distvirt_worker_protocol::EndpointSpec {
         distvirt_worker_protocol::EndpointSpec {
             ip: info.service_ip,
             kind: distvirt_worker_protocol::EndpointKind::Service {
-                service_id: *service_id,
+                service_id: info.service_id,
                 policy: info.policy.clone(),
                 backend: Some(distvirt_worker_protocol::EndpointPodBackend {
                     pod_ip: info.pod_ip,
@@ -650,8 +623,8 @@ impl NamespaceWithBoundary {
         action: &EndpointAction,
     ) -> distvirt_worker_protocol::WorkerCommand {
         match action {
-            EndpointAction::ServiceUpdate { service_id, info } => {
-                let endpoint_spec = Self::build_endpoint_spec_from_info(service_id, info);
+            EndpointAction::ServiceUpdate { endpoint_id: _, info } => {
+                let endpoint_spec = Self::build_endpoint_spec_from_info(info);
                 distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
                     namespace_id: self.core.namespace_id().clone(),
                     upserted: vec![endpoint_spec],
@@ -659,7 +632,7 @@ impl NamespaceWithBoundary {
                 }
             }
             EndpointAction::ServiceRemove {
-                service_id: _,
+                endpoint_id: _,
                 old_info,
             } => {
                 distvirt_worker_protocol::WorkerCommand::EndpointUpdate {

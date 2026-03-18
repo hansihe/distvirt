@@ -28,7 +28,7 @@ fn test_two_services_one_workload_shared_demand() {
     let svc_b_id = h.proto_service_id("ns", "svc-b");
 
     // Activate svc-a → workload launches
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(svc_a_id),
@@ -38,7 +38,7 @@ fn test_two_services_one_workload_shared_demand() {
     h.assert_service_active("ns", "svc-a");
 
     // Activate svc-b → workload already running
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(svc_b_id),
@@ -52,9 +52,9 @@ fn test_two_services_one_workload_shared_demand() {
 
     // Idle svc-a → demand drops. Workload stays running because svc-b has demand
     // (even though svc-b is in NeedBackend, it has issued DemandUp).
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::UNSPECIFIED,
+        ip: h.service_ip("ns", "svc-a"),
         service_id: Some(svc_a_id),
         active: false,
     });
@@ -78,7 +78,7 @@ fn test_service_activation_while_already_running() {
     let svc_b_id = h.proto_service_id("ns", "svc-b");
 
     // Activate svc-a
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(svc_a_id),
@@ -91,7 +91,7 @@ fn test_service_activation_while_already_running() {
     let pod_id_before = h.workload_state("ns", "shared").pod_id;
 
     // Activate svc-b while already running
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(svc_b_id),
@@ -211,7 +211,7 @@ fn test_add_service_to_suspended_workload() {
     let web_svc_id = h.proto_service_id("ns", "web-svc");
 
     // Activate → running → idle → suspended
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(web_svc_id),
@@ -219,9 +219,9 @@ fn test_add_service_to_suspended_workload() {
     h.converge();
     h.assert_workload_running("ns", "web");
 
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::UNSPECIFIED,
+        ip: h.service_ip("ns", "web-svc"),
         service_id: Some(web_svc_id),
         active: false,
     });
@@ -275,7 +275,7 @@ fn test_add_service_to_suspended_workload() {
     );
 
     // Activating the new service should resume the workload.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(web_svc_2_id),
@@ -328,13 +328,13 @@ fn test_remove_service_updates_demand() {
     let svc_b_id = h.proto_service_id("ns", "svc-b");
 
     // Activate both services.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(svc_a_id),
     });
     h.converge();
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(svc_b_id),
@@ -387,7 +387,7 @@ fn test_remove_only_active_service_drops_demand() {
     let svc_a_id = h.proto_service_id("ns", "svc-a");
 
     // Activate svc-a only.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(svc_a_id),

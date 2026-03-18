@@ -5,7 +5,8 @@ use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::core::namespace_boundary::NamespaceWithBoundary;
 use distvirt_orchestrator::core::{ClientCommand, GlobalWorkerId};
 use distvirt_orchestrator::shell::sync::{MockWorkerConfig, SyncShell};
-use distvirt_orchestrator::sm::{ServiceSm, ServiceState, SvcStatus, WlStatus, WorkloadSm};
+use distvirt_orchestrator::sm::endpoint::{EndpointSm, EndpointState, EndpointStatus};
+use distvirt_orchestrator::sm::{ServiceSm, WlStatus, WorkloadSm};
 use distvirt_orchestrator::types::NamespaceSpec;
 use distvirt_worker_protocol::{NamespaceId, PsiMetrics, ServiceId, WorkerCommand, WorkerEvent};
 
@@ -137,6 +138,15 @@ impl TestHarness {
             .unwrap_or_else(|| panic!("service SM '{}' not found in router", svc_name))
     }
 
+    pub fn service_enpoint_state_sm(&self, ns_id: &str, svc_name: &str) -> &EndpointSm {
+        let ns = self.namespace(ns_id);
+        let service = self.service_state_sm(ns_id, svc_name);
+        let ep_id = service.endpoint_id.expect("expected endpoint");
+        ns.router()
+            .get_endpoint(&ep_id)
+            .expect("endpoint not found for service in router")
+    }
+
     /// Get the protocol PodId for a workload (maps from router-internal PodId).
     pub fn workload_proto_pod_id(
         &self,
@@ -145,8 +155,7 @@ impl TestHarness {
     ) -> Option<distvirt_worker_protocol::PodId> {
         let wl = self.workload_state(ns_id, wl_name);
         let ns = self.namespace(ns_id);
-        wl.pod_id
-            .and_then(|pid| ns.router_pod_to_proto(&pid))
+        wl.pod_id.and_then(|pid| ns.router_pod_to_proto(&pid))
     }
 
     /// Get the GlobalWorkerId for the worker hosting a workload.
@@ -178,12 +187,13 @@ impl TestHarness {
         }
     }
 
-    pub fn service_status(&self, ns_id: &str, svc_name: &str) -> SvcStatus {
+    pub fn service_status(&self, ns_id: &str, svc_name: &str) -> EndpointStatus {
         let svc = self.service_state_sm(ns_id, svc_name);
-        match &svc.state {
-            ServiceState::Idle => SvcStatus::Idle,
-            ServiceState::NeedBackend => SvcStatus::NeedBackend,
-            ServiceState::Active { .. } => SvcStatus::Active,
+        let svc_ep = self.service_enpoint_state_sm(ns_id, svc_name);
+        match &svc_ep.state {
+            EndpointState::Idle => EndpointStatus::Idle,
+            EndpointState::NeedBackend => EndpointStatus::NeedBackend,
+            EndpointState::Active { .. } => EndpointStatus::Active,
         }
     }
 
@@ -196,16 +206,13 @@ impl TestHarness {
         let wl = self.workload_state(ns_id, wl_id);
         let mut conditions = std::collections::BTreeMap::new();
 
-        let is_failed = wl.consecutive_failures >= wl.max_retries
-            && (wl.has_demand || wl.committed_to_boot);
+        let is_failed =
+            wl.consecutive_failures >= wl.max_retries && (wl.has_demand || wl.committed_to_boot);
 
         if is_failed {
             conditions.insert(
                 "failed".into(),
-                format!(
-                    "attempt {}/{}",
-                    wl.consecutive_failures, wl.max_retries,
-                ),
+                format!("attempt {}/{}", wl.consecutive_failures, wl.max_retries,),
             );
         } else if wl.in_backoff {
             conditions.insert(
@@ -236,9 +243,15 @@ impl TestHarness {
 
     /// Look up the protocol ServiceId (u64) for a service name.
     /// The management adapter assigns numeric IDs when applying the namespace spec.
-    pub fn proto_service_id(&self, ns_id: &str, svc_name: &str) -> distvirt_worker_protocol::ServiceId {
+    pub fn proto_service_id(
+        &self,
+        ns_id: &str,
+        svc_name: &str,
+    ) -> distvirt_worker_protocol::ServiceId {
         let ns = self.namespace(ns_id);
-        let router_svc_id = ns.management().lookup_service(svc_name)
+        let router_svc_id = ns
+            .management()
+            .lookup_service(svc_name)
             .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_name, ns_id));
         distvirt_worker_protocol::ServiceId(router_svc_id.0)
     }
@@ -279,7 +292,7 @@ impl TestHarness {
 
         self.shell.queue_worker_event(
             worker_id,
-            WorkerEvent::EndpointActivation {
+            WorkerEvent::EndpointDemandTraffic {
                 namespace_id,
                 ip: svc_ip,
                 service_id: Some(self.proto_service_id(ns_id, svc_id)),
@@ -292,6 +305,7 @@ impl TestHarness {
 
     pub fn deactivate_service(&mut self, ns_id: &str, svc_id: &str) {
         let namespace_id = NamespaceId::from(ns_id);
+        let svc_ip = self.service_ip(ns_id, svc_id);
 
         let worker_id = *self
             .shell
@@ -301,9 +315,9 @@ impl TestHarness {
 
         self.shell.queue_worker_event(
             worker_id,
-            WorkerEvent::EndpointDemand {
+            WorkerEvent::EndpointDemandActive {
                 namespace_id,
-                ip: std::net::Ipv4Addr::UNSPECIFIED,
+                ip: svc_ip,
                 service_id: Some(self.proto_service_id(ns_id, svc_id)),
                 active: false,
             },
@@ -314,15 +328,12 @@ impl TestHarness {
     pub fn advance_past_idle_timeout(&mut self, ns_id: &str, svc_id: &str) {
         let ns = self.namespace(ns_id);
         let spec = ns.current_spec().unwrap();
-        let svc_spec = spec
-            .services
-            .get(svc_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "service '{}' not found in namespace '{}' spec",
-                    svc_id, ns_id
-                )
-            });
+        let svc_spec = spec.services.get(svc_id).unwrap_or_else(|| {
+            panic!(
+                "service '{}' not found in namespace '{}' spec",
+                svc_id, ns_id
+            )
+        });
         let timeout = svc_spec
             .activation
             .as_ref()

@@ -428,12 +428,12 @@ pub enum WorkerEvent {
         memory: PsiMetrics,
         io: PsiMetrics,
     },
-    EndpointActivation {
+    EndpointDemandTraffic {
         namespace_id: NamespaceId,
         ip: Ipv4Addr,
         service_id: Option<ServiceId>,
     },
-    EndpointDemand {
+    EndpointDemandActive {
         namespace_id: NamespaceId,
         ip: Ipv4Addr,
         service_id: Option<ServiceId>,

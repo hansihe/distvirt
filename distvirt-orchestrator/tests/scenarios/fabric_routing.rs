@@ -65,7 +65,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.converge();
 
     // Activate via EndpointActivation.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns1".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(h.proto_service_id("ns1", "web-svc")),
@@ -95,9 +95,9 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     );
 
     // Idle → suspend.
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns1".into(),
-        ip: Ipv4Addr::UNSPECIFIED,
+        ip: h.service_ip("ns1", "web-svc"),
         service_id: Some(h.proto_service_id("ns1", "web-svc")),
         active: false,
     });
@@ -118,7 +118,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     );
 
     // Re-activate via EndpointActivation → resume.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns1".into(),
         ip: Ipv4Addr::new(172, 16, 0, 100),
         service_id: Some(h.proto_service_id("ns1", "web-svc")),
@@ -153,7 +153,7 @@ fn test_route_miss_activates_dormant_workload() {
     h.assert_workload_dormant("ns", "web");
 
     // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
         service_id: None,
@@ -183,7 +183,7 @@ fn test_route_miss_activates_suspended_workload() {
     h.assert_workload_suspended("ns", "web");
 
     // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
         service_id: None,
@@ -211,7 +211,7 @@ fn test_route_miss_ignored_when_already_running() {
     // Low-level: command window slicing to verify no new commands after endpoint activation
     let cmds_before = h.worker(&w1).commands().len();
 
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
         service_id: None,
@@ -241,7 +241,7 @@ fn test_route_miss_ignored_for_unknown_ip() {
     h.assert_workload_dormant("ns", "web");
 
     // Low-level: testing with an IP that doesn't match any workload
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 99),
         service_id: None,
@@ -263,7 +263,7 @@ fn test_route_miss_demand_leak() {
 
     // Low-level: testing exact demand leak behavior with endpoint activation interaction
     // Step 1: EndpointActivation (no service_id) activates the workload.
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
         service_id: None,
@@ -273,7 +273,7 @@ fn test_route_miss_demand_leak() {
 
     // Step 2: EndpointActivation with service_id arrives (real traffic hits the service IP).
     let svc_ip = h.service_ip("ns", "web-svc");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
@@ -283,7 +283,7 @@ fn test_route_miss_demand_leak() {
     h.assert_service_active("ns", "web-svc");
 
     // Step 3: Signal no more demand → start idle timer.
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemand {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 10),
         service_id: Some(h.proto_service_id("ns", "web-svc")),

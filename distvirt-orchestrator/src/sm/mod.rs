@@ -2,16 +2,17 @@ use distvirt_sm_router::{Aggregator, IncrementalAggregator, ListAggregator, SmHa
 
 use crate::adapter::artifact::ArtifactRefIncrementalAggregator;
 use crate::adapter::dns_registry::{
-    ServiceDnsIncrementalAggregator, WorkloadDnsIncrementalAggregator,
+    EndpointDnsIncrementalAggregator, WorkloadDnsIncrementalAggregator,
 };
+use crate::adapter::endpoint::EndpointIncrementalAggregator;
 use crate::adapter::pod_assignment::PodAssignmentIncrementalAggregator;
 use crate::adapter::schedule_request::ScheduleRequestIncrementalAggregator;
-use crate::adapter::endpoint::EndpointIncrementalAggregator;
 use crate::adapter::timer::{
-    PodTimerIncrementalAggregator, ServiceTimerIncrementalAggregator,
+    EndpointTimerIncrementalAggregator, PodTimerIncrementalAggregator,
     WorkloadTimerIncrementalAggregator,
 };
 
+pub mod endpoint;
 mod pod;
 mod service;
 mod workload;
@@ -90,12 +91,12 @@ pub struct ScheduleRequestId(pub u64);
 /// The singleton schedule-request port ID.
 pub const SCHEDULE_REQUEST: ScheduleRequestId = ScheduleRequestId(0);
 
-/// Manual ID for the singleton endpoint port.
+/// Manual ID for the singleton fabric endpoint port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct EndpointId(pub u64);
+pub struct FabricEndpointId(pub u64);
 
-/// The singleton endpoint port ID.
-pub const ENDPOINT: EndpointId = EndpointId(0);
+/// The singleton fabric endpoint port ID.
+pub const FABRIC_ENDPOINT: FabricEndpointId = FabricEndpointId(0);
 
 /// Manual ID for the singleton timer port.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -122,6 +123,7 @@ pub struct DnsEntryInfo {
 /// Combines service spec fields (ip, policy) with workload readiness (pod_ip, worker_id).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServiceEndpointInfo {
+    pub service_id: ServiceId,
     pub service_ip: std::net::Ipv4Addr,
     pub policy: distvirt_worker_protocol::ServicePolicy,
     pub pod_ip: std::net::Ipv4Addr,
@@ -269,18 +271,6 @@ pub enum WlStatus {
     Failed,
 }
 
-/// Observable service lifecycle status.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub enum SvcStatus {
-    /// Has activation, currently idle (no demand signal).
-    #[default]
-    Idle,
-    /// Wants a backend — demand is set but workload not ready.
-    NeedBackend,
-    /// Active with a ready backend.
-    Active,
-}
-
 /// Timer key enum for workload-specific timers.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum WorkloadTimerKey {
@@ -299,21 +289,6 @@ pub enum BackendNeed {
     None,
     Traffic,
     Active,
-}
-
-/// Timer key enum for service-specific timers.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub enum ServiceTimerKey {
-    #[default]
-    IdleTimeout,
-}
-
-/// Timer request: service declares which timers it wants active.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct ServiceTimerRequest {
-    pub key: ServiceTimerKey,
-    pub generation: u64,
-    pub duration: std::time::Duration,
 }
 
 /// Timer key enum for pod-specific timers.
@@ -344,32 +319,33 @@ pub struct TimerRequest {
     pub duration: std::time::Duration,
 }
 
-/// Counts services with demand=true, also collects all service IDs.
+/// Counts endpoints with demand=true, also collects all endpoint IDs
+/// so the workload can route readiness back.
 #[derive(Default)]
 pub struct DemandAggregator;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DemandInfo {
     pub demand_count: u32,
-    pub service_ids: Vec<ServiceId>,
+    pub endpoint_ids: Vec<EndpointId>,
 }
 
 impl Aggregator for DemandAggregator {
-    type Input = (ServiceId, bool);
+    type Input = (EndpointId, bool);
     type Output = DemandInfo;
 
-    fn aggregate(&self, inputs: &[(ServiceId, bool)]) -> DemandInfo {
+    fn aggregate(&self, inputs: &[(EndpointId, bool)]) -> DemandInfo {
         let mut demand_count = 0;
-        let mut service_ids = Vec::new();
+        let mut endpoint_ids = Vec::new();
         for (id, demand) in inputs {
-            service_ids.push(*id);
+            endpoint_ids.push(*id);
             if *demand {
                 demand_count += 1;
             }
         }
         DemandInfo {
             demand_count,
-            service_ids,
+            endpoint_ids,
         }
     }
 }
@@ -517,6 +493,23 @@ impl Aggregator for SvcSpecAggregator {
     }
 }
 
+/// Aggregates endpoint config from the owner (Service or Workload).
+/// Expects at most one owner.
+#[derive(Default)]
+pub struct EndpointConfigAggregator;
+
+impl Aggregator for EndpointConfigAggregator {
+    type Input = (ServiceId, Option<endpoint::EndpointConfig>);
+    type Output = Option<endpoint::EndpointConfig>;
+
+    fn aggregate(
+        &self,
+        inputs: &[(ServiceId, Option<endpoint::EndpointConfig>)],
+    ) -> Option<endpoint::EndpointConfig> {
+        inputs.first().and_then(|(_, config)| config.clone())
+    }
+}
+
 // ============================================================================
 // Router topology declaration
 // ============================================================================
@@ -526,6 +519,7 @@ distvirt_sm_router::router! {
         Service(ServiceId, ServiceSm),
         Workload(WorkloadId, WorkloadSm),
         Pod(auto, PodSm),
+        Endpoint(auto, endpoint::EndpointSm),
     }
     ports {
         Worker(WorkerId),
@@ -534,20 +528,25 @@ distvirt_sm_router::router! {
         Timer(TimerId),
         ScheduleRequest(ScheduleRequestId),
         ScheduleLease(auto),
-        Endpoint(EndpointId),
+        FabricEndpoint(FabricEndpointId),
         DnsRegistry(DnsRegistryId),
         Artifact(ArtifactPortId),
         WireGuardPeer(auto),
     }
     signals {
-        Service::Demand(bool),
-        Service::WantedTimers(Vec<ServiceTimerRequest>),
-        Service::Status(SvcStatus),
-        Service::CurrentBackendNeed(BackendNeed),
-        Service::IdleTimerActive(bool),
-        Service::EndpointInfo(Option<ServiceEndpointInfo>),
-        Service::DnsEntry(Option<DnsEntryInfo>),
+        // Service signals (slimmed down — activation logic moved to Endpoint)
+        Service::EndpointConfig(Option<endpoint::EndpointConfig>),
+        // Endpoint signals
+        Endpoint::Demand(bool),
+        Endpoint::WantedTimers(Vec<endpoint::EndpointTimerRequest>),
+        Endpoint::Status(endpoint::EndpointStatus),
+        Endpoint::CurrentBackendNeed(BackendNeed),
+        Endpoint::IdleTimerActive(bool),
+        Endpoint::EndpointInfo(Option<ServiceEndpointInfo>),
+        Endpoint::DnsEntry(Option<DnsEntryInfo>),
+        // WireGuard peer
         WireGuardPeer::EndpointInfo(Option<WireGuardPeerEndpointInfo>),
+        // Workload (unchanged)
         Workload::Readiness(Option<ReadyInfo>),
         Workload::DnsEntry(Option<DnsEntryInfo>),
         Workload::PodIntent(PodIntent),
@@ -557,10 +556,12 @@ distvirt_sm_router::router! {
         Workload::ConsecutiveFailures(u32),
         Workload::SpecStale(bool),
         Workload::ArtifactRef(bool),
+        // Pod (unchanged)
         Pod::Status(PodStatus),
         Pod::AssignedWorker(Option<WorkerId>),
         Pod::WantedTimers(Vec<PodTimerRequest>),
         Pod::ScheduleRequest(PodScheduleRequest),
+        // Port signals
         Worker::Info(WorkerInfo),
         BackendNeed::Level(BackendNeed),
         Management::WlSpec(WorkloadSpec),
@@ -569,23 +570,30 @@ distvirt_sm_router::router! {
         Artifact::Valid(bool),
     }
     edges {
-        ServiceDemand: Service -> Workload,
-        WorkloadReadiness: Workload -> Service,
+        // Service → Endpoint ownership
+        ServiceEndpointOwnership: Service -> Endpoint,
+        // Endpoint → Workload demand
+        EndpointDemand: Endpoint -> Workload,
+        // Workload → Endpoint readiness
+        EndpointReadiness: Workload -> Endpoint,
+        // BackendNeed → Endpoint
+        TrafficDemand: BackendNeed -> Endpoint,
+        // Endpoint output ports
+        EndpointTimers: Endpoint -> Timer,
+        EndpointFabricEndpoints: Endpoint -> FabricEndpoint,
+        EndpointDns: Endpoint -> DnsRegistry,
+        // Workload
         PodOwnership: Workload -> Pod,
         PodReport: Pod -> Workload,
         WorkerAssignment: Worker -> Pod,
-        TrafficDemand: BackendNeed -> Service,
         WorkloadConfig: Management -> Workload,
         ServiceConfig: Management -> Service,
         WorkloadTimers: Workload -> Timer,
-        ServiceTimers: Service -> Timer,
         PodTimers: Pod -> Timer,
         PodScheduleIntent: Pod -> ScheduleRequest,
         PodLease: ScheduleLease -> Pod,
         PodPlacement: Pod -> Worker,
-        ServiceEndpoints: Service -> Endpoint,
-        WireGuardPeerEndpoints: WireGuardPeer -> Endpoint,
-        ServiceDns: Service -> DnsRegistry,
+        WireGuardPeerEndpoints: WireGuardPeer -> FabricEndpoint,
         WorkloadDns: Workload -> DnsRegistry,
         WorkloadArtifactRef: Workload -> Artifact,
         ArtifactValidity: Artifact -> Workload,
@@ -593,10 +601,11 @@ distvirt_sm_router::router! {
     events {
         AdminCommand(AdminCmd): Management -> Workload,
         ActivateService(bool): Management -> Service,
+        ActivateEndpoint(bool): Service -> Endpoint,
         NotifyPodStatus(PodStatus): Worker -> Pod,
         NotifyPodSuspended(ArtifactPortId): Worker -> Pod,
         WorkloadTimerFired(WorkloadTimerKey): Timer -> Workload,
-        ServiceTimerFired(ServiceTimerKey): Timer -> Service,
+        EndpointTimerFired(endpoint::EndpointTimerKey): Timer -> Endpoint,
         PodTimerFired(PodTimerKey): Timer -> Pod,
     }
     invariants {
@@ -605,7 +614,7 @@ distvirt_sm_router::router! {
     }
     inputs {
         Workload::DemandInput {
-            sources: [(ServiceDemand, Service::Demand)],
+            sources: [(EndpointDemand, Endpoint::Demand)],
             aggregator: DemandAggregator,
         },
         Workload::SpecInput {
@@ -620,15 +629,19 @@ distvirt_sm_router::router! {
             sources: [(PodReport, Pod::AssignedWorker)],
             aggregator: ListAggregator<PodId, Option<WorkerId>>,
         },
-        Service::ReadinessInput {
-            sources: [(WorkloadReadiness, Workload::Readiness)],
-            aggregator: ListAggregator<WorkloadId, Option<ReadyInfo>>,
-        },
         Service::SvcSpecInput {
             sources: [(ServiceConfig, Management::SvcSpec)],
             aggregator: SvcSpecAggregator,
         },
-        Service::BackendNeedInput {
+        Endpoint::ConfigInput {
+            sources: [(ServiceEndpointOwnership, Service::EndpointConfig)],
+            aggregator: EndpointConfigAggregator,
+        },
+        Endpoint::ReadinessInput {
+            sources: [(EndpointReadiness, Workload::Readiness)],
+            aggregator: ListAggregator<WorkloadId, Option<ReadyInfo>>,
+        },
+        Endpoint::BackendNeedInput {
             sources: [(TrafficDemand, BackendNeed::Level)],
             aggregator: BackendNeedAggregator,
         },
@@ -660,21 +673,21 @@ distvirt_sm_router::router! {
             sources: [(WorkloadTimers, Workload::WantedTimers)],
             incremental_aggregator: WorkloadTimerIncrementalAggregator,
         },
-        Timer::ServiceTimersInput {
-            sources: [(ServiceTimers, Service::WantedTimers)],
-            incremental_aggregator: ServiceTimerIncrementalAggregator,
+        Timer::EndpointTimersInput {
+            sources: [(EndpointTimers, Endpoint::WantedTimers)],
+            incremental_aggregator: EndpointTimerIncrementalAggregator,
         },
         Timer::PodTimersInput {
             sources: [(PodTimers, Pod::WantedTimers)],
             incremental_aggregator: PodTimerIncrementalAggregator,
         },
-        Endpoint::EndpointsInput {
-            sources: [(ServiceEndpoints, Service::EndpointInfo), (WireGuardPeerEndpoints, WireGuardPeer::EndpointInfo)],
+        FabricEndpoint::EndpointsInput {
+            sources: [(EndpointFabricEndpoints, Endpoint::EndpointInfo), (WireGuardPeerEndpoints, WireGuardPeer::EndpointInfo)],
             incremental_aggregator: EndpointIncrementalAggregator,
         },
-        DnsRegistry::ServiceDnsInput {
-            sources: [(ServiceDns, Service::DnsEntry)],
-            incremental_aggregator: ServiceDnsIncrementalAggregator,
+        DnsRegistry::EndpointDnsInput {
+            sources: [(EndpointDns, Endpoint::DnsEntry)],
+            incremental_aggregator: EndpointDnsIncrementalAggregator,
         },
         DnsRegistry::WorkloadDnsInput {
             sources: [(WorkloadDns, Workload::DnsEntry)],

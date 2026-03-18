@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use distvirt_sm_router::IncrementalAggregator;
 
 use crate::sm::{
-    DRouter, EndpointId, EndpointPortInput, EndpointsInputSource, ServiceEndpointInfo, ServiceId,
-    WireGuardPeerEndpointInfo, WireGuardPeerId,
+    DRouter, EndpointId, FabricEndpointId, FabricEndpointPortInput, EndpointsInputSource,
+    ServiceEndpointInfo, WireGuardPeerEndpointInfo, WireGuardPeerId,
 };
 
 #[cfg(test)]
@@ -14,11 +14,11 @@ mod tests;
 #[derive(Clone, Debug, PartialEq)]
 pub enum EndpointAction {
     ServiceUpdate {
-        service_id: ServiceId,
+        endpoint_id: EndpointId,
         info: ServiceEndpointInfo,
     },
     ServiceRemove {
-        service_id: ServiceId,
+        endpoint_id: EndpointId,
         /// The last known endpoint info, carried from the old signal value
         /// so the boundary layer can build the removal command without lookups.
         old_info: ServiceEndpointInfo,
@@ -34,46 +34,43 @@ pub enum EndpointAction {
 }
 
 pub(crate) struct EndpointAdapter {
-    endpoint_id: EndpointId,
+    fabric_endpoint_id: FabricEndpointId,
     /// Cached service endpoint state, maintained from incremental actions.
     /// Used to build full syncs for new workers.
-    service_cache: HashMap<ServiceId, ServiceEndpointInfo>,
+    service_cache: HashMap<EndpointId, ServiceEndpointInfo>,
     /// Cached WireGuard peer endpoint state.
     wg_peer_cache: HashMap<WireGuardPeerId, WireGuardPeerEndpointInfo>,
 }
 
 impl EndpointAdapter {
-    pub(crate) fn new(endpoint_id: EndpointId) -> Self {
+    pub(crate) fn new(fabric_endpoint_id: FabricEndpointId) -> Self {
         EndpointAdapter {
-            endpoint_id,
+            fabric_endpoint_id,
             service_cache: HashMap::new(),
             wg_peer_cache: HashMap::new(),
         }
     }
 
     /// Drain endpoint inputs from the router and update cache.
-    ///
-    /// Returns `(actions, mutated_router)`. Currently only drains, so
-    /// `mutated_router` is always `false`.
     pub(crate) fn reconcile(&mut self, router: &mut DRouter) -> (Vec<EndpointAction>, bool) {
-        let inputs = router.drain_endpoint_inputs();
+        let inputs = router.drain_fabric_endpoint_inputs();
 
         let actions: Vec<EndpointAction> = inputs
             .into_iter()
-            .filter(|(ep_id, _)| *ep_id == self.endpoint_id)
+            .filter(|(ep_id, _)| *ep_id == self.fabric_endpoint_id)
             .flat_map(|(_, input)| match input {
-                EndpointPortInput::EndpointsInput(action) => action,
+                FabricEndpointPortInput::EndpointsInput(action) => action,
             })
             .collect();
 
         // Update caches from actions.
         for action in &actions {
             match action {
-                EndpointAction::ServiceUpdate { service_id, info } => {
-                    self.service_cache.insert(*service_id, info.clone());
+                EndpointAction::ServiceUpdate { endpoint_id, info } => {
+                    self.service_cache.insert(*endpoint_id, info.clone());
                 }
-                EndpointAction::ServiceRemove { service_id, .. } => {
-                    self.service_cache.remove(service_id);
+                EndpointAction::ServiceRemove { endpoint_id, .. } => {
+                    self.service_cache.remove(endpoint_id);
                 }
                 EndpointAction::WireGuardPeerUpdate { peer_id, info } => {
                     self.wg_peer_cache.insert(*peer_id, info.clone());
@@ -88,10 +85,10 @@ impl EndpointAdapter {
     }
 
     /// Build a full sync snapshot of service endpoints from cached state (for new workers).
-    pub(crate) fn build_service_sync(&self) -> Vec<(ServiceId, ServiceEndpointInfo)> {
+    pub(crate) fn build_service_sync(&self) -> Vec<(EndpointId, ServiceEndpointInfo)> {
         self.service_cache
             .iter()
-            .map(|(sid, info)| (*sid, info.clone()))
+            .map(|(eid, info)| (*eid, info.clone()))
             .collect()
     }
 
@@ -109,9 +106,8 @@ impl EndpointAdapter {
 // =============================================================================
 
 /// Incremental aggregator for endpoint inputs.
-/// Handles both service and WireGuard peer sources via the generated
+/// Handles both endpoint SM and WireGuard peer sources via the generated
 /// `EndpointsInputSource` enum.
-/// Produces `EndpointAction` directly — no adapter-side diffing needed.
 #[derive(Default)]
 pub struct EndpointIncrementalAggregator;
 
@@ -121,9 +117,9 @@ impl IncrementalAggregator for EndpointIncrementalAggregator {
 
     fn added(&self, input: &EndpointsInputSource) -> Option<Vec<EndpointAction>> {
         match input {
-            EndpointsInputSource::ServiceEndpointInfo(service_id, Some(info)) => {
+            EndpointsInputSource::EndpointEndpointInfo(endpoint_id, Some(info)) => {
                 Some(vec![EndpointAction::ServiceUpdate {
-                    service_id: *service_id,
+                    endpoint_id: *endpoint_id,
                     info: info.clone(),
                 }])
             }
@@ -139,9 +135,9 @@ impl IncrementalAggregator for EndpointIncrementalAggregator {
 
     fn removed(&self, input: &EndpointsInputSource) -> Option<Vec<EndpointAction>> {
         match input {
-            EndpointsInputSource::ServiceEndpointInfo(service_id, Some(old)) => {
+            EndpointsInputSource::EndpointEndpointInfo(endpoint_id, Some(old)) => {
                 Some(vec![EndpointAction::ServiceRemove {
-                    service_id: *service_id,
+                    endpoint_id: *endpoint_id,
                     old_info: old.clone(),
                 }])
             }
@@ -161,22 +157,20 @@ impl IncrementalAggregator for EndpointIncrementalAggregator {
         new: &EndpointsInputSource,
     ) -> Option<Vec<EndpointAction>> {
         match (old, new) {
-            // Service endpoint changed
             (
-                EndpointsInputSource::ServiceEndpointInfo(_, old_info),
-                EndpointsInputSource::ServiceEndpointInfo(service_id, new_info),
+                EndpointsInputSource::EndpointEndpointInfo(_, old_info),
+                EndpointsInputSource::EndpointEndpointInfo(endpoint_id, new_info),
             ) => match (old_info, new_info) {
                 (_, Some(info)) => Some(vec![EndpointAction::ServiceUpdate {
-                    service_id: *service_id,
+                    endpoint_id: *endpoint_id,
                     info: info.clone(),
                 }]),
                 (Some(old), None) => Some(vec![EndpointAction::ServiceRemove {
-                    service_id: *service_id,
+                    endpoint_id: *endpoint_id,
                     old_info: old.clone(),
                 }]),
                 (None, None) => None,
             },
-            // WireGuard peer endpoint changed
             (
                 EndpointsInputSource::WireGuardPeerEndpointInfo(_, old_info),
                 EndpointsInputSource::WireGuardPeerEndpointInfo(peer_id, new_info),
@@ -191,7 +185,6 @@ impl IncrementalAggregator for EndpointIncrementalAggregator {
                 }]),
                 (None, None) => None,
             },
-            // Cross-source change shouldn't happen, but handle gracefully
             _ => None,
         }
     }

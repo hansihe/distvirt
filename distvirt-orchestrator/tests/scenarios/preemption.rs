@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ActivatorConfig,  ServicePolicy, WorkerEvent};
+use distvirt_worker_protocol::{ActivatorConfig, ServicePolicy, WorkerEvent};
 
 /// Namespace with two activation-based workloads: "wl-a" (service "svc-a") and "wl-b" (service "svc-b").
 /// Both have suspend_on_idle=true and activation.
@@ -99,7 +99,7 @@ fn test_basic_preemption() {
 
     // Activate wl-b via svc-b — should trigger preemption of wl-a.
     let svc_b_ip = h.service_ip("ns", "svc-b");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
         service_id: Some(h.proto_service_id("ns", "svc-b")),
@@ -158,7 +158,7 @@ fn test_no_preemption_of_active_traffic_workloads() {
 
     // Activate wl-b via svc-b.
     let svc_b_ip = h.service_ip("ns", "svc-b");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
         service_id: Some(h.proto_service_id("ns", "svc-b")),
@@ -224,7 +224,7 @@ fn test_preempted_workload_can_reactivate() {
     // High pressure, activate wl-b to trigger preemption of wl-a.
     h.send_pressure_update(&w1, 85.0);
     let svc_b_ip = h.service_ip("ns", "svc-b");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_b_ip,
         service_id: Some(h.proto_service_id("ns", "svc-b")),
@@ -249,7 +249,7 @@ fn test_preempted_workload_can_reactivate() {
 
     // Activate wl-a again.
     let svc_a_ip = h.service_ip("ns", "svc-a");
-    h.worker(&w1).send_event(WorkerEvent::EndpointActivation {
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_a_ip,
         service_id: Some(h.proto_service_id("ns", "svc-a")),

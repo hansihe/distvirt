@@ -81,7 +81,7 @@
 //! ## Scale-to-Zero with Endpoint Activation
 //!
 //! When a service endpoint has no backend, traffic is buffered and the worker
-//! fires a [`WorkerEvent::EndpointActivation`] so the orchestrator can schedule
+//! fires a [`WorkerEvent::EndpointDemandTraffic`] so the orchestrator can schedule
 //! a pod on demand.
 //!
 //! ```text
@@ -90,7 +90,7 @@
 //!   |  (endpoint exists, no backend)       |
 //!   |                                      |  // client pod sends traffic
 //!   |                                      |  // to service IP
-//!   |<──────────── EndpointActivation     |  // "someone wants this endpoint"
+//!   |<──────────── EndpointDemandTraffic     |  // "someone wants this endpoint"
 //!   |                                      |
 //!   |── LaunchPod ──────────────────────>|  // orchestrator reacts
 //!   |<──────────────────────── PodRunning |
@@ -99,7 +99,7 @@
 //!
 //! With a **protocol activator** (e.g., TCP), the activation is smarter — only
 //! meaningful traffic (TCP SYN) triggers activation, and RSTs/noise are filtered.
-//! The activator also signals [`WorkerEvent::EndpointDemand`] so the
+//! The activator also signals [`WorkerEvent::EndpointDemandActive`] so the
 //! orchestrator knows when all sessions have ended and it can release the backend.
 //!
 //! ```text
@@ -108,14 +108,14 @@
 //!   |── EndpointSync(activator: Tcp) ────>|  // TCP-aware service endpoint
 //!   |                                      |
 //!   |                                      |  // TCP SYN arrives
-//!   |<───────────── EndpointActivation    |  // pulse: traffic detected
+//!   |<───────────── EndpointDemandTraffic    |  // pulse: traffic detected
 //!   |                                      |  // (RSTs are dropped silently)
 //!   |── LaunchPod ──────────────────────>|
 //!   |<──────────────────────── PodRunning |
 //!   |── EndpointUpdate ──────────────────>|  // assign backend
 //!   |        ...traffic flows...           |
 //!   |                                      |  // no new SYNs for a while
-//!   |<───────────── EndpointDemand        |  // active=false
+//!   |<───────────── EndpointDemandActive        |  // active=false
 //!   |── EndpointUpdate(backend: None) ───>|  // release backend
 //!   |── StopPod ────────────────────────>|  // scale to zero
 //! ```

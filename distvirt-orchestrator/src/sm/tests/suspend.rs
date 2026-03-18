@@ -1,8 +1,16 @@
 use super::*;
+use super::super::endpoint::{EndpointState};
 
 // ============================================================================
 // Suspend/Resume tests
 // ============================================================================
+
+/// Helper: get the EndpointState for a service by looking up its endpoint.
+fn get_endpoint_state(router: &Router, service_id: &ServiceId) -> EndpointState {
+    let svc = router.get_service(service_id).unwrap();
+    let ep_id = svc.endpoint_id.unwrap();
+    router.get_endpoint(&ep_id).unwrap().state.clone()
+}
 
 /// Helper: create an artifact port, send PodSuspended, propagate, and confirm
 /// the artifact (simulating the adapter/scheduler behavior).
@@ -130,8 +138,7 @@ fn resume_from_artifact() {
     // Artifact reference dropped now that pod is Running.
     assert_eq!(wl.artifact_port, None);
 
-    let s1 = router.get_service(&S1).unwrap();
-    assert!(matches!(s1.state, ServiceState::Active { .. }));
+    assert!(matches!(get_endpoint_state(&router, &S1), EndpointState::Active { .. }));
 }
 
 /// 34. Demand returns during suspend: pod is suspending, demand comes back,
@@ -257,8 +264,7 @@ fn worker_loss_on_suspendable_workload() {
     assert!(wl.wants_pod); // immediately reschedules
 
     // Service should be back to NeedBackend.
-    let s1 = router.get_service(&S1).unwrap();
-    assert_eq!(s1.state, ServiceState::NeedBackend);
+    assert_eq!(get_endpoint_state(&router, &S1), EndpointState::NeedBackend);
 }
 
 /// 37. Destroy (hard kill) discards any previously saved artifact.

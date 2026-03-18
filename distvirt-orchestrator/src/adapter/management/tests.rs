@@ -175,7 +175,8 @@ fn create_service_linked_to_workload() {
         .get_service(&svc_id)
         .expect("service exists in router");
 
-    assert!(!svc.has_activation);
+    // Service SM was created and should have an endpoint after propagation.
+    assert!(svc.endpoint_id.is_some(), "service should have created an endpoint");
 }
 
 // ============================================================================
@@ -233,7 +234,7 @@ fn activate_service_command() {
 
     let svc_id = adapter.lookup_service("web-svc").unwrap();
     let svc = router.get_service(&svc_id).unwrap();
-    assert!(svc.has_activation);
+    assert!(svc.endpoint_id.is_some(), "service should have created an endpoint");
 
     adapter.send_activate_service(&mut router, "web-svc", true);
     router.propagate();

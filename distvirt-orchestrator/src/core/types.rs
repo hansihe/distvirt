@@ -10,9 +10,10 @@ use crate::adapter::timer::{TimerAction, TimerIdentity};
 use crate::core::scheduler::WorkerCandidate;
 use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::{
-    ArtifactPlacementEvent, ClientCommand, GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent,
+    ArtifactPlacementEvent, ClientCommand, EndpointDemandSignal, GlobalWorkerId,
+    SchedulerDecision, WorkerNamespaceEvent,
 };
-use crate::sm::{ArtifactPortId, PodId, ServiceId, WorkerId};
+use crate::sm::{ArtifactPortId, PodId, WorkerId};
 use crate::types::NamespaceId;
 
 // =============================================================================
@@ -136,12 +137,9 @@ pub(crate) enum InternalWorkerEvent {
     PodSuspendFailed {
         pod_id: PodId,
     },
-    EndpointActivation {
-        service_name: String,
-    },
     EndpointDemand {
-        service_id: ServiceId,
-        active: bool,
+        ip: std::net::Ipv4Addr,
+        signal: EndpointDemandSignal,
     },
 }
 

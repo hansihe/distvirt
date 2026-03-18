@@ -38,13 +38,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
     .await?;
 
     // Launch a pod that resolves the name via the gateway DNS
-    register_pod_endpoint(
-        &mut conn,
-        "ns-dns",
-        &test_pod_network_config(),
-        WorkerId(1),
-    )
-    .await?;
+    register_pod_endpoint(&mut conn, "ns-dns", &test_pod_network_config(), WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
         namespace_id: "ns-dns".into(),
@@ -182,10 +176,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     // Note: EndpointActivation may arrive before PodRunning because the SYN
     // is sent as soon as the guest network is up, so we must wait for it first.
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(
-            e,
-            WorkerEvent::EndpointActivation { .. }
-        )
+        matches!(e, WorkerEvent::EndpointActivation { .. })
     })
     .await?;
 
@@ -542,10 +533,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
 
     // Wait for the TCP activator to signal activation (SYN was buffered)
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(
-            e,
-            WorkerEvent::EndpointActivation { .. }
-        )
+        matches!(e, WorkerEvent::EndpointActivation { .. })
     })
     .await?;
 

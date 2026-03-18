@@ -11,10 +11,10 @@ use crate::{sm::PodId, types::NamespaceSpec};
 pub mod namespace;
 pub mod namespace_boundary;
 pub mod orchestrator;
-pub mod wg_peers;
 pub(crate) mod scheduler;
 pub mod timer_wheel;
 pub mod types;
+pub mod wg_peers;
 pub mod worker_event;
 pub mod worker_state;
 
@@ -76,6 +76,19 @@ pub struct WorkerNamespaceEvent {
     pub event: WorkerNamespaceEventKind,
 }
 
+/// Endpoint demand signal from a worker.
+///
+/// Both wire event types (EndpointActivation and EndpointDemand) are unified
+/// into this enum and routed through `EndpointDemandAdapter`.
+pub enum EndpointDemandSignal {
+    /// Instantaneous traffic event — something meaningful hit this endpoint.
+    /// No persistent state mutation; the adapter/SM decides how to react.
+    Traffic,
+    /// Level signal from a protocol activator — "activation is now true/false
+    /// until I say otherwise."
+    Active { active: bool },
+}
+
 /// Worker-reported namespace-scoped events. Uses protocol u64 IDs so the
 /// reader can fill these directly from wire data.
 /// The namespace boundary translates protocol IDs → router IDs (trivial u64 copy).
@@ -97,14 +110,11 @@ pub enum WorkerNamespaceEventKind {
     PodSuspendFailed {
         pod_id: distvirt_worker_protocol::PodId,
     },
-    EndpointActivation {
-        ip: std::net::Ipv4Addr,
-        service_id: Option<distvirt_worker_protocol::ServiceId>,
-    },
     EndpointDemand {
         ip: std::net::Ipv4Addr,
+        /// Carried for debug assertions only — routing uses IP.
         service_id: Option<distvirt_worker_protocol::ServiceId>,
-        active: bool,
+        signal: EndpointDemandSignal,
     },
     NamespaceCreated,
     NamespaceFailed {

@@ -1,5 +1,6 @@
 use distvirt_orchestrator::core::GlobalWorkerId;
-use distvirt_orchestrator::sm::{SvcStatus, WlStatus};
+use distvirt_orchestrator::sm::WlStatus;
+use distvirt_orchestrator::sm::endpoint::EndpointStatus;
 use distvirt_orchestrator::types::NamespaceId;
 
 use super::test_harness::TestHarness;
@@ -150,7 +151,7 @@ impl TestHarness {
     pub fn assert_service_active(&self, ns_id: &str, svc_id: &str) {
         let status = self.service_status(ns_id, svc_id);
         assert!(
-            matches!(status, SvcStatus::Active),
+            matches!(status, EndpointStatus::Active),
             "service '{}/{}': expected Active, got {:?}",
             ns_id,
             svc_id,
@@ -161,7 +162,7 @@ impl TestHarness {
     pub fn assert_service_idle(&self, ns_id: &str, svc_id: &str) {
         let status = self.service_status(ns_id, svc_id);
         assert!(
-            matches!(status, SvcStatus::Idle),
+            matches!(status, EndpointStatus::Idle),
             "service '{}/{}': expected Idle, got {:?}",
             ns_id,
             svc_id,
@@ -172,7 +173,7 @@ impl TestHarness {
     pub fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
         let status = self.service_status(ns_id, svc_id);
         assert!(
-            matches!(status, SvcStatus::NeedBackend),
+            matches!(status, EndpointStatus::NeedBackend),
             "service '{}/{}': expected NeedBackend, got {:?}",
             ns_id,
             svc_id,

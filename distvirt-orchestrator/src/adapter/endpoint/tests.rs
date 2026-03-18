@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm::{
-    DRouter, ENDPOINT, PodId, SCHEDULE_REQUEST, ServiceSm, ServiceSpec, TIMER, WorkerInfo,
-    WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, FABRIC_ENDPOINT, PodId, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, TIMER,
+    WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -16,7 +16,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_endpoint(ENDPOINT);
+    router.create_fabric_endpoint(FABRIC_ENDPOINT);
 
     let mgmt = router.create_management();
     router.create_workload(W1, WorkloadSm::new());
@@ -29,7 +29,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S1, ServiceSm::new()); // always-on
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -70,8 +70,8 @@ fn make_pod_running(router: &mut DRouter, worker: crate::sm::WorkerId, pod_id: P
 fn no_active_services_no_actions() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_endpoint(ENDPOINT);
-    let mut adapter = EndpointAdapter::new(ENDPOINT);
+    router.create_fabric_endpoint(FABRIC_ENDPOINT);
+    let mut adapter = EndpointAdapter::new(FABRIC_ENDPOINT);
 
     router.propagate();
     let (actions, _) = adapter.reconcile(&mut router);
@@ -86,7 +86,7 @@ fn no_active_services_no_actions() {
 fn service_becomes_active_update() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let (worker, pod_id) = setup_workload(&mut router);
-    let mut adapter = EndpointAdapter::new(ENDPOINT);
+    let mut adapter = EndpointAdapter::new(FABRIC_ENDPOINT);
 
     // Initially, service is NeedBackend — no active endpoints.
     let (actions, _) = adapter.reconcile(&mut router);
@@ -102,8 +102,8 @@ fn service_becomes_active_update() {
 
     assert_eq!(actions.len(), 1);
     match &actions[0] {
-        EndpointAction::ServiceUpdate { service_id, info } => {
-            assert_eq!(*service_id, S1);
+        EndpointAction::ServiceUpdate { endpoint_id: _, info } => {
+            assert_eq!(info.service_id, S1);
             assert_eq!(info.worker_id, worker);
         }
         other => panic!("expected ServiceUpdate, got {:?}", other),
@@ -118,7 +118,7 @@ fn service_becomes_active_update() {
 fn service_leaves_active_remove() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let (worker, pod_id) = setup_workload(&mut router);
-    let mut adapter = EndpointAdapter::new(ENDPOINT);
+    let mut adapter = EndpointAdapter::new(FABRIC_ENDPOINT);
 
     // Make active.
     make_pod_running(&mut router, worker, pod_id);
@@ -154,7 +154,7 @@ fn service_leaves_active_remove() {
 fn stable_state_no_actions() {
     let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
     let (worker, pod_id) = setup_workload(&mut router);
-    let mut adapter = EndpointAdapter::new(ENDPOINT);
+    let mut adapter = EndpointAdapter::new(FABRIC_ENDPOINT);
 
     // Make active and reconcile.
     make_pod_running(&mut router, worker, pod_id);
@@ -182,7 +182,7 @@ fn multiple_services_change() {
     router.create_worker(worker);
     router.set_worker_info(worker, WorkerInfo { capacity: 10 });
     router.create_schedule_request(SCHEDULE_REQUEST);
-    router.create_endpoint(ENDPOINT);
+    router.create_fabric_endpoint(FABRIC_ENDPOINT);
 
     let w2_id = WorkloadId(2);
     let s2_id = ServiceId(2);
@@ -198,7 +198,7 @@ fn multiple_services_change() {
             ..Default::default()
         },
     );
-    router.create_service(S1, ServiceSm::new(false));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt1, vec![S1]);
     router.set_management_svc_spec(
         mgmt1,
@@ -219,7 +219,7 @@ fn multiple_services_change() {
             ..Default::default()
         },
     );
-    router.create_service(s2_id, ServiceSm::new(false));
+    router.create_service(s2_id, ServiceSm::new());
     router.set_service_config_edges(mgmt2, vec![s2_id]);
     router.set_management_svc_spec(
         mgmt2,
@@ -251,7 +251,7 @@ fn multiple_services_change() {
     router.send_notify_pod_status(worker, pod2, crate::sm::PodStatus::Running);
     router.propagate();
 
-    let mut adapter = EndpointAdapter::new(ENDPOINT);
+    let mut adapter = EndpointAdapter::new(FABRIC_ENDPOINT);
     let (actions, _) = adapter.reconcile(&mut router);
 
     let update_count = actions

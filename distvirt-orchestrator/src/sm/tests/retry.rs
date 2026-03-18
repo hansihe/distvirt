@@ -227,7 +227,7 @@ fn failed_recovery_via_demand_cycle() {
     );
 
     // Activation-based service so we can toggle demand.
-    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -286,7 +286,7 @@ fn failed_ignores_new_demand() {
     assert!(wl.pod_id.is_none());
 
     // Add another service with demand — still Failed, no new pod.
-    router.create_service(S2, ServiceSm::new(false));
+    router.create_service(S2, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1, S2]);
     router.set_management_svc_spec(
         mgmt,
@@ -325,7 +325,7 @@ fn backoff_cleared_on_demand_drop() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -474,7 +474,7 @@ fn scavenge_during_failed() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true));
+    router.create_service(S1, ServiceSm::new());
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,

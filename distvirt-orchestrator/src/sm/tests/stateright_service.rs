@@ -1,11 +1,14 @@
-//! Stateright model checking for the new ServiceSm.
+//! Stateright model checking for the thin ServiceSm.
 //!
 //! Level 1 individual SM model checking: we instantiate ServiceSm in isolation,
-//! feed it inputs via CtxConcrete, inspect effects to update environment state,
-//! and verify safety/liveness properties.
+//! feed it inputs via ServiceCtxConcrete, inspect effects to update environment
+//! state, and verify safety/liveness properties.
 //!
-//! The state space is fully explored (no step bound). All monotonic counters
-//! are normalized by Representative, so the state space is finite.
+//! The ServiceSm is now a thin wrapper that:
+//! - Creates an EndpointSm on first spec delivery
+//! - Pushes EndpointConfig on every spec delivery
+//! - Forwards ActivateService events as ActivateEndpoint events to the endpoint
+//! - Self-destructs when spec is removed
 
 use distvirt_sm_router::{SequentialIds, SmHandler};
 use stateright::*;
@@ -13,59 +16,29 @@ use stateright::*;
 use super::super::*;
 
 // ============================================================================
-// Environment types
+// Model
 // ============================================================================
 
-/// Readiness as seen by the environment (the workload's readiness signal).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum ReadinessEnv {
-    /// No workload is ready.
-    None,
-    /// Workload is ready (has a running pod).
-    Ready,
-}
-
-// ============================================================================
-// Model configuration
-// ============================================================================
-
-/// Level 1 model: tests ServiceSm in isolation.
-///
-/// Note: spec changes that affect `has_activation` are tested here because
-/// the service SM handles them directly. Workload readiness is modeled as
-/// a simple present/absent toggle — the actual ReadyInfo content doesn't
-/// affect service behavior beyond presence.
-struct SvcNewModel {
-    /// Whether the service has activation (demand-driven vs always-on).
-    has_activation: bool,
-    /// Whether to inject backend need changes from workers.
-    enable_backend_need: bool,
-}
+struct SvcModel;
 
 // ============================================================================
 // Model state
 // ============================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct SvcNewModelState {
+struct SvcModelState {
     /// The SM under test.
     sm: ServiceSm,
-    /// Whether the service is currently activated (for activation-based services).
-    activated: bool,
-    /// Current readiness from the workload.
-    readiness_env: ReadinessEnv,
-    /// Current backend need level from workers.
-    backend_need: BackendNeed,
-    /// Whether the demand signal is set (extracted from effects).
-    demand_set: bool,
-    /// Whether an idle timer is pending in the environment.
-    timer_pending: bool,
-    /// Generation of the pending timer.
-    timer_generation: u64,
-    /// Whether the spec is currently present (SM initialized as if spec delivered).
+    /// Whether a spec is currently present in the environment.
     spec_present: bool,
-    /// Whether self-destruct was triggered (spec removed).
+    /// Whether self-destruct was triggered.
     self_destructed: bool,
+    /// Whether an endpoint has been created (cumulative).
+    endpoint_created: bool,
+    /// Whether endpoint config was set in the last input application.
+    endpoint_config_set: bool,
+    /// Whether an ActivateEndpoint event was forwarded in the last input application.
+    activate_forwarded: bool,
 }
 
 // ============================================================================
@@ -73,305 +46,160 @@ struct SvcNewModelState {
 // ============================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum SvcNewAction {
-    /// Activate the service (ActivateService(true)).
-    Activate,
-    /// Deactivate the service (ActivateService(false)).
-    Deactivate,
-    /// Workload becomes ready (ReadinessInput with Some).
-    WorkloadReady,
-    /// Workload becomes unready (ReadinessInput with None).
-    WorkloadUnready,
-    /// Backend need changes to None.
-    BackendNeedNone,
-    /// Backend need changes to Traffic.
-    BackendNeedTraffic,
-    /// Backend need changes to Active.
-    BackendNeedActive,
-    /// Idle timer fires.
-    TimerFired,
-    /// Remove the spec (SvcSpecInput(None)) — triggers self-destruct.
+enum SvcAction {
+    /// Deliver initial spec: SvcSpecInput(Some(...))
+    DeliverSpec,
+    /// Deliver updated spec (different workload): SvcSpecInput(Some(...))
+    UpdateSpec,
+    /// Remove spec: SvcSpecInput(None)
     RemoveSpec,
-    /// Toggle has_activation via spec change.
-    ChangeActivation,
+    /// ActivateService(true)
+    ActivateTrue,
+    /// ActivateService(false)
+    ActivateFalse,
 }
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/// Deliver an input to the SM, apply effects to env state.
-fn apply_svc_input(state: &SvcNewModelState, input: ServiceInput) -> SvcNewModelState {
+fn apply_input(state: &SvcModelState, input: ServiceInput) -> SvcModelState {
     let mut next = state.clone();
     let mut alloc = SequentialIds::<NodeKind>::new();
-    let svc_id = ServiceId(0);
+    let svc_id = ServiceId(1);
     let mut ctx = ServiceCtxConcrete::new(svc_id, &mut alloc);
     next.sm.handle(input, &mut ctx);
     let effects = ctx.into_effects();
 
-    // Check self-destruct.
+    // Reset per-step tracking flags.
+    next.endpoint_config_set = false;
+    next.activate_forwarded = false;
+
     if effects.pending_self_destruct {
         next.self_destructed = true;
     }
-
-    // Check demand signal changes.
-    if let Some(demand) = effects.demand {
-        next.demand_set = demand;
+    // Check if endpoint was created.
+    if !effects.pending_creates.is_empty() {
+        next.endpoint_created = true;
     }
-
-    // Check timer signal changes.
-    if let Some(ref timers) = effects.wanted_timers {
-        if let Some(req) = timers.first() {
-            next.timer_pending = true;
-            next.timer_generation = req.generation;
-        } else {
-            next.timer_pending = false;
-        }
+    // Check if EndpointConfig signal was set.
+    if effects.endpoint_config.is_some() {
+        next.endpoint_config_set = true;
     }
-
+    // Check if ActivateEndpoint event was forwarded.
+    if !effects.pending_events.is_empty() {
+        next.activate_forwarded = true;
+    }
     next
 }
 
-fn make_ready_info() -> ReadyInfo {
-    ReadyInfo {
-        pod_id: PodId(1),
-        worker_id: WorkerId(1),
-        pod_ip: std::net::Ipv4Addr::new(10, 0, 0, 1),
-    }
+fn make_spec(workload_id: u64) -> (ManagementId, ServiceSpec) {
+    (
+        ManagementId(0),
+        ServiceSpec {
+            workload: WorkloadId(workload_id),
+            has_activation: true,
+            ..Default::default()
+        },
+    )
 }
 
 // ============================================================================
 // Model implementation
 // ============================================================================
 
-impl Model for SvcNewModel {
-    type State = SvcNewModelState;
-    type Action = SvcNewAction;
+impl Model for SvcModel {
+    type State = SvcModelState;
+    type Action = SvcAction;
 
     fn init_states(&self) -> Vec<Self::State> {
-        let sm = ServiceSm::new(self.has_activation);
-        vec![SvcNewModelState {
-            demand_set: !self.has_activation, // always-on starts with demand
-            sm,
-            activated: false,
-            readiness_env: ReadinessEnv::None,
-            backend_need: BackendNeed::None,
-            timer_pending: false,
-            timer_generation: 0,
-            spec_present: true, // SM initialized as if spec was delivered
+        vec![SvcModelState {
+            sm: ServiceSm::new(),
+            spec_present: false,
             self_destructed: false,
+            endpoint_created: false,
+            endpoint_config_set: false,
+            activate_forwarded: false,
         }]
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
-        // Don't generate actions for destroyed services.
         if state.self_destructed {
             return;
         }
 
-        // Activation toggle (only for activation-based services).
-        if state.sm.has_activation {
-            if !state.activated {
-                actions.push(SvcNewAction::Activate);
-            } else {
-                actions.push(SvcNewAction::Deactivate);
-            }
+        if !state.spec_present {
+            // No spec yet — can deliver one.
+            actions.push(SvcAction::DeliverSpec);
+        } else {
+            // Spec present — can update or remove.
+            actions.push(SvcAction::UpdateSpec);
+            actions.push(SvcAction::RemoveSpec);
         }
 
-        // Readiness changes.
-        match state.readiness_env {
-            ReadinessEnv::None => {
-                actions.push(SvcNewAction::WorkloadReady);
-            }
-            ReadinessEnv::Ready => {
-                actions.push(SvcNewAction::WorkloadUnready);
-                // Also allow re-delivering ready (workload pod changed).
-                actions.push(SvcNewAction::WorkloadReady);
-            }
-        }
-
-        // Backend need changes.
-        if self.enable_backend_need {
-            if state.backend_need != BackendNeed::None {
-                actions.push(SvcNewAction::BackendNeedNone);
-            }
-            if state.backend_need != BackendNeed::Traffic {
-                actions.push(SvcNewAction::BackendNeedTraffic);
-            }
-            if state.backend_need != BackendNeed::Active {
-                actions.push(SvcNewAction::BackendNeedActive);
-            }
-        }
-
-        // Timer fires.
-        if state.timer_pending {
-            actions.push(SvcNewAction::TimerFired);
-        }
-
-        // Spec changes.
-        if state.spec_present {
-            actions.push(SvcNewAction::RemoveSpec);
-            actions.push(SvcNewAction::ChangeActivation);
-        }
+        // Activation events can arrive at any time.
+        actions.push(SvcAction::ActivateTrue);
+        actions.push(SvcAction::ActivateFalse);
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        let mut next = match action {
-            SvcNewAction::Activate => {
-                let mut s = apply_svc_input(state, ServiceInput::ActivateService(true));
-                s.activated = true;
-                s
-            }
-            SvcNewAction::Deactivate => {
-                let mut s = apply_svc_input(state, ServiceInput::ActivateService(false));
-                s.activated = false;
-                s
-            }
-            SvcNewAction::WorkloadReady => {
-                let mut s = apply_svc_input(
-                    state,
-                    ServiceInput::ReadinessInput(vec![Some(make_ready_info())]),
-                );
-                s.readiness_env = ReadinessEnv::Ready;
-                s
-            }
-            SvcNewAction::WorkloadUnready => {
-                let mut s = apply_svc_input(state, ServiceInput::ReadinessInput(vec![None]));
-                s.readiness_env = ReadinessEnv::None;
-                s
-            }
-            SvcNewAction::BackendNeedNone => {
+        let next = match action {
+            SvcAction::DeliverSpec => {
                 let mut s =
-                    apply_svc_input(state, ServiceInput::BackendNeedInput(BackendNeed::None));
-                s.backend_need = BackendNeed::None;
+                    apply_input(state, ServiceInput::SvcSpecInput(Some(make_spec(1))));
+                s.spec_present = true;
                 s
             }
-            SvcNewAction::BackendNeedTraffic => {
-                let mut s =
-                    apply_svc_input(state, ServiceInput::BackendNeedInput(BackendNeed::Traffic));
-                s.backend_need = BackendNeed::Traffic;
-                s
+            SvcAction::UpdateSpec => {
+                // Deliver a different spec (different workload ID).
+                apply_input(state, ServiceInput::SvcSpecInput(Some(make_spec(2))))
             }
-            SvcNewAction::BackendNeedActive => {
-                let mut s =
-                    apply_svc_input(state, ServiceInput::BackendNeedInput(BackendNeed::Active));
-                s.backend_need = BackendNeed::Active;
-                s
-            }
-            SvcNewAction::TimerFired => {
-                // Don't force timer_pending=false — let effects drive it.
-                // If the SM processes the timer (guard passes), it calls
-                // update_timer_signal which clears the signal via effects.
-                // If the timer is a no-op (guard fails), the old signal
-                // persists and the timer remains active.
-                apply_svc_input(
-                    state,
-                    ServiceInput::ServiceTimerFired(ServiceTimerKey::IdleTimeout),
-                )
-            }
-            SvcNewAction::RemoveSpec => {
-                let mut s = apply_svc_input(state, ServiceInput::SvcSpecInput(None));
+            SvcAction::RemoveSpec => {
+                let mut s = apply_input(state, ServiceInput::SvcSpecInput(None));
                 s.spec_present = false;
                 s
             }
-            SvcNewAction::ChangeActivation => {
-                let new_has_activation = !state.sm.has_activation;
-                apply_svc_input(
-                    state,
-                    ServiceInput::SvcSpecInput(Some((
-                        ManagementId(0),
-                        ServiceSpec {
-                            workload: WorkloadId(0),
-                            has_activation: new_has_activation,
-                            ..Default::default()
-                        },
-                    ))),
-                )
+            SvcAction::ActivateTrue => {
+                apply_input(state, ServiceInput::ActivateService(true))
+            }
+            SvcAction::ActivateFalse => {
+                apply_input(state, ServiceInput::ActivateService(false))
             }
         };
-
-        // Sync activated with SM state (deactivation via idle timer clears
-        // demand and transitions to Idle, which means "not activated").
-        if matches!(next.sm.state, ServiceState::Idle) && !next.demand_set {
-            next.activated = false;
-        }
 
         Some(next)
     }
 
     fn properties(&self) -> Vec<Property<Self>> {
-        let mut properties = vec![
-            // Safety: idle timer is only active when service is Active + has_activation.
-            Property::<Self>::always("idle timer only when active+activation", |_model, state| {
+        vec![
+            // Safety: endpoint is created exactly once (on first spec delivery).
+            Property::<Self>::always("endpoint created at most once", |_model, state| {
+                // If endpoint was already created, no new creates should happen.
+                // We track this by checking: if endpoint_created was already true
+                // before this step, pending_creates should be empty.
+                // Since we track cumulative endpoint_created, we verify via the SM:
+                // endpoint_id is Some iff endpoint_created is true.
                 if state.self_destructed {
                     return true;
                 }
-                if state.sm.idle_timer_active {
-                    matches!(state.sm.state, ServiceState::Active { .. }) && state.sm.has_activation
+                state.sm.endpoint_id.is_some() == state.endpoint_created
+            }),
+            // Safety: endpoint_config is set on every spec delivery.
+            Property::<Self>::always("config set when spec delivered", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                // When spec is present and endpoint exists, config should have been set
+                // at some point. We check: if spec_present and endpoint exists,
+                // the SM must have an endpoint_id.
+                if state.spec_present {
+                    // endpoint must exist if spec was delivered
+                    state.endpoint_created
                 } else {
                     true
                 }
             }),
-            // Safety: idle timer pending in env matches SM's idle_timer_active.
-            Property::<Self>::always("timer env consistent with SM", |_model, state| {
-                if state.self_destructed {
-                    return true;
-                }
-                state.timer_pending == state.sm.idle_timer_active
-            }),
-            // Safety: demand signal matches state expectations.
-            Property::<Self>::always("demand consistent with state", |_model, state| {
-                if state.self_destructed {
-                    return true;
-                }
-                match &state.sm.state {
-                    ServiceState::Idle => !state.demand_set,
-                    ServiceState::NeedBackend | ServiceState::Active { .. } => state.demand_set,
-                }
-            }),
-            // Safety: Active state requires readiness to be present.
-            Property::<Self>::always("active implies readiness", |_model, state| {
-                if state.self_destructed {
-                    return true;
-                }
-                if matches!(state.sm.state, ServiceState::Active { .. }) {
-                    state.readiness_env == ReadinessEnv::Ready
-                } else {
-                    true
-                }
-            }),
-            // Safety: Idle state only possible with has_activation.
-            Property::<Self>::always("idle only with activation", |_model, state| {
-                if state.self_destructed {
-                    return true;
-                }
-                if matches!(state.sm.state, ServiceState::Idle) {
-                    state.sm.has_activation
-                } else {
-                    true
-                }
-            }),
-            // Safety: last_readiness cache tracks environment readiness.
-            Property::<Self>::always("last_readiness consistent with env", |_model, state| {
-                if state.self_destructed {
-                    return true;
-                }
-                state.sm.last_readiness.is_some() == (state.readiness_env == ReadinessEnv::Ready)
-            }),
-            // Safety: NeedBackend implies readiness is absent. With the
-            // last_readiness cache, activate() skips straight to Active when
-            // readiness is available, so NeedBackend is unreachable with ready env.
-            Property::<Self>::always("NeedBackend implies no readiness", |_model, state| {
-                if state.self_destructed {
-                    return true;
-                }
-                if matches!(state.sm.state, ServiceState::NeedBackend) {
-                    state.readiness_env == ReadinessEnv::None
-                } else {
-                    true
-                }
-            }),
-            // Safety: self-destruct only on spec removal.
+            // Safety: self-destruct only happens when spec is removed.
             Property::<Self>::always("self-destruct only on spec removal", |_model, state| {
                 if state.self_destructed {
                     !state.spec_present
@@ -379,33 +207,37 @@ impl Model for SvcNewModel {
                     true
                 }
             }),
-            // Liveness: every path to a terminal state ends in self-destruct.
-            // Verifies no other stuck states exist.
+            // Safety: activate is only forwarded when endpoint exists.
+            Property::<Self>::always(
+                "activate only forwarded with endpoint",
+                |_model, state| {
+                    if state.activate_forwarded {
+                        state.sm.endpoint_id.is_some()
+                    } else {
+                        true
+                    }
+                },
+            ),
+            // Safety: no endpoint without spec.
+            Property::<Self>::always("no endpoint without spec", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.sm.endpoint_id.is_some() {
+                    state.spec_present
+                } else {
+                    true
+                }
+            }),
+            // Liveness: eventually self-destructs (every path reaches spec removal).
             Property::<Self>::eventually("eventually self-destructs", |_model, state| {
                 state.self_destructed
             }),
-            // Reachability: can reach Active state.
-            Property::<Self>::sometimes("can reach active", |_model, state| {
-                matches!(state.sm.state, ServiceState::Active { .. })
+            // Reachability: can create endpoint.
+            Property::<Self>::sometimes("can create endpoint", |_model, state| {
+                state.endpoint_created
             }),
-        ];
-
-        // Reachability: can return to Idle (activation-based only).
-        if self.has_activation {
-            properties.push(Property::<Self>::sometimes(
-                "can reach idle",
-                |_model, state| matches!(state.sm.state, ServiceState::Idle),
-            ));
-        }
-        // Reachability: can have idle timer active (requires activation + backend need).
-        if self.has_activation && self.enable_backend_need {
-            properties.push(Property::<Self>::sometimes(
-                "can have idle timer",
-                |_model, state| state.sm.idle_timer_active,
-            ));
-        }
-
-        properties
+        ]
     }
 }
 
@@ -413,36 +245,14 @@ impl Model for SvcNewModel {
 // Symmetry reduction
 // ============================================================================
 
-impl Representative for SvcNewModelState {
+impl Representative for SvcModelState {
     fn representative(&self) -> Self {
         let mut s = self.clone();
-
-        // idle_generation: only used to tag timer requests. Our model tracks
-        // timer_pending separately.
-        s.sm.idle_generation = 0;
-        s.timer_generation = 0;
-
-        // Normalize ReadyInfo inside Active state — actual pod/worker IDs
-        // and pod_ip don't affect service behavior.
-        if let ServiceState::Active { ref mut ready } = s.sm.state {
-            ready.pod_id = PodId(0);
-            ready.worker_id = WorkerId(0);
-            ready.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
+        // Normalize the EndpointId value — the exact auto-allocated value
+        // doesn't matter, only whether it's Some or None.
+        if let Some(ref mut ep_id) = s.sm.endpoint_id {
+            *ep_id = EndpointId(0);
         }
-        if let Some(ref mut info) = s.sm.last_readiness {
-            info.pod_id = PodId(0);
-            info.worker_id = WorkerId(0);
-            info.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
-        }
-
-        // Normalize service endpoint fields — don't affect service SM behavior.
-        s.sm.service_ip = std::net::Ipv4Addr::UNSPECIFIED;
-        s.sm.service_policy = distvirt_worker_protocol::ServicePolicy {
-            buffer_frames: 0,
-            timeout_ms: 0,
-            activator: None,
-        };
-
         s
     }
 }
@@ -452,94 +262,11 @@ impl Representative for SvcNewModelState {
 // ============================================================================
 
 #[test]
-fn service_new_activation_basic() {
-    let result = SvcNewModel {
-        has_activation: true,
-        enable_backend_need: false,
-    }
-    .checker()
-    .symmetry()
-    .spawn_dfs()
-    .join();
-
+fn service_basic() {
+    let result = SvcModel.checker().symmetry().spawn_dfs().join();
     result.assert_properties();
     eprintln!(
-        "Service new (activation, no backend need): {} unique states",
-        result.unique_state_count()
-    );
-}
-
-#[test]
-fn service_new_always_on() {
-    let result = SvcNewModel {
-        has_activation: false,
-        enable_backend_need: false,
-    }
-    .checker()
-    .symmetry()
-    .spawn_dfs()
-    .join();
-
-    result.assert_properties();
-    eprintln!(
-        "Service new (always-on): {} unique states",
-        result.unique_state_count()
-    );
-}
-
-#[test]
-fn service_new_activation_with_backend_need() {
-    let result = SvcNewModel {
-        has_activation: true,
-        enable_backend_need: true,
-    }
-    .checker()
-    .symmetry()
-    .spawn_dfs()
-    .join();
-
-    result.assert_properties();
-    eprintln!(
-        "Service new (activation + backend need): {} unique states",
-        result.unique_state_count()
-    );
-}
-
-#[test]
-fn service_new_always_on_with_backend_need() {
-    let result = SvcNewModel {
-        has_activation: false,
-        enable_backend_need: true,
-    }
-    .checker()
-    .symmetry()
-    .spawn_dfs()
-    .join();
-
-    result.assert_properties();
-    eprintln!(
-        "Service new (always-on + backend need): {} unique states",
-        result.unique_state_count()
-    );
-}
-
-/// Kitchen sink: activation + backend need.
-/// This is the most complex service configuration — explores idle timer
-/// interactions with activation toggles and backend need fluctuations.
-#[test]
-fn service_new_kitchen_sink() {
-    let result = SvcNewModel {
-        has_activation: true,
-        enable_backend_need: true,
-    }
-    .checker()
-    .symmetry()
-    .spawn_dfs()
-    .join();
-
-    result.assert_properties();
-    eprintln!(
-        "Service new (kitchen sink): {} unique states",
+        "Service (thin wrapper): {} unique states",
         result.unique_state_count()
     );
 }

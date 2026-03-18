@@ -1,21 +1,25 @@
 use std::collections::HashMap;
 
-use crate::sm::{BackendNeedId, DRouter, ServiceId, WorkerId};
+use crate::core::EndpointDemandSignal;
+use crate::sm::{BackendNeedId, DRouter, EndpointId, WorkerId};
 
 #[cfg(test)]
 mod tests;
 
 /// Push-based adapter for endpoint demand signals.
 ///
-/// Manages BackendNeed ports in the router — one per (worker, service) pair.
-/// When a worker reports `EndpointDemand`, the adapter creates or updates the
-/// port. When a worker disconnects, all its ports are removed.
+/// Receives unified `EndpointDemandSignal` events (traffic impulses and
+/// activation level changes) and translates them into BackendNeed ports
+/// in the router.
 ///
-/// No reconcile method — this adapter is purely push-based. The service SM
+/// Manages one BackendNeed port per (worker, endpoint) pair. When a worker
+/// disconnects, all its ports are removed.
+///
+/// No reconcile method — this adapter is purely push-based. The endpoint SM
 /// reads the aggregated need via BackendNeedInput and reacts.
 pub(crate) struct EndpointDemandAdapter {
-    /// Maps (WorkerId, ServiceId) → BackendNeedPortId.
-    ports: HashMap<(WorkerId, ServiceId), BackendNeedId>,
+    /// Maps (WorkerId, EndpointId) → BackendNeedPortId.
+    ports: HashMap<(WorkerId, EndpointId), BackendNeedId>,
 }
 
 impl EndpointDemandAdapter {
@@ -25,28 +29,34 @@ impl EndpointDemandAdapter {
         }
     }
 
-    /// A worker reports demand for a service. Creates the port if it
-    /// doesn't exist, then sets the level signal.
-    pub(crate) fn push_need(
+    /// A worker reports demand for an endpoint. Creates the port if it
+    /// doesn't exist, then sets the level signal based on signal type.
+    pub(crate) fn push_demand(
         &mut self,
         router: &mut DRouter,
         worker_id: WorkerId,
-        service_id: ServiceId,
-        need: crate::sm::BackendNeed,
+        endpoint_id: EndpointId,
+        signal: EndpointDemandSignal,
     ) {
-        let key = (worker_id, service_id);
+        let need = match signal {
+            EndpointDemandSignal::Traffic => crate::sm::BackendNeed::Traffic,
+            EndpointDemandSignal::Active { active: true } => crate::sm::BackendNeed::Active,
+            EndpointDemandSignal::Active { active: false } => crate::sm::BackendNeed::None,
+        };
+
+        let key = (worker_id, endpoint_id);
         let port_id = *self.ports.entry(key).or_insert_with(|| {
             let id = router.create_backend_need();
-            router.set_traffic_demand_edges(id, vec![service_id]);
+            router.set_traffic_demand_edges(id, vec![endpoint_id]);
             id
         });
         router.set_backend_need_level(port_id, need);
     }
 
     /// Remove all demand ports for a disconnected worker.
-    /// The signal naturally falls away on the services.
+    /// The signal naturally falls away on the endpoints.
     pub(crate) fn remove_worker(&mut self, router: &mut DRouter, worker_id: &WorkerId) {
-        let to_remove: Vec<(WorkerId, ServiceId)> = self
+        let to_remove: Vec<(WorkerId, EndpointId)> = self
             .ports
             .keys()
             .filter(|(w, _)| w == worker_id)

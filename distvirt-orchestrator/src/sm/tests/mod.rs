@@ -4,7 +4,9 @@ mod basic;
 mod misc;
 mod multi;
 mod retry;
-mod service_idle;
+// mod service_idle; // transplanted to EndpointSm grounding tests
+mod endpoint_idle;
+//mod stateright_endpoint;
 mod stateright_pod;
 mod stateright_service;
 mod stateright_workload;
@@ -34,7 +36,7 @@ fn drain_workload_timer_actions(router: &mut Router) -> Vec<TimerAction> {
         .filter(|(id, _)| *id == TIMER)
         .flat_map(|(_, input)| match input {
             TimerPortInput::WorkloadTimersInput(actions) => actions,
-            TimerPortInput::ServiceTimersInput(_) => vec![],
+            TimerPortInput::EndpointTimersInput(_) => vec![],
             TimerPortInput::PodTimersInput(_) => vec![],
         })
         .collect()
@@ -116,7 +118,7 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.create_service(S1, ServiceSm::new()); // activation-based
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -185,7 +187,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S1, ServiceSm::new()); // always-on
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -226,7 +228,7 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
         },
     );
 
-    router.create_service(S1, ServiceSm::new(true)); // activation-based
+    router.create_service(S1, ServiceSm::new()); // activation-based
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,

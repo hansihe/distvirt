@@ -235,12 +235,12 @@ fn apply_input(state: &WlNewModelState, input: WorkloadInput) -> WlNewModelState
     next
 }
 
-/// Build a DemandInfo with the given count and synthetic service IDs.
+/// Build a DemandInfo with the given count and synthetic endpoint IDs.
 fn make_demand(count: u32) -> DemandInfo {
-    let service_ids: Vec<ServiceId> = (0..count).map(|i| ServiceId(i as u64 + 1)).collect();
+    let endpoint_ids: Vec<EndpointId> = (0..count).map(|i| EndpointId(i as u64 + 1)).collect();
     DemandInfo {
         demand_count: count,
-        service_ids,
+        endpoint_ids,
     }
 }
 

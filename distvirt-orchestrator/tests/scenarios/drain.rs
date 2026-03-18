@@ -102,7 +102,7 @@ fn test_drain_single_worker_no_scheduling() {
     // Try to activate — workload should be stuck in WaitingForCapacity.
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1)
-        .send_event(distvirt_worker_protocol::WorkerEvent::EndpointActivation {
+        .send_event(distvirt_worker_protocol::WorkerEvent::EndpointDemandTraffic {
             namespace_id: "ns".into(),
             ip: svc_ip,
             service_id: Some(h.proto_service_id("ns", "web-svc")),

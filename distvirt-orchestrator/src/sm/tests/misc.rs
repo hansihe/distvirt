@@ -1,4 +1,5 @@
 use super::*;
+use super::super::endpoint::EndpointState;
 
 // ============================================================================
 // Graceful exit (Finished) + Worker identity tests
@@ -149,7 +150,7 @@ fn worker_identity_in_readiness() {
         },
     );
 
-    router.create_service(S1, ServiceSm::new(false)); // always-on
+    router.create_service(S1, ServiceSm::new()); // always-on
     router.set_service_config_edges(mgmt, vec![S1]);
     router.set_management_svc_spec(
         mgmt,
@@ -174,10 +175,11 @@ fn worker_identity_in_readiness() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.pod_worker_id, Some(worker));
 
-    // Service readiness should carry the real worker ID.
-    let s1 = router.get_service(&S1).unwrap();
-    match &s1.state {
-        ServiceState::Active { ready } => {
+    // Endpoint readiness should carry the real worker ID.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    match &ep.state {
+        EndpointState::Active { ready } => {
             assert_eq!(ready.worker_id, worker);
             assert_eq!(ready.pod_id, pod_id);
         }
@@ -220,10 +222,11 @@ fn worker_identity_updates_on_new_worker() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.pod_worker_id, Some(worker2));
 
-    // Service readiness should carry worker2.
-    let s1 = router.get_service(&S1).unwrap();
-    match &s1.state {
-        ServiceState::Active { ready } => {
+    // Endpoint readiness should carry worker2.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep = router.get_endpoint(&ep_id).unwrap();
+    match &ep.state {
+        EndpointState::Active { ready } => {
             assert_eq!(ready.worker_id, worker2);
         }
         other => panic!("expected Active, got {:?}", other),
