@@ -51,6 +51,6 @@ async fn test_pod_launch_failure_recovery_e2e() {
     cluster.assert_workload_retry_backoff("ns", "echo").await;
 
     // Advance past second backoff → 3rd attempt succeeds.
-    tokio::time::advance(Duration::from_secs(4)).await;
+    cluster.advance_time(Duration::from_secs(4)).await;
     cluster.assert_workload_running("ns", "echo").await;
 }

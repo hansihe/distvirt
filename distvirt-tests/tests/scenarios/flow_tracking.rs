@@ -6,9 +6,9 @@ use distvirt_orchestrator::types::*;
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::activation_spec;
 
-/// Active flows should prevent a workload from being suspended even after
-/// the service is deactivated. EndpointDemand with active=true
-/// keeps the workload alive past the idle timeout.
+/// Active demand (level signal) should prevent a workload from being
+/// suspended. The Active level holds demand independently of the idle
+/// timer — as long as Active is true the workload stays running.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_active_flows_prevent_suspend() {
     let mut cluster = TestCluster::new();
@@ -20,11 +20,11 @@ async fn test_active_flows_prevent_suspend() {
     cluster.converge().await;
     cluster.assert_workload_dormant("ns", "web").await;
 
-    // Activate via traffic.
+    // Activate via traffic impulse.
     cluster.send_activation_traffic("ns", "web-svc").await;
     cluster.assert_workload_running("ns", "web").await;
 
-    // Report active demand on the service endpoint.
+    // Worker reports active flows (level signal).
     let service_ip = cluster.service_ip("ns", "web-svc");
     cluster
         .shell
@@ -40,17 +40,14 @@ async fn test_active_flows_prevent_suspend() {
         .await;
     cluster.converge().await;
 
-    // Deactivate the service (no more new traffic demand).
-    cluster.deactivate_service("ns", "web-svc", &w1).await;
-
     // Advance well past idle timeout — workload should remain Running
-    // because active demand is keeping it alive.
+    // because Active level holds demand.
     cluster.advance_time(Duration::from_secs(60)).await;
     cluster.assert_workload_running("ns", "web").await;
 }
 
-/// Clearing active demand after deactivation should allow the idle timeout
-/// to proceed and eventually suspend the workload.
+/// When active demand (level signal) drops, the idle timeout should start
+/// and eventually suspend the workload.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_flow_end_triggers_idle_timeout() {
     let mut cluster = TestCluster::new();
@@ -62,11 +59,11 @@ async fn test_flow_end_triggers_idle_timeout() {
     cluster.converge().await;
     cluster.assert_workload_dormant("ns", "web").await;
 
-    // Activate via traffic.
+    // Activate via traffic impulse.
     cluster.send_activation_traffic("ns", "web-svc").await;
     cluster.assert_workload_running("ns", "web").await;
 
-    // Report active demand.
+    // Worker reports active flows (level signal).
     let service_ip = cluster.service_ip("ns", "web-svc");
     cluster
         .shell
@@ -82,14 +79,11 @@ async fn test_flow_end_triggers_idle_timeout() {
         .await;
     cluster.converge().await;
 
-    // Deactivate the service.
-    cluster.deactivate_service("ns", "web-svc", &w1).await;
-
-    // Advance past idle timeout — should still be running due to active demand.
+    // Advance past idle timeout — should still be running due to Active level.
     cluster.advance_time(Duration::from_secs(35)).await;
     cluster.assert_workload_running("ns", "web").await;
 
-    // Now clear active demand.
+    // Flows end — worker clears active demand.
     cluster
         .shell
         .inject_namespace_event(
@@ -104,7 +98,7 @@ async fn test_flow_end_triggers_idle_timeout() {
         .await;
     cluster.converge().await;
 
-    // Advance past idle timeout again — now the workload should suspend.
+    // Now the idle timeout should proceed and suspend the workload.
     cluster.advance_past_idle_timeout("ns", "web-svc").await;
     cluster.wait_workload_suspended("ns", "web").await;
     cluster.assert_workload_suspended("ns", "web").await;
