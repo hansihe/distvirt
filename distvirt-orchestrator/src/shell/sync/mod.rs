@@ -539,7 +539,7 @@ impl SyncShell {
         // Broadcast commands scoped to a namespace.
         for (namespace_id, cmd) in effects.broadcast_commands {
             if let Some(ns) = self.core.namespace(&namespace_id) {
-                let active: Vec<GlobalWorkerId> = ns.active_workers().iter().copied().collect();
+                let active: Vec<GlobalWorkerId> = ns.active_worker_ids().collect();
                 for worker_id in active {
                     if let Some(state) = self.workers.get_mut(&worker_id) {
                         state.commands_sent.push(cmd.clone());

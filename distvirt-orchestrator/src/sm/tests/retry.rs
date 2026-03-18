@@ -212,7 +212,7 @@ fn failed_recovery_via_demand_cycle() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
 
     let mgmt = router.create_management();
     router.create_schedule_request(SCHEDULE_REQUEST);
@@ -316,7 +316,7 @@ fn backoff_cleared_on_demand_drop() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
 
     let mgmt = router.create_management();
     router.create_schedule_request(SCHEDULE_REQUEST);
@@ -470,7 +470,7 @@ fn scavenge_during_failed() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
 
     let mgmt = router.create_management();
     router.create_schedule_request(SCHEDULE_REQUEST);

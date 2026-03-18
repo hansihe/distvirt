@@ -21,7 +21,7 @@ impl TestHarness {
                 );
             }
             Some(ns) => {
-                if ns.active_workers().is_empty() {
+                if ns.active_worker_ids().next().is_none() {
                     NamespaceStatus::Creating
                 } else {
                     NamespaceStatus::Active

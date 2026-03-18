@@ -110,7 +110,7 @@ fn finished_pod_self_destructs() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Create a standalone pod (no workload owner).
@@ -136,7 +136,7 @@ fn worker_identity_in_readiness() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -215,7 +215,7 @@ fn worker_identity_updates_on_new_worker() {
     // New worker takes over.
     let worker2 = WK2;
     router.create_worker(worker2);
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker2, WorkerInfo { capacity: 10, ..Default::default() });
     make_pod_running(&mut router, worker2, new_pod);
 
     // Workload should now report worker2.
@@ -240,7 +240,7 @@ fn pod_tracks_worker_from_input() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let pod_id = router.create_pod(PodSm::new());

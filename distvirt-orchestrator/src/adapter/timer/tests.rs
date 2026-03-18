@@ -28,7 +28,7 @@ fn setup_workload(
 ) -> (crate::sm::ManagementId, crate::sm::WorkerId) {
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -231,7 +231,7 @@ fn generation_change_restarts_timer() {
     // Set up activation-based service so we can trigger idle timer generation changes.
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -343,7 +343,7 @@ fn multiple_sm_kinds_in_one_cycle() {
     // Set up activation-based service.
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -443,7 +443,7 @@ fn fire_dispatches_workload_timer() {
     let adapter = TimerAdapter::new(test_config());
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -502,7 +502,7 @@ fn fire_dispatches_endpoint_timer() {
     let adapter = TimerAdapter::new(test_config());
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();

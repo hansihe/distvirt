@@ -106,7 +106,7 @@ fn setup_workload_with_pending_pod(
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -178,7 +178,7 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -220,7 +220,7 @@ fn setup_running_suspendable_workload(
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();

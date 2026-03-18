@@ -110,7 +110,7 @@ fn connect_worker(
     let effects1 = boundary.process_event(NamespaceCoreEvent::WorkerConnected {
         worker_id,
         proto_worker_id: test_proto_worker_id(worker_id),
-        info: WorkerInfo { capacity: 10 },
+        info: WorkerInfo { capacity: 10, ..Default::default() },
     });
 
     // Then, send NamespaceCreated to promote to active.
@@ -211,7 +211,7 @@ fn worker_disconnect_cleans_up() {
     });
 
     assert!(
-        boundary.active_workers().is_empty(),
+        boundary.active_worker_ids().next().is_none(),
         "worker should be removed after disconnect"
     );
     let _ = effects;
@@ -235,7 +235,7 @@ fn empty_core_processes_events() {
     let effects = boundary.process_event(NamespaceCoreEvent::WorkerDisconnected {
         worker_id: GlobalWorkerId::from(1),
     });
-    assert!(boundary.active_workers().is_empty());
+    assert!(boundary.active_worker_ids().next().is_none());
     let _ = effects;
 }
 

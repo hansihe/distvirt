@@ -12,7 +12,7 @@ fn setup_activation_endpoint() -> (Router, ManagementId, EndpointId) {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();

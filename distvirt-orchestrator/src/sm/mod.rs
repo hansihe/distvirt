@@ -242,6 +242,7 @@ impl Default for ServiceSpec {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct WorkerInfo {
     pub capacity: u32,
+    pub default_pool: Option<distvirt_worker_protocol::PoolId>,
 }
 
 /// Admin command event payload.

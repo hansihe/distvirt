@@ -38,6 +38,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 async-trait = "0.1"
 snow = "0.10"
 tar = "0.4"
+uuid = { version = "1.22.0", features = ["v4"] }
 
 [dev-dependencies]
 env_logger = "0.11"

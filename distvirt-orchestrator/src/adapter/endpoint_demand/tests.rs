@@ -17,7 +17,7 @@ fn setup_activation_service(router: &mut DRouter) -> (WorkerId, EndpointId) {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -116,7 +116,7 @@ fn multiple_workers_separate_ports() {
     let (worker1, endpoint_id) = setup_activation_service(&mut router);
     let worker2 = WK2;
     router.create_worker(worker2);
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker2, WorkerInfo { capacity: 10, ..Default::default() });
 
     let mut adapter = EndpointDemandAdapter::new();
     adapter.push_demand(
@@ -149,10 +149,10 @@ fn remove_worker_cleans_up() {
     router.create_timer(TIMER);
     let worker1 = WK1;
     router.create_worker(worker1);
-    router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker1, WorkerInfo { capacity: 10, ..Default::default() });
     let worker2 = WK2;
     router.create_worker(worker2);
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker2, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();

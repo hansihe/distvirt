@@ -50,6 +50,7 @@ pub struct OrchestratorCore {
 struct ConnectedWorkerInfo {
     proto_worker_id: distvirt_worker_protocol::WorkerId,
     max_pods: u32,
+    default_pool: Option<distvirt_worker_protocol::PoolId>,
 }
 
 impl OrchestratorCore {
@@ -166,12 +167,14 @@ impl OrchestratorCore {
         let worker_id = info.worker_id;
         let proto_worker_id = info.proto_worker_id;
         let max_pods = info.capabilities.max_pods;
+        let default_pool = info.capabilities.pools.first().map(|p| p.pool_id.clone());
 
         self.connected_workers.insert(
             worker_id,
             ConnectedWorkerInfo {
                 proto_worker_id: proto_worker_id.clone(),
                 max_pods,
+                default_pool: default_pool.clone(),
             },
         );
 
@@ -199,7 +202,7 @@ impl OrchestratorCore {
                 let ns_effects = ns.process_event(NamespaceCoreEvent::WorkerConnected {
                     worker_id,
                     proto_worker_id: proto_worker_id.clone(),
-                    info: WorkerInfo { capacity: max_pods },
+                    info: WorkerInfo { capacity: max_pods, default_pool: default_pool.clone() },
                 });
                 self.route_namespace_effects(&ns_id, ns_effects, &mut effects, now);
             }
@@ -294,9 +297,9 @@ impl OrchestratorCore {
         let workers: Vec<_> = self
             .connected_workers
             .iter()
-            .map(|(&wid, winfo)| (wid, winfo.proto_worker_id.clone(), winfo.max_pods))
+            .map(|(&wid, winfo)| (wid, winfo.proto_worker_id.clone(), winfo.max_pods, winfo.default_pool.clone()))
             .collect();
-        for (worker_id, proto_wid, max_pods) in workers {
+        for (worker_id, proto_wid, max_pods, default_pool) in workers {
             effects.direct_worker_commands.push(DirectWorkerCommand {
                 worker_id,
                 command: distvirt_worker_protocol::WorkerCommand::CreateNamespace {
@@ -309,7 +312,7 @@ impl OrchestratorCore {
                 let ns_effects = ns.process_event(NamespaceCoreEvent::WorkerConnected {
                     worker_id,
                     proto_worker_id: proto_wid,
-                    info: WorkerInfo { capacity: max_pods },
+                    info: WorkerInfo { capacity: max_pods, default_pool },
                 });
                 self.route_namespace_effects(&info.namespace_id, ns_effects, &mut effects, now);
             }

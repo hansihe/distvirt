@@ -20,7 +20,7 @@ fn shared_worker_death_independent_failure() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -120,7 +120,7 @@ fn shared_worker_death_independent_failure() {
     // New worker — recover both.
     let worker2 = WK2;
     router.create_worker(worker2);
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker2, WorkerInfo { capacity: 10, ..Default::default() });
     router.set_worker_assignment_edges(worker2, vec![new_pod1, new_pod2]);
     router.send_notify_pod_status(worker2, new_pod1, PodStatus::Running);
     router.send_notify_pod_status(worker2, new_pod2, PodStatus::Running);
@@ -147,7 +147,7 @@ fn service_retarget_workload() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -235,7 +235,7 @@ fn independent_workload_subgraphs() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // W1 + S1 subgraph.
@@ -347,7 +347,7 @@ fn service_fan_in_with_retarget() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Both workloads get specs.
@@ -537,7 +537,7 @@ fn full_teardown_cascade() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     // Set up two independent service→workload subgraphs via separate mgmt ports.

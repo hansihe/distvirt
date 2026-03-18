@@ -14,7 +14,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_fabric_endpoint(FABRIC_ENDPOINT);
 
@@ -183,7 +183,7 @@ fn multiple_services_change() {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
     router.create_fabric_endpoint(FABRIC_ENDPOINT);
 

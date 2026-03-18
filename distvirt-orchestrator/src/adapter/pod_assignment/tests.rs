@@ -15,7 +15,7 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, crate::sm::PodI
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
-    router.set_worker_info(worker, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
     router.create_schedule_request(SCHEDULE_REQUEST);
 
     let mgmt = router.create_management();
@@ -180,10 +180,10 @@ fn multiple_workers() {
 
     let worker1 = WK1;
     router.create_worker(worker1);
-    router.set_worker_info(worker1, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker1, WorkerInfo { capacity: 10, ..Default::default() });
     let worker2 = WK2;
     router.create_worker(worker2);
-    router.set_worker_info(worker2, WorkerInfo { capacity: 10 });
+    router.set_worker_info(worker2, WorkerInfo { capacity: 10, ..Default::default() });
 
     // Two separate management ports, each with its own workload+service.
     let w2_id = WorkloadId(2);

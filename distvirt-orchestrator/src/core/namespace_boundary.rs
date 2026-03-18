@@ -6,7 +6,7 @@
 //! - Pending worker lifecycle (before NamespaceCreated) still matters
 //! - Protocol command building (LaunchPod, StopPod, etc.) still lives here
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::adapter::dns_registry::DnsRegistryAction;
 use crate::adapter::endpoint::EndpointAction;
@@ -48,10 +48,15 @@ struct PendingWorkerCore {
 // NamespaceWithBoundary
 // =============================================================================
 
+/// Per-worker info tracked by the boundary layer.
+struct ActiveWorkerInfo {
+    default_pool: Option<distvirt_worker_protocol::PoolId>,
+}
+
 pub struct NamespaceWithBoundary {
     core: NamespaceCore,
     pending_workers: HashMap<GlobalWorkerId, PendingWorkerCore>,
-    active_workers: HashSet<GlobalWorkerId>,
+    active_workers: HashMap<GlobalWorkerId, ActiveWorkerInfo>,
     deferred_grants: Vec<(PodId, GlobalWorkerId)>,
     /// Artifact ID allocator (for suspend operations that create new artifacts).
     next_artifact_counter: u64,
@@ -66,7 +71,7 @@ impl NamespaceWithBoundary {
         NamespaceWithBoundary {
             core: NamespaceCore::new(namespace_id, timer_config, network),
             pending_workers: HashMap::new(),
-            active_workers: HashSet::new(),
+            active_workers: HashMap::new(),
             deferred_grants: Vec::new(),
             next_artifact_counter: 0,
         }
@@ -77,7 +82,7 @@ impl NamespaceWithBoundary {
         NamespaceWithBoundary {
             core,
             pending_workers: HashMap::new(),
-            active_workers: HashSet::new(),
+            active_workers: HashMap::new(),
             deferred_grants: Vec::new(),
             next_artifact_counter: 0,
         }
@@ -111,7 +116,7 @@ impl NamespaceWithBoundary {
                 );
             }
             NamespaceCoreEvent::WorkerDisconnected { worker_id } => {
-                let was_active = self.active_workers.remove(&worker_id);
+                let was_active = self.active_workers.remove(&worker_id).is_some();
                 // Discard any deferred grants for this worker.
                 self.deferred_grants.retain(|(_, w)| *w != worker_id);
 
@@ -131,7 +136,9 @@ impl NamespaceWithBoundary {
                         if let Some(pending) = self.pending_workers.remove(&wne.worker_id) {
                             // Create router worker port with the same ID.
                             self.core.create_worker_port(wne.worker_id);
-                            self.active_workers.insert(wne.worker_id);
+                            self.active_workers.insert(wne.worker_id, ActiveWorkerInfo {
+                                default_pool: pending.info.default_pool.clone(),
+                            });
 
                             // Send initial DNS registry to the new worker.
                             let sync_entries = self.core.adapters.dns_registry.build_sync();
@@ -237,7 +244,7 @@ impl NamespaceWithBoundary {
                 }
 
                 // Worker must be active to process events.
-                if !self.active_workers.contains(&wne.worker_id) {
+                if !self.active_workers.contains_key(&wne.worker_id) {
                     eprintln!(
                         "warning: unknown global worker {:?}, dropping event",
                         wne.worker_id
@@ -261,7 +268,7 @@ impl NamespaceWithBoundary {
                     pod_id,
                     worker_id,
                 } => {
-                    if self.active_workers.contains(&worker_id) {
+                    if self.active_workers.contains_key(&worker_id) {
                         let internal_effects = self.core.process_event(
                             InternalNamespaceEvent::SchedulerGrant {
                                 worker_id,
@@ -462,7 +469,7 @@ impl NamespaceWithBoundary {
                 } => {
                     let proto_artifact_id = ArtifactId(artifact_id.0.to_string());
                     let cmd =
-                        self.build_resume_command(&proto_pod_id(pod_id), &proto_artifact_id, &spec);
+                        self.build_resume_command(worker_id, &proto_pod_id(pod_id), &proto_artifact_id, &spec);
                     effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Stop { worker_id, pod_id } => {
@@ -474,13 +481,16 @@ impl NamespaceWithBoundary {
                     effects.worker_commands.push((worker_id, cmd));
                 }
                 PodAssignmentAction::Suspend { worker_id, pod_id } => {
+                    let pool_id = self.active_workers.get(&worker_id)
+                        .and_then(|w| w.default_pool.clone())
+                        .expect("suspend target worker must have a pool");
                     let artifact_port_id = self.alloc_artifact_id();
                     let proto_artifact_id = ArtifactId(artifact_port_id.0.to_string());
                     let cmd = distvirt_worker_protocol::WorkerCommand::SuspendPod {
                         namespace_id: self.core.namespace_id().clone(),
                         pod_id: proto_pod_id(pod_id),
                         artifact_id: proto_artifact_id,
-                        pool_id: distvirt_worker_protocol::PoolId::from("default"),
+                        pool_id,
                     };
                     effects.worker_commands.push((worker_id, cmd));
                 }
@@ -580,10 +590,14 @@ impl NamespaceWithBoundary {
 
     fn build_resume_command(
         &self,
+        worker_id: GlobalWorkerId,
         proto_pod_id: &distvirt_worker_protocol::PodId,
         proto_artifact_id: &distvirt_worker_protocol::ArtifactId,
         spec: &Option<crate::sm::WorkloadSpec>,
     ) -> distvirt_worker_protocol::WorkerCommand {
+        let pool_id = self.active_workers.get(&worker_id)
+            .and_then(|w| w.default_pool.clone())
+            .expect("resume target worker must have a pool");
         let network = spec
             .as_ref()
             .and_then(|s| s.network.clone())
@@ -594,7 +608,7 @@ impl NamespaceWithBoundary {
             pod_id: *proto_pod_id,
             artifact_id: proto_artifact_id.clone(),
             network,
-            pool_id: distvirt_worker_protocol::PoolId::from("default"),
+            pool_id,
         }
     }
 
@@ -686,8 +700,8 @@ impl NamespaceWithBoundary {
     // =========================================================================
 
     /// Get the set of active worker IDs (for the async shell to know whom to broadcast to).
-    pub fn active_workers(&self) -> &HashSet<GlobalWorkerId> {
-        &self.active_workers
+    pub fn active_worker_ids(&self) -> impl Iterator<Item = GlobalWorkerId> + '_ {
+        self.active_workers.keys().copied()
     }
 
     /// Access the router (for inspecting workload/service/pod state in tests).

@@ -156,7 +156,7 @@ fn apply_pod_input(state: &PodNewModelState, input: PodInput) -> PodNewModelStat
 }
 
 fn make_worker_info() -> (WorkerId, WorkerInfo) {
-    (WorkerId(1), WorkerInfo { capacity: 10 })
+    (WorkerId(1), WorkerInfo { capacity: 10, ..Default::default() })
 }
 
 // ============================================================================

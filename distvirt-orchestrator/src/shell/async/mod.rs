@@ -623,7 +623,7 @@ impl Shell {
         // Namespace-scoped broadcasts.
         for (namespace_id, cmd) in effects.broadcast_commands {
             if let Some(ns) = self.orchestrator.namespace(&namespace_id) {
-                for &worker_id in ns.active_workers() {
+                for worker_id in ns.active_worker_ids() {
                     if let Some(slot) = self.workers.get(&worker_id) {
                         slot.writer.send(cmd.clone()).await;
                     }
