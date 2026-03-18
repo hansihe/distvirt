@@ -62,6 +62,9 @@ pub struct WorkloadSm {
     /// Pod IP from spec's network config, included in ReadyInfo for downstream
     /// consumers (endpoint signals).
     pub pod_ip: std::net::Ipv4Addr,
+
+    /// Endpoint SM owned by this workload (if any).
+    pub endpoint_id: Option<EndpointId>,
 }
 
 impl WorkloadSm {
@@ -92,6 +95,7 @@ impl WorkloadSm {
             awaiting_suspend: false,
             current_image: None,
             pod_ip: std::net::Ipv4Addr::UNSPECIFIED,
+            endpoint_id: None,
         }
     }
 
@@ -149,6 +153,25 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         .as_ref()
                         .map(|n| n.ip)
                         .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+
+                    // --- Create/update workload-owned endpoint ---
+                    if let Some(ref network) = spec.network {
+                        if self.endpoint_id.is_none() {
+                            let ep_id = ctx.create_endpoint(
+                                endpoint::EndpointSm::new(true),
+                            );
+                            self.endpoint_id = Some(ep_id);
+                            ctx.set_workload_endpoint_ownership_edges(vec![ep_id]);
+                        }
+                        ctx.set_endpoint_config(Some(endpoint::EndpointConfig {
+                            kind: endpoint::EndpointKind::Workload,
+                            workload: ctx.id(),
+                            has_activation: true,
+                            idle_timeout: std::time::Duration::from_secs(30),
+                            ip: network.ip,
+                            dns_entry: None,
+                        }));
+                    }
 
                     // --- Update suspend_on_idle from spec ---
                     let old_suspend_on_idle = self.suspend_on_idle;

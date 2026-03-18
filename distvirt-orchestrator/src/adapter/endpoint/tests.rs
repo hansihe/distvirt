@@ -102,11 +102,14 @@ fn service_becomes_active_update() {
 
     assert_eq!(actions.len(), 1);
     match &actions[0] {
-        EndpointAction::ServiceUpdate { endpoint_id: _, info } => {
-            assert_eq!(info.service_id, S1);
-            assert_eq!(info.worker_id, worker);
+        EndpointAction::Update { endpoint_id: _, info } => {
+            assert!(matches!(
+                info.kind,
+                crate::sm::endpoint::EndpointKind::Service { service_id, .. } if service_id == S1
+            ));
+            assert_eq!(info.backend.as_ref().unwrap().worker_id, worker);
         }
-        other => panic!("expected ServiceUpdate, got {:?}", other),
+        other => panic!("expected Update, got {:?}", other),
     }
 }
 
@@ -131,12 +134,12 @@ fn service_leaves_active_remove() {
     let (actions, _) = adapter.reconcile(&mut router);
     let removes: Vec<_> = actions
         .iter()
-        .filter(|a| matches!(a, EndpointAction::ServiceRemove { .. }))
+        .filter(|a| matches!(a, EndpointAction::Remove { .. }))
         .collect();
     // Verify the old_info is populated on Remove actions.
     for r in &removes {
-        if let EndpointAction::ServiceRemove { old_info, .. } = r {
-            assert_eq!(old_info.worker_id, worker);
+        if let EndpointAction::Remove { old_info, .. } = r {
+            assert_eq!(old_info.backend.as_ref().unwrap().worker_id, worker);
         }
     }
     assert!(
@@ -256,7 +259,7 @@ fn multiple_services_change() {
 
     let update_count = actions
         .iter()
-        .filter(|a| matches!(a, EndpointAction::ServiceUpdate { .. }))
+        .filter(|a| matches!(a, EndpointAction::Update { .. }))
         .count();
     assert!(
         update_count >= 2,

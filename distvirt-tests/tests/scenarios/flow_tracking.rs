@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use distvirt_orchestrator::core::WorkerNamespaceEventKind;
+use distvirt_orchestrator::core::{EndpointDemandSignal, WorkerNamespaceEventKind};
 use distvirt_orchestrator::types::*;
 
 use crate::harness::TestCluster;
@@ -26,15 +26,18 @@ async fn test_active_flows_prevent_suspend() {
 
     // Report active demand on the service endpoint.
     let service_ip = cluster.service_ip("ns", "web-svc");
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        w1,
-        WorkerNamespaceEventKind::EndpointDemand {
-            ip: service_ip,
-            service_id: None,
-            active: true,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            w1,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: service_ip,
+                service_id: None,
+                signal: EndpointDemandSignal::Active { active: true },
+            },
+        )
+        .await;
     cluster.converge().await;
 
     // Deactivate the service (no more new traffic demand).
@@ -65,15 +68,18 @@ async fn test_flow_end_triggers_idle_timeout() {
 
     // Report active demand.
     let service_ip = cluster.service_ip("ns", "web-svc");
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        w1,
-        WorkerNamespaceEventKind::EndpointDemand {
-            ip: service_ip,
-            service_id: None,
-            active: true,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            w1,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: service_ip,
+                service_id: None,
+                signal: EndpointDemandSignal::Active { active: true },
+            },
+        )
+        .await;
     cluster.converge().await;
 
     // Deactivate the service.
@@ -84,15 +90,18 @@ async fn test_flow_end_triggers_idle_timeout() {
     cluster.assert_workload_running("ns", "web").await;
 
     // Now clear active demand.
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        w1,
-        WorkerNamespaceEventKind::EndpointDemand {
-            ip: service_ip,
-            service_id: None,
-            active: false,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            w1,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: service_ip,
+                service_id: None,
+                signal: EndpointDemandSignal::Active { active: false },
+            },
+        )
+        .await;
     cluster.converge().await;
 
     // Advance past idle timeout again — now the workload should suspend.
@@ -129,15 +138,18 @@ async fn test_flow_status_cleared_on_worker_disconnect() {
 
     // Report active demand on the hosting worker.
     let service_ip = cluster.service_ip("ns", "web-svc");
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        hosting,
-        WorkerNamespaceEventKind::EndpointDemand {
-            ip: service_ip,
-            service_id: None,
-            active: true,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            hosting,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: service_ip,
+                service_id: None,
+                signal: EndpointDemandSignal::Active { active: true },
+            },
+        )
+        .await;
     cluster.converge().await;
 
     // Disconnect the hosting worker.

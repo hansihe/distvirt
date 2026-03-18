@@ -163,11 +163,13 @@ impl NamespaceState {
                 match event {
                     FabricEvent::EndpointActivation { dst_ip, service_id } => {
                         let svc_id = service_id.map(ServiceId::from);
-                        if let Err(e) = bridge_event_tx.try_send(WorkerEvent::EndpointActivation {
-                            namespace_id: bridge_ns_id.clone(),
-                            ip: dst_ip,
-                            service_id: svc_id,
-                        }) {
+                        if let Err(e) =
+                            bridge_event_tx.try_send(WorkerEvent::EndpointDemandTraffic {
+                                namespace_id: bridge_ns_id.clone(),
+                                ip: dst_ip,
+                                service_id: svc_id,
+                            })
+                        {
                             log::warn!("worker: dropped EndpointActivation event: {}", e);
                         }
                     }
@@ -177,12 +179,14 @@ impl NamespaceState {
                         active,
                     } => {
                         let svc_id = service_id.map(ServiceId::from);
-                        if let Err(e) = bridge_event_tx.try_send(WorkerEvent::EndpointDemand {
-                            namespace_id: bridge_ns_id.clone(),
-                            ip,
-                            service_id: svc_id,
-                            active,
-                        }) {
+                        if let Err(e) =
+                            bridge_event_tx.try_send(WorkerEvent::EndpointDemandActive {
+                                namespace_id: bridge_ns_id.clone(),
+                                ip,
+                                service_id: svc_id,
+                                active,
+                            })
+                        {
                             log::warn!("worker: dropped EndpointDemand event: {}", e);
                         }
                     }
@@ -434,7 +438,7 @@ impl NamespaceState {
                     service_id,
                     active,
                 } => {
-                    pending_events.push(WorkerEvent::EndpointDemand {
+                    pending_events.push(WorkerEvent::EndpointDemandActive {
                         namespace_id: namespace_id.clone(),
                         ip,
                         service_id,

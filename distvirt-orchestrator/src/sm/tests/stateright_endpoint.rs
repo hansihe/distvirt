@@ -175,16 +175,16 @@ fn make_config(has_activation: bool) -> EndpointConfig {
     EndpointConfig {
         kind: EndpointKind::Service {
             service_id: ServiceId(1),
+            policy: distvirt_worker_protocol::ServicePolicy {
+                buffer_frames: 0,
+                timeout_ms: 0,
+                activator: None,
+            },
         },
         workload: WorkloadId(0),
         has_activation,
         idle_timeout: std::time::Duration::from_secs(30),
         ip: std::net::Ipv4Addr::new(10, 0, 0, 100),
-        policy: distvirt_worker_protocol::ServicePolicy {
-            buffer_frames: 0,
-            timeout_ms: 0,
-            activator: None,
-        },
         dns_entry: None,
     }
 }
@@ -542,11 +542,6 @@ impl Representative for EndpointModelState {
 
         // Normalize endpoint config fields — don't affect SM logic.
         s.sm.ip = std::net::Ipv4Addr::UNSPECIFIED;
-        s.sm.service_policy = distvirt_worker_protocol::ServicePolicy {
-            buffer_frames: 0,
-            timeout_ms: 0,
-            activator: None,
-        };
         s.sm.dns_entry = None;
         s.sm.idle_timeout = std::time::Duration::ZERO;
 

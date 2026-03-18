@@ -19,10 +19,14 @@ pub enum EndpointState {
     Active { ready: ReadyInfo },
 }
 
-/// Identifies what kind of entity owns this endpoint.
+/// Identifies what kind of entity owns this endpoint, carrying kind-specific data.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EndpointKind {
-    Service { service_id: ServiceId },
+    Service {
+        service_id: ServiceId,
+        policy: distvirt_worker_protocol::ServicePolicy,
+    },
+    Workload,
 }
 
 /// Configuration pushed by the owner (Service or Workload) via ownership edge signal.
@@ -33,7 +37,6 @@ pub struct EndpointConfig {
     pub has_activation: bool,
     pub idle_timeout: std::time::Duration,
     pub ip: std::net::Ipv4Addr,
-    pub policy: distvirt_worker_protocol::ServicePolicy,
     pub dns_entry: Option<DnsEntryInfo>,
 }
 
@@ -77,10 +80,8 @@ pub struct EndpointSm {
     pub active_level: bool,
     /// What kind of entity owns this endpoint.
     pub kind: Option<EndpointKind>,
-    /// IP from config, used to construct ServiceEndpointInfo.
+    /// IP from config, used to construct EndpointInfo.
     pub ip: std::net::Ipv4Addr,
-    /// Service policy from config, used to construct ServiceEndpointInfo.
-    pub service_policy: distvirt_worker_protocol::ServicePolicy,
     /// DNS entry info from config, signaled to the DnsRegistry port.
     pub dns_entry: Option<DnsEntryInfo>,
 }
@@ -97,11 +98,6 @@ impl EndpointSm {
             active_level: false,
             kind: None,
             ip: std::net::Ipv4Addr::UNSPECIFIED,
-            service_policy: distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 0,
-                timeout_ms: 0,
-                activator: None,
-            },
             dns_entry: None,
         };
         sm.derive_state();
@@ -158,13 +154,27 @@ impl EndpointSm {
         ctx.set_idle_timer_active(self.idle_timer_active);
 
         let endpoint_info = match (&self.state, &self.kind) {
-            (EndpointState::Active { ready }, Some(EndpointKind::Service { service_id })) => {
-                Some(ServiceEndpointInfo {
-                    service_id: *service_id,
-                    service_ip: self.ip,
-                    policy: self.service_policy.clone(),
-                    pod_ip: ready.pod_ip,
-                    worker_id: ready.worker_id,
+            (EndpointState::Active { ready }, Some(kind)) => {
+                let backend_ip = match kind {
+                    EndpointKind::Service { .. } => Some(ready.pod_ip),
+                    EndpointKind::Workload => None,
+                };
+                Some(EndpointInfo {
+                    kind: kind.clone(),
+                    ip: self.ip,
+                    backend: Some(EndpointBackendInfo {
+                        ip: backend_ip,
+                        worker_id: ready.worker_id,
+                    }),
+                })
+            }
+            (EndpointState::NeedBackend | EndpointState::Idle, Some(kind))
+                if self.has_activation =>
+            {
+                Some(EndpointInfo {
+                    kind: kind.clone(),
+                    ip: self.ip,
+                    backend: None,
                 })
             }
             _ => None,
@@ -185,7 +195,6 @@ impl EndpointSm {
             self.has_activation = config.has_activation;
             self.idle_timeout = config.idle_timeout;
             self.ip = config.ip;
-            self.service_policy = config.policy;
             self.dns_entry = config.dns_entry;
 
             // Point demand at the workload.

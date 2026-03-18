@@ -154,7 +154,7 @@ impl NamespaceWithBoundary {
                                 let mut endpoints: Vec<distvirt_worker_protocol::EndpointSpec> = Vec::new();
 
                                 // Service endpoints
-                                for (_endpoint_id, info) in self.core.adapters.endpoint.build_service_sync() {
+                                for (_endpoint_id, info) in self.core.adapters.endpoint.build_endpoint_sync() {
                                     endpoints.push(Self::build_endpoint_spec_from_info(&info));
                                 }
 
@@ -598,23 +598,38 @@ impl NamespaceWithBoundary {
         }
     }
 
-    /// Build an EndpointSpec from self-contained ServiceEndpointInfo.
+    /// Build an EndpointSpec from self-contained EndpointInfo.
     fn build_endpoint_spec_from_info(
-        info: &crate::sm::ServiceEndpointInfo,
+        info: &crate::sm::EndpointInfo,
     ) -> distvirt_worker_protocol::EndpointSpec {
-        distvirt_worker_protocol::EndpointSpec {
-            ip: info.service_ip,
-            kind: distvirt_worker_protocol::EndpointKind::Service {
-                service_id: info.service_id,
-                policy: info.policy.clone(),
-                backend: Some(distvirt_worker_protocol::EndpointPodBackend {
-                    pod_ip: info.pod_ip,
-                    placement: Some(distvirt_worker_protocol::EndpointPlacement {
-                        worker_id: info.worker_id,
+        use crate::sm::endpoint::EndpointKind;
+        let proto_kind = match &info.kind {
+            EndpointKind::Service { service_id, policy } => {
+                distvirt_worker_protocol::EndpointKind::Service {
+                    service_id: *service_id,
+                    policy: policy.clone(),
+                    backend: info.backend.as_ref().map(|b| {
+                        distvirt_worker_protocol::EndpointPodBackend {
+                            pod_ip: b.ip.unwrap(),
+                            placement: Some(distvirt_worker_protocol::EndpointPlacement {
+                                worker_id: b.worker_id,
+                            }),
+                            ready: true,
+                        }
                     }),
-                    ready: true,
+                }
+            }
+            EndpointKind::Workload => distvirt_worker_protocol::EndpointKind::Pod {
+                placement: info.backend.as_ref().map(|b| {
+                    distvirt_worker_protocol::EndpointPlacement {
+                        worker_id: b.worker_id,
+                    }
                 }),
             },
+        };
+        distvirt_worker_protocol::EndpointSpec {
+            ip: info.ip,
+            kind: proto_kind,
         }
     }
 
@@ -623,7 +638,7 @@ impl NamespaceWithBoundary {
         action: &EndpointAction,
     ) -> distvirt_worker_protocol::WorkerCommand {
         match action {
-            EndpointAction::ServiceUpdate { endpoint_id: _, info } => {
+            EndpointAction::Update { endpoint_id: _, info } => {
                 let endpoint_spec = Self::build_endpoint_spec_from_info(info);
                 distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
                     namespace_id: self.core.namespace_id().clone(),
@@ -631,14 +646,14 @@ impl NamespaceWithBoundary {
                     removed_ips: vec![],
                 }
             }
-            EndpointAction::ServiceRemove {
+            EndpointAction::Remove {
                 endpoint_id: _,
                 old_info,
             } => {
                 distvirt_worker_protocol::WorkerCommand::EndpointUpdate {
                     namespace_id: self.core.namespace_id().clone(),
                     upserted: vec![],
-                    removed_ips: vec![old_info.service_ip],
+                    removed_ips: vec![old_info.ip],
                 }
             }
             EndpointAction::WireGuardPeerUpdate { peer_id: _, info } => {

@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use distvirt_orchestrator::core::WorkerNamespaceEventKind;
+use distvirt_orchestrator::core::{EndpointDemandSignal, WorkerNamespaceEventKind};
 use distvirt_orchestrator::types::NamespaceId;
 
 use crate::harness::TestCluster;
@@ -21,14 +21,18 @@ async fn test_route_miss_activates_dormant_workload_e2e() {
     cluster.assert_workload_dormant("ns", "web").await;
 
     // Inject EndpointActivation with pod IP (not service IP), service_id: None.
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        w1,
-        WorkerNamespaceEventKind::EndpointActivation {
-            ip: Ipv4Addr::new(172, 16, 0, 10),
-            service_id: None,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            w1,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: Ipv4Addr::new(172, 16, 0, 10),
+                service_id: None,
+                signal: EndpointDemandSignal::Traffic,
+            },
+        )
+        .await;
     cluster.converge().await;
 
     cluster.assert_workload_running("ns", "web").await;
@@ -55,14 +59,18 @@ async fn test_route_miss_activates_suspended_workload_e2e() {
     cluster.wait_workload_suspended("ns", "web").await;
 
     // Now inject a route-miss activation with pod IP.
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        w1,
-        WorkerNamespaceEventKind::EndpointActivation {
-            ip: Ipv4Addr::new(172, 16, 0, 10),
-            service_id: None,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            w1,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: Ipv4Addr::new(172, 16, 0, 10),
+                service_id: None,
+                signal: EndpointDemandSignal::Traffic,
+            },
+        )
+        .await;
     cluster.converge().await;
 
     cluster.assert_workload_running("ns", "web").await;

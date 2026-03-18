@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use distvirt_orchestrator::core::WorkerNamespaceEventKind;
+use distvirt_orchestrator::core::{EndpointDemandSignal, WorkerNamespaceEventKind};
 use distvirt_orchestrator::types::*;
 
 use crate::harness::TestCluster;
@@ -29,15 +29,18 @@ async fn test_endpoint_flow_status_via_service_id() {
     // Inject EndpointDemand with the service IP.
     // The orchestrator should resolve the workload via IP lookup.
     let service_ip = cluster.service_ip("ns", "web-svc");
-    cluster.shell.inject_namespace_event(
-        NamespaceId::from("ns"),
-        w1,
-        WorkerNamespaceEventKind::EndpointDemand {
-            ip: service_ip,
-            service_id: None,
-            active: false,
-        },
-    ).await;
+    cluster
+        .shell
+        .inject_namespace_event(
+            NamespaceId::from("ns"),
+            w1,
+            WorkerNamespaceEventKind::EndpointDemand {
+                ip: service_ip,
+                service_id: None,
+                signal: EndpointDemandSignal::Active { active: false },
+            },
+        )
+        .await;
     cluster.converge().await;
 
     // The workload should have processed the demand change.

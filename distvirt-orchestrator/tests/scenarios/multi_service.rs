@@ -37,11 +37,12 @@ fn test_two_services_one_workload_shared_demand() {
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
-    // Activate svc-b → workload already running
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
+    // Activate svc-b with sustained demand → workload already running
+    h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
         ip: Ipv4Addr::new(172, 16, 0, 101),
         service_id: Some(svc_b_id),
+        active: true,
     });
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -50,8 +51,8 @@ fn test_two_services_one_workload_shared_demand() {
     // Fixed: svc-b receives late-joiner WorkloadReady and transitions to Active.
     h.assert_service_active("ns", "svc-b");
 
-    // Idle svc-a → demand drops. Workload stays running because svc-b has demand
-    // (even though svc-b is in NeedBackend, it has issued DemandUp).
+    // Idle svc-a → demand drops. Workload stays running because svc-b has
+    // sustained demand via EndpointDemandActive.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
         ip: h.service_ip("ns", "svc-a"),
@@ -61,7 +62,7 @@ fn test_two_services_one_workload_shared_demand() {
     h.converge();
     let timeout = Duration::from_secs(30);
     h.advance_time(timeout + Duration::from_secs(1));
-    // Workload should still be running (demand_count=1 from svc-b's DemandUp)
+    // Workload should still be running (svc-b has sustained demand)
     h.assert_workload_running("ns", "shared");
 }
 
@@ -395,7 +396,7 @@ fn test_remove_only_active_service_drops_demand() {
     h.converge();
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
-    h.assert_service_idle("ns", "svc-b");
+    h.assert_service_active("ns", "svc-b");
 
     // Remove svc-a (the only service with demand) via spec update.
     let mut new_spec = multi_service_spec();

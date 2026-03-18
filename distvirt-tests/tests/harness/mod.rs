@@ -18,9 +18,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use distvirt_orchestrator::adapter::timer::TimerConfig;
+use distvirt_orchestrator::core::EndpointDemandSignal;
 use distvirt_orchestrator::core::GlobalWorkerId;
-use distvirt_orchestrator::core::types::WorkerStateCoreEvent;
 use distvirt_orchestrator::core::WorkerNamespaceEventKind;
+use distvirt_orchestrator::core::types::WorkerStateCoreEvent;
 use distvirt_orchestrator::shell::r#async::{self, ShellHandle};
 use distvirt_orchestrator::types::*;
 use distvirt_worker::image_provider::stub::StubImageProvider;
@@ -69,8 +70,7 @@ pub struct TestCluster {
 impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
-        let (shell, shell_task) =
-            r#async::spawn("test-secret".to_string(), test_timer_config());
+        let (shell, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config());
         TestCluster {
             shell,
             _shell_task: shell_task,
@@ -309,25 +309,18 @@ impl TestCluster {
     }
 
     /// Get the worker hosting a workload, from the pod status reports.
-    pub async fn worker_id_for_workload(
-        &self,
-        ns_id: &str,
-        wl_id: &str,
-    ) -> GlobalWorkerId {
+    pub async fn worker_id_for_workload(&self, ns_id: &str, wl_id: &str) -> GlobalWorkerId {
         let status = self.namespace_status(ns_id).await;
         let wl = status
             .workloads
             .get(&WorkloadName(wl_id.to_string()))
             .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
-        let pod_id = wl
-            .pod_id
-            .as_ref()
-            .unwrap_or_else(|| {
-                panic!(
-                    "workload '{}/{}' has no pod_id (state: {})",
-                    ns_id, wl_id, wl.state
-                )
-            });
+        let pod_id = wl.pod_id.as_ref().unwrap_or_else(|| {
+            panic!(
+                "workload '{}/{}' has no pod_id (state: {})",
+                ns_id, wl_id, wl.state
+            )
+        });
         let pod = status
             .pods
             .get(pod_id)
@@ -369,7 +362,7 @@ impl TestCluster {
                 WorkerNamespaceEventKind::EndpointDemand {
                     ip: svc_ip,
                     service_id: None,
-                    active: false,
+                    signal: EndpointDemandSignal::Active { active: false },
                 },
             )
             .await;
@@ -410,15 +403,12 @@ impl TestCluster {
             .specs
             .get(ns_id)
             .unwrap_or_else(|| panic!("no cached spec for namespace '{}'", ns_id));
-        let svc_spec = spec
-            .services
-            .get(svc_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "service spec '{}' not found in namespace '{}'",
-                    svc_id, ns_id
-                )
-            });
+        let svc_spec = spec.services.get(svc_id).unwrap_or_else(|| {
+            panic!(
+                "service spec '{}' not found in namespace '{}'",
+                svc_id, ns_id
+            )
+        });
         let idle_timeout = svc_spec
             .activation
             .as_ref()

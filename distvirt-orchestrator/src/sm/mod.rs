@@ -119,15 +119,23 @@ pub struct DnsEntryInfo {
     pub ip: std::net::Ipv4Addr,
 }
 
-/// Self-contained endpoint info emitted by service SM to the endpoint port.
-/// Combines service spec fields (ip, policy) with workload readiness (pod_ip, worker_id).
+/// Backend placement info, present when a ready backend exists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ServiceEndpointInfo {
-    pub service_id: ServiceId,
-    pub service_ip: std::net::Ipv4Addr,
-    pub policy: distvirt_worker_protocol::ServicePolicy,
-    pub pod_ip: std::net::Ipv4Addr,
+pub struct EndpointBackendInfo {
+    /// Backing pod IP. Only present for Service endpoints (the pod IP
+    /// that traffic is forwarded to). None for Workload endpoints
+    /// (where the endpoint IP is the pod IP).
+    pub ip: Option<std::net::Ipv4Addr>,
     pub worker_id: WorkerId,
+}
+
+/// Self-contained endpoint info emitted by endpoint SM to the fabric endpoint port.
+/// Combines owner-specific fields (via EndpointKind) with optional backend placement.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EndpointInfo {
+    pub kind: endpoint::EndpointKind,
+    pub ip: std::net::Ipv4Addr,
+    pub backend: Option<EndpointBackendInfo>,
 }
 
 /// Endpoint info for a WireGuard peer: its allocated IP and the worker hosting the WG adapter.
@@ -496,14 +504,17 @@ impl Aggregator for SvcSpecAggregator {
 pub struct EndpointConfigAggregator;
 
 impl Aggregator for EndpointConfigAggregator {
-    type Input = (ServiceId, Option<endpoint::EndpointConfig>);
+    type Input = ConfigInputSource;
     type Output = Option<endpoint::EndpointConfig>;
 
     fn aggregate(
         &self,
-        inputs: &[(ServiceId, Option<endpoint::EndpointConfig>)],
+        inputs: &[ConfigInputSource],
     ) -> Option<endpoint::EndpointConfig> {
-        inputs.first().and_then(|(_, config)| config.clone())
+        inputs.iter().find_map(|src| match src {
+            ConfigInputSource::ServiceEndpointConfig(_, config) => config.clone(),
+            ConfigInputSource::WorkloadEndpointConfig(_, config) => config.clone(),
+        })
     }
 }
 
@@ -539,7 +550,7 @@ distvirt_sm_router::router! {
         Endpoint::Status(endpoint::EndpointStatus),
         Endpoint::CurrentBackendNeed(BackendNeed),
         Endpoint::IdleTimerActive(bool),
-        Endpoint::EndpointInfo(Option<ServiceEndpointInfo>),
+        Endpoint::EndpointInfo(Option<EndpointInfo>),
         Endpoint::DnsEntry(Option<DnsEntryInfo>),
         // WireGuard peer
         WireGuardPeer::EndpointInfo(Option<WireGuardPeerEndpointInfo>),
@@ -553,6 +564,7 @@ distvirt_sm_router::router! {
         Workload::ConsecutiveFailures(u32),
         Workload::SpecStale(bool),
         Workload::ArtifactRef(bool),
+        Workload::EndpointConfig(Option<endpoint::EndpointConfig>),
         // Pod (unchanged)
         Pod::Status(PodStatus),
         Pod::AssignedWorker(Option<WorkerId>),
@@ -569,6 +581,8 @@ distvirt_sm_router::router! {
     edges {
         // Service → Endpoint ownership
         ServiceEndpointOwnership: Service -> Endpoint,
+        // Workload → Endpoint ownership
+        WorkloadEndpointOwnership: Workload -> Endpoint,
         // Endpoint → Workload demand
         EndpointDemand: Endpoint -> Workload,
         // Workload → Endpoint readiness
@@ -632,7 +646,7 @@ distvirt_sm_router::router! {
             aggregator: SvcSpecAggregator,
         },
         Endpoint::ConfigInput {
-            sources: [(ServiceEndpointOwnership, Service::EndpointConfig)],
+            sources: [(ServiceEndpointOwnership, Service::EndpointConfig), (WorkloadEndpointOwnership, Workload::EndpointConfig)],
             aggregator: EndpointConfigAggregator,
         },
         Endpoint::ReadinessInput {

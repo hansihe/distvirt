@@ -36,12 +36,12 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                     ctx.set_endpoint_config(Some(endpoint::EndpointConfig {
                         kind: endpoint::EndpointKind::Service {
                             service_id: ctx.id(),
+                            policy: spec.policy,
                         },
                         workload: spec.workload,
                         has_activation: spec.has_activation,
                         idle_timeout: spec.idle_timeout,
                         ip: spec.ip,
-                        policy: spec.policy,
                         dns_entry: match (spec.dns_name, spec.dns_ip) {
                             (Some(name), Some(ip)) => Some(DnsEntryInfo { name, ip }),
                             _ => None,
