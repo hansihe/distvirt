@@ -15,19 +15,36 @@ async fn test_delete_during_launch() {
     // Create namespace but don't fully converge — just enough to start scheduling.
     cluster.create_namespace("ns", always_on_spec()).await;
 
-    // Partially converge: drain + a few yields, but not full quiescence.
-    // This gives the orchestrator time to schedule but the pod may still be launching.
-    cluster.shell.drain().await;
-    for _ in 0..5 {
+    // Partially converge: yield a few times to let the orchestrator schedule,
+    // but don't reach full quiescence — the pod may still be launching.
+    for _ in 0..20 {
         tokio::task::yield_now().await;
     }
-    cluster.shell.step().await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
 
-    // Delete while potentially still launching.
+    // Verify the workload exists and record its state before deletion.
+    // We want to confirm we're deleting during an active lifecycle, not a no-op.
+    let status = cluster.namespace_status("ns").await;
+    let wl_state = status
+        .workloads
+        .get(&WorkloadName("echo".to_string()))
+        .expect("workload 'echo' should exist after partial convergence")
+        .state
+        .clone();
+    assert!(
+        ["launching", "running"].contains(&wl_state.as_str()),
+        "workload should be launching or running after partial converge, got '{}'",
+        wl_state,
+    );
+
+    // Delete while the workload is in an active state.
     cluster.delete_namespace("ns").await;
     cluster.converge().await;
 
-    cluster.assert_namespace_absent("ns");
+    cluster.assert_namespace_absent("ns").await;
 }
 
 /// Send activation traffic while a pod is mid-suspend. The incoming demand
@@ -41,11 +58,11 @@ async fn test_traffic_during_suspend() {
         .create_namespace("ns", activation_spec(Duration::from_secs(30)))
         .await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns", "web");
+    cluster.assert_workload_dormant("ns", "web").await;
 
     // Activate via traffic -> Running.
     cluster.send_activation_traffic("ns", "web-svc").await;
-    cluster.assert_workload_running("ns", "web");
+    cluster.assert_workload_running("ns", "web").await;
 
     // Deactivate service to start idle timer.
     cluster.deactivate_service("ns", "web-svc", &w1).await;
@@ -61,7 +78,7 @@ async fn test_traffic_during_suspend() {
     cluster.advance_time(Duration::from_secs(5)).await;
 
     // The workload should end up Running (either stayed running or was re-activated).
-    cluster.assert_workload_running("ns", "web");
+    cluster.assert_workload_running("ns", "web").await;
 }
 
 /// Multiple rapid activate/deactivate cycles in quick succession.
@@ -75,7 +92,7 @@ async fn test_rapid_activate_deactivate_cycles() {
         .create_namespace("ns", activation_spec(Duration::from_secs(30)))
         .await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns", "web");
+    cluster.assert_workload_dormant("ns", "web").await;
 
     // Rapid fire: activate, deactivate, activate, deactivate, activate.
     // Don't converge between each — let them pile up.
@@ -87,8 +104,8 @@ async fn test_rapid_activate_deactivate_cycles() {
 
     // Final converge — last action was activate, so workload should be Running.
     cluster.converge().await;
-    cluster.assert_workload_running("ns", "web");
-    cluster.assert_service_active("ns", "web-svc");
+    cluster.assert_workload_running("ns", "web").await;
+    cluster.assert_service_active("ns", "web-svc").await;
 }
 
 /// Spec update arrives while pod is in the process of suspending.
@@ -105,11 +122,11 @@ async fn test_spec_update_during_suspend() {
         .create_namespace("ns", activation_spec(Duration::from_secs(30)))
         .await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns", "web");
+    cluster.assert_workload_dormant("ns", "web").await;
 
     // Activate -> Running.
     cluster.send_activation_traffic("ns", "web-svc").await;
-    cluster.assert_workload_running("ns", "web");
+    cluster.assert_workload_running("ns", "web").await;
 
     // Deactivate to start idle timer.
     cluster.deactivate_service("ns", "web-svc", &w1).await;
@@ -121,7 +138,7 @@ async fn test_spec_update_during_suspend() {
     let mut new_spec = activation_spec(Duration::from_secs(30));
     new_spec
         .workloads
-        .get_mut(&WorkloadId("web".to_string()))
+        .get_mut(&WorkloadName("web".to_string()))
         .unwrap()
         .containers = vec![container_spec("docker.io/library/alpine:3.19")];
 
@@ -129,9 +146,9 @@ async fn test_spec_update_during_suspend() {
     cluster.advance_time(Duration::from_secs(2)).await;
 
     // Snapshot should be invalidated. No demand → Dormant.
-    cluster.assert_workload_dormant("ns", "web");
+    cluster.assert_workload_dormant("ns", "web").await;
 
     // Re-activate — should cold-start (new pod_id), not resume from snapshot.
     cluster.send_activation_traffic("ns", "web-svc").await;
-    cluster.assert_workload_running("ns", "web");
+    cluster.assert_workload_running("ns", "web").await;
 }

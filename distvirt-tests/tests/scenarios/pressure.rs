@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use distvirt_orchestrator::types::*;
-
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::{
     activation_spec, always_on_spec, two_activation_workloads_spec,
@@ -24,7 +22,7 @@ async fn test_pressure_based_scheduling() {
         .create_namespace("ns", activation_spec(Duration::from_secs(30)))
         .await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns", "web");
+    cluster.assert_workload_dormant("ns", "web").await;
 
     // Inject elevated memory pressure on w1 (60/100 = 0.6 → Elevated band).
     // Both workers already have Active fabric for this namespace.
@@ -32,9 +30,9 @@ async fn test_pressure_based_scheduling() {
 
     // Activate — scheduling runs with both workers Active, should prefer w2 (Normal).
     cluster.send_activation_traffic("ns", "web-svc").await;
-    cluster.assert_workload_running("ns", "web");
+    cluster.assert_workload_running("ns", "web").await;
 
-    let hosting = cluster.worker_id_for_workload("ns", "web");
+    let hosting = cluster.worker_id_for_workload("ns", "web").await;
     assert_ne!(hosting, w1, "workload should avoid pressured worker w1");
 }
 
@@ -44,17 +42,16 @@ async fn test_pressure_based_scheduling() {
 async fn test_pressure_shortens_idle_timeout() {
     let mut cluster = TestCluster::new();
     let w1 = cluster.add_worker().await;
-    let mut events = cluster.subscribe_events("ns");
 
     cluster
         .create_namespace("ns", activation_spec(Duration::from_secs(40)))
         .await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns", "web");
+    cluster.assert_workload_dormant("ns", "web").await;
 
     // Activate.
     cluster.send_activation_traffic("ns", "web-svc").await;
-    cluster.assert_workload_running("ns", "web");
+    cluster.assert_workload_running("ns", "web").await;
 
     // Inject elevated pressure BEFORE deactivation so idle timer picks it up.
     // 60/100 = 0.6 → Elevated → 75% factor → effective timeout = 30s.
@@ -66,37 +63,20 @@ async fn test_pressure_shortens_idle_timeout() {
     // Advance 31s — past 40s * 0.75 = 30s adjusted timeout.
     tokio::time::advance(Duration::from_secs(31)).await;
 
-    // Drain to process pending events from the 31s advance.
-    cluster.shell.drain().await;
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
-    cluster.shell.step().await;
+    // Converge to process pending events from the 31s advance.
+    cluster.converge().await;
 
     // Should be suspended or suspending since pressure shortening fired.
-    let state = cluster.workload_state("ns", "web");
+    let state = cluster.workload_status_str("ns", "web").await;
     assert!(
-        matches!(
-            state,
-            WorkloadState::Suspended { .. }
-                | WorkloadState::Active {
-                    pod: PodSlot {
-                        pod_state: PodState::Suspending { .. },
-                        ..
-                    },
-                    ..
-                }
-        ),
+        state == "suspended" || state == "suspending",
         "expected Suspended/Suspending after pressure-shortened idle timeout, got {:?}",
         state
     );
 
-    // Wait for PodSuspended event to handle the Suspending → Suspended async transition.
-    cluster.wait_for_event(&mut events, |e| matches!(e,
-        SmNamespaceEvent::Workload { workload_id, event: SmWorkloadEvent::PodSuspended { .. } }
-        if workload_id.0 == "web"
-    )).await;
-    cluster.assert_workload_suspended("ns", "web");
+    // Wait for suspended state.
+    cluster.wait_workload_suspended("ns", "web").await;
+    cluster.assert_workload_suspended("ns", "web").await;
 }
 
 /// When all workers are at High/Critical pressure, new pods get WaitingForCapacity.
@@ -111,7 +91,7 @@ async fn test_high_pressure_blocks_scheduling() {
 
     cluster.create_namespace("ns", always_on_spec()).await;
     cluster.converge().await;
-    cluster.assert_workload_waiting_for_capacity("ns", "echo");
+    cluster.assert_workload_waiting_for_capacity("ns", "echo").await;
 
     // Release pressure.
     cluster.inject_pressure(&w1, 0.0).await;
@@ -120,7 +100,7 @@ async fn test_high_pressure_blocks_scheduling() {
     // schedule_waiting_pods() after recomputing pressure. Workloads stuck in
     // WaitingForCapacity are automatically reconsidered when pressure drops.
     cluster.converge().await;
-    cluster.assert_workload_running("ns", "echo");
+    cluster.assert_workload_running("ns", "echo").await;
 }
 
 /// Under high pressure, activating a second workload should preempt the idle first one.
@@ -132,12 +112,12 @@ async fn test_basic_preemption_e2e() {
 
     cluster.create_namespace("ns", spec.clone()).await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns", "wl-a");
-    cluster.assert_workload_dormant("ns", "wl-b");
+    cluster.assert_workload_dormant("ns", "wl-a").await;
+    cluster.assert_workload_dormant("ns", "wl-b").await;
 
     // Activate wl-a via svc-a.
     cluster.send_activation_traffic("ns", "svc-a").await;
-    cluster.assert_workload_running("ns", "wl-a");
+    cluster.assert_workload_running("ns", "wl-a").await;
 
     // Deactivate svc-a (wl-a becomes idle but still running).
     cluster.deactivate_service("ns", "svc-a", &w1).await;
@@ -149,9 +129,9 @@ async fn test_basic_preemption_e2e() {
     cluster.send_activation_traffic("ns", "svc-b").await;
 
     // wl-a should be preempted (no longer Running).
-    let wl_a_state = cluster.workload_state("ns", "wl-a");
+    let wl_a_state = cluster.workload_status_str("ns", "wl-a").await;
     assert!(
-        !wl_a_state.is_running(),
+        wl_a_state != "running",
         "wl-a should be preempted (not Running), got {:?}",
         wl_a_state
     );
@@ -163,7 +143,7 @@ async fn test_basic_preemption_e2e() {
     // PressureUpdate flows through step() → schedule_waiting_pods(), so wl-b
     // is automatically rescheduled when pressure drops after preemption.
     cluster.converge().await;
-    cluster.assert_workload_running("ns", "wl-b");
+    cluster.assert_workload_running("ns", "wl-b").await;
 }
 
 /// Pressure recovery: multiple workloads stuck in WaitingForCapacity should
@@ -180,14 +160,14 @@ async fn test_pressure_recovery_reschedules_all_waiting() {
     cluster.create_namespace("ns-a", always_on_spec()).await;
     cluster.create_namespace("ns-b", always_on_spec()).await;
     cluster.converge().await;
-    cluster.assert_workload_waiting_for_capacity("ns-a", "echo");
-    cluster.assert_workload_waiting_for_capacity("ns-b", "echo");
+    cluster.assert_workload_waiting_for_capacity("ns-a", "echo").await;
+    cluster.assert_workload_waiting_for_capacity("ns-b", "echo").await;
 
     // Release pressure.
     cluster.inject_pressure(&w1, 0.0).await;
     cluster.converge().await;
 
     // Both should now be scheduled and running.
-    cluster.assert_workload_running("ns-a", "echo");
-    cluster.assert_workload_running("ns-b", "echo");
+    cluster.assert_workload_running("ns-a", "echo").await;
+    cluster.assert_workload_running("ns-b", "echo").await;
 }

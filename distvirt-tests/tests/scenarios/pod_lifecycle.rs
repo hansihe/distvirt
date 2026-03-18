@@ -8,9 +8,9 @@ async fn test_always_on_pod_lifecycle() {
 
     cluster.create_namespace("ns", always_on_spec()).await;
     cluster.converge().await;
-    cluster.assert_workload_running("ns", "echo");
+    cluster.assert_workload_running("ns", "echo").await;
 
     cluster.delete_namespace("ns").await;
     cluster.converge().await;
-    cluster.assert_namespace_absent("ns");
+    cluster.assert_namespace_absent("ns").await;
 }

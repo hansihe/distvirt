@@ -1,34 +1,33 @@
-//! Sim test harness for distvirt integration tests.
+//! Integration test harness for distvirt.
 //!
-//! All sim tests run under `#[tokio::test(flavor = "current_thread", start_paused = true)]`.
+//! All integration tests run under `#[tokio::test(flavor = "current_thread", start_paused = true)]`.
 //! This gives us a single-threaded async runtime with fake time — `tokio::time::advance()`
 //! moves the clock without wall-clock delay, and `tokio::task::yield_now()` yields to
 //! other async tasks on that same thread.
 //!
-//! The `Fs` trait (`SyncFs` implementation) ensures all worker file I/O runs inline
-//! on the current thread via `std::fs`, avoiding `spawn_blocking` / blocking pool
-//! interactions that cause flakiness under fake time.
-//!
-//! Per-instance snapshot directories ensure parallel tests don't stomp each other's
-//! snapshot artifacts.
+//! The harness uses the async shell (`ShellHandle`) with real workers connected via
+//! duplex channels. Convergence is detected via the shell's activity counter — we
+//! yield to let workers and shell run, then check if the activity counter stopped
+//! incrementing.
 
 pub mod spec_builders;
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use distvirt_orchestrator::shell::{EventData, OrchestratorShell};
+use distvirt_orchestrator::adapter::timer::TimerConfig;
+use distvirt_orchestrator::core::GlobalWorkerId;
+use distvirt_orchestrator::core::types::WorkerStateCoreEvent;
+use distvirt_orchestrator::core::WorkerNamespaceEventKind;
+use distvirt_orchestrator::shell::r#async::{self, ShellHandle};
 use distvirt_orchestrator::types::*;
 use distvirt_worker::image_provider::stub::StubImageProvider;
 use distvirt_worker::sim_traffic::SimGatewayProvider;
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::TestVmm;
-use distvirt_worker_protocol::{
-    BackendNeed, OrchestratorConnection, WorkerConnection, WorkerEvent, WorkerId,
-};
-use tokio::sync::mpsc;
+use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
 use tokio::task::JoinHandle;
 
 /// Craft a TCP SYN packet wrapped in a fabric header.
@@ -49,36 +48,64 @@ pub fn craft_tcp_syn(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port
     distvirt_worker::packet::frame::with_fabric_header(0, 0, &ip_packet)
 }
 
+fn test_timer_config() -> TimerConfig {
+    TimerConfig {
+        retry_backoff: Duration::from_secs(5),
+        launch_timeout: Duration::from_secs(60),
+        suspend_timeout: Duration::from_secs(60),
+        idle_timeout: Duration::from_secs(30),
+    }
+}
+
 pub struct TestCluster {
-    pub shell: OrchestratorShell,
-    worker_handles: Vec<(WorkerId, JoinHandle<anyhow::Result<()>>)>,
-    next_client_id: u64,
+    pub shell: ShellHandle,
+    _shell_task: JoinHandle<()>,
+    worker_handles: Vec<(GlobalWorkerId, JoinHandle<anyhow::Result<()>>)>,
     gateway_provider: SimGatewayProvider,
+    /// Cache of namespace specs for service_ip / idle_timeout lookups.
+    specs: BTreeMap<String, NamespaceSpec>,
 }
 
 impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
+        let (shell, shell_task) =
+            r#async::spawn("test-secret".to_string(), test_timer_config());
         TestCluster {
-            shell: OrchestratorShell::new(0, false, vec![], "test-secret".to_string()),
+            shell,
+            _shell_task: shell_task,
             worker_handles: Vec::new(),
-            next_client_id: 1,
             gateway_provider: SimGatewayProvider::new(),
+            specs: BTreeMap::new(),
         }
     }
 
-    pub async fn add_worker(&mut self) -> WorkerId {
+    // -------------------------------------------------------------------------
+    // Worker management
+    // -------------------------------------------------------------------------
+
+    pub async fn add_worker(&mut self) -> GlobalWorkerId {
         self.add_worker_with(ContainerBehavior::RunUntilSignaled)
             .await
     }
 
-    pub async fn add_worker_with(&mut self, behavior: ContainerBehavior) -> WorkerId {
+    pub async fn add_worker_with(&mut self, behavior: ContainerBehavior) -> GlobalWorkerId {
         self.add_worker_with_vmm(TestVmm::new(behavior)).await
     }
 
-    pub async fn add_worker_with_vmm(&mut self, vmm: TestVmm) -> WorkerId {
+    pub async fn add_worker_with_vmm(&mut self, vmm: TestVmm) -> GlobalWorkerId {
         let image_provider = StubImageProvider;
         let gateway_provider = self.gateway_provider.clone();
+
+        // Record workers before connection to find the new one.
+        let before: Vec<GlobalWorkerId> = self
+            .shell
+            .list_workers()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
 
         let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
@@ -106,28 +133,56 @@ impl TestCluster {
             .await
             .expect("orchestrator connect failed");
 
-        let worker_id = self
-            .shell
-            .add_worker(orch_conn)
-            .await
-            .expect("add_worker failed");
+        self.shell.worker_connection(orch_conn);
 
-        self.worker_handles.push((worker_id.clone(), worker_handle));
+        // Let the handshake complete.
+        self.converge().await;
+
+        // Find the new worker ID.
+        let after: Vec<GlobalWorkerId> = self
+            .shell
+            .list_workers()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
+
+        let worker_id = after
+            .iter()
+            .find(|id| !before.contains(id))
+            .copied()
+            .expect("no new worker found after connection");
+
+        self.worker_handles.push((worker_id, worker_handle));
         worker_id
     }
 
-    /// Converge: drain + step in a loop until quiescent.
-    ///
-    /// With real workers (not mocks), the full command cascade requires many
-    /// cooperative yield points. We yield generously and require several
-    /// consecutive quiet rounds before declaring quiescence.
+    /// Disconnect a worker by aborting its task handle (closes the duplex, triggers WorkerDisconnected).
+    pub async fn disconnect_worker(&mut self, worker_id: &GlobalWorkerId) {
+        let idx = self
+            .worker_handles
+            .iter()
+            .position(|(id, _)| id == worker_id)
+            .unwrap_or_else(|| panic!("worker {:?} not found", worker_id));
+        let (_, handle) = self.worker_handles.remove(idx);
+        handle.abort();
+        self.converge().await;
+    }
+
+    // -------------------------------------------------------------------------
+    // Convergence
+    // -------------------------------------------------------------------------
+
+    /// Converge: yield to let workers + shell run, using the activity counter
+    /// to detect quiescence.
     pub async fn converge(&mut self) {
         let max_rounds = 500;
         let quiet_rounds_needed = 5;
         let mut quiet_rounds = 0;
 
         for _ in 0..max_rounds {
-            self.shell.drain().await;
+            let before = self.shell.activity_count();
 
             // Yield multiple times to let worker tasks make progress.
             for _ in 0..10 {
@@ -135,16 +190,19 @@ impl TestCluster {
             }
             // Advance time slightly so any short sleeps/timeouts fire.
             tokio::time::advance(Duration::from_millis(1)).await;
-
-            let had_messages = self.shell.step().await;
-            if had_messages {
-                quiet_rounds = 0;
-                continue;
+            // Yield again to let shell process timer events.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
             }
 
-            quiet_rounds += 1;
-            if quiet_rounds >= quiet_rounds_needed {
-                return;
+            let after = self.shell.activity_count();
+            if before == after {
+                quiet_rounds += 1;
+                if quiet_rounds >= quiet_rounds_needed {
+                    return;
+                }
+            } else {
+                quiet_rounds = 0;
             }
         }
         panic!("converge() did not reach quiescence after {max_rounds} rounds");
@@ -155,71 +213,92 @@ impl TestCluster {
         self.converge().await;
     }
 
+    // -------------------------------------------------------------------------
+    // Namespace lifecycle
+    // -------------------------------------------------------------------------
+
     pub async fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
+        self.specs.insert(ns_id.to_string(), spec.clone());
         self.shell
-            .client_command(
-                client_id,
-                ClientCommand::CreateNamespace {
-                    namespace_id: NamespaceId::from(ns_id),
-                    spec,
-                },
-            )
-            .await;
+            .create_namespace(NamespaceId::from(ns_id), spec.network.clone())
+            .await
+            .expect("create_namespace failed");
+        self.shell
+            .update_namespace(NamespaceId::from(ns_id), spec)
+            .await
+            .expect("update_namespace (initial spec) failed");
     }
 
     pub async fn delete_namespace(&mut self, ns_id: &str) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
+        self.specs.remove(ns_id);
         self.shell
-            .client_command(
-                client_id,
-                ClientCommand::DeleteNamespace {
-                    namespace_id: NamespaceId::from(ns_id),
-                },
-            )
-            .await;
+            .destroy_namespace(NamespaceId::from(ns_id))
+            .await
+            .expect("destroy_namespace failed");
     }
 
-    pub fn orchestrator(&self) -> &distvirt_orchestrator::orchestrator::Orchestrator {
-        self.shell.orchestrator()
-    }
-
-    pub fn namespace(
-        &self,
-        ns_id: &str,
-    ) -> &distvirt_orchestrator::namespace::NamespaceStateMachine {
+    pub async fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
+        self.specs.insert(ns_id.to_string(), spec.clone());
         self.shell
-            .orchestrator()
-            .namespaces
-            .get(&NamespaceId::from(ns_id))
-            .unwrap_or_else(|| panic!("namespace '{}' not found", ns_id))
+            .update_namespace(NamespaceId::from(ns_id), spec)
+            .await
+            .expect("update_namespace failed");
+        self.converge().await;
     }
 
-    pub fn workload_state(&self, ns_id: &str, wl_id: &str) -> &WorkloadState {
-        let ns = self.namespace(ns_id);
-        let wl = ns
+    // -------------------------------------------------------------------------
+    // State queries (async — go through shell channel)
+    // -------------------------------------------------------------------------
+
+    pub async fn namespace_status(&self, ns_id: &str) -> NamespaceStatusReport {
+        self.shell
+            .get_namespace_status(NamespaceId::from(ns_id))
+            .await
+            .unwrap_or_else(|e| panic!("namespace '{}' status failed: {:?}", ns_id, e))
+    }
+
+    pub async fn workload_status_str(&self, ns_id: &str, wl_id: &str) -> String {
+        let status = self.namespace_status(ns_id).await;
+        status
             .workloads
-            .get(&WorkloadId(wl_id.to_string()))
-            .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
-        &wl.state
+            .get(&WorkloadName(wl_id.to_string()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "workload '{}' not found in namespace '{}' (have: {:?})",
+                    wl_id,
+                    ns_id,
+                    status.workloads.keys().collect::<Vec<_>>()
+                )
+            })
+            .state
+            .clone()
     }
 
-    pub fn service_state(&self, ns_id: &str, svc_id: &str) -> &ServiceState {
-        let ns = self.namespace(ns_id);
-        let svc = ns
+    pub async fn service_status_str(&self, ns_id: &str, svc_id: &str) -> String {
+        let status = self.namespace_status(ns_id).await;
+        status
             .services
-            .get(&ServiceId::from(svc_id))
-            .unwrap_or_else(|| panic!("service '{}' not found in namespace '{}'", svc_id, ns_id));
-        &svc.state
+            .get(svc_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "service '{}' not found in namespace '{}' (have: {:?})",
+                    svc_id,
+                    ns_id,
+                    status.services.keys().collect::<Vec<_>>()
+                )
+            })
+            .service_state
+            .clone()
     }
 
+    /// Look up the service IP from the cached spec.
     pub fn service_ip(&self, ns_id: &str, svc_id: &str) -> Ipv4Addr {
-        let ns = self.namespace(ns_id);
-        ns.spec
-            .services
-            .get(&ServiceId::from(svc_id))
+        let spec = self
+            .specs
+            .get(ns_id)
+            .unwrap_or_else(|| panic!("no cached spec for namespace '{}'", ns_id));
+        spec.services
+            .get(svc_id)
             .unwrap_or_else(|| {
                 panic!(
                     "service spec '{}' not found in namespace '{}'",
@@ -229,7 +308,37 @@ impl TestCluster {
             .ip
     }
 
-    // --- Traffic / event injection ---
+    /// Get the worker hosting a workload, from the pod status reports.
+    pub async fn worker_id_for_workload(
+        &self,
+        ns_id: &str,
+        wl_id: &str,
+    ) -> GlobalWorkerId {
+        let status = self.namespace_status(ns_id).await;
+        let wl = status
+            .workloads
+            .get(&WorkloadName(wl_id.to_string()))
+            .unwrap_or_else(|| panic!("workload '{}' not found in namespace '{}'", wl_id, ns_id));
+        let pod_id = wl
+            .pod_id
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "workload '{}/{}' has no pod_id (state: {})",
+                    ns_id, wl_id, wl.state
+                )
+            });
+        let pod = status
+            .pods
+            .get(pod_id)
+            .unwrap_or_else(|| panic!("pod {:?} not found in namespace '{}'", pod_id, ns_id));
+        // GlobalWorkerId is a type alias for distvirt_worker_protocol::WorkerId.
+        distvirt_worker_protocol::WorkerId(pod.worker_id.0)
+    }
+
+    // -------------------------------------------------------------------------
+    // Traffic / event injection
+    // -------------------------------------------------------------------------
 
     /// Inject a TCP SYN packet into the fabric via the sim gateway's internet_tx channel.
     /// This exercises the full activation path: packet -> fabric -> EndpointActivation -> orchestrator.
@@ -245,39 +354,65 @@ impl TestCluster {
         self.converge().await;
     }
 
-    /// Inject a ServiceBackendNeed::None event to deactivate a service.
-    /// This is needed because the WASM TCP activator is not available in tests.
-    pub async fn deactivate_service(&mut self, ns_id: &str, svc_id: &str, worker_id: &WorkerId) {
-        self.shell.inject_worker_event(
-            worker_id.clone(),
-            WorkerEvent::ServiceBackendNeed {
-                namespace_id: NamespaceId::from(ns_id),
-                service_id: distvirt_worker_protocol::ServiceId::from(svc_id),
-                need: BackendNeed::None,
-            },
-        );
+    /// Deactivate a service by injecting an EndpointDemand { active: false } event.
+    pub async fn deactivate_service(
+        &mut self,
+        ns_id: &str,
+        svc_id: &str,
+        worker_id: &GlobalWorkerId,
+    ) {
+        let svc_ip = self.service_ip(ns_id, svc_id);
+        self.shell
+            .inject_namespace_event(
+                NamespaceId::from(ns_id),
+                *worker_id,
+                WorkerNamespaceEventKind::EndpointDemand {
+                    ip: svc_ip,
+                    service_id: None,
+                    active: false,
+                },
+            )
+            .await;
         self.converge().await;
     }
 
-    /// Disconnect a worker by aborting its task handle (closes the duplex, triggers WorkerDisconnected).
-    pub async fn disconnect_worker(&mut self, worker_id: &WorkerId) {
-        let idx = self
-            .worker_handles
-            .iter()
-            .position(|(id, _)| id == worker_id)
-            .unwrap_or_else(|| panic!("worker {:?} not found", worker_id));
-        let (_, handle) = self.worker_handles.remove(idx);
-        handle.abort();
+    /// Inject memory pressure on a worker.
+    pub async fn inject_pressure(&mut self, worker_id: &GlobalWorkerId, memory_psi_avg10: f64) {
+        use distvirt_worker_protocol::PsiMetrics;
+        let metrics = PsiMetrics {
+            some_avg10: memory_psi_avg10,
+            some_avg60: memory_psi_avg10,
+            full_avg10: 0.0,
+            full_avg60: 0.0,
+        };
+        self.shell
+            .inject_worker_state_event(WorkerStateCoreEvent::PressureUpdate {
+                worker_id: *worker_id,
+                cpu: metrics.clone(),
+                memory: metrics.clone(),
+                io: metrics,
+            })
+            .await;
         self.converge().await;
+    }
+
+    pub async fn drain_worker(&mut self, _worker_id: &GlobalWorkerId) {
+        todo!("drain_worker not yet implemented on async shell")
+    }
+
+    pub async fn undrain_worker(&mut self, _worker_id: &GlobalWorkerId) {
+        todo!("undrain_worker not yet implemented on async shell")
     }
 
     /// Advance time past a service's idle timeout and converge.
     pub async fn advance_past_idle_timeout(&mut self, ns_id: &str, svc_id: &str) {
-        let ns = self.namespace(ns_id);
-        let svc_spec = ns
-            .spec
+        let spec = self
+            .specs
+            .get(ns_id)
+            .unwrap_or_else(|| panic!("no cached spec for namespace '{}'", ns_id));
+        let svc_spec = spec
             .services
-            .get(&ServiceId::from(svc_id))
+            .get(svc_id)
             .unwrap_or_else(|| {
                 panic!(
                     "service spec '{}' not found in namespace '{}'",
@@ -293,285 +428,137 @@ impl TestCluster {
             .await;
     }
 
-    // --- Namespace mutation ---
+    // -------------------------------------------------------------------------
+    // Assertions (all async — query state via shell)
+    // -------------------------------------------------------------------------
 
-    pub async fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
-        self.shell
-            .client_command(
-                client_id,
-                ClientCommand::UpdateNamespace {
-                    namespace_id: NamespaceId::from(ns_id),
-                    spec,
-                },
-            )
+    pub async fn assert_workload_running(&self, ns_id: &str, wl_id: &str) {
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_eq!(
+            state, "running",
+            "workload '{}/{}': expected running, got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_workload_dormant(&self, ns_id: &str, wl_id: &str) {
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_eq!(
+            state, "dormant",
+            "workload '{}/{}': expected dormant, got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_workload_suspended(&self, ns_id: &str, wl_id: &str) {
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_eq!(
+            state, "suspended",
+            "workload '{}/{}': expected suspended, got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_workload_failed(&self, ns_id: &str, wl_id: &str) {
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_eq!(
+            state, "failed",
+            "workload '{}/{}': expected failed, got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_workload_retry_backoff(&self, ns_id: &str, wl_id: &str) {
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_eq!(
+            state, "retry_backoff",
+            "workload '{}/{}': expected retry_backoff, got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_workload_waiting_for_capacity(&self, ns_id: &str, wl_id: &str) {
+        // In the new SM, "waiting for capacity" maps to "launching" (pod created,
+        // waiting for scheduler lease) or potentially "waiting_for_spec".
+        // Check for launching as the closest equivalent.
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_eq!(
+            state, "launching",
+            "workload '{}/{}': expected launching (waiting for capacity), got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_workload_not_running(&self, ns_id: &str, wl_id: &str) {
+        let state = self.workload_status_str(ns_id, wl_id).await;
+        assert_ne!(
+            state, "running",
+            "workload '{}/{}': expected NOT running, got {}",
+            ns_id, wl_id, state
+        );
+    }
+
+    pub async fn assert_service_active(&self, ns_id: &str, svc_id: &str) {
+        let state = self.service_status_str(ns_id, svc_id).await;
+        assert_eq!(
+            state, "active",
+            "service '{}/{}': expected active, got {}",
+            ns_id, svc_id, state
+        );
+    }
+
+    pub async fn assert_service_idle(&self, ns_id: &str, svc_id: &str) {
+        let state = self.service_status_str(ns_id, svc_id).await;
+        assert_eq!(
+            state, "idle",
+            "service '{}/{}': expected idle, got {}",
+            ns_id, svc_id, state
+        );
+    }
+
+    pub async fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
+        let state = self.service_status_str(ns_id, svc_id).await;
+        assert_eq!(
+            state, "need_backend",
+            "service '{}/{}': expected need_backend, got {}",
+            ns_id, svc_id, state
+        );
+    }
+
+    pub async fn assert_namespace_absent(&self, ns_id: &str) {
+        let result = self
+            .shell
+            .get_namespace_status(NamespaceId::from(ns_id))
             .await;
-        self.converge().await;
-    }
-
-    pub async fn drain_worker(&mut self, worker_id: &WorkerId) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
-        self.shell
-            .client_command(
-                client_id,
-                ClientCommand::DrainWorker {
-                    worker_id: worker_id.clone(),
-                },
-            )
-            .await;
-        self.converge().await;
-    }
-
-    pub async fn undrain_worker(&mut self, worker_id: &WorkerId) {
-        let client_id = ClientId(self.next_client_id);
-        self.next_client_id += 1;
-        self.shell
-            .client_command(
-                client_id,
-                ClientCommand::UndrainWorker {
-                    worker_id: worker_id.clone(),
-                },
-            )
-            .await;
-        self.converge().await;
-    }
-
-    pub async fn inject_pressure(&mut self, worker_id: &WorkerId, memory_psi_avg10: f64) {
-        use distvirt_worker_protocol::PsiMetrics;
-        let metrics = PsiMetrics {
-            some_avg10: memory_psi_avg10,
-            some_avg60: memory_psi_avg10,
-            full_avg10: 0.0,
-            full_avg60: 0.0,
-        };
-        self.shell.inject_worker_event(
-            worker_id.clone(),
-            WorkerEvent::PressureUpdate {
-                cpu: metrics.clone(),
-                memory: metrics.clone(),
-                io: metrics,
-            },
-        );
-        self.converge().await;
-    }
-
-    pub fn orchestrator_mut(&mut self) -> &mut distvirt_orchestrator::orchestrator::Orchestrator {
-        self.shell.orchestrator_mut()
-    }
-
-    // --- Event subscriptions ---
-
-    /// Subscribe to all events for a namespace.
-    ///
-    /// Uses a large channel buffer because tests subscribe early and many events
-    /// accumulate during converge cycles before `wait_for_event` drains them.
-    /// The production `subscribe_events` on OrchestratorShell uses 256; we
-    /// override with a direct subscription here to get a bigger buffer.
-    pub fn subscribe_events(&mut self, ns_id: &str) -> mpsc::Receiver<EventData> {
-        let (tx, rx) = mpsc::channel(8192);
-        self.shell.subscribe_events_with_sender(
-            NamespaceId::from(ns_id),
-            HashSet::new(),
-            HashSet::new(),
-            tx,
-        );
-        rx
-    }
-
-    /// Drive system forward until predicate matches a received event.
-    /// Each round: drain + yield + advance 1ms + step.
-    /// Default 5000 rounds — generous to tolerate blocking-pool contention
-    /// when many tests run in parallel (spawn_blocking shares a thread pool).
-    pub async fn wait_for_event(
-        &mut self,
-        rx: &mut mpsc::Receiver<EventData>,
-        predicate: impl Fn(&SmNamespaceEvent) -> bool,
-    ) {
-        self.wait_for_event_rounds(rx, 5000, predicate).await;
-    }
-
-    pub async fn wait_for_event_rounds(
-        &mut self,
-        rx: &mut mpsc::Receiver<EventData>,
-        max_rounds: usize,
-        predicate: impl Fn(&SmNamespaceEvent) -> bool,
-    ) {
-        for _ in 0..max_rounds {
-            while let Ok(data) = rx.try_recv() {
-                if predicate(&data.event) {
-                    return;
-                }
-            }
-            self.shell.drain().await;
-            for _ in 0..10 {
-                tokio::task::yield_now().await;
-            }
-            tokio::time::advance(Duration::from_millis(1)).await;
-            self.shell.step().await;
-        }
-        panic!("wait_for_event: expected event not received after {max_rounds} rounds");
-    }
-
-    // --- Assertions ---
-
-    pub fn assert_workload_running(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_state(ns_id, wl_id);
         assert!(
-            state.is_running(),
-            "workload '{}/{}': expected Running, got {:?}",
-            ns_id,
-            wl_id,
-            state
-        );
-    }
-
-    pub fn assert_workload_dormant(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_state(ns_id, wl_id);
-        assert!(
-            matches!(state, WorkloadState::Dormant),
-            "workload '{}/{}': expected Dormant, got {:?}",
-            ns_id,
-            wl_id,
-            state
-        );
-    }
-
-    pub fn assert_workload_suspended(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_state(ns_id, wl_id);
-        assert!(
-            matches!(state, WorkloadState::Suspended { .. }),
-            "workload '{}/{}': expected Suspended, got {:?}",
-            ns_id,
-            wl_id,
-            state
-        );
-    }
-
-    /// Wait for a workload to reach Suspended state, handling the Suspending → Suspended
-    /// transition which involves async I/O (snapshot writes) on the blocking pool.
-    pub async fn wait_workload_suspended(&mut self, ns_id: &str, wl_id: &str) {
-        for _ in 0..50 {
-            let state = self.workload_state(ns_id, wl_id);
-            if matches!(state, WorkloadState::Suspended { .. }) {
-                return;
-            }
-            assert!(
-                matches!(
-                    state,
-                    WorkloadState::Active {
-                        pod: PodSlot {
-                            pod_state: PodState::Suspending { .. },
-                            ..
-                        },
-                        ..
-                    } | WorkloadState::Suspended { .. }
-                ),
-                "workload '{}/{}': expected Suspending or Suspended, got {:?}",
-                ns_id,
-                wl_id,
-                state
-            );
-            // Give the blocking pool real wall-clock time to complete I/O,
-            // then converge to process the resulting events.
-            tokio::task::yield_now().await;
-            self.converge().await;
-        }
-        panic!(
-            "workload '{}/{}' did not reach Suspended after retries (still {:?})",
-            ns_id,
-            wl_id,
-            self.workload_state(ns_id, wl_id)
-        );
-    }
-
-    pub fn assert_workload_waiting_for_capacity(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_state(ns_id, wl_id);
-        assert!(
-            matches!(state, WorkloadState::WaitingForCapacity),
-            "workload '{}/{}': expected WaitingForCapacity, got {:?}",
-            ns_id,
-            wl_id,
-            state
-        );
-    }
-
-    pub fn assert_workload_retry_backoff(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_state(ns_id, wl_id);
-        assert!(
-            matches!(state, WorkloadState::RetryBackoff { .. }),
-            "workload '{}/{}': expected RetryBackoff, got {:?}",
-            ns_id,
-            wl_id,
-            state
-        );
-    }
-
-    pub fn assert_service_active(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_state(ns_id, svc_id);
-        assert!(
-            matches!(state, ServiceState::Active { .. }),
-            "service '{}/{}': expected Active, got {:?}",
-            ns_id,
-            svc_id,
-            state
-        );
-    }
-
-    pub fn assert_service_idle(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_state(ns_id, svc_id);
-        assert!(
-            matches!(state, ServiceState::Idle),
-            "service '{}/{}': expected Idle, got {:?}",
-            ns_id,
-            svc_id,
-            state
-        );
-    }
-
-    pub fn assert_namespace_absent(&self, ns_id: &str) {
-        let orch = self.orchestrator();
-        assert!(
-            !orch.namespaces.contains_key(&NamespaceId::from(ns_id)),
+            result.is_err(),
             "namespace '{}' should be absent but still exists",
             ns_id
         );
     }
 
-    pub fn assert_workload_failed(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_state(ns_id, wl_id);
-        assert!(
-            matches!(state, WorkloadState::Failed),
-            "workload '{}/{}': expected Failed, got {:?}",
-            ns_id,
-            wl_id,
-            state
+    /// Wait for a workload to reach Suspended state, handling the Suspending → Suspended
+    /// transition which involves async I/O (snapshot writes).
+    pub async fn wait_workload_suspended(&mut self, ns_id: &str, wl_id: &str) {
+        for _ in 0..50 {
+            let state = self.workload_status_str(ns_id, wl_id).await;
+            if state == "suspended" {
+                return;
+            }
+            assert!(
+                state == "suspending" || state == "suspended" || state == "running",
+                "workload '{}/{}': expected suspending/suspended/running, got {}",
+                ns_id,
+                wl_id,
+                state
+            );
+            tokio::task::yield_now().await;
+            self.converge().await;
+        }
+        let final_state = self.workload_status_str(ns_id, wl_id).await;
+        panic!(
+            "workload '{}/{}' did not reach suspended after retries (still {})",
+            ns_id, wl_id, final_state
         );
-    }
-
-    pub fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_state(ns_id, svc_id);
-        assert!(
-            matches!(state, ServiceState::NeedBackend),
-            "service '{}/{}': expected NeedBackend, got {:?}",
-            ns_id,
-            svc_id,
-            state
-        );
-    }
-
-    pub fn worker_id_for_workload(&self, ns_id: &str, wl_id: &str) -> WorkerId {
-        self.workload_state(ns_id, wl_id)
-            .worker_id()
-            .unwrap_or_else(|| {
-                panic!(
-                    "workload '{}/{}' has no worker_id (state: {:?})",
-                    ns_id,
-                    wl_id,
-                    self.workload_state(ns_id, wl_id)
-                )
-            })
-            .clone()
     }
 }

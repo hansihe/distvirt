@@ -44,8 +44,8 @@ pub fn container_spec(image: &str) -> ContainerSpec {
 }
 
 pub fn always_on_spec() -> NamespaceSpec {
-    let wl_id = WorkloadId("echo".to_string());
-    let svc_id = ServiceId::from("echo-svc");
+    let wl_id = WorkloadName("echo".to_string());
+    let svc_id = "echo-svc".to_string();
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -82,8 +82,8 @@ pub fn always_on_spec() -> NamespaceSpec {
 }
 
 pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_id = WorkloadId("web".to_string());
-    let svc_id = ServiceId::from("web-svc");
+    let wl_id = WorkloadName("web".to_string());
+    let svc_id = "web-svc".to_string();
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -120,8 +120,8 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
 }
 
 pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_id = WorkloadId("web".to_string());
-    let svc_id = ServiceId::from("web-svc");
+    let wl_id = WorkloadName("web".to_string());
+    let svc_id = "web-svc".to_string();
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -158,8 +158,8 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
 }
 
 pub fn two_workload_spec() -> NamespaceSpec {
-    let wl_a = WorkloadId("echo-a".to_string());
-    let wl_b = WorkloadId("echo-b".to_string());
+    let wl_a = WorkloadName("echo-a".to_string());
+    let wl_b = WorkloadName("echo-b".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -185,7 +185,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
 
     let mut services = BTreeMap::new();
     services.insert(
-        ServiceId::from("svc-a"),
+        "svc-a".to_string(),
         ServiceSpec {
             workload_id: wl_a,
             ip: Ipv4Addr::new(172, 16, 0, 100),
@@ -198,7 +198,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
         },
     );
     services.insert(
-        ServiceId::from("svc-b"),
+        "svc-b".to_string(),
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
@@ -219,8 +219,8 @@ pub fn two_workload_spec() -> NamespaceSpec {
 }
 
 pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_a = WorkloadId("wl-a".to_string());
-    let wl_b = WorkloadId("wl-b".to_string());
+    let wl_a = WorkloadName("wl-a".to_string());
+    let wl_b = WorkloadName("wl-b".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -246,7 +246,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
 
     let mut services = BTreeMap::new();
     services.insert(
-        ServiceId::from("svc-a"),
+        "svc-a".to_string(),
         ServiceSpec {
             workload_id: wl_a,
             ip: Ipv4Addr::new(172, 16, 0, 100),
@@ -259,7 +259,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
         },
     );
     services.insert(
-        ServiceId::from("svc-b"),
+        "svc-b".to_string(),
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
@@ -280,7 +280,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
 }
 
 pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
-    let wl_id = WorkloadId("shared".to_string());
+    let wl_id = WorkloadName("shared".to_string());
 
     let mut workloads = BTreeMap::new();
     workloads.insert(
@@ -296,7 +296,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
 
     let mut services = BTreeMap::new();
     services.insert(
-        ServiceId::from("svc-a"),
+        "svc-a".to_string(),
         ServiceSpec {
             workload_id: wl_id.clone(),
             ip: Ipv4Addr::new(172, 16, 0, 100),
@@ -309,7 +309,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
         },
     );
     services.insert(
-        ServiceId::from("svc-b"),
+        "svc-b".to_string(),
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 101),

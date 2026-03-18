@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use distvirt_orchestrator::types::*;
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::TestVmm;
 
@@ -23,14 +22,14 @@ async fn test_pod_exit_retry_loop_e2e() {
     cluster.converge().await;
 
     // Pod launches, runs briefly, exits(1) -> RetryBackoff.
-    cluster.assert_workload_retry_backoff("ns", "echo");
+    cluster.assert_workload_retry_backoff("ns", "echo").await;
 
     // Advance time to let the retry fire -> pod relaunches, exits again.
     cluster.advance_time(Duration::from_secs(2)).await;
 
     // The workload should be back in RetryBackoff (not stuck in Failed or Dormant),
     // verifying the retry cycle continues.
-    cluster.assert_workload_retry_backoff("ns", "echo");
+    cluster.assert_workload_retry_backoff("ns", "echo").await;
 }
 
 /// VM fails to start (guest dies before Ready) twice, then succeeds on the third attempt.
@@ -40,23 +39,18 @@ async fn test_pod_launch_failure_recovery_e2e() {
     let mut cluster = TestCluster::new();
     let (vmm, _counter) = TestVmm::with_fail_then_run(2);
     let _w1 = cluster.add_worker_with_vmm(vmm).await;
-    let mut events = cluster.subscribe_events("ns");
 
     cluster.create_namespace("ns", always_on_spec()).await;
     cluster.converge().await;
 
     // 1st attempt fails → RetryBackoff.
-    cluster.assert_workload_retry_backoff("ns", "echo");
+    cluster.assert_workload_retry_backoff("ns", "echo").await;
 
     // Advance past first backoff → 2nd attempt also fails → RetryBackoff.
     cluster.advance_time(Duration::from_secs(2)).await;
-    cluster.assert_workload_retry_backoff("ns", "echo");
+    cluster.assert_workload_retry_backoff("ns", "echo").await;
 
-    // Advance past second backoff → 3rd attempt succeeds → wait for PodRunning event.
+    // Advance past second backoff → 3rd attempt succeeds.
     tokio::time::advance(Duration::from_secs(4)).await;
-    cluster.wait_for_event(&mut events, |e| matches!(e,
-        SmNamespaceEvent::Workload { workload_id, event: SmWorkloadEvent::PodRunning { .. } }
-        if workload_id.0 == "echo"
-    )).await;
-    cluster.assert_workload_running("ns", "echo");
+    cluster.assert_workload_running("ns", "echo").await;
 }

@@ -11,6 +11,8 @@ mod worker_reader;
 mod worker_writer;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use distvirt_worker_protocol::OrchestratorConnection;
@@ -95,6 +97,16 @@ enum ShellCommand {
         namespace_id: NamespaceId,
         response: oneshot::Sender<Result<Vec<crate::types::PodStatusReport>, ClientError>>,
     },
+    InjectNamespaceEvent {
+        namespace_id: NamespaceId,
+        worker_id: GlobalWorkerId,
+        event: crate::core::WorkerNamespaceEventKind,
+        response: oneshot::Sender<()>,
+    },
+    InjectWorkerStateEvent {
+        event: WorkerStateCoreEvent,
+        response: oneshot::Sender<()>,
+    },
 }
 
 // =============================================================================
@@ -104,6 +116,7 @@ enum ShellCommand {
 #[derive(Clone)]
 pub struct ShellHandle {
     tx: mpsc::Sender<ShellEvent>,
+    activity: Arc<AtomicU64>,
 }
 
 impl ShellHandle {
@@ -253,6 +266,44 @@ impl ShellHandle {
             .await;
         rx.await.unwrap_or(Err(ClientError::ShellGone))
     }
+
+    pub fn activity_count(&self) -> u64 {
+        self.activity.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub async fn inject_namespace_event(
+        &self,
+        namespace_id: NamespaceId,
+        worker_id: GlobalWorkerId,
+        event: crate::core::WorkerNamespaceEventKind,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::InjectNamespaceEvent {
+                namespace_id,
+                worker_id,
+                event,
+                response: tx,
+            }))
+            .await;
+        let _ = rx.await;
+    }
+
+    pub async fn inject_worker_state_event(
+        &self,
+        event: crate::core::types::WorkerStateCoreEvent,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::InjectWorkerStateEvent {
+                event,
+                response: tx,
+            }))
+            .await;
+        let _ = rx.await;
+    }
 }
 
 // =============================================================================
@@ -287,6 +338,8 @@ struct Shell {
     self_tx: mpsc::Sender<ShellEvent>,
 
     worker_secret: String,
+
+    activity: Arc<AtomicU64>,
 }
 
 impl Shell {
@@ -308,6 +361,7 @@ impl Shell {
                 event = self.rx.recv() => {
                     let Some(event) = event else { break };
                     self.handle_event(event).await;
+                    self.activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 _ = timer_sleep, if has_timer => {
                     // Timer expired — advance_to will fire it and process effects.
@@ -318,6 +372,7 @@ impl Shell {
             let now = self.now();
             let effects = self.orchestrator.advance_to(now);
             self.execute_effects(effects).await;
+            self.activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -416,6 +471,32 @@ impl Shell {
                 } => {
                     let result = self.orchestrator.list_pods(&namespace_id);
                     let _ = response.send(result);
+                }
+                ShellCommand::InjectNamespaceEvent {
+                    namespace_id,
+                    worker_id,
+                    event,
+                    response,
+                } => {
+                    let effects = self.orchestrator.process(
+                        OrchestratorInput::NamespaceEvent {
+                            namespace_id,
+                            event: NamespaceCoreEvent::WorkerEvent(crate::core::WorkerNamespaceEvent {
+                                worker_id,
+                                event,
+                            }),
+                        },
+                        now,
+                    );
+                    self.execute_effects(effects).await;
+                    let _ = response.send(());
+                }
+                ShellCommand::InjectWorkerStateEvent { event, response } => {
+                    let effects = self
+                        .orchestrator
+                        .process(OrchestratorInput::WorkerStateEvent(event), now);
+                    self.execute_effects(effects).await;
+                    let _ = response.send(());
                 }
             },
             ShellEvent::NamespaceEvent {
@@ -573,6 +654,7 @@ pub fn spawn(
     timer_config: TimerConfig,
 ) -> (ShellHandle, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(256);
+    let activity = Arc::new(AtomicU64::new(0));
 
     let shell = Shell {
         orchestrator: OrchestratorCore::new(timer_config),
@@ -582,8 +664,9 @@ pub fn spawn(
         rx,
         self_tx: tx.clone(),
         worker_secret,
+        activity: activity.clone(),
     };
 
     let handle = tokio::spawn(shell.run());
-    (ShellHandle { tx }, handle)
+    (ShellHandle { tx, activity }, handle)
 }

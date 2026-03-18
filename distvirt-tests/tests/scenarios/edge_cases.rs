@@ -1,22 +1,37 @@
 use std::time::Duration;
 
+use distvirt_orchestrator::types::*;
+
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::{
     activation_spec, always_on_spec, two_activation_workloads_spec,
 };
 
 /// Create then immediately delete before pod fully starts.
+/// Verifies the namespace had a workload registered before deletion,
+/// so we're testing cleanup of in-progress state, not just a no-op delete.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_create_delete_namespace_rapid() {
     let mut cluster = TestCluster::new();
     let _w1 = cluster.add_worker().await;
 
-    // Create and delete without converging in between.
+    // Create namespace — this registers the namespace and its workloads
+    // in the orchestrator (via create + update_namespace), but doesn't
+    // converge so the pod hasn't been scheduled/launched yet.
     cluster.create_namespace("ns", always_on_spec()).await;
+
+    // Verify the namespace actually exists with a workload before we delete it.
+    // This proves we're deleting real in-progress state, not a no-op.
+    let status = cluster.namespace_status("ns").await;
+    assert!(
+        status.workloads.contains_key(&WorkloadName("echo".to_string())),
+        "workload 'echo' should exist after create_namespace (before converge)"
+    );
+
     cluster.delete_namespace("ns").await;
     cluster.converge().await;
 
-    cluster.assert_namespace_absent("ns");
+    cluster.assert_namespace_absent("ns").await;
 }
 
 /// Two independent namespaces on the same worker don't interfere.
@@ -28,14 +43,14 @@ async fn test_two_namespaces_on_same_worker() {
     cluster.create_namespace("ns-a", always_on_spec()).await;
     cluster.create_namespace("ns-b", always_on_spec()).await;
     cluster.converge().await;
-    cluster.assert_workload_running("ns-a", "echo");
-    cluster.assert_workload_running("ns-b", "echo");
+    cluster.assert_workload_running("ns-a", "echo").await;
+    cluster.assert_workload_running("ns-b", "echo").await;
 
     // Delete one, the other should continue.
     cluster.delete_namespace("ns-a").await;
     cluster.converge().await;
-    cluster.assert_namespace_absent("ns-a");
-    cluster.assert_workload_running("ns-b", "echo");
+    cluster.assert_namespace_absent("ns-a").await;
+    cluster.assert_workload_running("ns-b", "echo").await;
 }
 
 /// Delete a namespace that has a suspended workload.
@@ -49,11 +64,11 @@ async fn test_namespace_delete_while_suspended() {
         .create_namespace("ns-del", activation_spec(Duration::from_secs(30)))
         .await;
     cluster.converge().await;
-    cluster.assert_workload_dormant("ns-del", "web");
+    cluster.assert_workload_dormant("ns-del", "web").await;
 
     // Activate -> Running -> deactivate -> suspend.
     cluster.send_activation_traffic("ns-del", "web-svc").await;
-    cluster.assert_workload_running("ns-del", "web");
+    cluster.assert_workload_running("ns-del", "web").await;
 
     cluster.deactivate_service("ns-del", "web-svc", &w1).await;
     cluster.advance_past_idle_timeout("ns-del", "web-svc").await;
@@ -62,7 +77,7 @@ async fn test_namespace_delete_while_suspended() {
     // Delete the namespace while workload is suspended.
     cluster.delete_namespace("ns-del").await;
     cluster.converge().await;
-    cluster.assert_namespace_absent("ns-del");
+    cluster.assert_namespace_absent("ns-del").await;
 }
 
 /// Worker disconnects while a pod is being suspended.
@@ -79,9 +94,9 @@ async fn test_worker_disconnect_during_suspend() {
 
     // Activate.
     cluster.send_activation_traffic("ns-disc", "web-svc").await;
-    cluster.assert_workload_running("ns-disc", "web");
+    cluster.assert_workload_running("ns-disc", "web").await;
 
-    let hosting = cluster.worker_id_for_workload("ns-disc", "web");
+    let hosting = cluster.worker_id_for_workload("ns-disc", "web").await;
 
     // Deactivate service.
     cluster
@@ -94,31 +109,16 @@ async fn test_worker_disconnect_during_suspend() {
         .await;
 
     // Check current state.
-    let state = cluster.workload_state("ns-disc", "web");
-    let was_suspending = matches!(
-        state,
-        distvirt_orchestrator::types::WorkloadState::Active {
-            pod: distvirt_orchestrator::types::PodSlot {
-                pod_state: distvirt_orchestrator::types::PodState::Suspending { .. },
-                ..
-            },
-            ..
-        }
-    );
+    let state = cluster.workload_status_str("ns-disc", "web").await;
+    let was_suspending = state == "suspending";
 
     // Disconnect the hosting worker.
     cluster.disconnect_worker(&hosting).await;
     cluster.converge().await;
 
     // After disconnect, workload should be in a recoverable state.
-    let state = cluster.workload_state("ns-disc", "web");
-    let acceptable = matches!(
-        state,
-        distvirt_orchestrator::types::WorkloadState::Dormant
-            | distvirt_orchestrator::types::WorkloadState::WaitingForCapacity
-            | distvirt_orchestrator::types::WorkloadState::Suspended { .. }
-            | distvirt_orchestrator::types::WorkloadState::Active { .. }
-    );
+    let state = cluster.workload_status_str("ns-disc", "web").await;
+    let acceptable = ["dormant", "launching", "suspended", "running"].contains(&state.as_str());
     assert!(
         acceptable,
         "workload should be in a recoverable state after worker disconnect, got {:?}",
@@ -130,13 +130,8 @@ async fn test_worker_disconnect_during_suspend() {
 
     // The workload should eventually be running on the remaining worker,
     // or at least be in a state where it can be scheduled.
-    let final_state = cluster.workload_state("ns-disc", "web");
-    let ok = matches!(
-        final_state,
-        distvirt_orchestrator::types::WorkloadState::Active { .. }
-            | distvirt_orchestrator::types::WorkloadState::Dormant
-            | distvirt_orchestrator::types::WorkloadState::WaitingForCapacity
-    );
+    let final_state = cluster.workload_status_str("ns-disc", "web").await;
+    let ok = ["running", "dormant", "launching"].contains(&final_state.as_str());
     assert!(
         ok,
         "workload should be recoverable after worker disconnect, got {:?}",
@@ -167,21 +162,21 @@ async fn test_namespace_deletion_doesnt_affect_siblings() {
     // Activate both.
     cluster.send_activation_traffic("ns-a", "web-svc").await;
     cluster.send_activation_traffic("ns-b", "web-svc").await;
-    cluster.assert_workload_running("ns-a", "web");
-    cluster.assert_workload_running("ns-b", "web");
+    cluster.assert_workload_running("ns-a", "web").await;
+    cluster.assert_workload_running("ns-b", "web").await;
 
     // Delete ns-a while ns-b is running.
     cluster.delete_namespace("ns-a").await;
     cluster.converge().await;
 
-    cluster.assert_namespace_absent("ns-a");
-    cluster.assert_workload_running("ns-b", "web");
+    cluster.assert_namespace_absent("ns-a").await;
+    cluster.assert_workload_running("ns-b", "web").await;
 
     // ns-b should still respond to lifecycle events normally.
     cluster.deactivate_service("ns-b", "web-svc", &w1).await;
     cluster.advance_past_idle_timeout("ns-b", "web-svc").await;
     cluster.wait_workload_suspended("ns-b", "web").await;
-    cluster.assert_workload_suspended("ns-b", "web");
+    cluster.assert_workload_suspended("ns-b", "web").await;
 }
 
 /// Preemption under pressure should be scoped to the namespace that
@@ -195,7 +190,7 @@ async fn test_preemption_is_namespace_scoped() {
     // ns-other: single always-on workload (no idle, can't be preempted by ns-main).
     cluster.create_namespace("ns-other", always_on_spec()).await;
     cluster.converge().await;
-    cluster.assert_workload_running("ns-other", "echo");
+    cluster.assert_workload_running("ns-other", "echo").await;
 
     // ns-main: two activation workloads.
     let spec = two_activation_workloads_spec(Duration::from_secs(30));
@@ -204,7 +199,7 @@ async fn test_preemption_is_namespace_scoped() {
 
     // Activate wl-a.
     cluster.send_activation_traffic("ns-main", "svc-a").await;
-    cluster.assert_workload_running("ns-main", "wl-a");
+    cluster.assert_workload_running("ns-main", "wl-a").await;
 
     // Deactivate wl-a (becomes idle).
     cluster.deactivate_service("ns-main", "svc-a", &w1).await;
@@ -216,12 +211,12 @@ async fn test_preemption_is_namespace_scoped() {
     cluster.send_activation_traffic("ns-main", "svc-b").await;
 
     // ns-other's workload must still be running.
-    cluster.assert_workload_running("ns-other", "echo");
+    cluster.assert_workload_running("ns-other", "echo").await;
 
     // wl-a should be preempted.
-    let wl_a_state = cluster.workload_state("ns-main", "wl-a");
+    let wl_a_state = cluster.workload_status_str("ns-main", "wl-a").await;
     assert!(
-        !wl_a_state.is_running(),
+        wl_a_state != "running",
         "wl-a should be preempted, got {:?}",
         wl_a_state
     );
@@ -229,10 +224,10 @@ async fn test_preemption_is_namespace_scoped() {
     // Release pressure so wl-b can schedule.
     cluster.inject_pressure(&w1, 0.0).await;
     cluster.converge().await;
-    cluster.assert_workload_running("ns-main", "wl-b");
+    cluster.assert_workload_running("ns-main", "wl-b").await;
 
     // ns-other still running.
-    cluster.assert_workload_running("ns-other", "echo");
+    cluster.assert_workload_running("ns-other", "echo").await;
 }
 
 /// BROKEN: Three namespaces competing for a single worker under high pressure.
@@ -257,15 +252,15 @@ async fn test_many_namespaces_competing_for_capacity() {
     cluster.converge().await;
 
     // All should be waiting.
-    cluster.assert_workload_waiting_for_capacity("ns-1", "echo");
-    cluster.assert_workload_waiting_for_capacity("ns-2", "echo");
-    cluster.assert_workload_waiting_for_capacity("ns-3", "echo");
+    cluster.assert_workload_waiting_for_capacity("ns-1", "echo").await;
+    cluster.assert_workload_waiting_for_capacity("ns-2", "echo").await;
+    cluster.assert_workload_waiting_for_capacity("ns-3", "echo").await;
 
     // Release pressure — all should eventually schedule.
     cluster.inject_pressure(&w1, 0.0).await;
     cluster.converge().await;
 
-    cluster.assert_workload_running("ns-1", "echo");
-    cluster.assert_workload_running("ns-2", "echo");
-    cluster.assert_workload_running("ns-3", "echo");
+    cluster.assert_workload_running("ns-1", "echo").await;
+    cluster.assert_workload_running("ns-2", "echo").await;
+    cluster.assert_workload_running("ns-3", "echo").await;
 }
