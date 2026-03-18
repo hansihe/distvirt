@@ -306,7 +306,10 @@ fn independent_workload_subgraphs() {
     assert_eq!(get_endpoint_state(&router, &S1), EndpointState::Idle);
 
     // Activate S1 — now W1 also gets demand.
-    router.send_activate_service(mgmt1, S1, true);
+    let s1_ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_s1 = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_s1, vec![s1_ep_id]);
+    router.set_endpoint_demand_active(demand_s1, true);
     router.propagate();
 
     let wl1 = router.get_workload(&W1).unwrap();
@@ -323,7 +326,7 @@ fn independent_workload_subgraphs() {
     assert!(matches!(get_endpoint_state(&router, &S2), EndpointState::Active { .. }));
 
     // Deactivate S1 — only W1 affected.
-    router.send_activate_service(mgmt1, S1, false);
+    router.set_endpoint_demand_active(demand_s1, false);
     router.propagate();
 
     let wl1 = router.get_workload(&W1).unwrap();
@@ -637,14 +640,14 @@ fn teardown_during_backoff() {
 #[test]
 fn teardown_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
     let pod_id = wl.pod_id.unwrap();
 
     // Deactivate service → demand drops → workload signals Suspend.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();

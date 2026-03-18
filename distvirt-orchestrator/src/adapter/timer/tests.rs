@@ -260,13 +260,12 @@ fn generation_change_restarts_timer() {
 
     let ep_id = get_endpoint_id(&router);
 
-    // Activate via BackendNeed traffic.
-    let bn = router.create_backend_need();
-    router.set_traffic_demand_edges(bn, vec![ep_id]);
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
+    // Activate via active level, make pod running.
+    let bn = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(bn, vec![ep_id]);
+    router.set_endpoint_demand_active(bn, true);
     router.propagate();
 
-    // Make pod running.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     let lease = router.create_schedule_lease();
     router.set_pod_lease_edges(lease, vec![pod_id]);
@@ -277,8 +276,8 @@ fn generation_change_restarts_timer() {
     router.propagate();
     let _ = adapter.reconcile(&mut router).0;
 
-    // Traffic stops → idle timer starts (generation 1).
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
+    // Traffic event → idle timer starts (generation 1).
+    router.send_endpoint_demand_traffic(bn, ep_id, ());
     router.propagate();
     let (actions, _) = adapter.reconcile(&mut router);
     assert!(
@@ -293,8 +292,11 @@ fn generation_change_restarts_timer() {
         actions
     );
 
-    // Traffic returns → idle timer cancelled.
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
+    // Active level drop then rise cancels idle timer.
+    // Must propagate between to avoid router suppression of unchanged aggregation.
+    router.set_endpoint_demand_active(bn, false);
+    router.propagate();
+    router.set_endpoint_demand_active(bn, true);
     router.propagate();
     let (actions, _) = adapter.reconcile(&mut router);
     assert!(
@@ -308,8 +310,8 @@ fn generation_change_restarts_timer() {
         actions
     );
 
-    // Traffic stops again → idle timer starts with new generation (2).
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
+    // Second traffic event → idle timer starts with new generation (2).
+    router.send_endpoint_demand_traffic(bn, ep_id, ());
     router.propagate();
     let (actions, _) = adapter.reconcile(&mut router);
     let start = actions.iter().find(|a| {
@@ -370,10 +372,10 @@ fn multiple_sm_kinds_in_one_cycle() {
 
     let ep_id = get_endpoint_id(&router);
 
-    // Activate via traffic, make pod running.
-    let bn = router.create_backend_need();
-    router.set_traffic_demand_edges(bn, vec![ep_id]);
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
+    // Traffic event activates, make pod running.
+    let bn = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(bn, vec![ep_id]);
+    router.send_endpoint_demand_traffic(bn, ep_id, ());
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -386,8 +388,7 @@ fn multiple_sm_kinds_in_one_cycle() {
     router.propagate();
     let _ = adapter.reconcile(&mut router).0;
 
-    // Traffic stops → idle timer. Also make pod fail → workload retry timer.
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
+    // Idle timer already running from traffic event. Also make pod fail → workload retry timer.
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
     router.propagate();
 
@@ -529,10 +530,10 @@ fn fire_dispatches_endpoint_timer() {
 
     let ep_id = get_endpoint_id(&router);
 
-    // Traffic activates → pod running → traffic stops → idle timer active.
-    let bn = router.create_backend_need();
-    router.set_traffic_demand_edges(bn, vec![ep_id]);
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::Traffic);
+    // Traffic event activates → pod running → idle timer from traffic.
+    let bn = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(bn, vec![ep_id]);
+    router.send_endpoint_demand_traffic(bn, ep_id, ());
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -542,9 +543,6 @@ fn fire_dispatches_endpoint_timer() {
     router.propagate();
     router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Running);
-    router.propagate();
-
-    router.set_backend_need_level(bn, crate::sm::BackendNeed::None);
     router.propagate();
 
     let ep = router.get_endpoint(&ep_id).unwrap();

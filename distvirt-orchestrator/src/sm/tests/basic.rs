@@ -29,23 +29,31 @@ fn demand_aggregation() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(!wl.has_demand);
 
+    // Create demand ports for S1 and S2.
+    let ep1 = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let ep2 = router.get_service(&S2).unwrap().endpoint_id.unwrap();
+    let demand1 = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand1, vec![ep1]);
+    let demand2 = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand2, vec![ep2]);
+
     // S1 activates.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand1, true);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.has_demand);
 
     // S2 also activates.
-    router.send_activate_service(mgmt, S2, true);
+    router.set_endpoint_demand_active(demand2, true);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.has_demand);
 
     // Both deactivate.
-    router.send_activate_service(mgmt, S1, false);
-    router.send_activate_service(mgmt, S2, false);
+    router.set_endpoint_demand_active(demand1, false);
+    router.set_endpoint_demand_active(demand2, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -460,13 +468,16 @@ fn full_end_to_end() {
     let ep = router.get_endpoint(&ep_id).unwrap();
     assert!(matches!(ep.state, EndpointState::Active { .. }));
 
-    // S2 should still be Idle (has_activation=true, no activation event sent).
+    // S2 receives readiness from the workload (backend ready), even without demand.
     let ep_id = router.get_service(&S2).unwrap().endpoint_id.unwrap();
     let ep = router.get_endpoint(&ep_id).unwrap();
-    assert_eq!(ep.state, EndpointState::Idle);
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
 
-    // Activate S2 via event.
-    router.send_activate_service(mgmt_s2, S2, true);
+    // Activate S2 via EndpointDemand port.
+    let s2_ep_id = router.get_service(&S2).unwrap().endpoint_id.unwrap();
+    let demand_s2 = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_s2, vec![s2_ep_id]);
+    router.set_endpoint_demand_active(demand_s2, true);
     router.propagate();
 
     // S2 should now be in NeedBackend (demand set) or Active (readiness already available).

@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn demand_drop_during_launch_committed_to_boot() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Verify committed state.
     let wl = router.get_workload(&W1).unwrap();
@@ -13,7 +13,7 @@ fn demand_drop_during_launch_committed_to_boot() {
     assert!(wl.has_demand);
 
     // Deactivate the service — demand drops to 0.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     // Pod should still exist (committed_to_boot keeps it alive).
@@ -36,10 +36,10 @@ fn demand_drop_during_launch_committed_to_boot() {
 #[test]
 fn demand_fluctuation_during_launch() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Demand drops.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -48,7 +48,7 @@ fn demand_fluctuation_during_launch() {
     let original_pod = wl.pod_id.unwrap();
 
     // Demand reappears.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     // Same pod, still launching.
@@ -74,7 +74,7 @@ fn demand_fluctuation_during_launch() {
 #[test]
 fn spec_change_during_launch_triggers_restart() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
 
     let wl = router.get_workload(&W1).unwrap();
     let original_pod = wl.pod_id.unwrap();
@@ -107,7 +107,7 @@ fn spec_change_during_launch_triggers_restart() {
 #[test]
 fn spec_change_while_running_restarts_immediately() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Get pod running.
     make_pod_running(&mut router, worker, pod_id);
@@ -142,7 +142,7 @@ fn spec_change_while_running_restarts_immediately() {
 #[test]
 fn scavenge_idle_workload() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Get pod running.
     make_pod_running(&mut router, worker, pod_id);
@@ -203,8 +203,13 @@ fn scavenge_idle_workload() {
     assert!(!wl.has_demand);
     assert!(wl.pod_id.is_none());
 
+    // Create demand via EndpointDemand port.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+
     // Activate service → demand → pod created.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -218,7 +223,7 @@ fn scavenge_idle_workload() {
     assert!(wl.pod_running);
 
     // Service deactivates — demand drops to 0.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     // Workload destroyed the pod in reconcile (no demand, not committed).
@@ -238,7 +243,7 @@ fn scavenge_idle_workload() {
 #[test]
 fn scavenge_with_demand_is_noop() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Get pod running.
     make_pod_running(&mut router, worker, pod_id);
@@ -261,10 +266,10 @@ fn scavenge_with_demand_is_noop() {
 #[test]
 fn scavenge_aborts_committed_launch() {
     let mut router = Router::new(16);
-    let (mgmt, _worker, _pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, _worker, _pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Drop demand while pod is launching.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     // Pod still alive due to committed_to_boot.
@@ -288,7 +293,7 @@ fn scavenge_aborts_committed_launch() {
 #[test]
 fn spec_change_and_demand_drop_during_launch() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
 
     let original_pod = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
@@ -300,7 +305,7 @@ fn spec_change_and_demand_drop_during_launch() {
             ..Default::default()
         },
     );
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     // Pod still alive (committed_to_boot).
@@ -323,7 +328,7 @@ fn spec_change_and_demand_drop_during_launch() {
 #[test]
 fn restart_during_launch() {
     let mut router = Router::new(16);
-    let (mgmt, worker, _pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, _pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
 
     let original_pod = router.get_workload(&W1).unwrap().pod_id.unwrap();
 

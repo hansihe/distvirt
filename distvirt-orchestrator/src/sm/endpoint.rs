@@ -5,15 +5,17 @@ use distvirt_sm_router::SmHandler;
 
 /// Endpoint lifecycle state.
 ///
-/// An endpoint represents a service's presence in the network fabric.
-/// It tracks activation, idle timeout, and readiness from its backing workload.
+/// Derived from (demand, readiness):
+/// - No demand, no ready → Idle
+/// - Demand, no ready → NeedBackend
+/// - Ready (any demand) → Active
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EndpointState {
-    /// Has activation, currently idle (no demand signal).
+    /// No demand and no readiness.
     Idle,
-    /// Wants a backend — demand signal is true, waiting for readiness.
+    /// Demand present but no readiness yet.
     NeedBackend,
-    /// Active with a ready backend.
+    /// Ready backend available.
     Active { ready: ReadyInfo },
 }
 
@@ -30,7 +32,7 @@ pub struct EndpointConfig {
     pub workload: WorkloadId,
     pub has_activation: bool,
     pub idle_timeout: std::time::Duration,
-    pub service_ip: std::net::Ipv4Addr,
+    pub ip: std::net::Ipv4Addr,
     pub policy: distvirt_worker_protocol::ServicePolicy,
     pub dns_entry: Option<DnsEntryInfo>,
 }
@@ -53,10 +55,10 @@ pub struct EndpointTimerRequest {
 /// Observable endpoint lifecycle status.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum EndpointStatus {
-    /// Has activation, currently idle (no demand signal).
+    /// No demand, no readiness.
     #[default]
     Idle,
-    /// Wants a backend — demand is set but workload not ready.
+    /// Demand present, waiting for readiness.
     NeedBackend,
     /// Active with a ready backend.
     Active,
@@ -69,17 +71,14 @@ pub struct EndpointSm {
     pub idle_generation: u64,
     pub idle_timer_active: bool,
     pub idle_timeout: std::time::Duration,
-    /// Cached readiness from the workload. Stored regardless of endpoint state
-    /// so that an Idle→NeedBackend transition can skip straight to Active when
-    /// readiness was delivered while the endpoint was idle (the router suppresses
-    /// re-delivery of unchanged signals).
+    /// Cached readiness from the workload.
     pub last_readiness: Option<ReadyInfo>,
-    /// Current aggregated backend need level.
-    pub backend_need: BackendNeed,
+    /// Current active level from demand aggregation. Only written by handle_activate.
+    pub active_level: bool,
     /// What kind of entity owns this endpoint.
     pub kind: Option<EndpointKind>,
-    /// Service VIP from config, used to construct ServiceEndpointInfo.
-    pub service_ip: std::net::Ipv4Addr,
+    /// IP from config, used to construct ServiceEndpointInfo.
+    pub ip: std::net::Ipv4Addr,
     /// Service policy from config, used to construct ServiceEndpointInfo.
     pub service_policy: distvirt_worker_protocol::ServicePolicy,
     /// DNS entry info from config, signaled to the DnsRegistry port.
@@ -88,38 +87,48 @@ pub struct EndpointSm {
 
 impl EndpointSm {
     pub fn new(has_activation: bool) -> Self {
-        EndpointSm {
-            state: if has_activation {
-                EndpointState::Idle
-            } else {
-                EndpointState::NeedBackend
-            },
+        let mut sm = EndpointSm {
+            state: EndpointState::Idle, // overwritten by derive_state
             has_activation,
             idle_generation: 0,
             idle_timer_active: false,
             idle_timeout: std::time::Duration::ZERO,
             last_readiness: None,
-            backend_need: BackendNeed::None,
+            active_level: false,
             kind: None,
-            service_ip: std::net::Ipv4Addr::UNSPECIFIED,
+            ip: std::net::Ipv4Addr::UNSPECIFIED,
             service_policy: distvirt_worker_protocol::ServicePolicy {
                 buffer_frames: 0,
                 timeout_ms: 0,
                 activator: None,
             },
             dns_entry: None,
+        };
+        sm.derive_state();
+        sm
+    }
+
+    /// Compute the demand signal.
+    /// Always-on endpoints always have demand. Activation endpoints derive
+    /// demand from active_level || idle_timer_active.
+    fn compute_demand(&self) -> bool {
+        if !self.has_activation {
+            true
+        } else {
+            self.active_level || self.idle_timer_active
         }
     }
 
-    /// Transition from Idle to NeedBackend (or directly to Active if readiness
-    /// is already cached).
-    fn activate(&mut self) {
-        debug_assert!(matches!(self.state, EndpointState::Idle));
-        if let Some(info) = self.last_readiness.clone() {
-            self.state = EndpointState::Active { ready: info };
+    /// Derive endpoint state from (demand, readiness).
+    fn derive_state(&mut self) {
+        let demand = self.compute_demand();
+        self.state = if let Some(info) = self.last_readiness.clone() {
+            EndpointState::Active { ready: info }
+        } else if demand {
+            EndpointState::NeedBackend
         } else {
-            self.state = EndpointState::NeedBackend;
-        }
+            EndpointState::Idle
+        };
     }
 
     fn update_timer_signal(&self, ctx: &mut impl EndpointCtx) {
@@ -141,14 +150,18 @@ impl EndpointSm {
             EndpointState::Active { .. } => EndpointStatus::Active,
         };
         ctx.set_status(status);
-        ctx.set_current_backend_need(self.backend_need.clone());
+        ctx.set_current_backend_need(if self.compute_demand() {
+            BackendNeed::Active
+        } else {
+            BackendNeed::None
+        });
         ctx.set_idle_timer_active(self.idle_timer_active);
 
         let endpoint_info = match (&self.state, &self.kind) {
             (EndpointState::Active { ready }, Some(EndpointKind::Service { service_id })) => {
                 Some(ServiceEndpointInfo {
                     service_id: *service_id,
-                    service_ip: self.service_ip,
+                    service_ip: self.ip,
                     policy: self.service_policy.clone(),
                     pod_ip: ready.pod_ip,
                     worker_id: ready.worker_id,
@@ -171,20 +184,13 @@ impl EndpointSm {
             self.kind = Some(config.kind);
             self.has_activation = config.has_activation;
             self.idle_timeout = config.idle_timeout;
-            self.service_ip = config.service_ip;
+            self.ip = config.ip;
             self.service_policy = config.policy;
             self.dns_entry = config.dns_entry;
 
             // Point demand at the workload.
             ctx.set_endpoint_demand_edges(vec![config.workload]);
 
-            if !self.has_activation {
-                // Always-on: set demand immediately.
-                ctx.set_demand(true);
-                if matches!(self.state, EndpointState::Idle) {
-                    self.activate();
-                }
-            }
             // Clear stale timer if activation was removed.
             if self.idle_timer_active && !self.has_activation {
                 self.idle_timer_active = false;
@@ -196,97 +202,37 @@ impl EndpointSm {
         }
     }
 
-    pub(crate) fn handle_readiness(
-        &mut self,
-        ready: Option<ReadyInfo>,
-        ctx: &mut impl EndpointCtx,
-    ) {
-        self.last_readiness = ready.clone();
-        match (&self.state, ready) {
-            (EndpointState::NeedBackend, Some(info)) => {
-                self.state = EndpointState::Active { ready: info };
-            }
-            (EndpointState::Active { .. }, None) => {
-                self.state = EndpointState::NeedBackend;
-                if self.idle_timer_active {
-                    self.idle_timer_active = false;
-                    self.update_timer_signal(ctx);
-                }
-            }
-            (EndpointState::Active { .. }, Some(info)) => {
-                self.state = EndpointState::Active { ready: info };
-            }
-            _ => {}
-        }
+    pub(crate) fn handle_readiness(&mut self, ready: Option<ReadyInfo>) {
+        self.last_readiness = ready;
     }
 
-    pub(crate) fn handle_backend_need(&mut self, need: BackendNeed, ctx: &mut impl EndpointCtx) {
-        self.backend_need = need.clone();
-        match (&self.state, &need) {
-            // Active, need drops — start idle timer.
-            (EndpointState::Active { .. }, BackendNeed::None) if self.has_activation => {
-                if !self.idle_timer_active {
-                    self.idle_timer_active = true;
-                    self.idle_generation += 1;
-                    self.update_timer_signal(ctx);
-                }
-            }
-            // Active, sustained need — cancel idle timer.
-            (EndpointState::Active { .. }, BackendNeed::Traffic | BackendNeed::Active) => {
-                if self.idle_timer_active {
-                    self.idle_timer_active = false;
-                    self.update_timer_signal(ctx);
-                }
-            }
-            // Idle, sustained need — activate.
-            (EndpointState::Idle, BackendNeed::Traffic | BackendNeed::Active) => {
-                ctx.set_demand(true);
-                self.activate();
-            }
-            _ => {}
-        }
-    }
-
+    /// Level-based active input from demand aggregation.
+    /// Sets active_level. Cancels idle timer when active goes high.
     pub(crate) fn handle_activate(&mut self, active: bool, ctx: &mut impl EndpointCtx) {
-        if self.has_activation {
-            ctx.set_demand(active);
-            if active && matches!(self.state, EndpointState::Idle) {
-                self.activate();
-            } else if !active {
-                self.state = EndpointState::Idle;
-                if self.idle_timer_active {
-                    self.idle_timer_active = false;
-                    self.update_timer_signal(ctx);
-                }
-            }
+        self.active_level = active;
+        if active && self.idle_timer_active {
+            self.idle_timer_active = false;
+            self.update_timer_signal(ctx);
         }
     }
 
+    /// Instantaneous traffic event. Starts or restarts the idle timer.
+    /// Does not modify active_level.
     pub(crate) fn handle_traffic_event(&mut self, ctx: &mut impl EndpointCtx) {
-        if self.has_activation && matches!(self.state, EndpointState::Idle) {
-            ctx.set_demand(true);
-            self.activate();
-            // Unit impulse: start idle timer immediately, but only if
-            // we actually reached Active (readiness was cached).
-            if matches!(self.state, EndpointState::Active { .. }) && !self.idle_timer_active {
-                self.idle_timer_active = true;
-                self.idle_generation += 1;
-                self.update_timer_signal(ctx);
-            }
+        if self.has_activation {
+            self.idle_timer_active = true;
+            self.idle_generation += 1;
+            self.update_timer_signal(ctx);
         }
     }
 
+    /// Idle timer expired. Clears idle_timer_active.
     pub(crate) fn handle_timer_fired(
         &mut self,
         _key: EndpointTimerKey,
         ctx: &mut impl EndpointCtx,
     ) {
-        if matches!(self.state, EndpointState::Active { .. })
-            && self.idle_timer_active
-            && self.has_activation
-        {
-            self.state = EndpointState::Idle;
-            ctx.set_demand(false);
+        if self.idle_timer_active {
             self.idle_timer_active = false;
             self.update_timer_signal(ctx);
         }
@@ -300,6 +246,8 @@ impl<C: EndpointCtx> SmHandler<C> for EndpointSm {
         ctx.set_endpoint_timers_edges(vec![TIMER]);
         ctx.set_endpoint_fabric_endpoints_edges(vec![FABRIC_ENDPOINT]);
         ctx.set_endpoint_dns_edges(vec![DNS_REGISTRY]);
+        self.derive_state();
+        ctx.set_demand(self.compute_demand());
         self.update_status_signals(ctx);
     }
 
@@ -308,12 +256,15 @@ impl<C: EndpointCtx> SmHandler<C> for EndpointSm {
             EndpointInput::ConfigInput(config) => self.handle_config(config, ctx),
             EndpointInput::ReadinessInput(readiness_list) => {
                 let ready = readiness_list.into_iter().next().flatten();
-                self.handle_readiness(ready, ctx);
+                self.handle_readiness(ready);
             }
-            EndpointInput::BackendNeedInput(need) => self.handle_backend_need(need, ctx),
-            EndpointInput::ActivateEndpoint(active) => self.handle_activate(active, ctx),
+            EndpointInput::EndpointDemandTraffic(()) => self.handle_traffic_event(ctx),
+            EndpointInput::BackendNeedInput(need) => self.handle_activate(need, ctx),
+            EndpointInput::ActivateEndpoint(_) => {} // noop for now
             EndpointInput::EndpointTimerFired(key) => self.handle_timer_fired(key, ctx),
         }
+        self.derive_state();
+        ctx.set_demand(self.compute_demand());
         self.update_status_signals(ctx);
     }
 }

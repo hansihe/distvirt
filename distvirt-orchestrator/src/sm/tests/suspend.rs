@@ -59,14 +59,14 @@ fn confirm_artifact(
 #[test]
 fn suspend_on_demand_drop() {
     let mut router = Router::new(16);
-    let (mgmt, _worker) = setup_running_suspendable_workload(&mut router);
+    let (_mgmt, _worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
     let pod_id = wl.pod_id.unwrap();
 
     // Deactivate service → demand drops to 0.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     // Workload should have signaled Suspend (not destroyed the pod).
@@ -98,12 +98,12 @@ fn suspend_on_demand_drop() {
 #[test]
 fn resume_from_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (_mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Suspend: deactivate → suspend → complete + confirm.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let artifact = ArtifactPortId(100);
@@ -115,7 +115,7 @@ fn resume_from_artifact() {
     assert!(wl.pod_id.is_none());
 
     // Re-activate → demand returns → workload should create pod from artifact.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -146,19 +146,19 @@ fn resume_from_artifact() {
 #[test]
 fn demand_returns_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (_mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Start suspend.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.awaiting_suspend);
 
     // Demand returns while suspending.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     // Pod is still suspending — can't go back (lifecycle is non-circular).
@@ -203,12 +203,12 @@ fn demand_returns_during_suspend() {
 #[test]
 fn spec_change_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Start suspend.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -230,7 +230,7 @@ fn spec_change_during_suspend() {
     // The pod is still suspending.
 
     // Re-activate demand so the workload wants a pod again.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     // Worker completes the suspend.
@@ -250,7 +250,7 @@ fn spec_change_during_suspend() {
 #[test]
 fn worker_loss_on_suspendable_workload() {
     let mut router = Router::new(16);
-    let (_mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (_mgmt, worker, _demand_port) = setup_running_suspendable_workload(&mut router);
 
     // Worker dies — this is NOT a suspend, it's a failure.
     router.destroy_worker(worker);
@@ -271,12 +271,12 @@ fn worker_loss_on_suspendable_workload() {
 #[test]
 fn destroy_discards_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Suspend successfully + confirm.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
     let artifact = ArtifactPortId(400);
     suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
@@ -285,7 +285,7 @@ fn destroy_discards_artifact() {
     assert_eq!(wl.artifact_port, Some(artifact));
 
     // Re-activate → resumes from artifact.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let new_pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -309,11 +309,11 @@ fn destroy_discards_artifact() {
 #[test]
 fn suspend_resume_suspend_cycle() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (_mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     // First suspend.
     let pod1 = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
     let artifact1 = ArtifactPortId(500);
     suspend_and_confirm(&mut router, worker, pod1, artifact1, W1);
@@ -324,7 +324,7 @@ fn suspend_resume_suspend_cycle() {
     );
 
     // First resume.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_ne!(pod1, pod2);
@@ -342,7 +342,7 @@ fn suspend_resume_suspend_cycle() {
     assert!(wl.pod_running);
 
     // Second suspend.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
     let artifact2 = ArtifactPortId(501);
     suspend_and_confirm(&mut router, worker, pod2, artifact2, W1);
@@ -352,7 +352,7 @@ fn suspend_resume_suspend_cycle() {
     assert!(wl.pod_id.is_none());
 
     // Second resume.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
     let pod3 = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_ne!(pod2, pod3);
@@ -367,12 +367,12 @@ fn suspend_resume_suspend_cycle() {
 #[test]
 fn scavenge_clears_suspended_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Suspend successfully + confirm.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
     let artifact = ArtifactPortId(600);
     suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
@@ -398,12 +398,12 @@ fn scavenge_clears_suspended_artifact() {
 #[test]
 fn suspend_on_idle_disabled_during_suspend() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, _worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Start suspend by dropping demand.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -437,12 +437,12 @@ fn suspend_on_idle_disabled_during_suspend() {
 #[test]
 fn suspend_on_idle_disabled_discards_artifact() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_suspendable_workload(&mut router);
+    let (mgmt, worker, demand_port) = setup_running_suspendable_workload(&mut router);
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
     // Suspend successfully + confirm.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
     let artifact = ArtifactPortId(700);
     suspend_and_confirm(&mut router, worker, pod_id, artifact, W1);
@@ -467,7 +467,7 @@ fn suspend_on_idle_disabled_discards_artifact() {
     assert_eq!(wl.artifact_port, None);
 
     // Re-activate → demand returns → cold boot (no artifact).
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -481,7 +481,7 @@ fn suspend_on_idle_disabled_discards_artifact() {
 #[test]
 fn suspend_on_idle_enabled_with_running_pod() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
     make_pod_running(&mut router, worker, pod_id);
 
     let wl = router.get_workload(&W1).unwrap();
@@ -506,7 +506,7 @@ fn suspend_on_idle_enabled_with_running_pod() {
     assert_eq!(wl.pod_id, Some(pod_id)); // same pod, no restart
 
     // Drop demand → should suspend (not destroy).
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -527,7 +527,7 @@ fn suspend_on_idle_enabled_with_running_pod() {
 #[test]
 fn suspend_on_idle_change_no_restart() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
     make_pod_running(&mut router, worker, pod_id);
 
     let wl = router.get_workload(&W1).unwrap();
@@ -557,7 +557,7 @@ fn suspend_on_idle_change_no_restart() {
 #[test]
 fn image_and_suspend_change_together() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id) = setup_workload_with_pending_pod(&mut router);
+    let (mgmt, worker, pod_id, _demand_port) = setup_workload_with_pending_pod(&mut router);
     make_pod_running(&mut router, worker, pod_id);
 
     let wl = router.get_workload(&W1).unwrap();

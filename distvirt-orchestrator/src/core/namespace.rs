@@ -11,9 +11,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::adapter::artifact::{ArtifactAction, ArtifactAdapter};
-use crate::adapter::endpoint_demand::EndpointDemandAdapter;
 use crate::adapter::dns_registry::{DnsRegistryAction, DnsRegistryAdapter};
 use crate::adapter::endpoint::{EndpointAction, EndpointAdapter};
+use crate::adapter::endpoint_demand::EndpointDemandAdapter;
 use crate::adapter::management::ManagementAdapter;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
@@ -21,16 +21,17 @@ use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
 use crate::core::ClientCommand;
 use distvirt_sm_router::trace::PanicTracer;
 
-use crate::core::wg_peers::{WireGuardPeerManager, WgPeerOutput};
+use crate::core::wg_peers::{WgPeerOutput, WireGuardPeerManager};
 use crate::sm::{
-    AdminCmd, DRouter, DNS_REGISTRY, FABRIC_ENDPOINT, LeaseInfo, PodId, PodStatus,
-    Router, SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WlStatus, WorkerId,
-    WireGuardPeerEndpointInfo, WireGuardPeerId,
-    endpoint::EndpointStatus,
+    AdminCmd, DNS_REGISTRY, DRouter, FABRIC_ENDPOINT, LeaseInfo, PodId, PodStatus, Router,
+    SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WireGuardPeerEndpointInfo, WireGuardPeerId, WlStatus,
+    WorkerId, endpoint::EndpointStatus,
 };
 use crate::types::{NamespaceId, NamespaceSpec, NamespaceStatusReport, WorkloadName};
 
-use super::types::{InternalNamespaceEffects, InternalNamespaceEvent, InternalSchedulerMessage, InternalWorkerEvent};
+use super::types::{
+    InternalNamespaceEffects, InternalNamespaceEvent, InternalSchedulerMessage, InternalWorkerEvent,
+};
 
 // TODO: update for EndpointSm refactor
 // #[cfg(test)]
@@ -125,7 +126,10 @@ impl NamespaceCore {
     /// Top-level event processing: push event, propagate, reconcile loop.
     /// Returns all effects to be executed by the boundary layer.
     /// All IDs are router-internal.
-    pub(crate) fn process_event(&mut self, event: InternalNamespaceEvent) -> InternalNamespaceEffects {
+    pub(crate) fn process_event(
+        &mut self,
+        event: InternalNamespaceEvent,
+    ) -> InternalNamespaceEffects {
         let mut effects = InternalNamespaceEffects::default();
 
         // Phase 1: Push external event into router
@@ -151,20 +155,20 @@ impl NamespaceCore {
         for action in self.adapters.artifact.finalize(&mut self.router) {
             match action {
                 ArtifactAction::Referenced { port_id } => {
-                    effects.scheduler_messages.push(
-                        InternalSchedulerMessage::ArtifactReferenced {
+                    effects
+                        .scheduler_messages
+                        .push(InternalSchedulerMessage::ArtifactReferenced {
                             namespace_id: self.namespace_id.clone(),
                             artifact_port_id: port_id,
-                        },
-                    );
+                        });
                 }
                 ArtifactAction::Released { port_id } => {
-                    effects.scheduler_messages.push(
-                        InternalSchedulerMessage::ArtifactReleased {
+                    effects
+                        .scheduler_messages
+                        .push(InternalSchedulerMessage::ArtifactReleased {
                             namespace_id: self.namespace_id.clone(),
                             artifact_port_id: port_id,
-                        },
-                    );
+                        });
                 }
             }
         }
@@ -172,7 +176,11 @@ impl NamespaceCore {
         effects
     }
 
-    fn push_event(&mut self, event: InternalNamespaceEvent, _effects: &mut InternalNamespaceEffects) {
+    fn push_event(
+        &mut self,
+        event: InternalNamespaceEvent,
+        _effects: &mut InternalNamespaceEffects,
+    ) {
         match event {
             InternalNamespaceEvent::WorkerEvent { worker_id, event } => {
                 match event {
@@ -192,7 +200,8 @@ impl NamespaceCore {
                             } else {
                                 PodStatus::Failed
                             };
-                            self.router.send_notify_pod_status(worker_id, pod_id, status);
+                            self.router
+                                .send_notify_pod_status(worker_id, pod_id, status);
                         }
                     }
                     InternalWorkerEvent::PodFailed { pod_id } => {
@@ -204,16 +213,16 @@ impl NamespaceCore {
                             );
                         }
                     }
-                    InternalWorkerEvent::PodSuspended { pod_id, artifact_id } => {
+                    InternalWorkerEvent::PodSuspended {
+                        pod_id,
+                        artifact_id,
+                    } => {
                         if self.router.get_pod(&pod_id).is_some() {
                             // Create artifact port so the workload can reference it.
                             self.router.create_artifact(artifact_id);
                             self.adapters.artifact.register_pending(artifact_id);
-                            self.router.send_notify_pod_suspended(
-                                worker_id,
-                                pod_id,
-                                artifact_id,
-                            );
+                            self.router
+                                .send_notify_pod_suspended(worker_id, pod_id, artifact_id);
                         }
                     }
                     InternalWorkerEvent::PodSuspendFailed { pod_id } => {
@@ -227,8 +236,10 @@ impl NamespaceCore {
                     }
                     InternalWorkerEvent::EndpointDemand { ip, signal } => {
                         // Look up the endpoint by IP.
-                        let endpoint_id = self.router.iter_endpoint()
-                            .find(|(_, ep)| ep.service_ip == ip)
+                        let endpoint_id = self
+                            .router
+                            .iter_endpoint()
+                            .find(|(_, ep)| ep.ip == ip)
                             .map(|(id, _)| *id);
                         if let Some(endpoint_id) = endpoint_id {
                             self.adapters.endpoint_demand.push_demand(
@@ -325,11 +336,7 @@ impl NamespaceCore {
         }
     }
 
-    fn handle_wg_connect(
-        &mut self,
-        client_public_key: [u8; 32],
-        worker_id: WorkerId,
-    ) {
+    fn handle_wg_connect(&mut self, client_public_key: [u8; 32], worker_id: WorkerId) {
         let result = self.wg_peer_mgr.connect(client_public_key);
         match result {
             crate::core::wg_peers::ConnectResult::Ok { client_ip, outputs } => {
@@ -374,10 +381,7 @@ impl NamespaceCore {
         }
     }
 
-    fn handle_wg_disconnect(
-        &mut self,
-        client_public_key: [u8; 32],
-    ) {
+    fn handle_wg_disconnect(&mut self, client_public_key: [u8; 32]) {
         let outputs = self.wg_peer_mgr.disconnect(client_public_key);
         for output in outputs {
             match output {
@@ -414,8 +418,7 @@ impl NamespaceCore {
                 worker_id: router_worker_id,
             },
         );
-        self.router
-            .set_pod_lease_edges(lease_id, vec![pod_id]);
+        self.router.set_pod_lease_edges(lease_id, vec![pod_id]);
         self.leases.insert(pod_id, lease_id);
         self.add_pod_to_worker(router_worker_id, pod_id);
         true
@@ -435,8 +438,10 @@ impl NamespaceCore {
         if let Some(worker_id) = self.pod_worker.remove(&pod_id) {
             if let Some(pods) = self.worker_pod_edges.get_mut(&worker_id) {
                 pods.remove(&pod_id);
-                self.router
-                    .set_worker_assignment_edges(worker_id, pods.iter().copied().collect::<Vec<_>>());
+                self.router.set_worker_assignment_edges(
+                    worker_id,
+                    pods.iter().copied().collect::<Vec<_>>(),
+                );
             }
         }
     }
@@ -446,25 +451,34 @@ impl NamespaceCore {
     /// `mutated_router` is `true` when any adapter wrote back into the router.
     fn reconcile(&mut self) -> (ReconcileActions, bool) {
         let (timer_actions, timer_mut) = self.adapters.timer.reconcile(&mut self.router);
-        let (schedule_deltas, sched_mut) = self.adapters.schedule_request.reconcile(&mut self.router);
+        let (schedule_deltas, sched_mut) =
+            self.adapters.schedule_request.reconcile(&mut self.router);
         let (pod_actions, pod_mut) = self.adapters.pod_assignment.reconcile(&mut self.router);
         let (endpoint_actions, ep_mut) = self.adapters.endpoint.reconcile(&mut self.router);
-        let (dns_registry_actions, dns_mut) = self.adapters.dns_registry.reconcile(&mut self.router);
+        let (dns_registry_actions, dns_mut) =
+            self.adapters.dns_registry.reconcile(&mut self.router);
         let artifact_mut = self.adapters.artifact.reconcile(&mut self.router);
 
         let mutated = timer_mut || sched_mut || pod_mut || ep_mut || dns_mut || artifact_mut;
 
-        (ReconcileActions {
-            timer_actions,
-            schedule_deltas,
-            pod_actions,
-            endpoint_actions,
-            dns_registry_actions,
-        }, mutated)
+        (
+            ReconcileActions {
+                timer_actions,
+                schedule_deltas,
+                pod_actions,
+                endpoint_actions,
+                dns_registry_actions,
+            },
+            mutated,
+        )
     }
 
     /// Phase 4: Translate reconcile actions into internal effects.
-    fn collect_effects(&mut self, actions: ReconcileActions, effects: &mut InternalNamespaceEffects) {
+    fn collect_effects(
+        &mut self,
+        actions: ReconcileActions,
+        effects: &mut InternalNamespaceEffects,
+    ) {
         // Timer actions pass through directly.
         effects.timer_actions.extend(actions.timer_actions);
 
@@ -499,7 +513,9 @@ impl NamespaceCore {
         effects.endpoint_actions.extend(actions.endpoint_actions);
 
         // DNS registry actions pass through directly.
-        effects.dns_registry_actions.extend(actions.dns_registry_actions);
+        effects
+            .dns_registry_actions
+            .extend(actions.dns_registry_actions);
     }
 
     /// Create a new worker port in the router with the given ID.
@@ -521,10 +537,14 @@ impl NamespaceCore {
 
         // Workloads
         for (name, router_id) in self.adapters.management.iter_workloads() {
-            let state = self.router.signal_workload_status(router_id)
+            let state = self
+                .router
+                .signal_workload_status(router_id)
                 .map(|s| wl_status_str(s))
                 .unwrap_or("unknown");
-            let pod_id = self.router.get_workload(&router_id)
+            let pod_id = self
+                .router
+                .get_workload(&router_id)
                 .and_then(|wl| wl.pod_id)
                 .map(|pid| crate::types::PodId(pid.0));
 
@@ -552,10 +572,14 @@ impl NamespaceCore {
                 .cloned();
             let ep_sm = ep_id.as_ref().and_then(|id| self.router.get_endpoint(id));
             let has_activation = ep_sm.map(|s| s.has_activation).unwrap_or(false);
-            let service_ip = ep_sm.map(|s| s.service_ip).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+            let service_ip = ep_sm
+                .map(|s| s.ip)
+                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
 
             // Look up the workload name from the spec.
-            let workload_name = self.current_spec.as_ref()
+            let workload_name = self
+                .current_spec
+                .as_ref()
                 .and_then(|spec| spec.services.get(name))
                 .map(|svc_spec| svc_spec.workload_id.clone())
                 .unwrap_or_else(|| WorkloadName(String::new()));
@@ -580,15 +604,21 @@ impl NamespaceCore {
                 continue;
             }
             let workload_router_id = pod_sm.workload_id.unwrap();
-            let workload_name = self.adapters.management.workload_proto_name(&workload_router_id)
+            let workload_name = self
+                .adapters
+                .management
+                .workload_proto_name(&workload_router_id)
                 .map(|n| WorkloadName(n.to_string()))
                 .unwrap_or_else(|| WorkloadName(String::new()));
 
             let proto_pod_id = crate::types::PodId(pod_id.0);
-            let worker_id = pod_sm.worker_id
+            let worker_id = pod_sm
+                .worker_id
                 .map(|w| crate::types::WorkerId(w.0))
                 .unwrap_or(crate::types::WorkerId(0));
-            let ip = pod_sm.launch_spec.as_ref()
+            let ip = pod_sm
+                .launch_spec
+                .as_ref()
                 .and_then(|s| s.network.as_ref())
                 .map(|n| n.ip.to_string())
                 .unwrap_or_default();
@@ -644,7 +674,6 @@ impl NamespaceCore {
     pub fn wg_peers(&self) -> &WireGuardPeerManager {
         &self.wg_peer_mgr
     }
-
 }
 
 fn wl_status_str(status: &WlStatus) -> &'static str {

@@ -11,6 +11,7 @@ use stateright::*;
 
 use super::super::endpoint::*;
 use super::super::*;
+use distvirt_sm_router::{SequentialIds, SmHandler};
 
 // ============================================================================
 // Environment types
@@ -33,8 +34,8 @@ enum ReadinessEnv {
 struct EndpointModel {
     /// Whether the endpoint has activation (demand-driven vs always-on).
     has_activation: bool,
-    /// Whether to inject backend need changes from workers.
-    enable_backend_need: bool,
+    /// Whether to inject active level changes from demand aggregation.
+    enable_active_level: bool,
     /// Whether to inject instantaneous traffic events.
     enable_traffic_event: bool,
 }
@@ -51,8 +52,8 @@ struct EndpointModelState {
     config_present: bool,
     /// Current readiness from the workload.
     readiness_env: ReadinessEnv,
-    /// Current backend need level from workers.
-    backend_need: BackendNeed,
+    /// Current active level from demand aggregation.
+    active_level: bool,
     /// Whether the demand signal is set (extracted from effects).
     demand_set: bool,
     /// Whether an idle timer is pending in the environment.
@@ -73,12 +74,10 @@ enum EndpointAction {
     WorkloadReady,
     /// Workload becomes unready (ReadinessInput with None).
     WorkloadUnready,
-    /// Backend need changes to None.
-    BackendNeedNone,
-    /// Backend need changes to Traffic.
-    BackendNeedTraffic,
-    /// Backend need changes to Active.
-    BackendNeedActive,
+    /// Active level goes high (BackendNeedInput(true)).
+    ActiveLevelOn,
+    /// Active level goes low (BackendNeedInput(false)).
+    ActiveLevelOff,
     /// Instantaneous traffic event (unit impulse).
     TrafficEvent,
     /// Idle timer fires.
@@ -93,10 +92,14 @@ enum EndpointAction {
 // Helpers
 // ============================================================================
 
+const EP_ID: EndpointId = EndpointId(0);
+
 /// Deliver an input to the SM, apply effects to env state.
+/// Also verifies that emitted signals are consistent with SM internal state.
 fn apply_endpoint_input(state: &EndpointModelState, input: EndpointInput) -> EndpointModelState {
     let mut next = state.clone();
-    let mut ctx = EndpointCtxConcrete::new();
+    let mut alloc = SequentialIds::<NodeKind>::new();
+    let mut ctx = EndpointCtxConcrete::new(EP_ID, &mut alloc);
     next.sm.handle(input, &mut ctx);
     let effects = ctx.into_effects();
 
@@ -117,6 +120,46 @@ fn apply_endpoint_input(state: &EndpointModelState, input: EndpointInput) -> End
         }
     }
 
+    // Verify emitted signals are consistent with SM state.
+    // The handler always emits these signals, so they should always be Some.
+    if !next.self_destructed {
+        if let Some(ref status) = effects.status {
+            let expected = match &next.sm.state {
+                EndpointState::Idle => EndpointStatus::Idle,
+                EndpointState::NeedBackend => EndpointStatus::NeedBackend,
+                EndpointState::Active { .. } => EndpointStatus::Active,
+            };
+            assert_eq!(
+                *status, expected,
+                "status signal inconsistent with SM state"
+            );
+        }
+
+        if let Some(ref need) = effects.current_backend_need {
+            let expected_demand = if next.sm.has_activation {
+                next.sm.active_level || next.sm.idle_timer_active
+            } else {
+                true
+            };
+            let expected = if expected_demand {
+                BackendNeed::Active
+            } else {
+                BackendNeed::None
+            };
+            assert_eq!(
+                *need, expected,
+                "current_backend_need signal inconsistent with demand"
+            );
+        }
+
+        if let Some(idle_active) = effects.idle_timer_active {
+            assert_eq!(
+                idle_active, next.sm.idle_timer_active,
+                "idle_timer_active signal inconsistent with SM state"
+            );
+        }
+    }
+
     next
 }
 
@@ -130,10 +173,13 @@ fn make_ready_info() -> ReadyInfo {
 
 fn make_config(has_activation: bool) -> EndpointConfig {
     EndpointConfig {
+        kind: EndpointKind::Service {
+            service_id: ServiceId(1),
+        },
         workload: WorkloadId(0),
         has_activation,
         idle_timeout: std::time::Duration::from_secs(30),
-        service_ip: std::net::Ipv4Addr::new(10, 0, 0, 100),
+        ip: std::net::Ipv4Addr::new(10, 0, 0, 100),
         policy: distvirt_worker_protocol::ServicePolicy {
             buffer_frames: 0,
             timeout_ms: 0,
@@ -154,7 +200,8 @@ impl Model for EndpointModel {
     fn init_states(&self) -> Vec<Self::State> {
         // Start with a fresh SM that has received its initial config.
         let mut sm = EndpointSm::new(self.has_activation);
-        let mut ctx = EndpointCtxConcrete::new();
+        let mut alloc = SequentialIds::<NodeKind>::new();
+        let mut ctx = EndpointCtxConcrete::new(EP_ID, &mut alloc);
         sm.handle(
             EndpointInput::ConfigInput(Some(make_config(self.has_activation))),
             &mut ctx,
@@ -166,7 +213,7 @@ impl Model for EndpointModel {
             sm,
             config_present: true,
             readiness_env: ReadinessEnv::None,
-            backend_need: BackendNeed::None,
+            active_level: false,
             timer_pending: false,
             timer_generation: 0,
             self_destructed: false,
@@ -190,16 +237,13 @@ impl Model for EndpointModel {
             }
         }
 
-        // Backend need changes.
-        if self.enable_backend_need {
-            if state.backend_need != BackendNeed::None {
-                actions.push(EndpointAction::BackendNeedNone);
+        // Active level changes.
+        if self.enable_active_level {
+            if !state.active_level {
+                actions.push(EndpointAction::ActiveLevelOn);
             }
-            if state.backend_need != BackendNeed::Traffic {
-                actions.push(EndpointAction::BackendNeedTraffic);
-            }
-            if state.backend_need != BackendNeed::Active {
-                actions.push(EndpointAction::BackendNeedActive);
+            if state.active_level {
+                actions.push(EndpointAction::ActiveLevelOff);
             }
         }
 
@@ -225,40 +269,28 @@ impl Model for EndpointModel {
             EndpointAction::WorkloadReady => {
                 let mut s = apply_endpoint_input(
                     state,
-                    EndpointInput::ReadinessInput(Some(make_ready_info())),
+                    EndpointInput::ReadinessInput(vec![Some(make_ready_info())]),
                 );
                 s.readiness_env = ReadinessEnv::Ready;
                 s
             }
             EndpointAction::WorkloadUnready => {
-                let mut s = apply_endpoint_input(state, EndpointInput::ReadinessInput(None));
+                let mut s = apply_endpoint_input(state, EndpointInput::ReadinessInput(vec![None]));
                 s.readiness_env = ReadinessEnv::None;
                 s
             }
-            EndpointAction::BackendNeedNone => {
-                let mut s =
-                    apply_endpoint_input(state, EndpointInput::BackendNeedInput(BackendNeed::None));
-                s.backend_need = BackendNeed::None;
+            EndpointAction::ActiveLevelOn => {
+                let mut s = apply_endpoint_input(state, EndpointInput::BackendNeedInput(true));
+                s.active_level = true;
                 s
             }
-            EndpointAction::BackendNeedTraffic => {
-                let mut s = apply_endpoint_input(
-                    state,
-                    EndpointInput::BackendNeedInput(BackendNeed::Traffic),
-                );
-                s.backend_need = BackendNeed::Traffic;
-                s
-            }
-            EndpointAction::BackendNeedActive => {
-                let mut s = apply_endpoint_input(
-                    state,
-                    EndpointInput::BackendNeedInput(BackendNeed::Active),
-                );
-                s.backend_need = BackendNeed::Active;
+            EndpointAction::ActiveLevelOff => {
+                let mut s = apply_endpoint_input(state, EndpointInput::BackendNeedInput(false));
+                s.active_level = false;
                 s
             }
             EndpointAction::TrafficEvent => {
-                apply_endpoint_input(state, EndpointInput::TrafficEvent)
+                apply_endpoint_input(state, EndpointInput::EndpointDemandTraffic(()))
             }
             EndpointAction::TimerFired => apply_endpoint_input(
                 state,
@@ -283,14 +315,13 @@ impl Model for EndpointModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         let mut properties = vec![
-            // Safety: idle timer is only active when endpoint is Active + has_activation.
-            Property::<Self>::always("idle timer only when active+activation", |_model, state| {
+            // Safety: idle timer requires has_activation.
+            Property::<Self>::always("idle timer requires activation", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
                 if state.sm.idle_timer_active {
-                    matches!(state.sm.state, EndpointState::Active { .. })
-                        && state.sm.has_activation
+                    state.sm.has_activation
                 } else {
                     true
                 }
@@ -302,14 +333,17 @@ impl Model for EndpointModel {
                 }
                 state.timer_pending == state.sm.idle_timer_active
             }),
-            // Safety: demand signal matches state expectations.
-            Property::<Self>::always("demand consistent with state", |_model, state| {
+            // Safety: state is correctly derived from (demand, readiness).
+            Property::<Self>::always("state derived from demand+readiness", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
-                match &state.sm.state {
-                    EndpointState::Idle => !state.demand_set,
-                    EndpointState::NeedBackend | EndpointState::Active { .. } => state.demand_set,
+                let ready = state.readiness_env == ReadinessEnv::Ready;
+                match (&state.sm.state, ready, state.demand_set) {
+                    (EndpointState::Active { .. }, true, _) => true,
+                    (EndpointState::NeedBackend, false, true) => true,
+                    (EndpointState::Idle, false, false) => true,
+                    _ => false,
                 }
             }),
             // Safety: Active state requires readiness to be present.
@@ -341,9 +375,7 @@ impl Model for EndpointModel {
                 }
                 state.sm.last_readiness.is_some() == (state.readiness_env == ReadinessEnv::Ready)
             }),
-            // Safety: NeedBackend implies readiness is absent. With the
-            // last_readiness cache, activate() skips straight to Active when
-            // readiness is available, so NeedBackend is unreachable with ready env.
+            // Safety: NeedBackend implies readiness is absent.
             Property::<Self>::always("NeedBackend implies no readiness", |_model, state| {
                 if state.self_destructed {
                     return true;
@@ -362,38 +394,52 @@ impl Model for EndpointModel {
                     true
                 }
             }),
-            // Safety: idle timer implies no sustained need. The timer should
-            // only tick when there is no sustained signal holding activation.
-            Property::<Self>::always("idle timer implies no sustained need", |_model, state| {
+            // Safety: env active_level tracks SM active_level.
+            Property::<Self>::always("active_level env matches SM", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                state.active_level == state.sm.active_level
+            }),
+            // Safety: Idle decomposition — for activation endpoints, Idle means
+            // no active_level AND no idle timer AND no readiness.
+            Property::<Self>::always("Idle decomposition", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.sm.has_activation && matches!(state.sm.state, EndpointState::Idle) {
+                    !state.sm.active_level
+                        && !state.sm.idle_timer_active
+                        && state.readiness_env == ReadinessEnv::None
+                } else {
+                    true
+                }
+            }),
+            // Safety: idle timer implies endpoint is not Idle (timer sustains demand).
+            Property::<Self>::always("timer active implies not Idle", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
                 if state.sm.idle_timer_active {
-                    state.backend_need == BackendNeed::None
+                    !matches!(state.sm.state, EndpointState::Idle)
                 } else {
                     true
                 }
             }),
-            // Safety: sustained need prevents idle timeout. When there is
-            // sustained demand and the endpoint is Active, the idle timer
-            // must not be running.
-            Property::<Self>::always("sustained need prevents idle timer", |_model, state| {
+            // Safety: demand == active_level || idle_timer_active (for activation endpoints).
+            // For always-on, demand is unconditionally true.
+            Property::<Self>::always("demand matches spec formula", |_model, state| {
                 if state.self_destructed {
                     return true;
                 }
-                if matches!(state.sm.state, EndpointState::Active { .. })
-                    && matches!(
-                        state.backend_need,
-                        BackendNeed::Traffic | BackendNeed::Active
-                    )
-                {
-                    !state.sm.idle_timer_active
+                let expected = if state.sm.has_activation {
+                    state.sm.active_level || state.sm.idle_timer_active
                 } else {
                     true
-                }
+                };
+                state.demand_set == expected
             }),
-            // Safety: always-on never idles. If activation is disabled, the
-            // endpoint must always have demand set and never be in Idle.
+            // Safety: always-on never idles.
             Property::<Self>::always("always-on never idles", |_model, state| {
                 if state.self_destructed {
                     return true;
@@ -414,6 +460,14 @@ impl Model for EndpointModel {
             }),
         ];
 
+        // Reachability: can reach NeedBackend (demand present, no readiness).
+        if self.enable_active_level || self.enable_traffic_event || !self.has_activation {
+            properties.push(Property::<Self>::sometimes(
+                "can reach NeedBackend",
+                |_model, state| matches!(state.sm.state, EndpointState::NeedBackend),
+            ));
+        }
+
         // Reachability: can return to Idle (activation-based only).
         if self.has_activation {
             properties.push(Property::<Self>::sometimes(
@@ -422,8 +476,8 @@ impl Model for EndpointModel {
             ));
         }
 
-        // Reachability: can have idle timer active (requires activation + some need mechanism).
-        if self.has_activation && (self.enable_backend_need || self.enable_traffic_event) {
+        // Reachability: can have idle timer active (requires activation + traffic event).
+        if self.has_activation && self.enable_traffic_event {
             properties.push(Property::<Self>::sometimes(
                 "can have idle timer",
                 |_model, state| state.sm.idle_timer_active,
@@ -442,8 +496,8 @@ impl Model for EndpointModel {
             ));
         }
 
-        // Reachability: full idle timeout cycle.
-        if self.has_activation && (self.enable_backend_need || self.enable_traffic_event) {
+        // Reachability: full idle timeout cycle (requires traffic events to start timer).
+        if self.has_activation && self.enable_traffic_event {
             properties.push(Property::<Self>::sometimes(
                 "can complete idle timeout cycle",
                 |_model, state| {
@@ -487,7 +541,7 @@ impl Representative for EndpointModelState {
         }
 
         // Normalize endpoint config fields — don't affect SM logic.
-        s.sm.service_ip = std::net::Ipv4Addr::UNSPECIFIED;
+        s.sm.ip = std::net::Ipv4Addr::UNSPECIFIED;
         s.sm.service_policy = distvirt_worker_protocol::ServicePolicy {
             buffer_frames: 0,
             timeout_ms: 0,
@@ -508,7 +562,7 @@ impl Representative for EndpointModelState {
 fn endpoint_activation_basic() {
     let result = EndpointModel {
         has_activation: true,
-        enable_backend_need: false,
+        enable_active_level: false,
         enable_traffic_event: false,
     }
     .checker()
@@ -518,7 +572,7 @@ fn endpoint_activation_basic() {
 
     result.assert_properties();
     eprintln!(
-        "Endpoint (activation, no backend need, no traffic): {} unique states",
+        "Endpoint (activation, no active level, no traffic): {} unique states",
         result.unique_state_count()
     );
 }
@@ -527,7 +581,7 @@ fn endpoint_activation_basic() {
 fn endpoint_always_on() {
     let result = EndpointModel {
         has_activation: false,
-        enable_backend_need: false,
+        enable_active_level: false,
         enable_traffic_event: false,
     }
     .checker()
@@ -543,10 +597,10 @@ fn endpoint_always_on() {
 }
 
 #[test]
-fn endpoint_activation_with_backend_need() {
+fn endpoint_activation_with_active_level() {
     let result = EndpointModel {
         has_activation: true,
-        enable_backend_need: true,
+        enable_active_level: true,
         enable_traffic_event: false,
     }
     .checker()
@@ -556,16 +610,16 @@ fn endpoint_activation_with_backend_need() {
 
     result.assert_properties();
     eprintln!(
-        "Endpoint (activation + backend need): {} unique states",
+        "Endpoint (activation + active level): {} unique states",
         result.unique_state_count()
     );
 }
 
 #[test]
-fn endpoint_always_on_with_backend_need() {
+fn endpoint_always_on_with_active_level() {
     let result = EndpointModel {
         has_activation: false,
-        enable_backend_need: true,
+        enable_active_level: true,
         enable_traffic_event: false,
     }
     .checker()
@@ -575,7 +629,7 @@ fn endpoint_always_on_with_backend_need() {
 
     result.assert_properties();
     eprintln!(
-        "Endpoint (always-on + backend need): {} unique states",
+        "Endpoint (always-on + active level): {} unique states",
         result.unique_state_count()
     );
 }
@@ -584,7 +638,7 @@ fn endpoint_always_on_with_backend_need() {
 fn endpoint_activation_with_traffic_event() {
     let result = EndpointModel {
         has_activation: true,
-        enable_backend_need: false,
+        enable_active_level: false,
         enable_traffic_event: true,
     }
     .checker()
@@ -603,7 +657,7 @@ fn endpoint_activation_with_traffic_event() {
 fn endpoint_kitchen_sink() {
     let result = EndpointModel {
         has_activation: true,
-        enable_backend_need: true,
+        enable_active_level: true,
         enable_traffic_event: true,
     }
     .checker()

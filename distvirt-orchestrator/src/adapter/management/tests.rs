@@ -236,14 +236,18 @@ fn activate_service_command() {
     let svc = router.get_service(&svc_id).unwrap();
     assert!(svc.endpoint_id.is_some(), "service should have created an endpoint");
 
-    adapter.send_activate_service(&mut router, "web-svc", true);
+    // Demand comes from EndpointDemand ports, not ActivateService.
+    let ep_id = svc.endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let wl_id = adapter.lookup_workload("web").unwrap();
     let wl = router.get_workload(&wl_id).unwrap();
     assert!(
         wl.has_demand,
-        "workload should have demand after service activation"
+        "workload should have demand after endpoint demand activation"
     );
 }
 

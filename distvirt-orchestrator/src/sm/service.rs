@@ -27,17 +27,20 @@ impl<C: ServiceCtx> SmHandler<C> for ServiceSm {
                 if let Some((_, spec)) = spec_opt {
                     // Create endpoint if needed.
                     if self.endpoint_id.is_none() {
-                        let ep_id = ctx.create_endpoint(endpoint::EndpointSm::new(spec.has_activation));
+                        let ep_id =
+                            ctx.create_endpoint(endpoint::EndpointSm::new(spec.has_activation));
                         self.endpoint_id = Some(ep_id);
                         ctx.set_service_endpoint_ownership_edges(vec![ep_id]);
                     }
                     // Push config to endpoint via signal.
                     ctx.set_endpoint_config(Some(endpoint::EndpointConfig {
-                        kind: endpoint::EndpointKind::Service { service_id: ctx.id() },
+                        kind: endpoint::EndpointKind::Service {
+                            service_id: ctx.id(),
+                        },
                         workload: spec.workload,
                         has_activation: spec.has_activation,
                         idle_timeout: spec.idle_timeout,
-                        service_ip: spec.ip,
+                        ip: spec.ip,
                         policy: spec.policy,
                         dns_entry: match (spec.dns_name, spec.dns_ip) {
                             (Some(name), Some(ip)) => Some(DnsEntryInfo { name, ip }),

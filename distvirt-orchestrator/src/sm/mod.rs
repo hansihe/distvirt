@@ -397,22 +397,19 @@ impl Aggregator for LaunchSpecAggregator {
 /// Aggregates BackendNeed from multiple workers. Returns the "hottest" need.
 /// Priority: Active > Traffic > None.
 #[derive(Default)]
-pub struct BackendNeedAggregator;
+pub struct EndpointDemandActiveAggregator;
 
-impl Aggregator for BackendNeedAggregator {
-    type Input = (BackendNeedId, BackendNeed);
-    type Output = BackendNeed;
+impl Aggregator for EndpointDemandActiveAggregator {
+    type Input = (EndpointDemandId, bool);
+    type Output = bool;
 
-    fn aggregate(&self, inputs: &[(BackendNeedId, BackendNeed)]) -> BackendNeed {
-        let mut result = BackendNeed::None;
+    fn aggregate(&self, inputs: &[(EndpointDemandId, bool)]) -> bool {
         for (_, need) in inputs {
-            match need {
-                BackendNeed::Active => return BackendNeed::Active,
-                BackendNeed::Traffic => result = BackendNeed::Traffic,
-                BackendNeed::None => {}
+            if *need {
+                return true;
             }
         }
-        result
+        false
     }
 }
 
@@ -523,7 +520,7 @@ distvirt_sm_router::router! {
     }
     ports {
         Worker(WorkerId),
-        BackendNeed(auto),
+        EndpointDemand(auto),
         Management(auto),
         Timer(TimerId),
         ScheduleRequest(ScheduleRequestId),
@@ -563,7 +560,7 @@ distvirt_sm_router::router! {
         Pod::ScheduleRequest(PodScheduleRequest),
         // Port signals
         Worker::Info(WorkerInfo),
-        BackendNeed::Level(BackendNeed),
+        EndpointDemand::Active(bool),
         Management::WlSpec(WorkloadSpec),
         Management::SvcSpec(ServiceSpec),
         ScheduleLease::Lease(LeaseInfo),
@@ -577,7 +574,7 @@ distvirt_sm_router::router! {
         // Workload → Endpoint readiness
         EndpointReadiness: Workload -> Endpoint,
         // BackendNeed → Endpoint
-        TrafficDemand: BackendNeed -> Endpoint,
+        EndpointPortDemand: EndpointDemand -> Endpoint,
         // Endpoint output ports
         EndpointTimers: Endpoint -> Timer,
         EndpointFabricEndpoints: Endpoint -> FabricEndpoint,
@@ -607,6 +604,7 @@ distvirt_sm_router::router! {
         WorkloadTimerFired(WorkloadTimerKey): Timer -> Workload,
         EndpointTimerFired(endpoint::EndpointTimerKey): Timer -> Endpoint,
         PodTimerFired(PodTimerKey): Timer -> Pod,
+        EndpointDemandTraffic(()): EndpointDemand -> Endpoint,
     }
     invariants {
         // Worker info should always have positive capacity
@@ -642,8 +640,8 @@ distvirt_sm_router::router! {
             aggregator: ListAggregator<WorkloadId, Option<ReadyInfo>>,
         },
         Endpoint::BackendNeedInput {
-            sources: [(TrafficDemand, BackendNeed::Level)],
-            aggregator: BackendNeedAggregator,
+            sources: [(EndpointPortDemand, EndpointDemand::Active)],
+            aggregator: EndpointDemandActiveAggregator,
         },
         Pod::WorkerInput {
             sources: [(WorkerAssignment, Worker::Info)],

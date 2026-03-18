@@ -6,7 +6,7 @@ mod multi;
 mod retry;
 // mod service_idle; // transplanted to EndpointSm grounding tests
 mod endpoint_idle;
-//mod stateright_endpoint;
+mod stateright_endpoint;
 mod stateright_pod;
 mod stateright_service;
 mod stateright_workload;
@@ -97,10 +97,12 @@ fn assert_no_timer_output(router: &mut Router) {
 // ============================================================================
 
 /// Helper: set up a workload with an activation-based service that has been
-/// activated, return (mgmt, worker, pod_id).
+/// activated via an EndpointDemand port, return (mgmt, worker, pod_id, demand_port).
 /// After this, workload has spec + demand, a pod exists in Pending state.
-/// Use send_activate_service(mgmt, S1, false) to drop demand.
-fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, WorkerId, PodId) {
+/// Use router.set_endpoint_demand_active(demand_port, false) to drop demand.
+fn setup_workload_with_pending_pod(
+    router: &mut Router,
+) -> (ManagementId, WorkerId, PodId, EndpointDemandId) {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
@@ -130,14 +132,17 @@ fn setup_workload_with_pending_pod(router: &mut Router) -> (ManagementId, Worker
     );
     router.propagate();
 
-    // Activate the service to create demand.
-    router.send_activate_service(mgmt, S1, true);
+    // Create demand via EndpointDemand port.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     assert_eq!(router.get_pod(&pod_id).unwrap().status, PodStatus::Pending);
 
-    (mgmt, worker, pod_id)
+    (mgmt, worker, pod_id, demand_port)
 }
 
 /// Helper: schedule a pod to a worker by creating a lease port.
@@ -208,8 +213,10 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
 }
 
 /// Helper: set up a suspendable workload (suspend_on_idle=true via spec) with an
-/// activation-based service, a running pod, and return (mgmt, worker).
-fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, WorkerId) {
+/// activation-based service, a running pod, and return (mgmt, worker, demand_port).
+fn setup_running_suspendable_workload(
+    router: &mut Router,
+) -> (ManagementId, WorkerId, EndpointDemandId) {
     router.create_timer(TIMER);
     let worker = WK1;
     router.create_worker(worker);
@@ -240,13 +247,16 @@ fn setup_running_suspendable_workload(router: &mut Router) -> (ManagementId, Wor
     );
     router.propagate();
 
-    // Activate → demand → pod created.
-    router.send_activate_service(mgmt, S1, true);
+    // Create demand via EndpointDemand port.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
     make_pod_running(router, worker, pod_id);
 
     assert!(router.get_workload(&W1).unwrap().pod_running);
-    (mgmt, worker)
+    (mgmt, worker, demand_port)
 }

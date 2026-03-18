@@ -239,8 +239,13 @@ fn failed_recovery_via_demand_cycle() {
     );
     router.propagate();
 
+    // Create demand via EndpointDemand port.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+
     // Activate → demand → pod.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -254,7 +259,7 @@ fn failed_recovery_via_demand_cycle() {
     assert_eq!(wl.consecutive_failures, 1);
 
     // Drop demand — clears failure state.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -262,7 +267,7 @@ fn failed_recovery_via_demand_cycle() {
     assert!(!wl.in_backoff);
 
     // Re-activate — fresh start, creates new pod.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -337,8 +342,13 @@ fn backoff_cleared_on_demand_drop() {
     );
     router.propagate();
 
+    // Create demand via EndpointDemand port.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+
     // Activate → running pod.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -363,7 +373,7 @@ fn backoff_cleared_on_demand_drop() {
     );
 
     // Drop demand → clears everything.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -486,8 +496,13 @@ fn scavenge_during_failed() {
     );
     router.propagate();
 
+    // Create demand via EndpointDemand port.
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+
     // Activate → pod → running.
-    router.send_activate_service(mgmt, S1, true);
+    router.set_endpoint_demand_active(demand_port, true);
     router.propagate();
 
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
@@ -501,7 +516,7 @@ fn scavenge_during_failed() {
     assert_eq!(wl.consecutive_failures, 1);
 
     // Drop demand first so scavenge doesn't noop.
-    router.send_activate_service(mgmt, S1, false);
+    router.set_endpoint_demand_active(demand_port, false);
     router.propagate();
 
     // Scavenge clears everything.

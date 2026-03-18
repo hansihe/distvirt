@@ -235,3 +235,169 @@ fn need_none_keeps_port() {
     // Port still exists — only removed on worker disconnect
     assert_eq!(adapter.ports.len(), 1);
 }
+
+// ============================================================================
+// 6. Traffic signal: full lifecycle through adapter → endpoint → workload
+// ============================================================================
+
+use crate::sm::endpoint::{EndpointState, EndpointTimerKey};
+use crate::sm::{PodStatus, TimerPortInput};
+
+/// Helper: make the workload's pod running.
+fn make_pod_running(router: &mut DRouter) -> crate::sm::PodId {
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    let lease = router.create_schedule_lease();
+    router.set_pod_lease_edges(lease, vec![pod_id]);
+    router.set_schedule_lease_lease(
+        lease,
+        crate::sm::LeaseInfo { worker_id: WK1 },
+    );
+    router.propagate();
+    router.set_worker_assignment_edges(WK1, vec![pod_id]);
+    router.send_notify_pod_status(WK1, pod_id, PodStatus::Running);
+    router.propagate();
+    pod_id
+}
+
+/// Drain endpoint timer actions from the timer port.
+fn drain_endpoint_timer_actions(router: &mut DRouter) -> Vec<crate::adapter::timer::TimerAction> {
+    router
+        .drain_timer_inputs()
+        .into_iter()
+        .filter(|(id, _)| *id == TIMER)
+        .flat_map(|(_, input)| match input {
+            TimerPortInput::EndpointTimersInput(actions) => actions,
+            _ => vec![],
+        })
+        .collect()
+}
+
+/// Traffic event through adapter starts workload, idle timer fires, workload tears down.
+#[test]
+fn traffic_signal_starts_workload_then_idle_timeout() {
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
+    let (worker, endpoint_id) = setup_activation_service(&mut router);
+
+    // Endpoint starts idle, workload dormant.
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+
+    // Traffic event through adapter → demand high, idle timer starts immediately.
+    let mut adapter = EndpointDemandAdapter::new();
+    adapter.push_demand(&mut router, worker, endpoint_id, EndpointDemandSignal::Traffic);
+    router.propagate();
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert_eq!(ep.state, EndpointState::NeedBackend);
+    assert!(ep.idle_timer_active);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.has_demand);
+    assert!(wl.pod_id.is_some());
+
+    // Make pod running → endpoint becomes Active, timer still running.
+    make_pod_running(&mut router);
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
+    assert!(ep.idle_timer_active);
+
+    // Drain timer actions (Start for idle timeout).
+    let timer_actions = drain_endpoint_timer_actions(&mut router);
+    assert!(
+        timer_actions.iter().any(|a| matches!(a, crate::adapter::timer::TimerAction::Start { .. })),
+        "expected idle timer Start action, got {:?}",
+        timer_actions,
+    );
+
+    // Fire idle timer → demand drops → workload tears down → idle.
+    router.send_endpoint_timer_fired(TIMER, endpoint_id, EndpointTimerKey::IdleTimeout);
+    router.propagate();
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
+    assert!(!ep.idle_timer_active);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+    assert!(wl.pod_id.is_none());
+}
+
+// ============================================================================
+// 7. Active level signal: full lifecycle through adapter → endpoint → workload
+// ============================================================================
+
+/// Active level starts workload, traffic event provides idle timer,
+/// active level drops, timer sustains demand, timer fires, workload tears down.
+#[test]
+fn active_level_starts_workload_then_idle_timeout() {
+    let mut router = DRouter::new_traced(16, distvirt_sm_router::trace::PanicTracer::new());
+    let (worker, endpoint_id) = setup_activation_service(&mut router);
+
+    // Endpoint starts idle, workload dormant.
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+
+    // Active level high through adapter → endpoint activates.
+    let mut adapter = EndpointDemandAdapter::new();
+    adapter.push_demand(
+        &mut router,
+        worker,
+        endpoint_id,
+        EndpointDemandSignal::Active { active: true },
+    );
+    router.propagate();
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert_eq!(ep.state, EndpointState::NeedBackend);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.has_demand);
+    assert!(wl.pod_id.is_some());
+
+    // Make pod running → endpoint becomes Active.
+    make_pod_running(&mut router);
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
+    // Active level is sustained — no idle timer.
+    assert!(!ep.idle_timer_active);
+
+    // Traffic event arrives while active level is high → idle timer starts.
+    adapter.push_demand(&mut router, worker, endpoint_id, EndpointDemandSignal::Traffic);
+    router.propagate();
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
+    assert!(ep.idle_timer_active);
+
+    // Active level drops → demand sustained by idle timer.
+    adapter.push_demand(
+        &mut router,
+        worker,
+        endpoint_id,
+        EndpointDemandSignal::Active { active: false },
+    );
+    router.propagate();
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert!(matches!(ep.state, EndpointState::Active { .. }));
+    assert!(ep.idle_timer_active);
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(wl.has_demand);
+
+    // Fire idle timer → demand drops → workload tears down → idle.
+    drain_endpoint_timer_actions(&mut router); // consume the Start action
+    router.send_endpoint_timer_fired(TIMER, endpoint_id, EndpointTimerKey::IdleTimeout);
+    router.propagate();
+
+    let ep = router.get_endpoint(&endpoint_id).unwrap();
+    assert_eq!(ep.state, EndpointState::Idle);
+    assert!(!ep.idle_timer_active);
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert!(!wl.has_demand);
+    assert!(wl.pod_id.is_none());
+}
