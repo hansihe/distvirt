@@ -136,6 +136,10 @@ impl EndpointTable {
                         } else {
                             (EndpointState::Pending, None)
                         };
+                        log::info!(
+                            "endpoint: {} -> LocalPod (state={:?}, port_id={:?}, buffered_frames={})",
+                            ip, state, existing_port_id, old_buffer.len()
+                        );
                         self.by_ip.insert(
                             ip,
                             Endpoint {
@@ -153,6 +157,10 @@ impl EndpointTable {
                     }
                     Some(ref p) => {
                         // Remote pod.
+                        log::info!(
+                            "endpoint: {} -> RemoteSegment (worker_id={})",
+                            ip, p.worker_id
+                        );
                         let was_buffering = self
                             .by_ip
                             .get(&ip)
@@ -182,6 +190,7 @@ impl EndpointTable {
                     }
                     None => {
                         // Unplaced pod — buffer.
+                        log::info!("endpoint: {} -> UnplacedPod (buffering)", ip);
                         if !self.by_ip.contains_key(&ip) {
                             self.by_ip.insert(
                                 ip,
@@ -209,6 +218,7 @@ impl EndpointTable {
                 match placement {
                     Some(ref p) if p.worker_id == my_worker_id => {
                         // Local adapter — create LocalAdapter endpoint.
+                        log::info!("endpoint: {} -> LocalAdapter (WireGuardPeer, local)", ip);
                         let port_id = match adapter_port_id {
                             Some(id) => id,
                             None => {
@@ -254,6 +264,10 @@ impl EndpointTable {
                     }
                     Some(ref p) => {
                         // Remote peer — same as remote pod.
+                        log::info!(
+                            "endpoint: {} -> RemoteSegment (WireGuardPeer, worker_id={})",
+                            ip, p.worker_id
+                        );
                         let was_buffering = self
                             .by_ip
                             .get(&ip)
@@ -284,6 +298,7 @@ impl EndpointTable {
                     }
                     None => {
                         // Unplaced peer — buffer.
+                        log::info!("endpoint: {} -> UnplacedPod (WireGuardPeer, buffering)", ip);
                         if !self.by_ip.contains_key(&ip) {
                             self.by_ip.insert(
                                 ip,
@@ -335,6 +350,11 @@ impl EndpointTable {
                         }
                     })
                     .unwrap_or(false);
+
+                log::info!(
+                    "endpoint: {} -> Service (service_id={}, state={:?}, backend_ip={:?}, reuse={})",
+                    ip, service_id, new_state, new_backend_ip, can_reuse_processor
+                );
 
                 if can_reuse_processor {
                     // Update existing service endpoint in place.

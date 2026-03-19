@@ -607,6 +607,12 @@ impl<
                 namespace_id,
                 endpoints,
             } => {
+                log::info!(
+                    "worker: received EndpointSync for ns='{}' with {} endpoints: [{}]",
+                    namespace_id,
+                    endpoints.len(),
+                    endpoints.iter().map(|e| format!("{}", e.ip)).collect::<Vec<_>>().join(", ")
+                );
                 let worker_id = self.worker_id.clone().ok_or_else(|| {
                     FatalError::InternalInvariant(
                         "worker_id not set (handshake not completed)".into(),
@@ -629,6 +635,12 @@ impl<
                 upserted,
                 removed_ips,
             } => {
+                log::info!(
+                    "worker: received EndpointUpdate for ns='{}' upserted=[{}] removed=[{}]",
+                    namespace_id,
+                    upserted.iter().map(|e| format!("{}", e.ip)).collect::<Vec<_>>().join(", "),
+                    removed_ips.iter().map(|ip| format!("{}", ip)).collect::<Vec<_>>().join(", ")
+                );
                 let worker_id = self.worker_id.clone().ok_or_else(|| {
                     FatalError::InternalInvariant(
                         "worker_id not set (handshake not completed)".into(),

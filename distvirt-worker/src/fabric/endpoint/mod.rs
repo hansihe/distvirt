@@ -370,6 +370,10 @@ impl EndpointTable {
                 }
                 let frames: Vec<Vec<u8>> = endpoint.buffer.drain(..).collect();
                 endpoint.buffer_start = None;
+                log::info!(
+                    "endpoint: attach_port {} -> port_id={} (state=Ready, flushing {} buffered frames)",
+                    ip, port_id, frames.len()
+                );
                 Ok(frames)
             }
             _ => Err(format!("attach_port: endpoint for {} is not LocalPod", ip)),
@@ -385,6 +389,10 @@ impl EndpointTable {
             } = endpoint.backend
             {
                 if *pid == Some(port_id) {
+                    log::info!(
+                        "endpoint: detach_port {} (port_id={}, state -> Pending)",
+                        endpoint.ip, port_id
+                    );
                     *pid = None;
                     endpoint.state = EndpointState::Pending;
                     return;
