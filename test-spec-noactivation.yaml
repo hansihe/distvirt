@@ -11,3 +11,5 @@ workloads:
   web:
     containers:
       - image: docker.io/library/nginx:latest
+    respects_demand: false
+    suspend_on_idle: false
