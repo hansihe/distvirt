@@ -9,15 +9,34 @@ network:
 
 workloads:
   web:
+    volumes:
+      - name: config
+        config_data:
+          files:
+            - path: Caddyfile
+              content: |
+                :80 {
+                    respond "Hello from distvirt!" 200
+                }
     containers:
-      #- image: docker.io/library/nginx:latest
       - image: docker.io/library/caddy:2.11.2-alpine
+        args: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"]
+        volume_mounts:
+          - name: config
+            mount_path: /etc/caddy
     respects_demand: false
     suspend_on_idle: false
   db:
+    volumes:
+      - name: data
+        empty_dir:
+          size_mb: 512
     containers:
       - image: docker.io/library/postgres:14.22-trixie
         env:
           POSTGRES_PASSWORD: password
+        volume_mounts: 
+          - name: data
+            mount_path: "/var/lib/postgresql"
     respects_demand: false
     suspend_on_idle: false

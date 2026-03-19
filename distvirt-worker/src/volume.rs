@@ -47,6 +47,8 @@ pub async fn prepare_volumes(
 
 /// Create an empty ext4 image of the given size in megabytes.
 async fn create_empty_dir_image(path: &Path, size_mb: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(size_mb > 0, "empty_dir size_mb must be greater than 0");
+
     let status = Command::new("truncate")
         .arg("-s")
         .arg(format!("{}M", size_mb))

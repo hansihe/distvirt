@@ -379,6 +379,13 @@ impl WireGuardAdapter {
                             e
                         );
                     }
+                } else {
+                    log::warn!(
+                        "wireguard: no namespace channel for '{}', dropping {} byte packet (available: {:?})",
+                        peer.namespace_id,
+                        frame.len(),
+                        s.namespace_channels.keys().collect::<Vec<_>>()
+                    );
                 }
             }
             TunnResult::WriteToTunnelV6(_ip_packet, _addr) => {
