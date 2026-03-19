@@ -377,6 +377,87 @@ fn endpoint_event_description(ee: &EndpointEvent) -> String {
     }
 }
 
+// --- String-returning render variants (for TUI) ---
+
+pub fn render_namespace_overview(report: &NamespaceStatusReport) -> String {
+    use std::fmt::Write;
+    let mut buf = String::new();
+
+    writeln!(
+        &mut buf,
+        "Namespace: {}  State: {}",
+        report.namespace_id,
+        namespace_state_label(report.state())
+    )
+    .unwrap();
+    writeln!(&mut buf).unwrap();
+
+    if report.workloads.is_empty() && report.services.is_empty() {
+        writeln!(&mut buf, "  (no workloads)").unwrap();
+        return buf;
+    }
+
+    for (workload_id, workload) in &report.workloads {
+        let state = workload
+            .state
+            .as_ref()
+            .map(|s| workload_state_label(s))
+            .unwrap_or("unknown");
+        let spliced = if workload.spliced { " [spliced]" } else { "" };
+        writeln!(&mut buf, "  workload/{:<20} {}{}", workload_id, state, spliced).unwrap();
+
+        for (svc_id, svc) in &report.services {
+            if svc.workload_id == *workload_id {
+                let svc_state = svc
+                    .state
+                    .as_ref()
+                    .map(|s| service_state_label(s))
+                    .unwrap_or("unknown");
+                let activation = if svc.activation_enabled {
+                    " (activation)"
+                } else {
+                    ""
+                };
+                writeln!(&mut buf, "    service/{:<18} {}{}", svc_id, svc_state, activation)
+                    .unwrap();
+            }
+        }
+    }
+
+    buf
+}
+
+pub fn render_event_line(event: &NamespaceEvent) -> String {
+    let ts = format_timestamp(event.timestamp_unix_ms);
+    match &event.event {
+        Some(namespace_event::Event::Workload(we)) => {
+            let desc = workload_event_description(we);
+            format!("{}  workload/{}  {}", ts, we.workload_id, desc)
+        }
+        Some(namespace_event::Event::Pod(pe)) => {
+            let desc = pod_event_description(pe);
+            format!(
+                "{}  pod/{} (workload/{})  {}",
+                ts, pe.pod_id, pe.workload_id, desc
+            )
+        }
+        Some(namespace_event::Event::Endpoint(ee)) => {
+            let desc = endpoint_event_description(ee);
+            let owner = if let Some(ref svc) = ee.service_id {
+                format!("service/{}", svc)
+            } else if let Some(ref wl) = ee.workload_id {
+                format!("workload/{}", wl)
+            } else {
+                "unknown".to_string()
+            };
+            format!("{}  endpoint/{} ({})  {}", ts, ee.endpoint_id, owner, desc)
+        }
+        None => {
+            format!("{}  (unknown event)", ts)
+        }
+    }
+}
+
 // --- Helpers ---
 
 fn format_timestamp(unix_ms: i64) -> String {

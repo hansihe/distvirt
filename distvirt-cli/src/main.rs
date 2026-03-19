@@ -9,6 +9,7 @@ mod connection;
 mod format;
 mod platform;
 mod spec;
+mod status_watch;
 
 use commands::OutputFormat;
 

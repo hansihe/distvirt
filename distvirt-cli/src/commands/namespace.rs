@@ -134,8 +134,22 @@ pub async fn down(mut client: Client, namespace_id: &str) -> anyhow::Result<()> 
 pub async fn status(mut client: Client, target: &str, watch: bool) -> anyhow::Result<()> {
     let (namespace_id, workload_id) = parse_target(target);
 
-    // Subscribe to events *before* fetching status to avoid missing events
-    // in the gap between the status snapshot and the subscription.
+    if watch && workload_id.is_none() {
+        // Subscribe to events *before* fetching status to avoid missing events
+        let event_stream = client
+            .stream_events(StreamEventsRequest {
+                namespace_id: namespace_id.to_string(),
+                workload_ids: vec![],
+                service_ids: vec![],
+            })
+            .await
+            .map_err(client::handle_grpc_error)?
+            .into_inner();
+
+        return crate::status_watch::run(client, namespace_id, event_stream).await;
+    }
+
+    // Non-watch mode (or workload-specific view)
     let mut event_stream = if watch {
         Some(
             client

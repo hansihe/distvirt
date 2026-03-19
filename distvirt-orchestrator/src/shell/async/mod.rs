@@ -363,6 +363,7 @@ struct Shell {
     self_tx: mpsc::Sender<ShellEvent>,
 
     worker_secret: String,
+    tunnel_encrypted: bool,
 
     activity: Arc<AtomicU64>,
 
@@ -589,7 +590,7 @@ impl Shell {
         conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
             worker_id: proto_worker_id.clone(),
             adapters: vec![],
-            tunnel_encrypted: false,
+            tunnel_encrypted: self.tunnel_encrypted,
             pools: vec![],
         })
         .await?;
@@ -738,6 +739,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn spawn(
     worker_secret: String,
     timer_config: TimerConfig,
+    tunnel_encrypted: bool,
 ) -> (ShellHandle, LogBusHandle, EventBusHandle, IdRegistryMap, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(256);
     let activity = Arc::new(AtomicU64::new(0));
@@ -753,6 +755,7 @@ pub fn spawn(
         rx,
         self_tx: tx.clone(),
         worker_secret,
+        tunnel_encrypted,
         activity: activity.clone(),
         log_bus: log_bus.clone(),
         event_bus: event_bus.clone(),

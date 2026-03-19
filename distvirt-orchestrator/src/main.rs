@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         idle_timeout: std::time::Duration::from_secs(30),
     };
     let (handle, log_bus, event_bus, id_registry_map, shell_handle) =
-        distvirt_orchestrator::shell::r#async::spawn(worker_secret, timer_config);
+        distvirt_orchestrator::shell::r#async::spawn(worker_secret, timer_config, config.tunnels.encrypted);
 
     // Start gRPC server.
     let grpc_addr = config.grpc.listen.parse()?;

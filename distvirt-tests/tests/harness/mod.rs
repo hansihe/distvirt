@@ -74,7 +74,7 @@ pub struct TestCluster {
 impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
-        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config());
+        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true);
         TestCluster {
             shell,
             event_bus,

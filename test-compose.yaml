@@ -14,9 +14,9 @@ workloads:
     services:
       web:
         activation:
-          activator:
-            tcp: { ports: [80] }
-          idle_timeout: 5m
+          tcp:
+            ports: [80]
+            idle_timeout: 5m
         expose:
           - container_port: 80
             host_port: 8080
