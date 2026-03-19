@@ -188,6 +188,7 @@ impl OrchestratorCore {
             worker_id,
             capabilities: info.capabilities,
             tunnel_info: info.tunnel_info,
+            wireguard_info: info.wireguard_info,
             proto_worker_id: proto_worker_id.clone(),
         });
         self.route_worker_state_effects(ws_effects, &mut effects, now);
@@ -431,9 +432,9 @@ impl OrchestratorCore {
             return (Err(ClientError::NamespaceNotFound), OrchestratorEffects::default());
         }
 
-        // Find a worker with tunnel capabilities.
-        let (worker_id, tunnel_info, public_endpoint) = match self.worker_state.find_tunnel_worker() {
-            Some((wid, ti, ep)) => (wid, ti.clone(), ep.to_string()),
+        // Find a worker with a WireGuard adapter.
+        let (worker_id, wg_info, public_endpoint) = match self.worker_state.find_wireguard_worker() {
+            Some((wid, wg, ep)) => (wid, wg.clone(), ep.to_string()),
             None => return (Err(ClientError::NoTunnelWorker), OrchestratorEffects::default()),
         };
 
@@ -463,10 +464,10 @@ impl OrchestratorCore {
         };
 
         let subnet_cidr = wg_peers.subnet_cidr();
-        let endpoint = format!("{}:{}", public_endpoint, tunnel_info.listen_port);
+        let endpoint = format!("{}:{}", public_endpoint, wg_info.listen_port);
 
         let result = super::ConnectResult {
-            server_public_key: tunnel_info.public_key,
+            server_public_key: wg_info.public_key,
             endpoint,
             client_ip,
             subnet: subnet_cidr,

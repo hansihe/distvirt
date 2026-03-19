@@ -22,6 +22,14 @@ pub struct WorkerTunnelInfo {
     pub public_key: [u8; 32],
 }
 
+/// WireGuard adapter info reported by a worker during handshake.
+/// Separate from tunnel info — this is for client-facing WireGuard connections.
+#[derive(Clone, Debug)]
+pub struct WireguardAdapterInfo {
+    pub listen_port: u16,
+    pub public_key: [u8; 32],
+}
+
 // =============================================================================
 // Tracked per-worker state (pure — no writer handle)
 // =============================================================================
@@ -34,6 +42,7 @@ struct TrackedWorkerStateCore {
     conditions: HashMap<String, bool>,
     pod_count: usize,
     tunnel_info: Option<WorkerTunnelInfo>,
+    wireguard_info: Option<WireguardAdapterInfo>,
     proto_worker_id: distvirt_worker_protocol::WorkerId,
     segments: HashSet<u16>,
 }
@@ -42,6 +51,7 @@ impl TrackedWorkerStateCore {
     fn new(
         capabilities: distvirt_worker_protocol::WorkerCapabilities,
         tunnel_info: Option<WorkerTunnelInfo>,
+        wireguard_info: Option<WireguardAdapterInfo>,
         proto_worker_id: distvirt_worker_protocol::WorkerId,
     ) -> Self {
         TrackedWorkerStateCore {
@@ -57,6 +67,7 @@ impl TrackedWorkerStateCore {
             conditions: HashMap::new(),
             pod_count: 0,
             tunnel_info,
+            wireguard_info,
             proto_worker_id,
             segments: HashSet::new(),
         }
@@ -179,9 +190,10 @@ impl WorkerStateCore {
                 worker_id,
                 capabilities,
                 tunnel_info,
+                wireguard_info,
                 proto_worker_id,
             } => {
-                let state = TrackedWorkerStateCore::new(capabilities, tunnel_info, proto_worker_id);
+                let state = TrackedWorkerStateCore::new(capabilities, tunnel_info, wireguard_info, proto_worker_id);
                 let candidate = state.to_candidate(worker_id);
                 self.workers.insert(worker_id, state);
                 effects
@@ -258,6 +270,18 @@ impl WorkerStateCore {
         None
     }
 
+    /// Find the first worker with a WireGuard adapter. Returns (worker_id, wireguard_info, public_endpoint).
+    pub(crate) fn find_wireguard_worker(&self) -> Option<(GlobalWorkerId, &WireguardAdapterInfo, &str)> {
+        for (&wid, state) in &self.workers {
+            if let Some(ref wg) = state.wireguard_info {
+                if !state.capabilities.public_endpoint.is_empty() {
+                    return Some((wid, wg, &state.capabilities.public_endpoint));
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) fn query_worker(&self, id: GlobalWorkerId) -> Option<WorkerQueryInfo> {
         let state = self.workers.get(&id)?;
         Some(WorkerQueryInfo {
@@ -312,6 +336,7 @@ mod tests {
                 pools: vec![],
             },
             tunnel_info: None,
+            wireguard_info: None,
             proto_worker_id: distvirt_worker_protocol::WorkerId::from(id),
         }
     }

@@ -262,6 +262,8 @@ impl<
             tunnel_listen_port: self.tunnel_manager.as_ref().and_then(|tm| tm.listen_port()),
             tunnel_public_key: self.tunnel_manager.as_ref().and_then(|tm| tm.public_key()),
             transfer_listen_port,
+            wireguard_listen_port: self.adapter_manager.wireguard_listen_port(),
+            wireguard_public_key: self.adapter_manager.wireguard_public_key(),
         })
         .await
         .context("handshake: send WorkerReady")?;

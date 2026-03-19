@@ -324,8 +324,7 @@ struct AdapterConfig {
   union {
     wireguard :group {
       listenPort @0 :UInt16;
-      privateKey @1 :Data;
-      # 32-byte private key derived from cluster identity.
+      deprecated1 @1 :Void;
     }
     reverseProxy :group {
       listenPort @2 :UInt16;
@@ -348,6 +347,10 @@ struct WorkerReady {
   hasTunnelPublicKey @3 :Bool;
   hasTransferListenPort @4 :Bool;
   transferListenPort @5 :UInt16;
+  hasWireguardListenPort @6 :Bool;
+  wireguardListenPort @7 :UInt16;
+  hasWireguardPublicKey @8 :Bool;
+  wireguardPublicKey @9 :Data;
 }
 
 # --- Control Stream: Command Payloads ---

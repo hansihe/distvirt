@@ -400,6 +400,7 @@ impl SyncShell {
                 worker_id,
                 capabilities: config.capabilities,
                 tunnel_info: config.tunnel_info,
+                wireguard_info: None,
                 proto_worker_id,
             },
             self.now,

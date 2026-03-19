@@ -364,6 +364,7 @@ struct Shell {
 
     worker_secret: String,
     tunnel_encrypted: bool,
+    wireguard_listen_port: u16,
 
     activity: Arc<AtomicU64>,
 
@@ -589,7 +590,11 @@ impl Shell {
 
         conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
             worker_id: proto_worker_id.clone(),
-            adapters: vec![],
+            adapters: vec![
+                distvirt_worker_protocol::AdapterConfig::WireGuard {
+                    listen_port: self.wireguard_listen_port,
+                },
+            ],
             tunnel_encrypted: self.tunnel_encrypted,
             pools: vec![],
         })
@@ -599,6 +604,14 @@ impl Shell {
 
         let tunnel_info = match (ready.tunnel_listen_port, ready.tunnel_public_key) {
             (Some(port), Some(key)) => Some(WorkerTunnelInfo {
+                listen_port: port,
+                public_key: key,
+            }),
+            _ => None,
+        };
+
+        let wireguard_info = match (ready.wireguard_listen_port, ready.wireguard_public_key) {
+            (Some(port), Some(key)) => Some(crate::core::worker_state::WireguardAdapterInfo {
                 listen_port: port,
                 public_key: key,
             }),
@@ -625,6 +638,7 @@ impl Shell {
                 worker_id: global_id,
                 capabilities: hello.capabilities,
                 tunnel_info,
+                wireguard_info,
                 proto_worker_id,
             },
             now,
@@ -740,6 +754,7 @@ pub fn spawn(
     worker_secret: String,
     timer_config: TimerConfig,
     tunnel_encrypted: bool,
+    wireguard_listen_port: u16,
 ) -> (ShellHandle, LogBusHandle, EventBusHandle, IdRegistryMap, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(256);
     let activity = Arc::new(AtomicU64::new(0));
@@ -756,6 +771,7 @@ pub fn spawn(
         self_tx: tx.clone(),
         worker_secret,
         tunnel_encrypted,
+        wireguard_listen_port,
         activity: activity.clone(),
         log_bus: log_bus.clone(),
         event_bus: event_bus.clone(),

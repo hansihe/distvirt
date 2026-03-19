@@ -590,6 +590,14 @@ pub fn write_worker_ready(builder: &mut schema::worker_ready::Builder<'_>, val: 
         builder.set_has_transfer_listen_port(true);
         builder.set_transfer_listen_port(port);
     }
+    if let Some(port) = val.wireguard_listen_port {
+        builder.set_has_wireguard_listen_port(true);
+        builder.set_wireguard_listen_port(port);
+    }
+    if let Some(ref key) = val.wireguard_public_key {
+        builder.set_has_wireguard_public_key(true);
+        builder.set_wireguard_public_key(key);
+    }
 }
 
 pub fn read_worker_ready(reader: schema::worker_ready::Reader<'_>) -> WorkerReady {
@@ -611,10 +619,25 @@ pub fn read_worker_ready(reader: schema::worker_ready::Reader<'_>) -> WorkerRead
     } else {
         None
     };
+    let wireguard_listen_port = if reader.get_has_wireguard_listen_port() {
+        Some(reader.get_wireguard_listen_port())
+    } else {
+        None
+    };
+    let wireguard_public_key = if reader.get_has_wireguard_public_key() {
+        reader
+            .get_wireguard_public_key()
+            .ok()
+            .and_then(|k| <[u8; 32]>::try_from(k).ok())
+    } else {
+        None
+    };
     WorkerReady {
         tunnel_listen_port,
         tunnel_public_key,
         transfer_listen_port,
+        wireguard_listen_port,
+        wireguard_public_key,
     }
 }
 
@@ -669,11 +692,9 @@ pub fn write_adapter_config(builder: schema::adapter_config::Builder<'_>, val: &
     match val {
         AdapterConfig::WireGuard {
             listen_port,
-            private_key,
         } => {
             let mut wg = builder.init_wireguard();
             wg.set_listen_port(*listen_port);
-            wg.set_private_key(private_key);
         }
         AdapterConfig::ReverseProxy {
             listen_port,
@@ -698,7 +719,6 @@ pub fn read_adapter_config(
     match reader.which()? {
         schema::adapter_config::Wireguard(wg) => Ok(AdapterConfig::WireGuard {
             listen_port: wg.get_listen_port(),
-            private_key: wg.get_private_key()?.to_vec(),
         }),
         schema::adapter_config::ReverseProxy(rp) => Ok(AdapterConfig::ReverseProxy {
             listen_port: rp.get_listen_port(),

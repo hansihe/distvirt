@@ -59,8 +59,7 @@ impl AdapterManager {
             match config {
                 AdapterConfig::WireGuard {
                     listen_port,
-                    private_key,
-                } => match WireGuardAdapter::new(*listen_port, private_key).await {
+                } => match WireGuardAdapter::new(*listen_port).await {
                     Ok(wg) => {
                         log::info!(
                             "adapter: WireGuard adapter initialized on port {}",
@@ -116,6 +115,16 @@ impl AdapterManager {
     /// Get the WireGuard adapter, if one is configured.
     pub fn wireguard(&self) -> Option<&WireGuardAdapter> {
         self.wireguard.as_deref()
+    }
+
+    /// WireGuard adapter's listen port, if configured.
+    pub fn wireguard_listen_port(&self) -> Option<u16> {
+        self.wireguard.as_ref().map(|wg| wg.listen_port())
+    }
+
+    /// WireGuard adapter's public key, if configured.
+    pub fn wireguard_public_key(&self) -> Option<[u8; 32]> {
+        self.wireguard.as_ref().map(|wg| wg.public_key())
     }
 
     /// List the types of all configured adapters.

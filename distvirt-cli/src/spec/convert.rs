@@ -123,6 +123,17 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                 );
             }
 
+            // Warn if activation is configured but respects_demand is false
+            if !wl.respects_demand {
+                if wl.activation.is_some() {
+                    errs.warn(
+                        wl_path.key("activation"),
+                        "activation is configured but respects_demand is false; \
+                         activation will have no effect on an always-on workload",
+                    );
+                }
+            }
+
             // Track inline service IDs
             if let Some(ref inline_services) = wl.services {
                 for sid in inline_services.keys() {
@@ -130,6 +141,20 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                         .entry(sid.as_str())
                         .or_default()
                         .push(wl_path.key("services").key(sid));
+                }
+
+                // Warn if inline services have activation but workload is always-on
+                if !wl.respects_demand {
+                    for (sid, svc) in inline_services {
+                        if svc.activation.is_some() {
+                            errs.warn(
+                                wl_path.key("services").key(sid).key("activation"),
+                                "service activation is configured but the workload has \
+                                 respects_demand: false; activation will have no effect \
+                                 on an always-on workload",
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -145,6 +170,25 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                     svc_path.clone(),
                     format!("workload '{}' does not exist", svc.workload),
                 );
+            }
+
+            // Warn if service has activation but target workload is always-on
+            if svc.activation.is_some() {
+                if let Some(ref spec_workloads) = spec.workloads {
+                    if let Some(target_wl) = spec_workloads.get(&svc.workload) {
+                        if !target_wl.respects_demand {
+                            errs.warn(
+                                svc_path.key("activation"),
+                                format!(
+                                    "service activation is configured but workload '{}' has \
+                                     respects_demand: false; activation will have no effect \
+                                     on an always-on workload",
+                                    svc.workload
+                                ),
+                            );
+                        }
+                    }
+                }
             }
 
             all_service_ids
@@ -568,7 +612,7 @@ fn build_namespace_spec(
                     suspend_on_idle,
                     resources,
                     activation: wl_activation,
-                    respects_demand: false, // TODO: derive from spec
+                    respects_demand: wl.respects_demand,
                 },
             );
 

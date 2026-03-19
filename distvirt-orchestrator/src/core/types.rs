@@ -9,7 +9,7 @@ use crate::adapter::observability::ObservabilityEvent;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::{TimerAction, TimerIdentity};
 use crate::core::scheduler::WorkerCandidate;
-use crate::core::worker_state::WorkerTunnelInfo;
+use crate::core::worker_state::{WorkerTunnelInfo, WireguardAdapterInfo};
 use crate::core::{
     ArtifactPlacementEvent, ClientCommand, EndpointDemandSignal, GlobalWorkerId,
     SchedulerDecision, WorkerNamespaceEvent,
@@ -247,6 +247,7 @@ pub enum WorkerStateCoreEvent {
         worker_id: GlobalWorkerId,
         capabilities: distvirt_worker_protocol::WorkerCapabilities,
         tunnel_info: Option<WorkerTunnelInfo>,
+        wireguard_info: Option<WireguardAdapterInfo>,
         proto_worker_id: distvirt_worker_protocol::WorkerId,
     },
     Disconnected {
@@ -310,6 +311,7 @@ pub struct WorkerConnectedInfo {
     pub worker_id: GlobalWorkerId,
     pub capabilities: distvirt_worker_protocol::WorkerCapabilities,
     pub tunnel_info: Option<WorkerTunnelInfo>,
+    pub wireguard_info: Option<WireguardAdapterInfo>,
     pub proto_worker_id: distvirt_worker_protocol::WorkerId,
 }
 

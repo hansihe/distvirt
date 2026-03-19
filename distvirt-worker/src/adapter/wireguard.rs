@@ -58,18 +58,18 @@ struct WireGuardState {
 pub struct WireGuardAdapter {
     state: Arc<RwLock<WireGuardState>>,
     udp_socket: Arc<UdpSocket>,
+    public_key: [u8; 32],
     _udp_recv_task: JoinHandle<()>,
     _timer_task: JoinHandle<()>,
 }
 
 impl WireGuardAdapter {
     /// Create a new WireGuard adapter bound to the given port.
-    pub async fn new(listen_port: u16, private_key_bytes: &[u8]) -> anyhow::Result<Self> {
-        let mut key_array = [0u8; 32];
-        let len = private_key_bytes.len().min(32);
-        key_array[..len].copy_from_slice(&private_key_bytes[..len]);
-        let private_key = StaticSecret::from(key_array);
-
+    ///
+    /// Generates a fresh X25519 keypair. The public key can be retrieved
+    /// via [`Self::public_key()`].
+    pub async fn new(listen_port: u16) -> anyhow::Result<Self> {
+        let private_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public_key = PublicKey::from(&private_key);
         let rate_limiter = Arc::new(RateLimiter::new(&public_key, 100));
 
@@ -79,8 +79,10 @@ impl WireGuardAdapter {
             udp_socket.local_addr()?
         );
 
+        let public_key_bytes = *public_key.as_bytes();
+
         let state = Arc::new(RwLock::new(WireGuardState {
-            private_key: StaticSecret::from(key_array),
+            private_key,
             peers_by_key: HashMap::new(),
             peers_by_addr: HashMap::new(),
             namespace_channels: HashMap::new(),
@@ -101,9 +103,23 @@ impl WireGuardAdapter {
         Ok(WireGuardAdapter {
             state,
             udp_socket,
+            public_key: public_key_bytes,
             _udp_recv_task: udp_recv_task,
             _timer_task: timer_task,
         })
+    }
+
+    /// The adapter's public key (reported to orchestrator, given to clients).
+    pub fn public_key(&self) -> [u8; 32] {
+        self.public_key
+    }
+
+    /// The actual UDP port the adapter is listening on.
+    pub fn listen_port(&self) -> u16 {
+        self.udp_socket
+            .local_addr()
+            .expect("bound socket has local addr")
+            .port()
     }
 
     /// Add a WireGuard peer mapped to a namespace.
@@ -702,13 +718,6 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::sync::Mutex;
 
-    // Fixed key material (deterministic, no randomness needed).
-    const SERVER_PRIVATE_KEY: [u8; 32] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-        0x1f, 0x20,
-    ];
-
     const CLIENT_PRIVATE_KEY: [u8; 32] = [
         0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
         0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe,
@@ -727,8 +736,8 @@ mod tests {
         public.to_bytes()
     }
 
-    async fn make_adapter(key: &[u8; 32]) -> WireGuardAdapter {
-        WireGuardAdapter::new(0, key)
+    async fn make_adapter() -> WireGuardAdapter {
+        WireGuardAdapter::new(0)
             .await
             .expect("failed to create adapter")
     }
@@ -817,7 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_peer_success() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
+        let adapter = make_adapter().await;
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
 
         let result = adapter
@@ -828,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_peer_remove_peer_lifecycle() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
+        let adapter = make_adapter().await;
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
 
         adapter
@@ -850,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_peers_same_namespace() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
+        let adapter = make_adapter().await;
         let pub1 = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let pub2 = pubkey_bytes(&CLIENT2_PRIVATE_KEY);
 
@@ -870,7 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_peers_different_namespaces() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
+        let adapter = make_adapter().await;
         let pub1 = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let pub2 = pubkey_bytes(&CLIENT2_PRIVATE_KEY);
 
@@ -893,7 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_peer() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
+        let adapter = make_adapter().await;
         let unknown_key = [0xffu8; 32];
         let result = adapter.remove_peer(&unknown_key).await;
         assert!(result.is_ok());
@@ -901,7 +910,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_create_port() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
+        let adapter = make_adapter().await;
         let (_port, _handle) = adapter
             .create_port("ns1")
             .await
@@ -916,8 +925,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_wireguard_handshake() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
-        let server_pub = pubkey_bytes(&SERVER_PRIVATE_KEY);
+        let adapter = make_adapter().await;
+        let server_pub = adapter.public_key();
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 
@@ -952,8 +961,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_wireguard_ingress_ip_packet() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
-        let server_pub = pubkey_bytes(&SERVER_PRIVATE_KEY);
+        let adapter = make_adapter().await;
+        let server_pub = adapter.public_key();
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 
@@ -1015,8 +1024,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_wireguard_egress_ip_packet() {
-        let adapter = make_adapter(&SERVER_PRIVATE_KEY).await;
-        let server_pub = pubkey_bytes(&SERVER_PRIVATE_KEY);
+        let adapter = make_adapter().await;
+        let server_pub = adapter.public_key();
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
         let port = adapter_port(&adapter);
 

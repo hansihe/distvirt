@@ -240,7 +240,6 @@ pub struct WorkerAccepted {
 pub enum AdapterConfig {
     WireGuard {
         listen_port: u16,
-        private_key: Vec<u8>,
     },
     ReverseProxy {
         listen_port: u16,
@@ -257,6 +256,8 @@ pub struct WorkerReady {
     pub tunnel_listen_port: Option<u16>,
     pub tunnel_public_key: Option<[u8; 32]>,
     pub transfer_listen_port: Option<u16>,
+    pub wireguard_listen_port: Option<u16>,
+    pub wireguard_public_key: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

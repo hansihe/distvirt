@@ -240,13 +240,10 @@ impl OrchestratorShell {
             .iter()
             .any(|a| a == "wireguard")
         {
-            let private_key = StaticSecret::random_from_rng(rand::thread_rng());
-            let public_key = PublicKey::from(&private_key);
             let listen_port = self.wg_listen_port;
 
             adapters.push(distvirt_worker_protocol::AdapterConfig::WireGuard {
                 listen_port,
-                private_key: private_key.to_bytes().to_vec(),
             });
 
             wg_config = Some(WorkerWgConfig {

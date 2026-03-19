@@ -32,6 +32,7 @@ yamux = "0.13.9"
 tokio-util = { version = "0.7.18", features = ["compat", "io-util"] }
 futures-lite = "2.6.1"
 boringtun = "0.7"
+rand = "0.8"
 sha2 = "0.10"
 hickory-resolver = "0.25"
 zerocopy = { version = "0.8", features = ["derive"] }

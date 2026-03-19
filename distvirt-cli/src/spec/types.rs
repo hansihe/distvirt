@@ -66,6 +66,10 @@ pub struct SpecNetwork {
 pub struct SpecWorkload {
     pub ip: Option<String>,
     pub suspend_on_idle: Option<bool>,
+    /// If true, the workload respects demand signals and starts dormant.
+    /// If false (default), the workload is always-on.
+    #[serde(default)]
+    pub respects_demand: bool,
     pub activation: Option<SpecWorkloadActivation>,
     pub containers: Vec<SpecContainer>,
     pub resources: Option<SpecResources>,
