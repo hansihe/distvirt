@@ -70,6 +70,9 @@ pub struct WorkloadSm {
     pub run_policy: RunPolicy,
     /// True when a Job has finished successfully (exit code 0).
     pub completed: bool,
+    /// If true, the workload respects demand signals and starts dormant.
+    /// If false, the workload is always-on regardless of demand.
+    pub respects_demand: bool,
 }
 
 impl WorkloadSm {
@@ -103,7 +106,14 @@ impl WorkloadSm {
             endpoint_id: None,
             run_policy: RunPolicy::Service,
             completed: false,
+            respects_demand: false,
         }
+    }
+
+    /// Effective demand: always true for always-on workloads, otherwise
+    /// reflects the actual demand signal.
+    fn effective_demand(&self) -> bool {
+        !self.respects_demand || self.has_demand
     }
 
     /// Drop the artifact port reference. Called on spec change, scavenge, etc.
@@ -167,20 +177,28 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     if let Some(ref network) = spec.network {
                         if self.endpoint_id.is_none() {
                             let ep_id = ctx.create_endpoint(
-                                endpoint::EndpointSm::new(true),
+                                endpoint::EndpointSm::new(spec.respects_demand),
                             );
                             self.endpoint_id = Some(ep_id);
                             ctx.set_workload_endpoint_ownership_edges(vec![ep_id]);
                         }
+                        let idle_timeout = spec
+                            .activation
+                            .as_ref()
+                            .map(|a| a.idle_timeout)
+                            .unwrap_or(std::time::Duration::ZERO);
                         ctx.set_endpoint_config(Some(endpoint::EndpointConfig {
                             kind: endpoint::EndpointKind::Workload,
                             workload: ctx.id(),
-                            has_activation: true,
-                            idle_timeout: std::time::Duration::from_secs(30),
+                            has_activation: spec.respects_demand,
+                            idle_timeout,
                             ip: network.ip,
                             dns_entry: None,
                         }));
                     }
+
+                    // --- Update respects_demand from spec ---
+                    self.respects_demand = spec.respects_demand;
 
                     // --- Update suspend_on_idle from spec ---
                     let old_suspend_on_idle = self.suspend_on_idle;
@@ -328,7 +346,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 match cmd {
                     AdminCmd::Scavenge => {
                         // Safe capacity reclamation. Noop if actively demanded.
-                        if self.has_demand {
+                        if self.effective_demand() {
                             return;
                         }
                         // Not demanded — reclaim: destroy pod, clear commitment and retry state.
@@ -424,7 +442,7 @@ impl WorkloadSm {
         }
 
         // 2. No demand → let reconcile decide (suspend if enabled, else destroy).
-        if !self.has_demand {
+        if !self.effective_demand() {
             self.reconcile(ctx);
             return;
         }
@@ -465,7 +483,7 @@ impl WorkloadSm {
         } else {
             // Service: no failure increment — graceful exit is not a failure.
             // Re-evaluate commitment.
-            if !self.has_demand {
+            if !self.effective_demand() {
                 self.committed_to_boot = false;
             }
         }
@@ -493,7 +511,7 @@ impl WorkloadSm {
         self.consecutive_failures += 1;
 
         // Re-evaluate commitment: no demand after pod death → no reason to retry.
-        if !self.has_demand {
+        if !self.effective_demand() {
             self.committed_to_boot = false;
         }
         if self.consecutive_failures >= self.max_retries {
@@ -501,12 +519,12 @@ impl WorkloadSm {
         }
 
         // Enter backoff only if we actually want to retry.
-        let want_retry = (self.has_demand || self.committed_to_boot)
+        let want_retry = (self.effective_demand() || self.committed_to_boot)
             && self.consecutive_failures < self.max_retries;
         if want_retry {
             self.in_backoff = true;
             self.backoff_generation += 1;
-        } else if !self.has_demand {
+        } else if !self.effective_demand() {
             // Going dormant — clear failure tracking.
             self.consecutive_failures = 0;
         }
@@ -536,7 +554,7 @@ impl WorkloadSm {
         // Do NOT enter in_backoff — allow immediate rescheduling.
 
         // Re-evaluate commitment.
-        if !self.has_demand {
+        if !self.effective_demand() {
             self.committed_to_boot = false;
         }
 
@@ -581,8 +599,8 @@ impl WorkloadSm {
     }
 
     pub(crate) fn update_status_signals(&self, ctx: &mut impl WorkloadCtx) {
-        let is_failed = self.consecutive_failures >= self.max_retries
-            && (self.has_demand || self.committed_to_boot);
+        let demand = self.effective_demand() || self.committed_to_boot;
+        let is_failed = self.consecutive_failures >= self.max_retries && demand;
         let status = if self.completed {
             WlStatus::Completed
         } else if is_failed {
@@ -597,7 +615,7 @@ impl WorkloadSm {
             WlStatus::Running
         } else if self.pod_id.is_some() {
             WlStatus::Launching
-        } else if !self.has_spec && (self.has_demand || self.committed_to_boot) {
+        } else if !self.has_spec && demand {
             WlStatus::WaitingForSpec
         } else {
             WlStatus::Dormant
@@ -616,8 +634,9 @@ impl WorkloadSm {
         }
 
         let is_failed = self.consecutive_failures >= self.max_retries;
+        let demand = self.effective_demand() || self.committed_to_boot;
         let want_pod = self.has_spec
-            && (self.has_demand || self.committed_to_boot)
+            && demand
             && !self.in_backoff
             && !is_failed
             && !self.completed;

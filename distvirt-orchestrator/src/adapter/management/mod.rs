@@ -267,6 +267,12 @@ impl ManagementAdapter {
                 crate::types::RunPolicy::Service => crate::sm::RunPolicy::Service,
                 crate::types::RunPolicy::Job => crate::sm::RunPolicy::Job,
             },
+            respects_demand: spec.respects_demand,
+            activation: spec.activation.as_ref().map(|a| {
+                crate::sm::WorkloadActivationSpec {
+                    idle_timeout: a.idle_timeout,
+                }
+            }),
         }
     }
 

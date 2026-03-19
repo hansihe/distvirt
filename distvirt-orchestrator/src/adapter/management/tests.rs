@@ -40,6 +40,7 @@ fn simple_workload_spec() -> WorkloadSpec {
         resources: None,
         activation: None,
         run_policy: Default::default(),
+        respects_demand: false,
     }
 }
 

@@ -169,6 +169,7 @@ fn failed_recovery_via_spec_change() {
         mgmt,
         WorkloadSpec {
             image: "app:v2".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -222,6 +223,7 @@ fn failed_recovery_via_demand_cycle() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -326,6 +328,7 @@ fn backoff_cleared_on_demand_drop() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -414,6 +417,7 @@ fn backoff_cleared_on_spec_change() {
         mgmt,
         WorkloadSpec {
             image: "app:v2".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -480,6 +484,7 @@ fn scavenge_during_failed() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

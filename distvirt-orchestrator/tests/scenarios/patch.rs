@@ -25,6 +25,7 @@ fn test_patch_add_workload() {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
     let mut services = BTreeMap::new();
@@ -121,6 +122,7 @@ fn test_patch_replace_workload_image() {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
     h.patch_namespace(

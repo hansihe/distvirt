@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: test
+
+network:
+  subnet: 172.16.0.0/24
+
+workloads:
+  web:
+    containers:
+      - image: docker.io/library/nginx:latest

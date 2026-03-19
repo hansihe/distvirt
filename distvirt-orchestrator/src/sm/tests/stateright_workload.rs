@@ -256,6 +256,7 @@ fn make_spec(image: &str, suspend_on_idle: bool) -> WorkloadSpec {
     WorkloadSpec {
         image: image.into(),
         suspend_on_idle,
+        respects_demand: true,
         ..Default::default()
     }
 }

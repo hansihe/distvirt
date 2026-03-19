@@ -38,6 +38,7 @@ fn setup_workload(
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -241,6 +242,7 @@ fn generation_change_restarts_timer() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -353,6 +355,7 @@ fn multiple_sm_kinds_in_one_cycle() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -453,6 +456,7 @@ fn fire_dispatches_workload_timer() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -512,6 +516,7 @@ fn fire_dispatches_endpoint_timer() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

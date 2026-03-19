@@ -146,6 +146,7 @@ fn worker_identity_in_readiness() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

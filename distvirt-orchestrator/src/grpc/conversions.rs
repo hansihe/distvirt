@@ -129,6 +129,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         resources,
         activation,
         run_policy: Default::default(),
+        respects_demand: wl.respects_demand,
     })
 }
 

@@ -82,6 +82,7 @@ fn reactive_readiness_edges() {
         mgmt,
         WorkloadSpec {
             image: "test:latest".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -153,6 +154,7 @@ fn pod_lifecycle() {
         mgmt,
         WorkloadSpec {
             image: "test:latest".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -217,6 +219,7 @@ fn worker_loss_via_port_removal() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -281,6 +284,7 @@ fn spec_via_management_port() {
         mgmt,
         WorkloadSpec {
             image: "v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -294,6 +298,7 @@ fn spec_via_management_port() {
         mgmt,
         WorkloadSpec {
             image: "v2".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -360,6 +365,7 @@ fn admin_restart_event() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -423,6 +429,7 @@ fn full_end_to_end() {
         mgmt_wl,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -534,6 +541,7 @@ fn handler_driven_pod_creation() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -596,6 +604,7 @@ fn handler_and_router_share_id_counter() {
         mgmt,
         WorkloadSpec {
             image: "test".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

@@ -273,6 +273,31 @@ pub async fn disconnect(mut client: Client, namespace_id: &str) -> anyhow::Resul
     Ok(())
 }
 
+/// Format a brief description of an IP packet for logging.
+fn describe_ip_packet(pkt: &[u8]) -> String {
+    if pkt.len() < 20 {
+        return format!("{} bytes (runt)", pkt.len());
+    }
+    let proto = pkt[9];
+    let src = std::net::Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
+    let dst = std::net::Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    let proto_name = match proto {
+        1 => "ICMP",
+        6 => "TCP",
+        17 => "UDP",
+        _ => "??",
+    };
+    let ihl = (pkt[0] & 0x0f) as usize * 4;
+    let ports = if (proto == 6 || proto == 17) && pkt.len() >= ihl + 4 {
+        let sp = u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]);
+        let dp = u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]);
+        format!(" {}→{}", sp, dp)
+    } else {
+        String::new()
+    };
+    format!("{} {} → {}{} ({} bytes)", proto_name, src, dst, ports, pkt.len())
+}
+
 /// Main tunnel forwarding loop. Returns on Ctrl+C or error.
 async fn run_tunnel(
     tun: TunDevice,
@@ -293,7 +318,7 @@ async fn run_tunnel(
             loop {
                 let n = tun.read_packet(&mut tun_buf).await?;
                 let ip_packet = &tun_buf[..n];
-                log::trace!("connect: read {} byte IP packet from TUN", n);
+                eprintln!("  tun ▶ wg: {}", describe_ip_packet(ip_packet));
 
                 let result = {
                     let mut t = tunn.lock().await;
@@ -302,17 +327,15 @@ async fn run_tunnel(
 
                 match result {
                     TunnResult::WriteToNetwork(data) => {
-                        log::trace!(
-                            "connect: sending {} byte encrypted to {}",
-                            data.len(),
-                            endpoint
-                        );
+                        eprintln!("  wg  ▶ udp: {} bytes encrypted → {}", data.len(), endpoint);
                         udp.send_to(data, endpoint).await?;
                     }
                     TunnResult::Err(e) => {
-                        log::debug!("connect: encapsulate error: {:?}", e);
+                        eprintln!("  wg  encapsulate error: {:?}", e);
                     }
-                    _ => {}
+                    other => {
+                        eprintln!("  wg  encapsulate unexpected: {}", describe_tunn_result(&other));
+                    }
                 }
             }
             #[allow(unreachable_code)]
@@ -332,32 +355,21 @@ async fn run_tunnel(
                 let (n, src) = udp.recv_from(&mut recv_buf).await?;
                 let datagram = &recv_buf[..n];
 
-                log::trace!("connect: received {} byte UDP from {}", n, src);
+                eprintln!("  udp ◀ {}: {} bytes", src, n);
                 let result = {
                     let mut t = tunn.lock().await;
                     t.decapsulate(Some(src.ip()), datagram, &mut dec_buf)
                 };
 
-                log::trace!(
-                    "connect: decapsulate result: {}",
-                    match &result {
-                        TunnResult::Done => "Done".to_string(),
-                        TunnResult::Err(e) => format!("Err({:?})", e),
-                        TunnResult::WriteToNetwork(d) =>
-                            format!("WriteToNetwork({} bytes)", d.len()),
-                        TunnResult::WriteToTunnelV4(d, _) =>
-                            format!("WriteToTunnelV4({} bytes)", d.len()),
-                        TunnResult::WriteToTunnelV6(d, _) =>
-                            format!("WriteToTunnelV6({} bytes)", d.len()),
-                    }
-                );
-
                 match result {
-                    TunnResult::Done => {}
+                    TunnResult::Done => {
+                        eprintln!("  wg  ◀ decapsulate: Done (no data)");
+                    }
                     TunnResult::Err(e) => {
-                        log::debug!("connect: decapsulate error: {:?}", e);
+                        eprintln!("  wg  ◀ decapsulate error: {:?}", e);
                     }
                     TunnResult::WriteToNetwork(data) => {
+                        eprintln!("  wg  ◀ decapsulate: handshake response, sending {} bytes", data.len());
                         let data = data.to_vec();
                         udp.send_to(&data, endpoint).await?;
                         // Handshake continuation loop.
@@ -370,6 +382,7 @@ async fn run_tunnel(
                             match cont {
                                 TunnResult::Done => break,
                                 TunnResult::WriteToNetwork(data) => {
+                                    eprintln!("  wg  ◀ handshake continuation: sending {} bytes", data.len());
                                     let data = data.to_vec();
                                     udp.send_to(&data, endpoint).await?;
                                 }
@@ -378,11 +391,11 @@ async fn run_tunnel(
                         }
                     }
                     TunnResult::WriteToTunnelV4(ip_packet, _) => {
-                        log::trace!("connect: writing {} byte IP packet to TUN", ip_packet.len());
+                        eprintln!("  wg  ◀ tun: {}", describe_ip_packet(ip_packet));
                         tun.write_packet(ip_packet).await?;
                     }
                     TunnResult::WriteToTunnelV6(_, _) => {
-                        log::trace!("dropping IPv6 packet");
+                        eprintln!("  wg  ◀ dropping IPv6 packet");
                     }
                 }
             }
@@ -391,29 +404,59 @@ async fn run_tunnel(
         }
     };
 
-    // Timer task: update_timers every 250ms
+    // Timer task: update_timers every 250ms, also prints WireGuard status periodically
     let timer = {
         let tunn = Arc::clone(&tunn);
         let udp = Arc::clone(&udp);
         async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
             let mut timer_buf = vec![0u8; MAX_PACKET_SIZE];
+            let mut was_connected = false;
+            let mut status_tick: u32 = 0;
             loop {
                 interval.tick().await;
-                let result = {
+                let (result, stats) = {
                     let mut t = tunn.lock().await;
-                    t.update_timers(&mut timer_buf)
+                    let r = t.update_timers(&mut timer_buf);
+                    let s = t.stats();
+                    (r, s)
                 };
                 match result {
                     TunnResult::Done => {}
                     TunnResult::Err(e) => {
-                        log::debug!("timer error: {:?}", e);
+                        eprintln!("  wg  timer error: {:?}", e);
                     }
                     TunnResult::WriteToNetwork(data) => {
+                        eprintln!("  wg  timer: sending {} bytes (handshake init / keepalive)", data.len());
                         let data = data.to_vec();
                         udp.send_to(&data, endpoint).await?;
                     }
                     _ => {}
+                }
+
+                // Check handshake status.
+                let (time_since_hs, tx_bytes, rx_bytes, loss, rtt) = stats;
+                let is_connected = time_since_hs.is_some();
+                if is_connected && !was_connected {
+                    let rtt_str = rtt.map(|r| format!(" rtt={}ms", r)).unwrap_or_default();
+                    eprintln!("  wg  handshake complete!{}", rtt_str);
+                    was_connected = true;
+                } else if !is_connected && was_connected {
+                    eprintln!("  wg  session lost, re-handshaking...");
+                    was_connected = false;
+                }
+
+                // Print periodic status every ~5s (20 ticks * 250ms).
+                status_tick += 1;
+                if status_tick % 20 == 0 {
+                    let hs_str = match time_since_hs {
+                        Some(d) => format!("{}s ago", d.as_secs()),
+                        None => "no session".to_string(),
+                    };
+                    eprintln!(
+                        "  wg  status: handshake={}, tx={}, rx={}, loss={:.1}%",
+                        hs_str, tx_bytes, rx_bytes, loss * 100.0
+                    );
                 }
             }
             #[allow(unreachable_code)]
@@ -428,5 +471,15 @@ async fn run_tunnel(
         r = tun_to_udp => r,
         r = udp_to_tun => r,
         r = timer => r,
+    }
+}
+
+fn describe_tunn_result(result: &TunnResult) -> String {
+    match result {
+        TunnResult::Done => "Done".to_string(),
+        TunnResult::Err(e) => format!("Err({:?})", e),
+        TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
+        TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
+        TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
     }
 }

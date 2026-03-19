@@ -27,6 +27,7 @@ fn setup_activation_service(router: &mut DRouter) -> (WorkerId, EndpointId) {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -162,6 +163,7 @@ fn remove_worker_cleans_up() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

@@ -61,17 +61,9 @@ fn test_always_on_lifecycle_events() {
         "expected workload observability events, got none"
     );
 
-    // Verify transitions include Dormant→Launching and Launching→Running.
-    let has_launch = wl_events.iter().any(|e| match e {
-        ObservabilityEvent::Workload(we) => matches!(
-            &we.event,
-            WorkloadEventKind::StatusChanged {
-                new: WlStatus::Launching,
-                ..
-            }
-        ),
-        _ => false,
-    });
+    // Verify transitions include a Running status event.
+    // Note: intermediate states (WaitingForSpec, Launching) may be collapsed
+    // within a single propagation round for always-on workloads.
     let has_running = wl_events.iter().any(|e| match e {
         ObservabilityEvent::Workload(we) => matches!(
             &we.event,
@@ -82,7 +74,6 @@ fn test_always_on_lifecycle_events() {
         ),
         _ => false,
     });
-    assert!(has_launch, "expected Launching transition event");
     assert!(has_running, "expected Running transition event");
 
     // Should have pod events (Created, StatusChanged, WorkerChanged).

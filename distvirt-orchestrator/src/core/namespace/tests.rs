@@ -77,6 +77,7 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
         mgmt,
         crate::sm::WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

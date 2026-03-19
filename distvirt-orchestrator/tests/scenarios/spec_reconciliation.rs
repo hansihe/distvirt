@@ -105,6 +105,7 @@ fn test_add_workload_to_existing_namespace() {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
     new_spec.services.insert(

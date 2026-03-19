@@ -84,6 +84,7 @@ fn spec_change_during_launch_triggers_restart() {
         mgmt,
         WorkloadSpec {
             image: "app:v2".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -121,6 +122,7 @@ fn spec_change_while_running_restarts_immediately() {
         mgmt,
         WorkloadSpec {
             image: "app:v2".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -181,6 +183,7 @@ fn scavenge_idle_workload() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -302,6 +305,7 @@ fn spec_change_and_demand_drop_during_launch() {
         mgmt,
         WorkloadSpec {
             image: "app:v2".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

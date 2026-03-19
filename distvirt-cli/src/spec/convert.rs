@@ -568,6 +568,7 @@ fn build_namespace_spec(
                     suspend_on_idle,
                     resources,
                     activation: wl_activation,
+                    respects_demand: false, // TODO: derive from spec
                 },
             );
 

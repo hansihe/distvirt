@@ -34,6 +34,7 @@ fn shared_worker_death_independent_failure() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -160,6 +161,7 @@ fn service_retarget_workload() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -248,6 +250,7 @@ fn independent_workload_subgraphs() {
         mgmt1,
         WorkloadSpec {
             image: "app-a:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -271,6 +274,7 @@ fn independent_workload_subgraphs() {
         mgmt2,
         WorkloadSpec {
             image: "app-b:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -359,6 +363,7 @@ fn service_fan_in_with_retarget() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -465,6 +470,7 @@ fn service_self_destructs_on_spec_removal() {
         mgmt_wl,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -549,6 +555,7 @@ fn full_teardown_cascade() {
         mgmt_wl,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

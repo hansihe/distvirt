@@ -22,6 +22,7 @@ fn setup_activation_endpoint() -> (Router, ManagementId, EndpointId) {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

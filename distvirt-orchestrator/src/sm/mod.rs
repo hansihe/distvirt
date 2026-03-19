@@ -224,6 +224,18 @@ pub struct WorkloadSpec {
     pub resources: Option<distvirt_worker_protocol::ResourceRequirements>,
     /// Whether this workload runs as a service or a job.
     pub run_policy: RunPolicy,
+    /// If true, the workload respects demand signals and starts dormant.
+    /// If false, the workload is always-on regardless of demand.
+    pub respects_demand: bool,
+    /// Workload-level activation config. Controls the workload-owned endpoint's
+    /// idle timeout behavior.
+    pub activation: Option<WorkloadActivationSpec>,
+}
+
+/// Workload-level activation configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WorkloadActivationSpec {
+    pub idle_timeout: std::time::Duration,
 }
 
 /// Service spec delivered by management port.

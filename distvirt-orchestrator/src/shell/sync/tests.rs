@@ -75,6 +75,7 @@ fn always_on_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
 

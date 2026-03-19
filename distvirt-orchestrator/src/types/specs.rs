@@ -53,6 +53,10 @@ pub struct WorkloadSpec {
     /// Whether this workload runs as a service or a job.
     #[serde(default)]
     pub run_policy: RunPolicy,
+    /// If true, the workload respects demand signals and starts dormant.
+    /// If false, the workload is always-on regardless of demand.
+    #[serde(default)]
+    pub respects_demand: bool,
 }
 
 /// Workload-level activation configuration. Only passthrough is valid.

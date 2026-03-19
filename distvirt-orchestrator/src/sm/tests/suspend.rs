@@ -220,6 +220,7 @@ fn spec_change_during_suspend() {
         WorkloadSpec {
             image: "app:v2".into(),
             suspend_on_idle: true,
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -416,6 +417,7 @@ fn suspend_on_idle_disabled_during_suspend() {
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: false,
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -456,6 +458,7 @@ fn suspend_on_idle_disabled_discards_artifact() {
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: false,
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -494,6 +497,7 @@ fn suspend_on_idle_enabled_with_running_pod() {
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: true,
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -540,6 +544,7 @@ fn suspend_on_idle_change_no_restart() {
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: true,
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -569,6 +574,7 @@ fn image_and_suspend_change_together() {
         WorkloadSpec {
             image: "app:v2".into(),
             suspend_on_idle: true,
+            respects_demand: true,
             ..Default::default()
         },
     );

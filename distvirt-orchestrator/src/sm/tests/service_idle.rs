@@ -22,6 +22,7 @@ fn traffic_triggered_activation() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -86,6 +87,7 @@ fn idle_timeout_deactivation() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -159,6 +161,7 @@ fn traffic_cancels_idle_timer() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -227,6 +230,7 @@ fn idle_timeout_suspend_integration() {
         WorkloadSpec {
             image: "app:v1".into(),
             suspend_on_idle: true,
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -314,6 +318,7 @@ fn worker_loss_removes_backend_need() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );
@@ -383,6 +388,7 @@ fn multiple_workers_one_loses_traffic() {
         mgmt,
         WorkloadSpec {
             image: "app:v1".into(),
+            respects_demand: true,
             ..Default::default()
         },
     );

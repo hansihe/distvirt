@@ -56,6 +56,9 @@ message WorkloadSpec {
     bool suspend_on_idle = 3;
     ResourceRequirements resources = 4;
     ActivationSpec activation = 5;
+    // If true, the workload respects demand signals and starts dormant.
+    // If false (default), the workload is always-on.
+    bool respects_demand = 6;
 }
 
 message ResourceValues {

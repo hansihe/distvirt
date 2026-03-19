@@ -74,6 +74,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
 
@@ -114,6 +115,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
@@ -158,6 +160,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
@@ -201,6 +204,7 @@ pub fn multi_service_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
@@ -289,6 +293,7 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
 
@@ -342,6 +347,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
     workloads.insert(
@@ -353,6 +359,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
 
