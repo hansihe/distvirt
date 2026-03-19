@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use distvirt_orchestrator::types::WorkloadStatus;
+
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::{
     activation_spec, always_on_spec, two_activation_workloads_spec,
@@ -67,9 +69,9 @@ async fn test_pressure_shortens_idle_timeout() {
     cluster.converge().await;
 
     // Should be suspended or suspending since pressure shortening fired.
-    let state = cluster.workload_status_str("ns", "web").await;
+    let state = cluster.workload_status("ns", "web").await;
     assert!(
-        state == "suspended" || state == "suspending",
+        matches!(state, WorkloadStatus::Suspended | WorkloadStatus::Suspending),
         "expected Suspended/Suspending after pressure-shortened idle timeout, got {:?}",
         state
     );
@@ -129,9 +131,9 @@ async fn test_basic_preemption_e2e() {
     cluster.send_activation_traffic("ns", "svc-b").await;
 
     // wl-a should be preempted (no longer Running).
-    let wl_a_state = cluster.workload_status_str("ns", "wl-a").await;
+    let wl_a_state = cluster.workload_status("ns", "wl-a").await;
     assert!(
-        wl_a_state != "running",
+        wl_a_state != WorkloadStatus::Running,
         "wl-a should be preempted (not Running), got {:?}",
         wl_a_state
     );

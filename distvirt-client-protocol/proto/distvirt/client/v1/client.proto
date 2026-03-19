@@ -214,14 +214,19 @@ message WorkloadStatusReport {
 message WorkloadState {
     oneof state {
         WorkloadDormant dormant = 1;
-        WorkloadWaitingForCapacity waiting_for_capacity = 2;
+        WorkloadWaitingForSpec waiting_for_spec = 2;
         WorkloadLaunching launching = 3;
         WorkloadRunning running = 4;
+        WorkloadSuspending suspending = 5;
+        WorkloadSuspended suspended = 6;
+        WorkloadRetryBackoff retry_backoff = 7;
+        WorkloadFailed failed = 8;
+        WorkloadCompleted completed = 9;
     }
 }
 
 message WorkloadDormant {}
-message WorkloadWaitingForCapacity {}
+message WorkloadWaitingForSpec {}
 
 message WorkloadLaunching {
     string pod_id = 1;
@@ -232,6 +237,16 @@ message WorkloadRunning {
     string pod_id = 1;
     string worker_id = 2;
 }
+
+message WorkloadSuspending {
+    string pod_id = 1;
+    string worker_id = 2;
+}
+
+message WorkloadSuspended {}
+message WorkloadRetryBackoff {}
+message WorkloadFailed {}
+message WorkloadCompleted {}
 
 message ServiceStatusReport {
     string workload_id = 1;

@@ -592,8 +592,8 @@ impl NamespaceCore {
             let state = self
                 .router
                 .signal_workload_status(router_id)
-                .map(|s| wl_status_str(s))
-                .unwrap_or("unknown");
+                .map(|s| sm_wl_status_to_client(s))
+                .unwrap_or(crate::types::WorkloadStatus::Dormant);
             let wl_sm = self.router.get_workload(&router_id);
             let pod_id = wl_sm
                 .as_ref()
@@ -609,7 +609,7 @@ impl NamespaceCore {
             workloads.insert(
                 WorkloadName(name.to_string()),
                 crate::types::WorkloadStatusReport {
-                    state: state.to_string(),
+                    state,
                     pod_id,
                     ip,
                     conditions: BTreeMap::new(),
@@ -624,8 +624,8 @@ impl NamespaceCore {
 
             let service_state = ep_id
                 .and_then(|id| self.router.signal_endpoint_status(id))
-                .map(|s| endpoint_status_str(s))
-                .unwrap_or("unknown");
+                .map(|s| sm_endpoint_status_to_client(s))
+                .unwrap_or(crate::types::ServiceStatus::Pending);
             let backend_need = ep_id
                 .and_then(|id| self.router.signal_endpoint_current_backend_need(id))
                 .cloned();
@@ -647,7 +647,7 @@ impl NamespaceCore {
                 name.to_string(),
                 crate::types::ServiceStatusReport {
                     workload_id: workload_name,
-                    service_state: service_state.to_string(),
+                    service_state,
                     backend_need,
                     activation_enabled: has_activation,
                     ip: service_ip.to_string(),
@@ -736,25 +736,25 @@ impl NamespaceCore {
     }
 }
 
-fn wl_status_str(status: &WlStatus) -> &'static str {
+fn sm_wl_status_to_client(status: &WlStatus) -> crate::types::WorkloadStatus {
     match status {
-        WlStatus::Dormant => "dormant",
-        WlStatus::WaitingForSpec => "waiting_for_spec",
-        WlStatus::Launching => "launching",
-        WlStatus::Running => "running",
-        WlStatus::Suspending => "suspending",
-        WlStatus::Suspended => "suspended",
-        WlStatus::RetryBackoff => "retry_backoff",
-        WlStatus::Failed => "failed",
-        WlStatus::Completed => "completed",
+        WlStatus::Dormant => crate::types::WorkloadStatus::Dormant,
+        WlStatus::WaitingForSpec => crate::types::WorkloadStatus::WaitingForSpec,
+        WlStatus::Launching => crate::types::WorkloadStatus::Launching,
+        WlStatus::Running => crate::types::WorkloadStatus::Running,
+        WlStatus::Suspending => crate::types::WorkloadStatus::Suspending,
+        WlStatus::Suspended => crate::types::WorkloadStatus::Suspended,
+        WlStatus::RetryBackoff => crate::types::WorkloadStatus::RetryBackoff,
+        WlStatus::Failed => crate::types::WorkloadStatus::Failed,
+        WlStatus::Completed => crate::types::WorkloadStatus::Completed,
     }
 }
 
-fn endpoint_status_str(status: &EndpointStatus) -> &'static str {
+fn sm_endpoint_status_to_client(status: &EndpointStatus) -> crate::types::ServiceStatus {
     match status {
-        EndpointStatus::Idle => "idle",
-        EndpointStatus::NeedBackend => "need_backend",
-        EndpointStatus::Active => "active",
+        EndpointStatus::Idle => crate::types::ServiceStatus::Idle,
+        EndpointStatus::NeedBackend => crate::types::ServiceStatus::NeedBackend,
+        EndpointStatus::Active => crate::types::ServiceStatus::Active,
     }
 }
 

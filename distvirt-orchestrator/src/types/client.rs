@@ -130,6 +130,54 @@ pub enum PodStatus {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum WorkloadStatus {
+    Dormant,
+    WaitingForSpec,
+    Launching,
+    Running,
+    Suspending,
+    Suspended,
+    RetryBackoff,
+    Failed,
+    Completed,
+}
+
+impl std::fmt::Display for WorkloadStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkloadStatus::Dormant => write!(f, "dormant"),
+            WorkloadStatus::WaitingForSpec => write!(f, "waiting_for_spec"),
+            WorkloadStatus::Launching => write!(f, "launching"),
+            WorkloadStatus::Running => write!(f, "running"),
+            WorkloadStatus::Suspending => write!(f, "suspending"),
+            WorkloadStatus::Suspended => write!(f, "suspended"),
+            WorkloadStatus::RetryBackoff => write!(f, "retry_backoff"),
+            WorkloadStatus::Failed => write!(f, "failed"),
+            WorkloadStatus::Completed => write!(f, "completed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServiceStatus {
+    Pending,
+    Idle,
+    NeedBackend,
+    Active,
+}
+
+impl std::fmt::Display for ServiceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceStatus::Pending => write!(f, "pending"),
+            ServiceStatus::Idle => write!(f, "idle"),
+            ServiceStatus::NeedBackend => write!(f, "need_backend"),
+            ServiceStatus::Active => write!(f, "active"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct NamespaceStatusReport {
     pub namespace_id: NamespaceId,
     pub status: NamespaceStatus,
@@ -140,7 +188,7 @@ pub struct NamespaceStatusReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkloadStatusReport {
-    pub state: String,
+    pub state: WorkloadStatus,
     pub pod_id: Option<PodId>,
     pub ip: String,
     pub conditions: BTreeMap<String, String>,
@@ -149,7 +197,7 @@ pub struct WorkloadStatusReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceStatusReport {
     pub workload_id: WorkloadName,
-    pub service_state: String,
+    pub service_state: ServiceStatus,
     pub backend_need: Option<BackendNeed>,
     pub activation_enabled: bool,
     pub ip: String,

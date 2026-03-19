@@ -310,9 +310,14 @@ fn namespace_state_label(state: NamespaceState) -> &'static str {
 fn workload_state_label(state: &WorkloadState) -> &'static str {
     match &state.state {
         Some(workload_state::State::Dormant(_)) => "dormant",
-        Some(workload_state::State::WaitingForCapacity(_)) => "waiting",
+        Some(workload_state::State::WaitingForSpec(_)) => "waiting",
         Some(workload_state::State::Launching(_)) => "launching",
         Some(workload_state::State::Running(_)) => "running",
+        Some(workload_state::State::Suspending(_)) => "suspending",
+        Some(workload_state::State::Suspended(_)) => "suspended",
+        Some(workload_state::State::RetryBackoff(_)) => "retry-backoff",
+        Some(workload_state::State::Failed(_)) => "failed",
+        Some(workload_state::State::Completed(_)) => "completed",
         None => "unknown",
     }
 }

@@ -109,16 +109,19 @@ async fn test_worker_disconnect_during_suspend() {
         .await;
 
     // Check current state.
-    let state = cluster.workload_status_str("ns-disc", "web").await;
-    let was_suspending = state == "suspending";
+    let state = cluster.workload_status("ns-disc", "web").await;
+    let was_suspending = state == WorkloadStatus::Suspending;
 
     // Disconnect the hosting worker.
     cluster.disconnect_worker(&hosting).await;
     cluster.converge().await;
 
     // After disconnect, workload should be in a recoverable state.
-    let state = cluster.workload_status_str("ns-disc", "web").await;
-    let acceptable = ["dormant", "launching", "suspended", "running"].contains(&state.as_str());
+    let state = cluster.workload_status("ns-disc", "web").await;
+    let acceptable = matches!(
+        state,
+        WorkloadStatus::Dormant | WorkloadStatus::Launching | WorkloadStatus::Suspended | WorkloadStatus::Running
+    );
     assert!(
         acceptable,
         "workload should be in a recoverable state after worker disconnect, got {:?}",
@@ -130,8 +133,11 @@ async fn test_worker_disconnect_during_suspend() {
 
     // The workload should eventually be running on the remaining worker,
     // or at least be in a state where it can be scheduled.
-    let final_state = cluster.workload_status_str("ns-disc", "web").await;
-    let ok = ["running", "dormant", "launching"].contains(&final_state.as_str());
+    let final_state = cluster.workload_status("ns-disc", "web").await;
+    let ok = matches!(
+        final_state,
+        WorkloadStatus::Running | WorkloadStatus::Dormant | WorkloadStatus::Launching
+    );
     assert!(
         ok,
         "workload should be recoverable after worker disconnect, got {:?}",
@@ -214,9 +220,9 @@ async fn test_preemption_is_namespace_scoped() {
     cluster.assert_workload_running("ns-other", "echo").await;
 
     // wl-a should be preempted.
-    let wl_a_state = cluster.workload_status_str("ns-main", "wl-a").await;
+    let wl_a_state = cluster.workload_status("ns-main", "wl-a").await;
     assert!(
-        wl_a_state != "running",
+        wl_a_state != WorkloadStatus::Running,
         "wl-a should be preempted, got {:?}",
         wl_a_state
     );

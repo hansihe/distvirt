@@ -74,7 +74,7 @@ pub struct TestCluster {
 impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
-        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true);
+        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true, 51820);
         TestCluster {
             shell,
             event_bus,
@@ -263,7 +263,7 @@ impl TestCluster {
             .unwrap_or_else(|e| panic!("namespace '{}' status failed: {:?}", ns_id, e))
     }
 
-    pub async fn workload_status_str(&self, ns_id: &str, wl_id: &str) -> String {
+    pub async fn workload_status(&self, ns_id: &str, wl_id: &str) -> WorkloadStatus {
         let status = self.namespace_status(ns_id).await;
         status
             .workloads
@@ -280,7 +280,7 @@ impl TestCluster {
             .clone()
     }
 
-    pub async fn service_status_str(&self, ns_id: &str, svc_id: &str) -> String {
+    pub async fn service_status(&self, ns_id: &str, svc_id: &str) -> ServiceStatus {
         let status = self.namespace_status(ns_id).await;
         status
             .services
@@ -429,45 +429,45 @@ impl TestCluster {
     // -------------------------------------------------------------------------
 
     pub async fn assert_workload_running(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
-            state, "running",
+            state, WorkloadStatus::Running,
             "workload '{}/{}': expected running, got {}",
             ns_id, wl_id, state
         );
     }
 
     pub async fn assert_workload_dormant(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
-            state, "dormant",
+            state, WorkloadStatus::Dormant,
             "workload '{}/{}': expected dormant, got {}",
             ns_id, wl_id, state
         );
     }
 
     pub async fn assert_workload_suspended(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
-            state, "suspended",
+            state, WorkloadStatus::Suspended,
             "workload '{}/{}': expected suspended, got {}",
             ns_id, wl_id, state
         );
     }
 
     pub async fn assert_workload_failed(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
-            state, "failed",
+            state, WorkloadStatus::Failed,
             "workload '{}/{}': expected failed, got {}",
             ns_id, wl_id, state
         );
     }
 
     pub async fn assert_workload_retry_backoff(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
-            state, "retry_backoff",
+            state, WorkloadStatus::RetryBackoff,
             "workload '{}/{}': expected retry_backoff, got {}",
             ns_id, wl_id, state
         );
@@ -477,45 +477,45 @@ impl TestCluster {
         // In the new SM, "waiting for capacity" maps to "launching" (pod created,
         // waiting for scheduler lease) or potentially "waiting_for_spec".
         // Check for launching as the closest equivalent.
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
-            state, "launching",
+            state, WorkloadStatus::Launching,
             "workload '{}/{}': expected launching (waiting for capacity), got {}",
             ns_id, wl_id, state
         );
     }
 
     pub async fn assert_workload_not_running(&self, ns_id: &str, wl_id: &str) {
-        let state = self.workload_status_str(ns_id, wl_id).await;
+        let state = self.workload_status(ns_id, wl_id).await;
         assert_ne!(
-            state, "running",
+            state, WorkloadStatus::Running,
             "workload '{}/{}': expected NOT running, got {}",
             ns_id, wl_id, state
         );
     }
 
     pub async fn assert_service_active(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_status_str(ns_id, svc_id).await;
+        let state = self.service_status(ns_id, svc_id).await;
         assert_eq!(
-            state, "active",
+            state, ServiceStatus::Active,
             "service '{}/{}': expected active, got {}",
             ns_id, svc_id, state
         );
     }
 
     pub async fn assert_service_idle(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_status_str(ns_id, svc_id).await;
+        let state = self.service_status(ns_id, svc_id).await;
         assert_eq!(
-            state, "idle",
+            state, ServiceStatus::Idle,
             "service '{}/{}': expected idle, got {}",
             ns_id, svc_id, state
         );
     }
 
     pub async fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
-        let state = self.service_status_str(ns_id, svc_id).await;
+        let state = self.service_status(ns_id, svc_id).await;
         assert_eq!(
-            state, "need_backend",
+            state, ServiceStatus::NeedBackend,
             "service '{}/{}': expected need_backend, got {}",
             ns_id, svc_id, state
         );
@@ -537,12 +537,14 @@ impl TestCluster {
     /// transition which involves async I/O (snapshot writes).
     pub async fn wait_workload_suspended(&mut self, ns_id: &str, wl_id: &str) {
         for _ in 0..50 {
-            let state = self.workload_status_str(ns_id, wl_id).await;
-            if state == "suspended" {
+            let state = self.workload_status(ns_id, wl_id).await;
+            if state == WorkloadStatus::Suspended {
                 return;
             }
             assert!(
-                state == "suspending" || state == "suspended" || state == "running",
+                state == WorkloadStatus::Suspending
+                    || state == WorkloadStatus::Suspended
+                    || state == WorkloadStatus::Running,
                 "workload '{}/{}': expected suspending/suspended/running, got {}",
                 ns_id,
                 wl_id,
@@ -551,7 +553,7 @@ impl TestCluster {
             tokio::task::yield_now().await;
             self.converge().await;
         }
-        let final_state = self.workload_status_str(ns_id, wl_id).await;
+        let final_state = self.workload_status(ns_id, wl_id).await;
         panic!(
             "workload '{}/{}' did not reach suspended after retries (still {})",
             ns_id, wl_id, final_state

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use distvirt_orchestrator::types::WorkloadStatus;
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::TestVmm;
 
@@ -94,8 +95,8 @@ async fn test_resume_pinned_to_artifact_worker_e2e() {
 
     // The resume path may need extra convergence for the snapshot restore I/O.
     // Check if already running, otherwise wait for it.
-    let state = cluster.workload_status_str("ns", "web").await;
-    if state != "running" {
+    let state = cluster.workload_status("ns", "web").await;
+    if state != WorkloadStatus::Running {
         cluster.assert_workload_running("ns", "web").await;
     }
     cluster.assert_workload_running("ns", "web").await;

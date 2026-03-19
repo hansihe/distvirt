@@ -35,7 +35,7 @@ async fn test_delete_during_launch() {
         .state
         .clone();
     assert!(
-        ["launching", "running"].contains(&wl_state.as_str()),
+        matches!(wl_state, WorkloadStatus::Launching | WorkloadStatus::Running),
         "workload should be launching or running after partial converge, got '{}'",
         wl_state,
     );

@@ -347,7 +347,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
         workloads.insert(
             wl_id.0.clone(),
             proto::WorkloadStatusReport {
-                state: Some(convert_workload_state_from_strings(
+                state: Some(convert_workload_state(
                     &wl.state,
                     &pod_id_ref.cloned(),
                     &worker_id_ref.cloned(),
@@ -376,7 +376,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
             svc_id.clone(),
             proto::ServiceStatusReport {
                 workload_id: svc.workload_id.0.clone(),
-                state: Some(convert_service_state_from_strings(
+                state: Some(convert_service_state(
                     &svc.service_state,
                     &pod_id,
                     &worker_id,
@@ -418,43 +418,60 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
     }
 }
 
-fn convert_workload_state_from_strings(
-    state: &str,
+fn convert_workload_state(
+    state: &WorkloadStatus,
     pod_id: &Option<PodId>,
     worker_id: &Option<WorkerId>,
 ) -> proto::WorkloadState {
+    let pod_id_str = || pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default();
+    let worker_id_str = || worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default();
+
     let state = match state {
-        "launching" => proto::workload_state::State::Launching(proto::WorkloadLaunching {
-            pod_id: pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default(),
-            worker_id: worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default(),
-        }),
-        "running" => proto::workload_state::State::Running(proto::WorkloadRunning {
-            pod_id: pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default(),
-            worker_id: worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default(),
-        }),
-        "waiting_for_capacity" => {
-            proto::workload_state::State::WaitingForCapacity(proto::WorkloadWaitingForCapacity {})
+        WorkloadStatus::Dormant => proto::workload_state::State::Dormant(proto::WorkloadDormant {}),
+        WorkloadStatus::WaitingForSpec => {
+            proto::workload_state::State::WaitingForSpec(proto::WorkloadWaitingForSpec {})
         }
-        _ => proto::workload_state::State::Dormant(proto::WorkloadDormant {}),
+        WorkloadStatus::Launching => proto::workload_state::State::Launching(proto::WorkloadLaunching {
+            pod_id: pod_id_str(),
+            worker_id: worker_id_str(),
+        }),
+        WorkloadStatus::Running => proto::workload_state::State::Running(proto::WorkloadRunning {
+            pod_id: pod_id_str(),
+            worker_id: worker_id_str(),
+        }),
+        WorkloadStatus::Suspending => proto::workload_state::State::Suspending(proto::WorkloadSuspending {
+            pod_id: pod_id_str(),
+            worker_id: worker_id_str(),
+        }),
+        WorkloadStatus::Suspended => {
+            proto::workload_state::State::Suspended(proto::WorkloadSuspended {})
+        }
+        WorkloadStatus::RetryBackoff => {
+            proto::workload_state::State::RetryBackoff(proto::WorkloadRetryBackoff {})
+        }
+        WorkloadStatus::Failed => proto::workload_state::State::Failed(proto::WorkloadFailed {}),
+        WorkloadStatus::Completed => {
+            proto::workload_state::State::Completed(proto::WorkloadCompleted {})
+        }
     };
     proto::WorkloadState { state: Some(state) }
 }
 
-fn convert_service_state_from_strings(
-    state: &str,
+fn convert_service_state(
+    state: &ServiceStatus,
     pod_id: &Option<PodId>,
     worker_id: &Option<WorkerId>,
     backend_need: &Option<BackendNeed>,
 ) -> proto::ServiceState {
     let state = match state {
-        "idle" => proto::service_state::State::Idle(proto::ServiceIdle {}),
-        "need_backend" => proto::service_state::State::NeedBackend(proto::ServiceNeedBackend {}),
-        "active" => proto::service_state::State::Active(proto::ServiceActive {
+        ServiceStatus::Pending => proto::service_state::State::Pending(proto::ServicePending {}),
+        ServiceStatus::Idle => proto::service_state::State::Idle(proto::ServiceIdle {}),
+        ServiceStatus::NeedBackend => proto::service_state::State::NeedBackend(proto::ServiceNeedBackend {}),
+        ServiceStatus::Active => proto::service_state::State::Active(proto::ServiceActive {
             pod_id: pod_id.as_ref().map(|p| p.0.to_string()).unwrap_or_default(),
             worker_id: worker_id.as_ref().map(|w| w.0.to_string()).unwrap_or_default(),
             backend_need: convert_backend_need(backend_need),
         }),
-        _ => proto::service_state::State::Pending(proto::ServicePending {}),
     };
     proto::ServiceState { state: Some(state) }
 }

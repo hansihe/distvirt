@@ -43,6 +43,32 @@ pub fn container_spec(image: &str) -> ContainerSpec {
     }
 }
 
+/// Workload with respects_demand=false, suspend_on_idle=false, NO services.
+/// Matches the user scenario: `dv up` with a bare workload that should auto-start.
+pub fn no_activation_spec() -> NamespaceSpec {
+    let wl_id = WorkloadName("web".to_string());
+
+    let mut workloads = BTreeMap::new();
+    workloads.insert(
+        wl_id,
+        WorkloadSpec {
+            containers: vec![container_spec("docker.io/library/nginx:latest")],
+            network: pod_network(10),
+            suspend_on_idle: false,
+            resources: None,
+            activation: None,
+            run_policy: Default::default(),
+            respects_demand: false,
+        },
+    );
+
+    NamespaceSpec {
+        network: default_network(),
+        workloads,
+        services: BTreeMap::new(),
+    }
+}
+
 pub fn always_on_spec() -> NamespaceSpec {
     let wl_id = WorkloadName("echo".to_string());
     let svc_id = "echo-svc".to_string();
@@ -57,6 +83,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
 
@@ -96,6 +123,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
@@ -135,6 +163,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
@@ -174,6 +203,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
     workloads.insert(
@@ -185,6 +215,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: false,
         },
     );
 
@@ -237,6 +268,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
     workloads.insert(
@@ -248,6 +280,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
@@ -299,6 +332,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             resources: None,
             activation: None,
             run_policy: Default::default(),
+            respects_demand: true,
         },
     );
 
