@@ -2,8 +2,7 @@ use super::convert::spec_to_namespace_spec;
 use super::helpers::parse_duration_ms;
 use super::includes::resolve_includes;
 use super::ip_alloc::IpAllocator;
-use super::parse::try_parse;
-use super::types::SpecFile;
+use super::parse::{try_parse, ParsedSpec};
 
 use distvirt_client_protocol::*;
 
@@ -12,15 +11,15 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use tempfile::{NamedTempFile, TempDir};
 
-    fn parse_yaml(yaml: &str) -> SpecFile {
+    fn parse_yaml(yaml: &str) -> ParsedSpec {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(yaml.as_bytes()).unwrap();
         try_parse(f.path()).unwrap().unwrap()
     }
 
     fn convert(yaml: &str) -> (Option<String>, NamespaceSpec) {
-        let spec = parse_yaml(yaml);
-        spec_to_namespace_spec(&spec).unwrap()
+        let parsed = parse_yaml(yaml);
+        spec_to_namespace_spec(&parsed).unwrap()
     }
 
     // --- (a) Full example parse + convert ---
@@ -417,8 +416,8 @@ services:
 
     /// Helper: parse YAML and attempt conversion, expecting an error.
     fn convert_err(yaml: &str) -> String {
-        let spec = parse_yaml(yaml);
-        let err = spec_to_namespace_spec(&spec).unwrap_err();
+        let parsed = parse_yaml(yaml);
+        let err = spec_to_namespace_spec(&parsed).unwrap_err();
         err.to_string()
     }
 
@@ -599,8 +598,8 @@ workloads:
         activation:
           postgres: {}
 "#;
-        let spec = parse_yaml(yaml);
-        let result = spec_to_namespace_spec(&spec);
+        let parsed = parse_yaml(yaml);
+        let result = spec_to_namespace_spec(&parsed);
         assert!(result.is_ok(), "warnings should not block: {:?}", result.err());
         let (_, proto) = result.unwrap();
         assert_eq!(proto.workloads.len(), 1);
@@ -656,6 +655,39 @@ workloads:
         assert!(err.contains("unrecognized apiVersion 'v99'"), "got: {}", err);
     }
 
+    // --- Snippet rendering sanity tests ---
+
+    #[test]
+    fn rendered_validation_error_has_source_snippet() {
+        let err = convert_err(r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  api:
+    ip: 10.0.0.5
+    containers:
+      - image: img
+"#);
+        // Should have annotate-snippets style output with source pointer
+        assert!(err.contains("-->"), "expected source location pointer, got:\n{}", err);
+        assert!(err.contains("10.0.0.5"), "expected value in snippet, got:\n{}", err);
+        assert!(err.contains("^^^^"), "expected underline, got:\n{}", err);
+    }
+
+    #[test]
+    fn rendered_parse_error_has_source_snippet() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"apiVersion: v1\nkind: Namespace\nworkloads:\n  api:\n    containers:\n      - image: valid\n        args: not_a_list\n").unwrap();
+        let msg = match try_parse(f.path()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("should fail to parse"),
+        };
+        // serde-saphyr renders parse errors with source snippets
+        assert!(msg.contains("-->"), "expected source location in parse error, got:\n{}", msg);
+    }
+
     // --- Fragment tests ---
 
     fn write_file(dir: &Path, name: &str, content: &str) -> std::path::PathBuf {
@@ -666,9 +698,9 @@ workloads:
 
     fn parse_with_includes(dir: &TempDir, ns_yaml: &str) -> (Option<String>, NamespaceSpec) {
         let spec_path = write_file(dir.path(), "distvirt.yaml", ns_yaml);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        resolve_includes(&mut spec, &spec_path).unwrap();
-        spec_to_namespace_spec(&spec).unwrap()
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        resolve_includes(&mut parsed, &spec_path).unwrap();
+        spec_to_namespace_spec(&parsed).unwrap()
     }
 
     #[test]
@@ -741,8 +773,8 @@ kind: Namespace
 include:
   - path: app.yaml
 "#);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        let err = resolve_includes(&mut spec, &spec_path).unwrap_err();
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("undefined variable 'FOO'"), "got: {}", msg);
     }
@@ -809,8 +841,8 @@ include:
   - path: frag1.yaml
   - path: frag2.yaml
 "#);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        let err = resolve_includes(&mut spec, &spec_path).unwrap_err();
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("duplicate workload ID 'api'"), "got: {}", msg);
     }
@@ -847,8 +879,8 @@ include:
   - path: frag1.yaml
   - path: frag2.yaml
 "#);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        let err = resolve_includes(&mut spec, &spec_path).unwrap_err();
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("duplicate service ID 'mysvc'"), "got: {}", msg);
     }
@@ -872,8 +904,8 @@ kind: Namespace
 include:
   - path: bad.yaml
 "#);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        let err = resolve_includes(&mut spec, &spec_path).unwrap_err();
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("fragments cannot have 'metadata'"), "got: {}", msg);
     }
@@ -897,8 +929,8 @@ kind: Namespace
 include:
   - path: bad.yaml
 "#);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        let err = resolve_includes(&mut spec, &spec_path).unwrap_err();
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("fragments cannot have 'network'"), "got: {}", msg);
     }
@@ -952,8 +984,8 @@ kind: Namespace
 include:
   - path: bad.yaml
 "#);
-        let mut spec = try_parse(&spec_path).unwrap().unwrap();
-        let err = resolve_includes(&mut spec, &spec_path).unwrap_err();
+        let mut parsed = try_parse(&spec_path).unwrap().unwrap();
+        let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("workload 'nonexistent' does not exist in this fragment"), "got: {}", msg);
     }
@@ -974,8 +1006,8 @@ workloads:
       - image: postgres:16
 "#;
         let spec_path = write_file(dir.path(), "distvirt.yaml", yaml_base);
-        let spec = try_parse(&spec_path).unwrap().unwrap();
-        let (_, proto1) = spec_to_namespace_spec(&spec).unwrap();
+        let parsed = try_parse(&spec_path).unwrap().unwrap();
+        let (_, proto1) = spec_to_namespace_spec(&parsed).unwrap();
         let db_ip1 = proto1.workloads["database"].network.as_ref().unwrap().ip.clone();
 
         // Now add a fragment
@@ -1000,9 +1032,9 @@ include:
   - path: api.yaml
 "#;
         let spec_path2 = write_file(dir.path(), "distvirt2.yaml", yaml_with_fragment);
-        let mut spec2 = try_parse(&spec_path2).unwrap().unwrap();
-        resolve_includes(&mut spec2, &spec_path2).unwrap();
-        let (_, proto2) = spec_to_namespace_spec(&spec2).unwrap();
+        let mut parsed2 = try_parse(&spec_path2).unwrap().unwrap();
+        resolve_includes(&mut parsed2, &spec_path2).unwrap();
+        let (_, proto2) = spec_to_namespace_spec(&parsed2).unwrap();
         let db_ip2 = &proto2.workloads["database"].network.as_ref().unwrap().ip;
 
         assert_eq!(&db_ip1, db_ip2, "database IP should be stable after adding fragment");

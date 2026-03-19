@@ -6,6 +6,7 @@ use distvirt_client_protocol::*;
 use super::errors::SpecErrors;
 use super::helpers::{convert_expose, ip_to_mac, parse_cidr, parse_duration_ms, resolve_activation, resolve_resources};
 use super::ip_alloc::IpAllocator;
+use super::path::YamlPath;
 use super::types::*;
 
 // ---------------------------------------------------------------------------
@@ -17,8 +18,10 @@ use super::types::*;
 ///
 /// Runs multi-phase validation first, collecting all errors and reporting them
 /// together so users can fix everything in one pass.
-pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
+pub fn spec_to_namespace_spec(parsed: &super::parse::ParsedSpec) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
+    let spec = &parsed.spec;
     let mut errs = SpecErrors::new();
+    errs.add_source(&parsed.file_name, &parsed.source);
     let namespace_id = spec.metadata.as_ref().and_then(|m| m.name.clone());
 
     // --- Phase 1: Structural validation ---
@@ -40,7 +43,7 @@ pub fn spec_to_namespace_spec(spec: &SpecFile) -> anyhow::Result<(Option<String>
     if let Some(ref net) = spec.network {
         if net.gateway.is_some() {
             errs.warn(
-                "network.gateway",
+                YamlPath::root().key("network").key("gateway"),
                 "gateway is not yet supported; will be ignored",
             );
         }
@@ -68,7 +71,7 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
     // apiVersion check
     if spec.api_version != "v1" {
         errs.error(
-            "apiVersion",
+            YamlPath::root().key("apiVersion"),
             format!("unrecognized apiVersion '{}' (expected 'v1')", spec.api_version),
         );
     }
@@ -76,7 +79,7 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
     // kind check
     if spec.kind != "Namespace" {
         errs.error(
-            "kind",
+            YamlPath::root().key("kind"),
             format!(
                 "unsupported kind '{}' (expected 'Namespace')",
                 spec.kind
@@ -91,27 +94,22 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
         .unwrap_or_default();
 
     // Collect all service IDs to check for duplicates
-    let mut all_service_ids: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut all_service_ids: HashMap<&str, Vec<YamlPath>> = HashMap::new();
 
     if let Some(ref spec_workloads) = spec.workloads {
         for (wid, wl) in spec_workloads {
-            let wl_path = format!("workloads.{}", wid);
+            let wl_path = YamlPath::root().key("workloads").key(wid);
 
             // Non-empty containers
             if wl.containers.is_empty() {
-                errs.error(&format!("{}.containers", wl_path), "containers list is empty");
+                errs.error(wl_path.key("containers"), "containers list is empty");
             }
 
             // Non-empty image on each container
             for (i, c) in wl.containers.iter().enumerate() {
-                let c_name = c
-                    .name
-                    .as_deref()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| format!("[{}]", i));
                 if c.image.is_empty() {
                     errs.error(
-                        &format!("{}.containers.{}.image", wl_path, c_name),
+                        wl_path.key("containers").index(i).key("image"),
                         "image is empty",
                     );
                 }
@@ -120,7 +118,7 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
             // Healthcheck warning
             if wl.healthcheck.is_some() {
                 errs.warn(
-                    &format!("{}.healthcheck", wl_path),
+                    wl_path.key("healthcheck"),
                     "healthcheck is not yet supported; will be ignored",
                 );
             }
@@ -131,7 +129,7 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                     all_service_ids
                         .entry(sid.as_str())
                         .or_default()
-                        .push(format!("{}.services.{}", wl_path, sid));
+                        .push(wl_path.key("services").key(sid));
                 }
             }
         }
@@ -140,11 +138,11 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
     // Top-level services: check workload references and track IDs
     if let Some(ref top_services) = spec.services {
         for (sid, svc) in top_services {
-            let svc_path = format!("services.{}", sid);
+            let svc_path = YamlPath::root().key("services").key(sid);
 
             if !workload_keys.contains(svc.workload.as_str()) {
                 errs.error(
-                    &svc_path,
+                    svc_path.clone(),
                     format!("workload '{}' does not exist", svc.workload),
                 );
             }
@@ -160,7 +158,7 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
     for (sid, locations) in &all_service_ids {
         if locations.len() > 1 {
             errs.error(
-                locations[1].as_str(),
+                locations[1].clone(),
                 format!(
                     "duplicate service ID '{}' (also defined at {})",
                     sid, locations[0]
@@ -180,15 +178,15 @@ fn validate_network_and_build_allocator(
     let allocator = match IpAllocator::new(subnet_str) {
         Ok(a) => a,
         Err(e) => {
-            errs.error("network.subnet", format!("invalid subnet: {}", e));
+            errs.error(YamlPath::root().key("network").key("subnet"), format!("invalid subnet: {}", e));
             return None;
         }
     };
 
     // Collect all explicit IPs for duplicate checking
-    let mut explicit_ips: HashMap<String, Vec<String>> = HashMap::new();
+    let mut explicit_ips: HashMap<String, Vec<YamlPath>> = HashMap::new();
 
-    let mut check_ip = |ip_str: &str, path: &str, errs: &mut SpecErrors| {
+    let mut check_ip = |ip_str: &str, path: YamlPath, errs: &mut SpecErrors| {
         match ip_str.parse::<Ipv4Addr>() {
             Ok(ip) => {
                 // Check within subnet
@@ -203,14 +201,14 @@ fn validate_network_and_build_allocator(
                 let num_hosts = 1u32.checked_shl(host_bits).unwrap_or(0).saturating_sub(2);
                 if ip_u32 < first_host || ip_u32 >= first_host + num_hosts {
                     errs.error(
-                        path,
+                        path.clone(),
                         format!("IP {} is outside the subnet {}", ip_str, subnet_str),
                     );
                 }
                 explicit_ips
                     .entry(ip_str.to_string())
                     .or_default()
-                    .push(path.to_string());
+                    .push(path);
             }
             Err(_) => {
                 errs.error(path, format!("'{}' is not a valid IPv4 address", ip_str));
@@ -220,15 +218,16 @@ fn validate_network_and_build_allocator(
 
     if let Some(ref spec_workloads) = spec.workloads {
         for (wid, wl) in spec_workloads {
+            let wl_path = YamlPath::root().key("workloads").key(wid);
             if let Some(ref ip) = wl.ip {
-                check_ip(ip, &format!("workloads.{}.ip", wid), errs);
+                check_ip(ip, wl_path.key("ip"), errs);
             }
             if let Some(ref inline_services) = wl.services {
                 for (sid, svc) in inline_services {
                     if let Some(ref ip) = svc.ip {
                         check_ip(
                             ip,
-                            &format!("workloads.{}.services.{}.ip", wid, sid),
+                            wl_path.key("services").key(sid).key("ip"),
                             errs,
                         );
                     }
@@ -239,7 +238,7 @@ fn validate_network_and_build_allocator(
     if let Some(ref top_services) = spec.services {
         for (sid, svc) in top_services {
             if let Some(ref ip) = svc.ip {
-                check_ip(ip, &format!("services.{}.ip", sid), errs);
+                check_ip(ip, YamlPath::root().key("services").key(sid).key("ip"), errs);
             }
         }
     }
@@ -248,7 +247,7 @@ fn validate_network_and_build_allocator(
     for (ip, locations) in &explicit_ips {
         if locations.len() > 1 {
             errs.error(
-                locations[1].as_str(),
+                locations[1].clone(),
                 format!(
                     "duplicate IP '{}' (also assigned at {})",
                     ip, locations[0]
@@ -261,7 +260,7 @@ fn validate_network_and_build_allocator(
     let total_items = count_total_items(spec);
     if total_items as u32 > allocator.num_hosts {
         errs.error(
-            "network.subnet",
+            YamlPath::root().key("network").key("subnet"),
             format!(
                 "subnet has {} usable addresses but spec requires {} (workloads + services)",
                 allocator.num_hosts, total_items
@@ -277,16 +276,16 @@ fn validate_activation(spec: &SpecFile, errs: &mut SpecErrors) {
     if let Some(ref spec_workloads) = spec.workloads {
         for (wid, wl) in spec_workloads {
             if let Some(ref activation) = wl.activation {
-                let path = format!("workloads.{}.activation", wid);
+                let path = YamlPath::root().key("workloads").key(wid).key("activation");
                 if activation.passthrough.is_none() {
                     errs.error(
-                        &path,
+                        path.clone(),
                         "only passthrough activator is valid on workloads",
                     );
                 } else if let Some(ref pt) = activation.passthrough {
                     validate_duration(
                         &pt.idle_timeout,
-                        &format!("{}.passthrough.idle_timeout", path),
+                        path.key("passthrough").key("idle_timeout"),
                         errs,
                     );
                 }
@@ -298,7 +297,12 @@ fn validate_activation(spec: &SpecFile, errs: &mut SpecErrors) {
                     if let Some(ref act) = svc.activation {
                         validate_service_activation(
                             act,
-                            &format!("workloads.{}.services.{}.activation", wid, sid),
+                            YamlPath::root()
+                                .key("workloads")
+                                .key(wid)
+                                .key("services")
+                                .key(sid)
+                                .key("activation"),
                             errs,
                         );
                     }
@@ -313,7 +317,7 @@ fn validate_activation(spec: &SpecFile, errs: &mut SpecErrors) {
             if let Some(ref act) = svc.activation {
                 validate_service_activation(
                     act,
-                    &format!("services.{}.activation", sid),
+                    YamlPath::root().key("services").key(sid).key("activation"),
                     errs,
                 );
             }
@@ -323,15 +327,15 @@ fn validate_activation(spec: &SpecFile, errs: &mut SpecErrors) {
     // Default activation
     if let Some(ref defaults) = spec.defaults {
         if let Some(ref act) = defaults.activation {
-            validate_service_activation(act, "defaults.activation", errs);
+            validate_service_activation(act, YamlPath::root().key("defaults").key("activation"), errs);
         }
     }
 }
 
-fn validate_service_activation(act: &SpecActivation, path: &str, errs: &mut SpecErrors) {
+fn validate_service_activation(act: &SpecActivation, path: YamlPath, errs: &mut SpecErrors) {
     if act.postgres.is_some() {
         errs.warn(
-            path,
+            path.clone(),
             "postgres activator is not yet supported; will be ignored",
         );
     }
@@ -339,7 +343,7 @@ fn validate_service_activation(act: &SpecActivation, path: &str, errs: &mut Spec
     if let Some(ref pt) = act.passthrough {
         validate_duration(
             &pt.idle_timeout,
-            &format!("{}.passthrough.idle_timeout", path),
+            path.key("passthrough").key("idle_timeout"),
             errs,
         );
     }
@@ -348,7 +352,7 @@ fn validate_service_activation(act: &SpecActivation, path: &str, errs: &mut Spec
         if let Some(ref idle_timeout) = tcp.idle_timeout {
             validate_duration(
                 idle_timeout,
-                &format!("{}.tcp.idle_timeout", path),
+                path.key("tcp").key("idle_timeout"),
                 errs,
             );
         }
@@ -356,7 +360,7 @@ fn validate_service_activation(act: &SpecActivation, path: &str, errs: &mut Spec
             for (i, &port) in ports.iter().enumerate() {
                 if port == 0 || port > 65535 {
                     errs.error(
-                        &format!("{}.tcp.ports[{}]", path, i),
+                        path.key("tcp").key("ports").index(i),
                         format!("invalid port number {} (must be 1-65535)", port),
                     );
                 }
@@ -367,14 +371,14 @@ fn validate_service_activation(act: &SpecActivation, path: &str, errs: &mut Spec
     if let Some(ref buf) = act.buffer {
         if buf.frames.is_some() || buf.timeout.is_some() {
             errs.warn(
-                &format!("{}.buffer", path),
+                path.key("buffer"),
                 "buffer fields are not yet supported; will be ignored",
             );
         }
     }
 }
 
-fn validate_duration(s: &str, path: &str, errs: &mut SpecErrors) {
+fn validate_duration(s: &str, path: YamlPath, errs: &mut SpecErrors) {
     if let Err(e) = parse_duration_ms(s) {
         errs.error(path, format!("invalid duration '{}' ({})", s, e));
     }
@@ -384,8 +388,9 @@ fn validate_duration(s: &str, path: &str, errs: &mut SpecErrors) {
 fn validate_defaults(spec: &SpecFile, errs: &mut SpecErrors) {
     if let Some(ref defaults) = spec.defaults {
         if let Some(ref res) = defaults.resources {
-            validate_resource_values(res.requests.as_ref(), "defaults.resources.requests", errs);
-            validate_resource_values(res.limits.as_ref(), "defaults.resources.limits", errs);
+            let path = YamlPath::root().key("defaults").key("resources");
+            validate_resource_values(res.requests.as_ref(), path.key("requests"), errs);
+            validate_resource_values(res.limits.as_ref(), path.key("limits"), errs);
         }
     }
 
@@ -393,15 +398,15 @@ fn validate_defaults(spec: &SpecFile, errs: &mut SpecErrors) {
     if let Some(ref spec_workloads) = spec.workloads {
         for (wid, wl) in spec_workloads {
             if let Some(ref res) = wl.resources {
-                let path = format!("workloads.{}.resources", wid);
+                let path = YamlPath::root().key("workloads").key(wid).key("resources");
                 validate_resource_values(
                     res.requests.as_ref(),
-                    &format!("{}.requests", path),
+                    path.key("requests"),
                     errs,
                 );
                 validate_resource_values(
                     res.limits.as_ref(),
-                    &format!("{}.limits", path),
+                    path.key("limits"),
                     errs,
                 );
             }
@@ -409,16 +414,16 @@ fn validate_defaults(spec: &SpecFile, errs: &mut SpecErrors) {
     }
 }
 
-fn validate_resource_values(vals: Option<&SpecResourceValues>, path: &str, errs: &mut SpecErrors) {
+fn validate_resource_values(vals: Option<&SpecResourceValues>, path: YamlPath, errs: &mut SpecErrors) {
     if let Some(v) = vals {
         if let Some(mem) = v.memory_mb {
             if mem == 0 {
-                errs.error(&format!("{}.memory_mb", path), "memory_mb must be > 0");
+                errs.error(path.key("memory_mb"), "memory_mb must be > 0");
             }
         }
         if let Some(vcpus) = v.vcpus {
             if vcpus == 0 {
-                errs.error(&format!("{}.vcpus", path), "vcpus must be > 0");
+                errs.error(path.key("vcpus"), "vcpus must be > 0");
             }
         }
     }

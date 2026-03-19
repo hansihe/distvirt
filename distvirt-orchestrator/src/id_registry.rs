@@ -50,6 +50,13 @@ impl IdRegistryMap {
 // Per-namespace ID registry
 // =============================================================================
 
+/// The entity that owns an endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EndpointOwner {
+    Service(ServiceId),
+    Workload(WorkloadId),
+}
+
 /// Interior state of the registry.
 #[derive(Debug, Default)]
 struct Inner {
@@ -57,8 +64,8 @@ struct Inner {
     workload_names: HashMap<WorkloadId, String>,
     /// Router ServiceId → protocol service name.
     service_names: HashMap<ServiceId, String>,
-    /// Router EndpointId → owning ServiceId.
-    endpoint_to_service: HashMap<EndpointId, ServiceId>,
+    /// Router EndpointId → owning entity (service or workload).
+    endpoint_owner: HashMap<EndpointId, EndpointOwner>,
     /// Router PodId → owning WorkloadId.
     pod_to_workload: HashMap<PodId, WorkloadId>,
 }
@@ -91,6 +98,10 @@ impl IdRegistry {
         inner.workload_names.remove(id);
         // Also remove any pods owned by this workload.
         inner.pod_to_workload.retain(|_, wl| wl != id);
+        // Also remove any endpoints owned by this workload.
+        inner
+            .endpoint_owner
+            .retain(|_, owner| !matches!(owner, EndpointOwner::Workload(w) if w == id));
     }
 
     /// Register a service name mapping.
@@ -103,16 +114,27 @@ impl IdRegistry {
         let mut inner = self.inner.write().unwrap();
         inner.service_names.remove(id);
         // Also remove any endpoints owned by this service.
-        inner.endpoint_to_service.retain(|_, svc| svc != id);
+        inner
+            .endpoint_owner
+            .retain(|_, owner| !matches!(owner, EndpointOwner::Service(s) if s == id));
     }
 
     /// Set the endpoint → service mapping for an endpoint.
-    pub fn register_endpoint(&self, endpoint_id: EndpointId, service_id: ServiceId) {
+    pub fn register_service_endpoint(&self, endpoint_id: EndpointId, service_id: ServiceId) {
         self.inner
             .write()
             .unwrap()
-            .endpoint_to_service
-            .insert(endpoint_id, service_id);
+            .endpoint_owner
+            .insert(endpoint_id, EndpointOwner::Service(service_id));
+    }
+
+    /// Set the endpoint → workload mapping for an endpoint.
+    pub fn register_workload_endpoint(&self, endpoint_id: EndpointId, workload_id: WorkloadId) {
+        self.inner
+            .write()
+            .unwrap()
+            .endpoint_owner
+            .insert(endpoint_id, EndpointOwner::Workload(workload_id));
     }
 
     /// Set the pod → workload mapping for a pod.
@@ -131,11 +153,7 @@ impl IdRegistry {
 
     /// Remove an endpoint mapping.
     pub fn unregister_endpoint(&self, endpoint_id: &EndpointId) {
-        self.inner
-            .write()
-            .unwrap()
-            .endpoint_to_service
-            .remove(endpoint_id);
+        self.inner.write().unwrap().endpoint_owner.remove(endpoint_id);
     }
 
     // =========================================================================
@@ -152,14 +170,32 @@ impl IdRegistry {
         self.inner.read().unwrap().service_names.get(id).cloned()
     }
 
-    /// Resolve an endpoint ID to its owning service's protocol name.
+    /// Resolve an endpoint ID to its owner.
+    pub fn endpoint_owner(&self, endpoint_id: &EndpointId) -> Option<EndpointOwner> {
+        self.inner
+            .read()
+            .unwrap()
+            .endpoint_owner
+            .get(endpoint_id)
+            .cloned()
+    }
+
+    /// Resolve an endpoint ID to its owning service's protocol name (if service-owned).
     pub fn endpoint_service_name(&self, endpoint_id: &EndpointId) -> Option<String> {
         let inner = self.inner.read().unwrap();
-        inner
-            .endpoint_to_service
-            .get(endpoint_id)
-            .and_then(|svc_id| inner.service_names.get(svc_id))
-            .cloned()
+        match inner.endpoint_owner.get(endpoint_id) {
+            Some(EndpointOwner::Service(svc_id)) => inner.service_names.get(svc_id).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Resolve an endpoint ID to its owning workload's protocol name (if workload-owned).
+    pub fn endpoint_workload_name(&self, endpoint_id: &EndpointId) -> Option<String> {
+        let inner = self.inner.read().unwrap();
+        match inner.endpoint_owner.get(endpoint_id) {
+            Some(EndpointOwner::Workload(wl_id)) => inner.workload_names.get(wl_id).cloned(),
+            _ => None,
+        }
     }
 
     /// Resolve a pod ID to its owning workload's protocol name.
@@ -174,16 +210,19 @@ impl IdRegistry {
 
     /// Resolve a pod ID to its owning workload ID.
     pub fn pod_workload_id(&self, pod_id: &PodId) -> Option<WorkloadId> {
-        self.inner.read().unwrap().pod_to_workload.get(pod_id).copied()
-    }
-
-    /// Resolve an endpoint ID to its owning service ID.
-    pub fn endpoint_service_id(&self, endpoint_id: &EndpointId) -> Option<ServiceId> {
         self.inner
             .read()
             .unwrap()
-            .endpoint_to_service
-            .get(endpoint_id)
+            .pod_to_workload
+            .get(pod_id)
             .copied()
+    }
+
+    /// Resolve an endpoint ID to its owning service ID (if service-owned).
+    pub fn endpoint_service_id(&self, endpoint_id: &EndpointId) -> Option<ServiceId> {
+        match self.inner.read().unwrap().endpoint_owner.get(endpoint_id) {
+            Some(EndpointOwner::Service(svc_id)) => Some(*svc_id),
+            _ => None,
+        }
     }
 }

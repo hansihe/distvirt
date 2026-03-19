@@ -14,7 +14,6 @@ use commands::OutputFormat;
 
 const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   up            Apply a namespace spec (create or update)
-  render        Render a spec file to resolved proto JSON
   down          Delete a namespace
   status        Show namespace/workload status
   logs          Stream logs from a namespace
@@ -25,6 +24,10 @@ const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   clone         Clone a namespace
   attach        Attach to a running workload's I/O
   splice        Splice a workload to a local worker
+
+\x1b[1;4mSpec commands:\x1b[0m
+  spec validate Validate a spec file
+  spec render   Render a spec file to resolved proto JSON
 
 \x1b[1;4mResource commands:\x1b[0m
   get           List resources
@@ -90,12 +93,11 @@ enum TaskCommands {
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    /// Render a spec file to resolved proto JSON (no server needed)
+    /// Spec file operations (validate, render)
     #[command(hide = true)]
-    Render {
-        /// Path to spec file
-        #[arg(short, long)]
-        file: PathBuf,
+    Spec {
+        #[command(subcommand)]
+        command: SpecCommands,
     },
     /// Delete a namespace
     #[command(hide = true)]
@@ -108,6 +110,9 @@ enum TaskCommands {
     Status {
         /// Target: "namespace" or "namespace/workload"
         target: String,
+        /// Watch: show status then stream events
+        #[arg(short, long)]
+        watch: bool,
     },
     /// Stream logs from a namespace
     #[command(hide = true)]
@@ -249,6 +254,22 @@ enum AuthCommands {
 }
 
 #[derive(Subcommand)]
+enum SpecCommands {
+    /// Validate a spec file (parse, resolve includes, check for errors)
+    Validate {
+        /// Path to spec file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Render a spec file to resolved proto JSON
+    Render {
+        /// Path to spec file
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum ContextCommands {
     /// Switch to a named context
     Use {
@@ -291,10 +312,15 @@ async fn main() -> anyhow::Result<()> {
             Some(ContextCommands::Delete { name }) => commands::auth::context_delete(&name)?,
         },
 
-        // Render runs locally, no gRPC needed
-        Commands::Task(TaskCommands::Render { file }) => {
-            commands::namespace::render(&file)?;
-        }
+        // Spec commands run locally, no gRPC needed
+        Commands::Task(TaskCommands::Spec { command }) => match command {
+            SpecCommands::Validate { file } => {
+                commands::namespace::validate(file.as_deref())?;
+            }
+            SpecCommands::Render { file } => {
+                commands::namespace::render(&file)?;
+            }
+        },
 
         // All other commands connect to the orchestrator
         cmd => {
@@ -313,8 +339,8 @@ async fn main() -> anyhow::Result<()> {
                 Commands::Task(TaskCommands::Down { namespace_id }) => {
                     commands::namespace::down(client, &namespace_id).await?;
                 }
-                Commands::Task(TaskCommands::Status { target }) => {
-                    commands::namespace::status(client, &target).await?;
+                Commands::Task(TaskCommands::Status { target, watch }) => {
+                    commands::namespace::status(client, &target, watch).await?;
                 }
                 Commands::Task(TaskCommands::Logs {
                     namespace_id,
@@ -386,7 +412,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Auth(AuthCommands::Login { .. })
                 | Commands::Auth(AuthCommands::Context { .. })
-                | Commands::Task(TaskCommands::Render { .. }) => unreachable!(),
+                | Commands::Task(TaskCommands::Spec { .. }) => unreachable!(),
             }
         }
     }

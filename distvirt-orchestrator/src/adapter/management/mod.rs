@@ -206,14 +206,23 @@ impl ManagementAdapter {
         }
     }
 
-    /// Update the ID registry with dynamic endpoint→service and pod→workload mappings.
+    /// Update the ID registry with dynamic endpoint→owner and pod→workload mappings.
     /// Called after each reconcile cycle once the router has converged.
     pub(crate) fn sync_dynamic_ids(&self, router: &DRouter) {
         // Service → Endpoint: each ServiceSm stores its endpoint_id.
         for (_name, &svc_id) in &self.proto_to_router_svc {
             if let Some(svc_sm) = router.get_service(&svc_id) {
                 if let Some(ep_id) = svc_sm.endpoint_id {
-                    self.id_registry.register_endpoint(ep_id, svc_id);
+                    self.id_registry.register_service_endpoint(ep_id, svc_id);
+                }
+            }
+        }
+
+        // Workload → Endpoint: each WorkloadSm stores its endpoint_id.
+        for (_name, &wl_id) in &self.proto_to_router_wl {
+            if let Some(wl_sm) = router.get_workload(&wl_id) {
+                if let Some(ep_id) = wl_sm.endpoint_id {
+                    self.id_registry.register_workload_endpoint(ep_id, wl_id);
                 }
             }
         }

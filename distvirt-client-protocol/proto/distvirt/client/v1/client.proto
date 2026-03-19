@@ -404,8 +404,9 @@ message StreamEventsRequest {
 message NamespaceEvent {
     int64 timestamp_unix_ms = 1;
     oneof event {
-        WorkloadEvent workload_event = 2;
-        ServiceEvent service_event = 3;
+        WorkloadEvent workload = 2;
+        PodEvent pod = 3;
+        EndpointEvent endpoint = 4;
     }
 }
 
@@ -413,58 +414,13 @@ message WorkloadEvent {
     string workload_id = 1;
     oneof event {
         WorkloadDemandChanged demand_changed = 2;
-        WorkloadPodLaunching pod_launching = 3;
-        WorkloadPodRunning pod_running = 4;
-        WorkloadPodStopped pod_stopped = 5;
-        WorkloadPodFailed pod_failed = 6;
-        WorkloadSpliced spliced = 7;
-        WorkloadUnspliced unspliced = 8;
-        WorkloadPodSuspending pod_suspending = 9;
-        WorkloadPodSuspended pod_suspended = 10;
-        WorkloadPodSuspendFailed pod_suspend_failed = 11;
-        WorkloadPodResuming pod_resuming = 12;
+        WorkloadSpliced spliced = 3;
+        WorkloadUnspliced unspliced = 4;
     }
 }
 
 message WorkloadDemandChanged {
     uint32 demanding_services = 1;
-}
-
-message WorkloadPodLaunching {
-    string pod_id = 1;
-    string worker_id = 2;
-}
-
-message WorkloadPodRunning {
-    string pod_id = 1;
-    string worker_id = 2;
-}
-
-message WorkloadPodStopped {
-    int32 exit_code = 1;
-}
-
-message WorkloadPodFailed {
-    string reason = 1;
-}
-
-message WorkloadPodSuspending {
-    string pod_id = 1;
-    string worker_id = 2;
-}
-
-message WorkloadPodSuspended {
-    string worker_id = 1;
-    string snapshot_id = 2;
-}
-
-message WorkloadPodSuspendFailed {
-    string reason = 1;
-}
-
-message WorkloadPodResuming {
-    string pod_id = 1;
-    string worker_id = 2;
 }
 
 message WorkloadSpliced {
@@ -473,35 +429,93 @@ message WorkloadSpliced {
 
 message WorkloadUnspliced {}
 
-message ServiceEvent {
-    string service_id = 1;
+message PodEvent {
+    string pod_id = 1;
     string workload_id = 2;
     oneof event {
-        ServiceActivated activated = 3;
-        ServiceBackendReady backend_ready = 4;
-        ServiceIdleTimerStarted idle_timer_started = 5;
-        ServiceIdleTimerCancelled idle_timer_cancelled = 6;
-        ServiceIdleTimeoutFired idle_timeout_fired = 7;
-        ServiceDeactivated deactivated = 8;
+        PodCreated created = 3;
+        PodScheduled scheduled = 4;
+        PodRunning running = 5;
+        PodStopped stopped = 6;
+        PodFailed failed = 7;
+        PodSuspending suspending = 8;
+        PodSuspended suspended = 9;
+        PodSuspendFailed suspend_failed = 10;
+        PodResuming resuming = 11;
+        PodDisplaced displaced = 12;
+        PodReaped reaped = 13;
     }
 }
 
-message ServiceActivated {
-    ServiceActivationTrigger trigger = 1;
+message PodCreated {}
+
+message PodScheduled {
+    string worker_id = 1;
 }
 
-enum ServiceActivationTrigger {
-    SERVICE_ACTIVATION_TRIGGER_UNSPECIFIED = 0;
-    SERVICE_ACTIVATION_TRIGGER_TRAFFIC = 1;
+message PodRunning {
+    string worker_id = 1;
 }
 
-message ServiceBackendReady {}
+message PodStopped {
+    int32 exit_code = 1;
+}
 
-message ServiceIdleTimerStarted {
+message PodFailed {
+    string reason = 1;
+}
+
+message PodSuspending {
+    string worker_id = 1;
+}
+
+message PodSuspended {
+    string worker_id = 1;
+    string snapshot_id = 2;
+}
+
+message PodSuspendFailed {
+    string reason = 1;
+}
+
+message PodResuming {
+    string worker_id = 1;
+}
+
+message PodDisplaced {}
+
+message PodReaped {}
+
+message EndpointEvent {
+    string endpoint_id = 1;
+    optional string service_id = 2;
+    optional string workload_id = 3;
+    oneof event {
+        EndpointActivated activated = 4;
+        EndpointBackendReady backend_ready = 5;
+        EndpointIdleTimerStarted idle_timer_started = 6;
+        EndpointIdleTimerCancelled idle_timer_cancelled = 7;
+        EndpointIdleTimeoutFired idle_timeout_fired = 8;
+        EndpointDeactivated deactivated = 9;
+    }
+}
+
+message EndpointActivated {
+    EndpointActivationTrigger trigger = 1;
+}
+
+enum EndpointActivationTrigger {
+    ENDPOINT_ACTIVATION_TRIGGER_UNSPECIFIED = 0;
+    ENDPOINT_ACTIVATION_TRIGGER_TRAFFIC = 1;
+}
+
+message EndpointBackendReady {}
+
+message EndpointIdleTimerStarted {
     uint64 timeout_ms = 1;
 }
 
-message ServiceIdleTimerCancelled {
+message EndpointIdleTimerCancelled {
     IdleTimerCancelReason reason = 1;
 }
 
@@ -510,16 +524,16 @@ enum IdleTimerCancelReason {
     IDLE_TIMER_CANCEL_REASON_NEW_TRAFFIC = 1;
 }
 
-message ServiceIdleTimeoutFired {}
+message EndpointIdleTimeoutFired {}
 
-message ServiceDeactivated {
-    ServiceDeactivationReason reason = 1;
+message EndpointDeactivated {
+    EndpointDeactivationReason reason = 1;
 }
 
-enum ServiceDeactivationReason {
-    SERVICE_DEACTIVATION_REASON_UNSPECIFIED = 0;
-    SERVICE_DEACTIVATION_REASON_IDLE_TIMEOUT = 1;
-    SERVICE_DEACTIVATION_REASON_FORCE_DEACTIVATE = 2;
+enum EndpointDeactivationReason {
+    ENDPOINT_DEACTIVATION_REASON_UNSPECIFIED = 0;
+    ENDPOINT_DEACTIVATION_REASON_IDLE_TIMEOUT = 1;
+    ENDPOINT_DEACTIVATION_REASON_FORCE_DEACTIVATE = 2;
 }
 
 // --- Attach Workload ---

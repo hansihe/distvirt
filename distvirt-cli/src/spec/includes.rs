@@ -4,7 +4,8 @@ use std::path::Path;
 use anyhow::bail;
 use std::fs;
 
-use super::errors::SpecErrors;
+use super::errors::{SourceId, SpecErrors};
+use super::path::YamlPath;
 use super::types::{SpecFile, SpecIncludeOverrides};
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,8 @@ use super::types::{SpecFile, SpecIncludeOverrides};
 
 /// Resolve `include` entries in a namespace spec, loading and merging fragments.
 /// `spec_path` is the path to the namespace spec file (used for relative path resolution).
-pub fn resolve_includes(spec: &mut SpecFile, spec_path: &Path) -> anyhow::Result<()> {
+pub fn resolve_includes(parsed: &mut super::parse::ParsedSpec, spec_path: &Path) -> anyhow::Result<()> {
+    let spec = &mut parsed.spec;
     let includes = match spec.include.take() {
         Some(inc) if !inc.is_empty() => inc,
         _ => return Ok(()),
@@ -24,16 +26,18 @@ pub fn resolve_includes(spec: &mut SpecFile, spec_path: &Path) -> anyhow::Result
         .unwrap_or_else(|| Path::new("."));
 
     let mut errs = SpecErrors::new();
+    // Register the main spec source for any errors on the main file
+    errs.add_source(&parsed.file_name, &parsed.source);
 
     for (idx, entry) in includes.iter().enumerate() {
         let fragment_path = spec_dir.join(&entry.path);
-        let label = format!("include[{}] ({})", idx, entry.path);
+        let label = YamlPath::root().include_entry(idx, &entry.path);
 
         // Read fragment file
         let raw_yaml = match fs::read_to_string(&fragment_path) {
             Ok(s) => s,
             Err(e) => {
-                errs.error(&label, format!("file not found: {}", e));
+                errs.error(label.clone(), format!("file not found: {}", e));
                 continue;
             }
         };
@@ -42,22 +46,25 @@ pub fn resolve_includes(spec: &mut SpecFile, spec_path: &Path) -> anyhow::Result
         let substituted = match substitute_variables(&raw_yaml, &entry.values, &label) {
             Ok(s) => s,
             Err(e) => {
-                errs.error(&label, format!("{}", e));
+                errs.error(label.clone(), format!("{}", e));
                 continue;
             }
         };
 
         // Parse fragment
-        let mut fragment: SpecFile = match serde_yaml::from_str(&substituted) {
+        let mut fragment: SpecFile = match serde_saphyr::from_str(&substituted) {
             Ok(f) => f,
             Err(e) => {
-                errs.error(&label, format!("YAML parse error: {}", e));
+                errs.error(label.clone(), format!("YAML parse error:\n{}", super::parse::render_yaml_error(e)));
                 continue;
             }
         };
 
+        // Register fragment source for span resolution
+        let frag_source_id = errs.add_source(&entry.path, &substituted);
+
         // Validate fragment structure
-        validate_fragment_structure(&fragment, &label, &mut errs);
+        validate_fragment_structure(&fragment, &label, frag_source_id, &mut errs);
         if errs.has_errors() {
             continue;
         }
@@ -72,8 +79,9 @@ pub fn resolve_includes(spec: &mut SpecFile, spec_path: &Path) -> anyhow::Result
             let spec_workloads = spec.workloads.get_or_insert_with(HashMap::new);
             for (wid, wl) in fragment_workloads {
                 if spec_workloads.contains_key(&wid) {
-                    errs.error(
-                        &format!("{} > workloads.{}", label, wid),
+                    errs.error_in(
+                        frag_source_id,
+                        label.key("workloads").key(&wid),
                         format!("duplicate workload ID '{}'", wid),
                     );
                 } else {
@@ -87,8 +95,9 @@ pub fn resolve_includes(spec: &mut SpecFile, spec_path: &Path) -> anyhow::Result
             let spec_services = spec.services.get_or_insert_with(HashMap::new);
             for (sid, svc) in fragment_services {
                 if spec_services.contains_key(&sid) {
-                    errs.error(
-                        &format!("{} > services.{}", label, sid),
+                    errs.error_in(
+                        frag_source_id,
+                        label.key("services").key(&sid),
                         format!("duplicate service ID '{}'", sid),
                     );
                 } else {
@@ -106,7 +115,7 @@ pub fn resolve_includes(spec: &mut SpecFile, spec_path: &Path) -> anyhow::Result
 fn substitute_variables(
     yaml: &str,
     values: &HashMap<String, String>,
-    path_label: &str,
+    path_label: &YamlPath,
 ) -> anyhow::Result<String> {
     let mut result = String::with_capacity(yaml.len());
     let mut chars = yaml.char_indices();
@@ -163,60 +172,59 @@ fn apply_overrides(fragment: &mut SpecFile, overrides: &SpecIncludeOverrides) {
 }
 
 /// Validate that a fragment has the expected structure.
-fn validate_fragment_structure(spec: &SpecFile, label: &str, errs: &mut SpecErrors) {
+fn validate_fragment_structure(spec: &SpecFile, label: &YamlPath, source_id: SourceId, errs: &mut SpecErrors) {
     if spec.api_version != "v1" {
-        errs.error(
-            label,
+        errs.error_in(
+            source_id,
+            label.clone(),
             format!("unrecognized apiVersion '{}' (expected 'v1')", spec.api_version),
         );
     }
     if spec.kind != "WorkloadFragment" {
-        errs.error(
-            label,
+        errs.error_in(
+            source_id,
+            label.clone(),
             format!("expected kind 'WorkloadFragment', got '{}'", spec.kind),
         );
     }
     if spec.metadata.is_some() {
-        errs.error(label, "fragments cannot have 'metadata'");
+        errs.error_in(source_id, label.clone(), "fragments cannot have 'metadata'");
     }
     if spec.network.is_some() {
-        errs.error(label, "fragments cannot have 'network'");
+        errs.error_in(source_id, label.clone(), "fragments cannot have 'network'");
     }
     if spec.defaults.is_some() {
-        errs.error(label, "fragments cannot have 'defaults'");
+        errs.error_in(source_id, label.clone(), "fragments cannot have 'defaults'");
     }
     if spec.include.is_some() {
-        errs.error(label, "fragments cannot have 'include' (no recursion)");
+        errs.error_in(source_id, label.clone(), "fragments cannot have 'include' (no recursion)");
     }
 
     // Must have at least one workload
     match &spec.workloads {
         None => {
-            errs.error(label, "fragment must have at least one workload");
+            errs.error_in(source_id, label.clone(), "fragment must have at least one workload");
         }
         Some(workloads) if workloads.is_empty() => {
-            errs.error(label, "fragment must have at least one workload");
+            errs.error_in(source_id, label.clone(), "fragment must have at least one workload");
         }
         Some(workloads) => {
             let workload_keys: HashSet<&str> = workloads.keys().map(|k| k.as_str()).collect();
 
             for (wid, wl) in workloads {
-                let wl_path = format!("{} > workloads.{}", label, wid);
+                let wl_path = label.key("workloads").key(wid);
                 if wl.containers.is_empty() {
-                    errs.error(
-                        &format!("{}.containers", wl_path),
+                    errs.error_in(
+                        source_id,
+                        wl_path.key("containers"),
                         "containers list is empty",
                     );
                 }
                 for (i, c) in wl.containers.iter().enumerate() {
-                    let c_name = c
-                        .name
-                        .as_deref()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| format!("[{}]", i));
                     if c.image.is_empty() {
-                        errs.error(
-                            &format!("{}.containers.{}.image", wl_path, c_name),
+                        errs.error_in(
+                            source_id,
+                            wl_path.key("containers").index(i).key("image"),
                             "image is empty",
                         );
                     }
@@ -227,8 +235,9 @@ fn validate_fragment_structure(spec: &SpecFile, label: &str, errs: &mut SpecErro
             if let Some(ref services) = spec.services {
                 for (sid, svc) in services {
                     if !workload_keys.contains(svc.workload.as_str()) {
-                        errs.error(
-                            &format!("{} > services.{}", label, sid),
+                        errs.error_in(
+                            source_id,
+                            label.key("services").key(sid),
                             format!(
                                 "workload '{}' does not exist in this fragment",
                                 svc.workload

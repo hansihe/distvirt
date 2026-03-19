@@ -4,6 +4,8 @@ mod helpers;
 mod includes;
 mod ip_alloc;
 mod parse;
+mod path;
+mod snippet;
 mod types;
 
 #[cfg(test)]

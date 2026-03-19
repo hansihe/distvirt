@@ -203,13 +203,24 @@ pub fn services_to_json(
 pub fn print_event_line(event: &NamespaceEvent) {
     let ts = format_timestamp(event.timestamp_unix_ms);
     match &event.event {
-        Some(namespace_event::Event::WorkloadEvent(we)) => {
+        Some(namespace_event::Event::Workload(we)) => {
             let desc = workload_event_description(we);
             println!("{}  workload/{}  {}", ts, we.workload_id, desc);
         }
-        Some(namespace_event::Event::ServiceEvent(se)) => {
-            let desc = service_event_description(se);
-            println!("{}  service/{}  {}", ts, se.service_id, desc);
+        Some(namespace_event::Event::Pod(pe)) => {
+            let desc = pod_event_description(pe);
+            println!("{}  pod/{} (workload/{})  {}", ts, pe.pod_id, pe.workload_id, desc);
+        }
+        Some(namespace_event::Event::Endpoint(ee)) => {
+            let desc = endpoint_event_description(ee);
+            let owner = if let Some(ref svc) = ee.service_id {
+                format!("service/{}", svc)
+            } else if let Some(ref wl) = ee.workload_id {
+                format!("workload/{}", wl)
+            } else {
+                "unknown".to_string()
+            };
+            println!("{}  endpoint/{} ({})  {}", ts, ee.endpoint_id, owner, desc);
         }
         None => {
             println!("{}  (unknown event)", ts);
@@ -277,50 +288,73 @@ fn workload_event_description(we: &WorkloadEvent) -> String {
         Some(workload_event::Event::DemandChanged(d)) => {
             format!("demand changed ({} services)", d.demanding_services)
         }
-        Some(workload_event::Event::PodLaunching(l)) => {
-            format!("pod launching on {}", l.worker_id)
-        }
-        Some(workload_event::Event::PodRunning(r)) => {
-            format!("pod running on {}", r.worker_id)
-        }
-        Some(workload_event::Event::PodStopped(s)) => {
-            format!("pod stopped: exited with code {}", s.exit_code)
-        }
-        Some(workload_event::Event::PodFailed(f)) => format!("pod failed: {}", f.reason),
         Some(workload_event::Event::Spliced(s)) => format!("spliced to {}", s.worker_id),
         Some(workload_event::Event::Unspliced(_)) => "unspliced".to_string(),
-        Some(workload_event::Event::PodSuspending(s)) => {
-            format!("pod suspending on {}", s.worker_id)
-        }
-        Some(workload_event::Event::PodSuspended(s)) => {
-            format!("pod suspended (artifact: {})", s.snapshot_id)
-        }
-        Some(workload_event::Event::PodSuspendFailed(f)) => {
-            format!("pod suspend failed: {}", f.reason)
-        }
-        Some(workload_event::Event::PodResuming(r)) => {
-            format!("pod resuming on {}", r.worker_id)
-        }
         None => "unknown event".to_string(),
     }
 }
 
-fn service_event_description(se: &ServiceEvent) -> String {
-    match &se.event {
-        Some(service_event::Event::Activated(a)) => {
-            let trigger = ServiceActivationTrigger::try_from(a.trigger)
-                .unwrap_or(ServiceActivationTrigger::Unspecified);
+fn pod_event_description(pe: &PodEvent) -> String {
+    match &pe.event {
+        Some(pod_event::Event::Created(_)) => "created".to_string(),
+        Some(pod_event::Event::Scheduled(s)) => format!("scheduled on {}", s.worker_id),
+        Some(pod_event::Event::Running(r)) => {
+            if r.worker_id.is_empty() {
+                "running".to_string()
+            } else {
+                format!("running on {}", r.worker_id)
+            }
+        }
+        Some(pod_event::Event::Stopped(s)) => {
+            format!("stopped (exit code {})", s.exit_code)
+        }
+        Some(pod_event::Event::Failed(f)) => format!("failed: {}", f.reason),
+        Some(pod_event::Event::Suspending(s)) => {
+            if s.worker_id.is_empty() {
+                "suspending".to_string()
+            } else {
+                format!("suspending on {}", s.worker_id)
+            }
+        }
+        Some(pod_event::Event::Suspended(s)) => {
+            if s.snapshot_id.is_empty() {
+                "suspended".to_string()
+            } else {
+                format!("suspended (snapshot: {})", s.snapshot_id)
+            }
+        }
+        Some(pod_event::Event::SuspendFailed(f)) => {
+            format!("suspend failed: {}", f.reason)
+        }
+        Some(pod_event::Event::Resuming(r)) => {
+            if r.worker_id.is_empty() {
+                "resuming".to_string()
+            } else {
+                format!("resuming on {}", r.worker_id)
+            }
+        }
+        Some(pod_event::Event::Displaced(_)) => "displaced".to_string(),
+        Some(pod_event::Event::Reaped(_)) => "reaped".to_string(),
+        None => "unknown event".to_string(),
+    }
+}
+
+fn endpoint_event_description(ee: &EndpointEvent) -> String {
+    match &ee.event {
+        Some(endpoint_event::Event::Activated(a)) => {
+            let trigger = EndpointActivationTrigger::try_from(a.trigger)
+                .unwrap_or(EndpointActivationTrigger::Unspecified);
             let label = match trigger {
-                ServiceActivationTrigger::Traffic => "traffic",
+                EndpointActivationTrigger::Traffic => "traffic",
                 _ => "unknown",
             };
             format!("activated ({})", label)
         }
-        Some(service_event::Event::BackendReady(_)) => "backend ready".to_string(),
-        Some(service_event::Event::IdleTimerStarted(t)) => {
+        Some(endpoint_event::Event::BackendReady(_)) => "backend ready".to_string(),
+        Some(endpoint_event::Event::IdleTimerStarted(t)) => {
             format!("idle timer started ({}ms)", t.timeout_ms)
         }
-        Some(service_event::Event::IdleTimerCancelled(c)) => {
+        Some(endpoint_event::Event::IdleTimerCancelled(c)) => {
             let reason = IdleTimerCancelReason::try_from(c.reason)
                 .unwrap_or(IdleTimerCancelReason::Unspecified);
             let label = match reason {
@@ -329,12 +363,12 @@ fn service_event_description(se: &ServiceEvent) -> String {
             };
             format!("idle timer cancelled: {}", label)
         }
-        Some(service_event::Event::IdleTimeoutFired(_)) => "idle timeout fired".to_string(),
-        Some(service_event::Event::Deactivated(d)) => {
-            let reason = ServiceDeactivationReason::try_from(d.reason)
-                .unwrap_or(ServiceDeactivationReason::Unspecified);
+        Some(endpoint_event::Event::IdleTimeoutFired(_)) => "idle timeout fired".to_string(),
+        Some(endpoint_event::Event::Deactivated(d)) => {
+            let reason = EndpointDeactivationReason::try_from(d.reason)
+                .unwrap_or(EndpointDeactivationReason::Unspecified);
             let label = match reason {
-                ServiceDeactivationReason::IdleTimeout => "idle timeout",
+                EndpointDeactivationReason::IdleTimeout => "idle timeout",
                 _ => "unknown",
             };
             format!("deactivated: {}", label)

@@ -109,6 +109,7 @@ workloads:
         working_dir: <path>    # Working directory.
         user: "<uid>[:<gid>]"  # Run as user/group.
         hostname: <string>     # Container hostname.
+        tty: <bool>            # Allocate a TTY. Default: false.
     resources:
       requests:                 # Scheduling weight. What the orchestrator uses for placement.
         memory_mb: <uint>
@@ -492,12 +493,31 @@ services.<id>.expose              -> ExposeSpec                    Implemented
 ## CLI Integration
 
 ```bash
+# Validate a spec file (parse, resolve includes, check for errors)
+dv spec validate -f distvirt.yaml
+
+# Render a spec file to resolved proto JSON (no server needed)
+dv spec render -f distvirt.yaml
+
 # Deploy from native spec
 dv up staging -f distvirt.yaml
 
 # Deploy from Docker Compose (auto-converted)
 dv up staging -f docker-compose.yml
 ```
+
+Validation errors include source snippets pointing at the offending YAML:
+
+```
+error: workloads.api.ip — IP 10.0.0.5 is outside the subnet 172.16.0.0/24
+ --> distvirt.yaml:8:9
+  |
+8 |     ip: 10.0.0.5
+  |         ^^^^^^^^
+  |
+```
+
+Unknown fields in the YAML are rejected at parse time, catching typos early.
 
 ---
 
@@ -513,15 +533,15 @@ These are infrastructure/runtime concerns, not application spec:
 
 ---
 
-## Planned: Multi-Repo Deployments (Fragments)
+## Multi-Repo Deployments (Fragments)
 
-> **[Planned] -- Not implemented.** The `SpecFile` struct has no `include` field. There is no `WorkloadFragment` assembly logic. The parser recognizes `kind: WorkloadFragment` in the YAML probe (it won't reject the file), but no fragment merging, variable substitution, or include resolution exists. Everything below describes future design intent.
+**[Implemented]**
 
-For organizations with many microservices across repos, distvirt will support a fragment-based workflow analogous to Helm values + ArgoCD.
+For organizations with many microservices across repos, distvirt supports a fragment-based workflow. A namespace spec can include workload fragments from other files, with variable substitution and environment overrides.
 
 ### Per-repo: workload fragment
 
-Each service repo would contain a `distvirt.yaml` declaring its workload:
+Each service repo contains a `distvirt.yaml` declaring its workload:
 
 ```yaml
 # api-service/distvirt.yaml
@@ -543,11 +563,11 @@ workloads:
             idle_timeout: 5m
 ```
 
-A fragment is a partial namespace spec. It declares one or more workloads with their inline services but has no `network` or `metadata` -- those belong to the namespace definition.
+A fragment is a partial namespace spec. It declares one or more workloads with their inline services and optionally top-level services. Fragments cannot have `network`, `metadata`, `defaults`, or `include` fields.
 
 ### Central: namespace assembly
 
-A state repo (analogous to an Argo state repo) would have a namespace file that imports fragments:
+A state repo has a namespace file that imports fragments:
 
 ```yaml
 # state-repo/namespaces/staging.yaml
@@ -561,29 +581,41 @@ network:
   subnet: 172.16.0.0/16
 
 include:
-  - fragment: api-service
+  - path: fragments/api-service.yaml
     values:
       IMAGE: docker.io/myorg/api:v1.2.3
     overrides:
       env:
         DATABASE_URL: "postgres://staging-db:5432/myapp"
 
-  - fragment: frontend
+  - path: fragments/frontend.yaml
     values:
       IMAGE: docker.io/myorg/frontend:v2.0.1
 ```
 
-### Fragment resolution
+### Include fields
 
-Fragments would be referenced by name. Resolution is a tooling concern -- fragments could be:
+```yaml
+include:
+  - path: <relative-path>       # Required. Path to fragment file, relative to the namespace spec.
+    values:                      # Variable substitution. Replaces ${VAR} in the fragment YAML.
+      <key>: <value>
+    overrides:                   # Optional overrides applied to all containers in the fragment.
+      env:                       # Environment variables merged into every container.
+        <key>: <value>
+```
 
-- Files in the same repo (`fragments/api-service.yaml`)
-- OCI artifacts pulled from a registry
-- Git refs from other repos
-- Downloaded from an internal artifact store
+### Fragment rules
+
+- Fragments must have `kind: WorkloadFragment` and `apiVersion: v1`.
+- Fragments must contain at least one workload.
+- Fragments cannot have `metadata`, `network`, `defaults`, or `include` (no recursive includes).
+- Top-level services in fragments must reference workloads within the same fragment.
+- Workload and service IDs must be unique across all fragments and the main spec.
+- Variable substitution (`${VAR}`) is performed before YAML parsing. All variables must be defined in `values`.
 
 ### CI workflow
 
 1. Service CI builds image, pushes to registry.
 2. Service CI updates the state repo -- bumps the image tag in the relevant `include` entry.
-3. A reconciler watches the state repo, renders the full namespace spec by assembling fragments, and applies via `dv apply` or the gRPC API.
+3. A reconciler watches the state repo, renders the full namespace spec by assembling fragments, and applies via `dv up` or the gRPC API.

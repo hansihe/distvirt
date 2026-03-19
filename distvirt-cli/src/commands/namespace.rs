@@ -32,6 +32,33 @@ fn parse_spec_file(file: &Path) -> anyhow::Result<(Option<String>, NamespaceSpec
     bail!("failed to parse spec file '{}'", file.display())
 }
 
+/// Validate a spec file: parse, resolve includes, and run validation.
+/// Prints errors/warnings and exits with an error if validation fails.
+pub fn validate(file: Option<&Path>) -> anyhow::Result<()> {
+    let file = match file {
+        Some(f) => f.to_path_buf(),
+        None => find_default_file()?,
+    };
+
+    let mut parsed = match spec::try_parse(&file)? {
+        Some(p) => p,
+        None => bail!("'{}' is not a native distvirt spec file", file.display()),
+    };
+    spec::resolve_includes(&mut parsed, &file)?;
+    let (ns_id, proto) = spec::spec_to_namespace_spec(&parsed)?;
+
+    let n_workloads = proto.workloads.len();
+    let n_services = proto.services.len();
+
+    eprintln!("spec '{}' is valid", file.display());
+    if let Some(id) = ns_id {
+        eprintln!("  namespace:  {}", id);
+    }
+    eprintln!("  workloads:  {}", n_workloads);
+    eprintln!("  services:   {}", n_services);
+    Ok(())
+}
+
 /// Render a spec file to resolved proto output (no server connection needed).
 pub fn render(file: &Path) -> anyhow::Result<()> {
     let (ns_id, proto_spec) = parse_spec_file(file)?;
@@ -104,8 +131,26 @@ pub async fn down(mut client: Client, namespace_id: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub async fn status(mut client: Client, target: &str) -> anyhow::Result<()> {
+pub async fn status(mut client: Client, target: &str, watch: bool) -> anyhow::Result<()> {
     let (namespace_id, workload_id) = parse_target(target);
+
+    // Subscribe to events *before* fetching status to avoid missing events
+    // in the gap between the status snapshot and the subscription.
+    let mut event_stream = if watch {
+        Some(
+            client
+                .stream_events(StreamEventsRequest {
+                    namespace_id: namespace_id.to_string(),
+                    workload_ids: vec![],
+                    service_ids: vec![],
+                })
+                .await
+                .map_err(client::handle_grpc_error)?
+                .into_inner(),
+        )
+    } else {
+        None
+    };
 
     let resp = client
         .get_namespace_status(GetNamespaceStatusRequest {
@@ -152,6 +197,15 @@ pub async fn status(mut client: Client, target: &str) -> anyhow::Result<()> {
         }
     } else {
         format::print_namespace_overview(&report);
+    }
+
+    if let Some(ref mut stream) = event_stream {
+        println!();
+        println!("--- watching events ---");
+
+        while let Some(event) = stream.message().await.map_err(client::handle_grpc_error)? {
+            format::print_event_line(&event);
+        }
     }
 
     Ok(())
