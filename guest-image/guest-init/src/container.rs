@@ -630,6 +630,34 @@ fn child_exec_inner(
         None,
     )?;
     util::mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, None)?;
+    // Use mode=666 so non-root containers can allocate PTYs without being in
+    // group 5 (tty). The proper fix is to support supplementary groups via
+    // setgroups()/initgroups() and use gid=5,mode=620 instead.
+    util::mount(
+        "devpts",
+        "/dev/pts",
+        "devpts",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        Some("mode=666"),
+    )?;
+
+    // Create standard /dev symlinks expected by userspace tools.
+    std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd")?;
+    std::os::unix::fs::symlink("/proc/self/fd/0", "/dev/stdin")?;
+    std::os::unix::fs::symlink("/proc/self/fd/1", "/dev/stdout")?;
+    std::os::unix::fs::symlink("/proc/self/fd/2", "/dev/stderr")?;
+
+    // Replace /dev/ptmx device node with symlink for proper PTY namespace isolation.
+    let _ = std::fs::remove_file("/dev/ptmx");
+    std::os::unix::fs::symlink("pts/ptmx", "/dev/ptmx")?;
+
+    util::mount(
+        "tmpfs",
+        "/dev/shm",
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        None,
+    )?;
     util::mount(
         "tmpfs",
         "/tmp",
