@@ -36,6 +36,9 @@ enum PodEnvState {
     Running { pod_id: PodId },
     /// Pod is suspending (SM sent Suspend intent).
     Suspending { pod_id: PodId },
+    /// Pod is in terminal Failed state but retained by the workload for
+    /// inspectability. No lifecycle events can occur.
+    Failed { pod_id: PodId },
 }
 
 impl PodEnvState {
@@ -44,7 +47,8 @@ impl PodEnvState {
             PodEnvState::None => None,
             PodEnvState::Pending { pod_id }
             | PodEnvState::Running { pod_id }
-            | PodEnvState::Suspending { pod_id } => Some(*pod_id),
+            | PodEnvState::Suspending { pod_id }
+            | PodEnvState::Failed { pod_id } => Some(*pod_id),
         }
     }
 }
@@ -351,6 +355,9 @@ impl Model for WlNewModel {
                     actions.push(WlNewAction::PodDisplaced);
                 }
             }
+            PodEnvState::Failed { .. } => {
+                // Terminal — no lifecycle actions. Pod is inert.
+            }
             PodEnvState::None => {}
         }
 
@@ -447,10 +454,19 @@ impl Model for WlNewModel {
                 // Also deliver PodWorkerInput with a worker assignment.
                 apply_input(&s, WorkloadInput::PodWorkerInput(vec![Some(WorkerId(1))]))
             }
-            WlNewAction::PodFailed => apply_input(
-                state,
-                WorkloadInput::PodStatusInput(vec![PodStatus::Failed]),
-            ),
+            WlNewAction::PodFailed => {
+                let mut s = apply_input(
+                    state,
+                    WorkloadInput::PodStatusInput(vec![PodStatus::Failed]),
+                );
+                // If SM retained the pod for inspectability, mark env as terminal.
+                if s.sm.pod_id.is_some() {
+                    if let Some(pod_id) = state.pod_env.pod_id() {
+                        s.pod_env = PodEnvState::Failed { pod_id };
+                    }
+                }
+                s
+            }
             WlNewAction::PodDisplaced => apply_input(
                 state,
                 WorkloadInput::PodStatusInput(vec![PodStatus::Displaced]),
@@ -880,6 +896,7 @@ impl Representative for WlNewModelState {
             PodEnvState::Pending { .. } => PodEnvState::Pending { pod_id: PodId(0) },
             PodEnvState::Running { .. } => PodEnvState::Running { pod_id: PodId(0) },
             PodEnvState::Suspending { .. } => PodEnvState::Suspending { pod_id: PodId(0) },
+            PodEnvState::Failed { .. } => PodEnvState::Failed { pod_id: PodId(0) },
         };
 
         // artifact_port: only used as Some/None check (has artifact to

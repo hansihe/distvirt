@@ -632,7 +632,7 @@ fn teardown_during_backoff() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
-    assert!(wl.pod_id.is_none());
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability
 
     // Remove management port during backoff.
     router.destroy_management(mgmt);

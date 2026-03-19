@@ -20,7 +20,7 @@ fn pod_failure_backoff_and_retry() {
     assert!(!wl.pod_running);
     assert!(wl.in_backoff);
     assert_eq!(wl.consecutive_failures, 1);
-    assert!(wl.pod_id.is_none()); // pod released
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability
 
     // Workload should have signaled a retry backoff timer.
     assert_timer_requested(
@@ -141,7 +141,7 @@ fn max_retries_enters_failed() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 2);
     assert!(!wl.in_backoff); // not in backoff — terminal
-    assert!(wl.pod_id.is_none()); // no new pod
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability
     assert!(!wl.wants_pod); // reconcile says no
 
     // Terminal failure: no timer requested (timers cleared).
@@ -162,7 +162,7 @@ fn failed_recovery_via_spec_change() {
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
     assert!(!wl.in_backoff);
-    assert!(wl.pod_id.is_none());
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability
 
     // Spec change resets failures.
     router.set_management_wl_spec(
@@ -193,7 +193,7 @@ fn failed_recovery_via_restart() {
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
-    assert!(wl.pod_id.is_none());
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability
     assert_eq!(wl.consecutive_failures, 1);
 
     // Restart resets failures.
@@ -290,7 +290,7 @@ fn failed_ignores_new_demand() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
-    assert!(wl.pod_id.is_none());
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability
 
     // Add another service with demand — still Failed, no new pod.
     router.create_service(S2, ServiceSm::new());
@@ -307,7 +307,7 @@ fn failed_ignores_new_demand() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.has_demand);
-    assert!(wl.pod_id.is_none()); // still Failed, no retry
+    assert!(wl.pod_id.is_some()); // retained failed pod, still no retry
     assert_eq!(wl.consecutive_failures, 1);
 }
 

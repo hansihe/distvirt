@@ -97,7 +97,7 @@ fn pod_removed_drop_delta() {
     let (deltas, _) = adapter.reconcile(&mut router);
     assert_eq!(deltas.len(), 1);
 
-    // Make pod fail → schedule request disappears.
+    // Make pod fail → pod is retained for inspectability (no Drop yet).
     let lease = router.create_schedule_lease();
     router.set_pod_lease_edges(lease, vec![pod_id]);
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
@@ -108,13 +108,25 @@ fn pod_removed_drop_delta() {
     router.propagate();
 
     let (deltas, _) = adapter.reconcile(&mut router);
+    assert!(
+        deltas.is_empty(),
+        "expected no deltas while pod is retained, got {:?}",
+        deltas
+    );
+
+    // Admin restart reaps the retained pod → Drop emitted.
+    let mgmt_id = crate::sm::ManagementId(0);
+    router.send_admin_command(mgmt_id, crate::sm::WorkloadId(1), crate::sm::AdminCmd::Restart);
+    router.propagate();
+
+    let (deltas, _) = adapter.reconcile(&mut router);
     let drop_deltas: Vec<_> = deltas
         .iter()
         .filter(|d| matches!(d, ScheduleRequestDelta::Drop { .. }))
         .collect();
     assert!(
         !drop_deltas.is_empty(),
-        "expected Drop delta, got {:?}",
+        "expected Drop delta after reap, got {:?}",
         deltas
     );
 }

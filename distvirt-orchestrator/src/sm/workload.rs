@@ -153,6 +153,18 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.in_backoff = false;
                     self.completed = false; // allow re-run on next activation
                 }
+                // Demand dropped while holding a retained failed pod: clear
+                // failure tracking so reconcile can reap and go dormant.
+                if !self.has_demand
+                    && self.pod_id.is_some()
+                    && !self.pod_running
+                    && (self.in_backoff || self.consecutive_failures >= self.max_retries)
+                {
+                    self.committed_to_boot = false;
+                    self.consecutive_failures = 0;
+                    self.in_backoff = false;
+                    self.completed = false;
+                }
 
                 ctx.set_endpoint_readiness_edges(demand.endpoint_ids);
                 self.reconcile(ctx);
@@ -224,6 +236,10 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         // Image changed (Some→Some). Increment version so we
                         // detect stale launches via on_pod_running.
                         self.spec_version += 1;
+
+                        // Reap retained dead pod before clearing failure state.
+                        self.reap_retained_pod(ctx);
+
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
                         self.completed = false; // new image = re-run the job
@@ -233,6 +249,8 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.clear_artifact_ref(ctx);
 
                         // If pod is already Running, restart immediately.
+                        // Pending pods are kept — spec mismatch is detected
+                        // at on_pod_running.
                         if self.pod_running {
                             self.destroy_current_pod(ctx);
                         }
@@ -397,6 +415,9 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
             WorkloadInput::WorkloadTimerFired(key) => match key {
                 WorkloadTimerKey::RetryBackoff => {
                     if self.in_backoff {
+                        // Reap the retained failed pod before reconcile
+                        // creates a new one for the retry attempt.
+                        self.reap_retained_pod(ctx);
                         self.in_backoff = false;
                         self.reconcile(ctx);
                         self.update_timer_signal(ctx);
@@ -492,8 +513,10 @@ impl WorkloadSm {
         self.update_timer_signal(ctx);
     }
 
-    /// Called when a pod reports Failed status. Cleans up tracking and enters
-    /// backoff for retry, or gives up if max retries exceeded.
+    /// Called when a pod reports Failed status. Retains the failed pod for
+    /// inspectability during backoff and terminal failure. The pod is reaped
+    /// when transitioning out: retry attempt, demand drop, admin command, or
+    /// spec change.
     pub(crate) fn on_pod_failed(&mut self, ctx: &mut impl WorkloadCtx) {
         // pod_running is already false — set by PodStatusInput handler at
         // the top (Failed is not Running).
@@ -501,12 +524,9 @@ impl WorkloadSm {
         self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
 
-        // Remove ownership edge — pod is already terminal (Failed),
-        // so removing the edge triggers self-destruct (terminal + no owner).
-        ctx.set_pod_ownership_edges(vec![]);
-        ctx.set_pod_intent(PodIntent::None);
-        self.pod_id = None;
-        // pod_worker_id will be cleared by PodWorkerInput signal propagation.
+        // Keep the ownership edge — the pod is terminal (Failed) but we
+        // retain it for inspectability. It will be reaped on transition out
+        // of backoff/failed state.
 
         self.consecutive_failures += 1;
 
@@ -525,8 +545,10 @@ impl WorkloadSm {
             self.in_backoff = true;
             self.backoff_generation += 1;
         } else if !self.effective_demand() {
-            // Going dormant — clear failure tracking.
+            // Going dormant — clear failure tracking and reap immediately
+            // (no one is looking).
             self.consecutive_failures = 0;
+            self.reap_retained_pod(ctx);
         }
 
         self.reconcile(ctx);
@@ -560,6 +582,20 @@ impl WorkloadSm {
 
         self.reconcile(ctx);
         self.update_timer_signal(ctx);
+    }
+
+    /// Reap a retained failed pod (if any). Removes the ownership edge so the
+    /// terminal pod self-destructs. Only acts on pods held during backoff or
+    /// terminal failure — not on actively launching pods.
+    fn reap_retained_pod(&mut self, ctx: &mut impl WorkloadCtx) {
+        let is_retained_dead = self.pod_id.is_some()
+            && !self.pod_running
+            && (self.in_backoff || self.consecutive_failures >= self.max_retries);
+        if is_retained_dead {
+            ctx.set_pod_ownership_edges(vec![]);
+            ctx.set_pod_intent(PodIntent::None);
+            self.pod_id = None;
+        }
     }
 
     /// Abandon the current pod by removing the ownership edge.
@@ -670,6 +706,9 @@ impl WorkloadSm {
                 // Suspended terminal state.
                 ctx.set_pod_intent(PodIntent::Suspend);
                 self.awaiting_suspend = true;
+            } else if !self.pod_running && (self.in_backoff || is_failed) {
+                // Retained failed pod — keep it alive for inspectability.
+                // Will be reaped on transition out of backoff/failed.
             } else {
                 // Abandon pod (remove edge). Pod will drive itself to
                 // terminal and self-destruct.

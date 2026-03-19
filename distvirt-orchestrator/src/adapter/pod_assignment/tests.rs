@@ -127,9 +127,23 @@ fn pod_disappears_stop() {
     assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], PodAssignmentAction::Launch { .. }));
 
-    // Make pod fail → it leaves the worker's assigned pods.
+    // Make pod fail → pod is retained for inspectability (no Stop yet).
     router.set_worker_assignment_edges(worker, vec![pod_id]);
     router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.propagate();
+
+    let (actions, _) = adapter.reconcile(&mut router);
+    assert!(
+        actions.is_empty(),
+        "expected no actions while pod is retained, got {:?}",
+        actions
+    );
+
+    // Admin restart reaps the retained pod → Stop emitted.
+    let wl = router.get_workload(&crate::sm::WorkloadId(1)).unwrap();
+    assert!(wl.pod_id.is_some()); // still retained
+    let mgmt_id = crate::sm::ManagementId(0);
+    router.send_admin_command(mgmt_id, crate::sm::WorkloadId(1), crate::sm::AdminCmd::Restart);
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);
@@ -139,7 +153,7 @@ fn pod_disappears_stop() {
         .collect();
     assert!(
         !stop_actions.is_empty(),
-        "expected Stop action, got {:?}",
+        "expected Stop action after reap, got {:?}",
         actions
     );
 }

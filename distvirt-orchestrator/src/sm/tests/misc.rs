@@ -100,7 +100,7 @@ fn finished_vs_failed_backoff_behavior() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
     assert_eq!(wl.consecutive_failures, 1);
-    assert!(wl.pod_id.is_none()); // waiting for backoff timer
+    assert!(wl.pod_id.is_some()); // pod retained for inspectability during backoff
 }
 
 /// 49. Pod self-destructs on Finished + no owner (same reaping rule as Failed).
@@ -205,7 +205,7 @@ fn worker_identity_updates_on_new_worker() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.in_backoff);
-    assert_eq!(wl.pod_worker_id, None); // cleared on failure
+    assert_eq!(wl.pod_worker_id, Some(worker1)); // retained pod keeps worker info
 
     // Timer fires → new pod created.
     router.send_workload_timer_fired(TIMER, W1, WorkloadTimerKey::RetryBackoff);
