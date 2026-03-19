@@ -10,6 +10,7 @@ network:
 workloads:
   web:
     containers:
-      - image: docker.io/library/nginx:latest
+      #- image: docker.io/library/nginx:latest
+      - image: docker.io/library/caddy:2.11.2-alpine
     respects_demand: false
     suspend_on_idle: false

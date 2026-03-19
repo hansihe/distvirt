@@ -4,6 +4,20 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::{Context, bail};
 
+/// Bring up the loopback interface so that 127.0.0.1 is available.
+pub fn bring_up_loopback() -> anyhow::Result<()> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if sock < 0 {
+        bail!("socket: {}", std::io::Error::last_os_error());
+    }
+    let sock = unsafe { OwnedFd::from_raw_fd(sock) };
+
+    let ifname = CString::new("lo")?;
+    bring_if_up(sock.as_raw_fd(), &ifname).context("bring up lo")?;
+    log::info!("loopback interface up");
+    Ok(())
+}
+
 /// Configure a network interface with IP, netmask, bring it up, and add a default route.
 pub fn configure_network(
     interface: &str,

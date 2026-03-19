@@ -436,6 +436,10 @@ async fn connection_loop(
 fn run() -> anyhow::Result<()> {
     init::mount_essential_filesystems();
 
+    if let Err(e) = net::bring_up_loopback() {
+        log::warn!("failed to bring up loopback: {:#}", e);
+    }
+
     let vm_mem_mib = memory::init::read_memtotal_mib()?;
     let vm_config = memory::init::VmMemoryConfig::from_vm_mem(vm_mem_mib);
     memory::init::setup_zram_swap(&vm_config);
