@@ -900,17 +900,17 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Wait for the TCP activator to detect the SYN and signal activation
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::EndpointActivation { .. })
+        matches!(e, WorkerEvent::EndpointDemandTraffic { .. })
     })
     .await?;
 
     assert!(
-        matches!(&event, WorkerEvent::EndpointActivation { namespace_id, service_id, .. }
+        matches!(&event, WorkerEvent::EndpointDemandTraffic { namespace_id, service_id, .. }
             if namespace_id == "ns-act-resume" && *service_id == Some(ServiceId(1))),
         "unexpected event: {:?}",
         event
     );
-    eprintln!("e2e: activator signaled EndpointActivation, resuming server pod");
+    eprintln!("e2e: activator signaled EndpointDemandTraffic, resuming server pod");
 
     // Resume the server pod from the snapshot
     register_pod_endpoint(

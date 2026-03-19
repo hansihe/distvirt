@@ -6,6 +6,7 @@ use async_executor::LocalExecutor;
 use async_io::Async;
 use futures::io::AsyncRead;
 
+use crate::transport::TransportListener;
 use crate::yamux_driver::YamuxHandle;
 use crate::{net, util, vsock};
 use distvirt_guest_protocol::{GuestMessage, HostMessage, StreamHeader};
@@ -273,19 +274,19 @@ pub struct Session {
 }
 
 impl Session {
-    /// Accept a vsock connection and perform the 3-phase yamux handshake.
+    /// Accept a transport connection and perform the 3-phase yamux handshake.
     ///
     /// 1. Accept the control inbound stream and read its StreamHeader::Control.
     /// 2. Open an outbound event stream.
     /// 3. Send StreamHeader::Events on the event stream and GuestMessage::Ready on control.
     pub async fn connect(
-        listener: &vsock::VsockListener,
+        listener: &TransportListener,
         running_containers: Vec<String>,
         pre_config_responses: &[GuestMessage],
         ex: &LocalExecutor<'_>,
     ) -> anyhow::Result<Session> {
         let accepted = listener.accept().await?;
-        let async_socket = Async::new(accepted).context("wrap vsock fd in Async")?;
+        let async_socket = Async::new(accepted).context("wrap transport fd in Async")?;
 
         let conn =
             yamux::Connection::new(async_socket, yamux::Config::default(), yamux::Mode::Server);

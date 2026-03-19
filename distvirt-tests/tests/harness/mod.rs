@@ -15,8 +15,10 @@ pub mod spec_builders;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use distvirt_common::ActivityTracker;
 use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::core::EndpointDemandSignal;
 use distvirt_orchestrator::core::GlobalWorkerId;
@@ -64,6 +66,7 @@ pub struct TestCluster {
     pub shell: ShellHandle,
     pub event_bus: EventBusHandle,
     pub id_registry_map: IdRegistryMap,
+    activity: Arc<ActivityTracker>,
     _shell_task: JoinHandle<()>,
     worker_handles: Vec<(GlobalWorkerId, JoinHandle<anyhow::Result<()>>)>,
     gateway_provider: SimGatewayProvider,
@@ -74,11 +77,13 @@ pub struct TestCluster {
 impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
-        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true, 51820);
+        let activity = Arc::new(ActivityTracker::new());
+        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true, 51820, Arc::clone(&activity));
         TestCluster {
             shell,
             event_bus,
             id_registry_map,
+            activity,
             _shell_task: shell_task,
             worker_handles: Vec::new(),
             gateway_provider: SimGatewayProvider::new(),
@@ -115,6 +120,8 @@ impl TestCluster {
 
         let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
+        let activity = Arc::clone(&self.activity);
+
         let worker_handle = tokio::spawn(async move {
             let conn = WorkerConnection::accept(worker_half).await.unwrap();
             let worker = distvirt_worker::worker::Worker::<
@@ -131,6 +138,7 @@ impl TestCluster {
                 None,
                 String::new(),
                 gateway_provider,
+                activity,
             );
             worker.run(conn, "test-secret".to_string()).await
         });
@@ -188,7 +196,7 @@ impl TestCluster {
         let mut quiet_rounds = 0;
 
         for _ in 0..max_rounds {
-            let before = self.shell.activity_count();
+            let before = self.activity.activity_count();
 
             // Yield multiple times to let worker tasks make progress.
             for _ in 0..10 {
@@ -201,8 +209,8 @@ impl TestCluster {
                 tokio::task::yield_now().await;
             }
 
-            let after = self.shell.activity_count();
-            if before == after {
+            let after = self.activity.activity_count();
+            if before == after && !self.activity.is_busy() {
                 quiet_rounds += 1;
                 if quiet_rounds >= quiet_rounds_needed {
                     return;

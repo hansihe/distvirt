@@ -7,6 +7,7 @@ mod memory;
 mod net;
 mod output;
 mod session;
+mod transport;
 mod util;
 mod vsock;
 mod yamux_driver;
@@ -269,7 +270,7 @@ fn uart_resume() {
 /// When a container is started, sends a `ContainerTaskRequest` through
 /// `container_task_tx` so the root supervisor can spawn the container task.
 async fn connection_loop(
-    listener: &vsock::VsockListener,
+    listener: &transport::TransportListener,
     containers: Rc<RefCell<ContainerManager>>,
     event_buffer: &EventBuffer,
     pre_config_responses: &[GuestMessage],
@@ -445,8 +446,25 @@ fn run() -> anyhow::Result<()> {
     memory::init::setup_zram_swap(&vm_config);
     memory::init::set_tcp_memory_caps(&vm_config);
 
-    log::info!("starting vsock listener on port {}", VSOCK_CONTROL_PORT);
-    let listener = vsock::VsockListener::bind(VSOCK_CONTROL_PORT).context("bind vsock listener")?;
+    let listener = match memory::init::read_cmdline_param("distvirt.transport") {
+        Some(val) if val == "virtio-serial" => {
+            let path = memory::init::read_cmdline_param("distvirt.transport_device")
+                .map(std::path::PathBuf::from)
+                .map_or_else(
+                    || transport::find_virtio_serial_port("transport"),
+                    Ok,
+                )
+                .context("find virtio-serial transport device")?;
+            log::info!("using virtio-serial transport: {}", path.display());
+            transport::TransportListener::VirtioSerial { path }
+        }
+        _ => {
+            log::info!("starting vsock listener on port {}", VSOCK_CONTROL_PORT);
+            let vsock_listener =
+                vsock::VsockListener::bind(VSOCK_CONTROL_PORT).context("bind vsock listener")?;
+            transport::TransportListener::Vsock(vsock_listener)
+        }
+    };
 
     let ex = LocalExecutor::new();
 

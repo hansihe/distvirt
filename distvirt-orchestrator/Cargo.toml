@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
+distvirt-common = { path = "../distvirt-common" }
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread", "test-util"] }
 anyhow = "1"

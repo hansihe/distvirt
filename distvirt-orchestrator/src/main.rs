@@ -41,12 +41,14 @@ async fn main() -> anyhow::Result<()> {
         suspend_timeout: std::time::Duration::from_secs(60),
         idle_timeout: std::time::Duration::from_secs(30),
     };
+    let activity = std::sync::Arc::new(distvirt_common::ActivityTracker::new());
     let (handle, log_bus, event_bus, id_registry_map, shell_handle) =
         distvirt_orchestrator::shell::r#async::spawn(
             worker_secret,
             timer_config,
             config.tunnels.encrypted,
             config.wireguard.listen_port,
+            activity,
         );
 
     // Start gRPC server.

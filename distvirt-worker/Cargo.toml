@@ -16,6 +16,7 @@ prost = "0.13"
 prost-types = "0.13"
 tokio-stream = "0.1"
 containerd-client = "0.8"
+distvirt-common = { path = "../distvirt-common" }
 distvirt-guest-protocol = { path = "../distvirt-guest-protocol" }
 distvirt-activator = { path = "../distvirt-activator" }
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }

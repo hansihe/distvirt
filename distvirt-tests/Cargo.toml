@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dev-dependencies]
+distvirt-common = { path = "../distvirt-common" }
 distvirt-orchestrator = { path = "../distvirt-orchestrator", features = ["test-trace"] }
 distvirt-worker = { path = "../distvirt-worker" }
 distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }

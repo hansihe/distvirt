@@ -103,6 +103,7 @@ async fn setup_full(
 
     let worker_handle = tokio::spawn(async move {
         let conn = WorkerConnection::accept(worker_half).await.unwrap();
+        let activity = std::sync::Arc::new(distvirt_common::ActivityTracker::new());
         let worker = distvirt_worker::worker::Worker::<_, _, _, distvirt_worker::TokioFs>::new(
             kernel,
             rootfs,
@@ -111,6 +112,7 @@ async fn setup_full(
             component_dir,
             String::new(),
             distvirt_worker::TunGatewayProvider,
+            activity,
         );
         worker.run(conn, "test-secret".to_string()).await
     });

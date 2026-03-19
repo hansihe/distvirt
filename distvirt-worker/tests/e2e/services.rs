@@ -176,16 +176,16 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait for the TCP activator to signal activation (Traffic maps to EndpointActivation pulse).
-    // Note: EndpointActivation may arrive before PodRunning because the SYN
+    // Wait for the TCP activator to signal activation (Traffic maps to EndpointDemandTraffic pulse).
+    // Note: EndpointDemandTraffic may arrive before PodRunning because the SYN
     // is sent as soon as the guest network is up, so we must wait for it first.
     let event = recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::EndpointActivation { .. })
+        matches!(e, WorkerEvent::EndpointDemandTraffic { .. })
     })
     .await?;
 
     assert!(
-        matches!(&event, WorkerEvent::EndpointActivation { namespace_id, service_id, .. }
+        matches!(&event, WorkerEvent::EndpointDemandTraffic { namespace_id, service_id, .. }
             if namespace_id == "ns-tcp-act" && *service_id == Some(ServiceId(1))),
         "unexpected event: {:?}",
         event
@@ -545,7 +545,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
 
     // Wait for the TCP activator to signal activation (SYN was buffered)
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::EndpointActivation { .. })
+        matches!(e, WorkerEvent::EndpointDemandTraffic { .. })
     })
     .await?;
 

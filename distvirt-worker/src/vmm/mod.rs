@@ -1,11 +1,14 @@
 pub mod firecracker;
 pub mod guest_sim;
+pub mod qemu;
 pub mod test_vmm;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+use std::time::Duration;
 
+use anyhow::Context;
 use distvirt_guest_protocol::HostMessage;
 use distvirt_worker_protocol::PodNetworkConfig;
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,7 @@ use tokio::net::UnixStream;
 use tokio::sync::watch;
 
 use crate::fabric::FabricPort;
+use crate::task_handle::TaskHandle;
 
 /// Network configuration for a VM.
 #[derive(Clone)]
@@ -173,4 +177,62 @@ pub trait VmInstance: Send + 'static {
         let _ = amount_mib;
         async { anyhow::bail!("balloon not supported by this VM instance") }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared utilities used by VMM backends
+// ---------------------------------------------------------------------------
+
+/// Copy a file and ensure the destination is writable.
+///
+/// Some VMMs need writable disk images, but the source may live in a
+/// read-only location (e.g. Nix store). Each VM gets its own copy.
+pub(crate) async fn copy_file_writable(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    tokio::fs::copy(src, dest)
+        .await
+        .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
+    let mut perms = tokio::fs::metadata(dest).await?.permissions();
+    perms.set_readonly(false);
+    tokio::fs::set_permissions(dest, perms).await?;
+    Ok(())
+}
+
+/// Poll for a file to appear on disk, with a timeout.
+pub(crate) async fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::fs::try_exists(path).await.unwrap_or(false) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timeout waiting for {}", path.display());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Spawn a pidfd-based exit monitor for a child process.
+/// Returns a watch receiver that fires with the exit status, plus the
+/// background task handle.
+pub(crate) fn spawn_exit_monitor(
+    child: &tokio::process::Child,
+) -> (watch::Receiver<Option<ExitStatus>>, TaskHandle<()>) {
+    let pid = child.id().expect("child has pid");
+    let (exit_tx, exit_rx) = watch::channel(None);
+    let handle = TaskHandle::spawn(async move {
+        let status = crate::linux::process::wait_for_exit_pidfd(pid).await;
+        let _ = exit_tx.send(Some(status));
+    });
+    (exit_rx, handle)
+}
+
+/// Spawn a task that line-logs child stdout at debug level.
+pub(crate) fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHandle<()> {
+    TaskHandle::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log::debug!("[serial] {}", line);
+        }
+    })
 }

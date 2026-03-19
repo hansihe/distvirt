@@ -1281,6 +1281,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "distvirt-common"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "distvirt-compose"
 version = "0.1.0"
 dependencies = [
@@ -1307,6 +1314,7 @@ dependencies = [
  "anyhow",
  "clap",
  "distvirt-client-protocol",
+ "distvirt-common",
  "distvirt-orchestrator",
  "distvirt-sm-router",
  "distvirt-worker-protocol",
@@ -1351,6 +1359,7 @@ name = "distvirt-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "distvirt-common",
  "distvirt-orchestrator",
  "distvirt-worker",
  "distvirt-worker-protocol",
@@ -1371,6 +1380,7 @@ dependencies = [
  "clap",
  "containerd-client",
  "distvirt-activator",
+ "distvirt-common",
  "distvirt-guest-protocol",
  "distvirt-worker-protocol",
  "env_logger",

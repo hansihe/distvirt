@@ -18,6 +18,8 @@ use distvirt_worker_protocol::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use distvirt_common::ActivityTracker;
+
 use crate::adapter::AdapterManager;
 use crate::fabric::gateway::GatewayProvider;
 use crate::fs::Fs;
@@ -73,6 +75,8 @@ pub struct Worker<
     worker_id: Option<WorkerId>,
     /// Gateway provider for creating egress ports per namespace.
     gateway_provider: G,
+    /// Activity tracker for convergence detection in tests.
+    activity: Arc<ActivityTracker>,
 }
 
 impl<
@@ -91,6 +95,7 @@ impl<
         component_dir: Option<PathBuf>,
         public_endpoint: String,
         gateway_provider: G,
+        activity: Arc<ActivityTracker>,
     ) -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel(256);
         let activator_runtime = component_dir.and_then(|dir| match ActivatorRuntime::new(&dir) {
@@ -134,6 +139,7 @@ impl<
             tunnel_manager: None,
             worker_id: None,
             gateway_provider,
+            activity,
         }
     }
 
@@ -733,6 +739,7 @@ impl<
         let ns_id = namespace_id.clone();
         let pid = pod_id.clone();
         let cancel_clone = pod_cancel.clone();
+        let activity = Arc::clone(&self.activity);
 
         let (suspend_tx, suspend_rx) = mpsc::channel(1);
 
@@ -753,6 +760,7 @@ impl<
                 resources,
                 volumes,
                 suspend_rx,
+                activity,
             )
             .await;
         });
@@ -997,6 +1005,7 @@ impl<
         let ns_id = namespace_id.clone();
         let pid = pod_id.clone();
         let cancel_clone = pod_cancel.clone();
+        let activity = Arc::clone(&self.activity);
 
         let (suspend_tx, suspend_rx) = mpsc::channel(1);
 
@@ -1011,6 +1020,7 @@ impl<
                 network,
                 snapshot,
                 suspend_rx,
+                activity,
             )
             .await;
         });
@@ -1266,6 +1276,7 @@ mod tests {
             None, // no activator component dir
             String::new(),
             crate::sim_traffic::SimGatewayProvider::new(),
+            Arc::new(distvirt_common::ActivityTracker::new()),
         )
     }
 
@@ -1527,6 +1538,7 @@ mod tests {
             None,
             String::new(),
             crate::sim_traffic::SimGatewayProvider::new(),
+            Arc::new(distvirt_common::ActivityTracker::new()),
         );
 
         // Inject namespace manually.

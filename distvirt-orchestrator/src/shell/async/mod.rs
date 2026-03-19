@@ -11,10 +11,10 @@ mod worker_reader;
 mod worker_writer;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use distvirt_common::ActivityTracker;
 use distvirt_worker_protocol::OrchestratorConnection;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -124,7 +124,7 @@ enum ShellCommand {
 #[derive(Clone)]
 pub struct ShellHandle {
     tx: mpsc::Sender<ShellEvent>,
-    activity: Arc<AtomicU64>,
+    activity: Arc<ActivityTracker>,
 }
 
 impl ShellHandle {
@@ -293,7 +293,11 @@ impl ShellHandle {
     }
 
     pub fn activity_count(&self) -> u64 {
-        self.activity.load(std::sync::atomic::Ordering::Relaxed)
+        self.activity.activity_count()
+    }
+
+    pub fn activity_tracker(&self) -> &Arc<ActivityTracker> {
+        &self.activity
     }
 
     pub async fn inject_namespace_event(
@@ -366,7 +370,7 @@ struct Shell {
     tunnel_encrypted: bool,
     wireguard_listen_port: u16,
 
-    activity: Arc<AtomicU64>,
+    activity: Arc<ActivityTracker>,
 
     log_bus: LogBusHandle,
     event_bus: EventBusHandle,
@@ -391,7 +395,7 @@ impl Shell {
                 event = self.rx.recv() => {
                     let Some(event) = event else { break };
                     self.handle_event(event).await;
-                    self.activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.activity.tick();
                 }
                 _ = timer_sleep, if has_timer => {
                     // Timer expired — advance_to will fire it and process effects.
@@ -402,7 +406,7 @@ impl Shell {
             let now = self.now();
             let effects = self.orchestrator.advance_to(now);
             self.execute_effects(effects).await;
-            self.activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.activity.tick();
         }
     }
 
@@ -757,9 +761,9 @@ pub fn spawn(
     timer_config: TimerConfig,
     tunnel_encrypted: bool,
     wireguard_listen_port: u16,
+    activity: Arc<ActivityTracker>,
 ) -> (ShellHandle, LogBusHandle, EventBusHandle, IdRegistryMap, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(256);
-    let activity = Arc::new(AtomicU64::new(0));
     let log_bus = LogBusHandle::new(256 * 1024); // 256 KiB per topic
     let event_bus = EventBusHandle::new(1024); // 1024 events per namespace
     let id_registry_map = IdRegistryMap::new();

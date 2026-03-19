@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, ServicePolicy,
+    ConfigDataFile, ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, ServicePolicy,
+    VolumeMountSpec, VolumeSpec, VolumeType,
 };
 
 pub fn default_network() -> NetworkConfig {
@@ -60,6 +61,7 @@ pub fn no_activation_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 
@@ -85,6 +87,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 
@@ -125,6 +128,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 
@@ -165,6 +169,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 
@@ -205,6 +210,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
     workloads.insert(
@@ -217,6 +223,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 
@@ -270,6 +277,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
     workloads.insert(
@@ -282,6 +290,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 
@@ -320,6 +329,226 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
     }
 }
 
+pub fn container_spec_with_mounts(image: &str, mounts: Vec<VolumeMountSpec>) -> ContainerSpec {
+    ContainerSpec {
+        container_id: "main".to_string(),
+        image_ref: image.to_string(),
+        config: ContainerConfig {
+            entrypoint: vec!["/bin/echo".to_string()],
+            args: vec!["hello".to_string()],
+            env: vec![],
+            working_dir: None,
+            uid: None,
+            gid: None,
+            hostname: None,
+            capture_output: false,
+            stdin: false,
+            volume_mounts: mounts,
+        },
+    }
+}
+
+/// Workload with an empty_dir volume mounted at /data.
+pub fn empty_dir_spec() -> NamespaceSpec {
+    let wl_id = WorkloadName("app".to_string());
+
+    let mut workloads = BTreeMap::new();
+    workloads.insert(
+        wl_id,
+        WorkloadSpec {
+            containers: vec![container_spec_with_mounts(
+                "docker.io/library/alpine:latest",
+                vec![VolumeMountSpec {
+                    name: "scratch".to_string(),
+                    mount_path: "/data".to_string(),
+                }],
+            )],
+            network: pod_network(10),
+            suspend_on_idle: false,
+            resources: None,
+            activation: None,
+            run_policy: Default::default(),
+            respects_demand: false,
+            volumes: vec![VolumeSpec {
+                name: "scratch".to_string(),
+                volume_type: VolumeType::EmptyDir { size_mb: 64 },
+            }],
+        },
+    );
+
+    NamespaceSpec {
+        network: default_network(),
+        workloads,
+        services: BTreeMap::new(),
+    }
+}
+
+/// Workload with a config_data volume containing files, mounted at /config.
+pub fn config_data_spec() -> NamespaceSpec {
+    let wl_id = WorkloadName("app".to_string());
+
+    let mut workloads = BTreeMap::new();
+    workloads.insert(
+        wl_id,
+        WorkloadSpec {
+            containers: vec![container_spec_with_mounts(
+                "docker.io/library/alpine:latest",
+                vec![VolumeMountSpec {
+                    name: "cfg".to_string(),
+                    mount_path: "/config".to_string(),
+                }],
+            )],
+            network: pod_network(10),
+            suspend_on_idle: false,
+            resources: None,
+            activation: None,
+            run_policy: Default::default(),
+            respects_demand: false,
+            volumes: vec![VolumeSpec {
+                name: "cfg".to_string(),
+                volume_type: VolumeType::ConfigData {
+                    files: vec![
+                        ConfigDataFile {
+                            path: "app.toml".to_string(),
+                            content: "[server]\nport = 8080\n".to_string(),
+                        },
+                        ConfigDataFile {
+                            path: "secrets/db.env".to_string(),
+                            content: "DB_HOST=localhost\n".to_string(),
+                        },
+                    ],
+                },
+            }],
+        },
+    );
+
+    NamespaceSpec {
+        network: default_network(),
+        workloads,
+        services: BTreeMap::new(),
+    }
+}
+
+/// Workload with both an empty_dir and a config_data volume.
+pub fn mixed_volumes_spec() -> NamespaceSpec {
+    let wl_id = WorkloadName("app".to_string());
+
+    let mut workloads = BTreeMap::new();
+    workloads.insert(
+        wl_id,
+        WorkloadSpec {
+            containers: vec![container_spec_with_mounts(
+                "docker.io/library/alpine:latest",
+                vec![
+                    VolumeMountSpec {
+                        name: "scratch".to_string(),
+                        mount_path: "/data".to_string(),
+                    },
+                    VolumeMountSpec {
+                        name: "cfg".to_string(),
+                        mount_path: "/config".to_string(),
+                    },
+                ],
+            )],
+            network: pod_network(10),
+            suspend_on_idle: false,
+            resources: None,
+            activation: None,
+            run_policy: Default::default(),
+            respects_demand: false,
+            volumes: vec![
+                VolumeSpec {
+                    name: "scratch".to_string(),
+                    volume_type: VolumeType::EmptyDir { size_mb: 64 },
+                },
+                VolumeSpec {
+                    name: "cfg".to_string(),
+                    volume_type: VolumeType::ConfigData {
+                        files: vec![ConfigDataFile {
+                            path: "app.conf".to_string(),
+                            content: "key=value\n".to_string(),
+                        }],
+                    },
+                },
+            ],
+        },
+    );
+
+    NamespaceSpec {
+        network: default_network(),
+        workloads,
+        services: BTreeMap::new(),
+    }
+}
+
+/// Activation-based workload with volumes (for suspend/resume testing).
+pub fn activation_with_volumes_spec(idle_timeout: Duration) -> NamespaceSpec {
+    let wl_id = WorkloadName("web".to_string());
+    let svc_id = "web-svc".to_string();
+
+    let mut workloads = BTreeMap::new();
+    workloads.insert(
+        wl_id.clone(),
+        WorkloadSpec {
+            containers: vec![container_spec_with_mounts(
+                "docker.io/library/alpine:latest",
+                vec![
+                    VolumeMountSpec {
+                        name: "scratch".to_string(),
+                        mount_path: "/data".to_string(),
+                    },
+                    VolumeMountSpec {
+                        name: "cfg".to_string(),
+                        mount_path: "/config".to_string(),
+                    },
+                ],
+            )],
+            network: pod_network(10),
+            suspend_on_idle: true,
+            resources: None,
+            activation: None,
+            run_policy: Default::default(),
+            respects_demand: true,
+            volumes: vec![
+                VolumeSpec {
+                    name: "scratch".to_string(),
+                    volume_type: VolumeType::EmptyDir { size_mb: 32 },
+                },
+                VolumeSpec {
+                    name: "cfg".to_string(),
+                    volume_type: VolumeType::ConfigData {
+                        files: vec![ConfigDataFile {
+                            path: "config.yaml".to_string(),
+                            content: "debug: true\n".to_string(),
+                        }],
+                    },
+                },
+            ],
+        },
+    );
+
+    let mut services = BTreeMap::new();
+    services.insert(
+        svc_id,
+        ServiceSpec {
+            workload_id: wl_id,
+            ip: Ipv4Addr::new(172, 16, 0, 100),
+            policy: ServicePolicy {
+                buffer_frames: 100,
+                timeout_ms: 5000,
+                activator: None,
+            },
+            activation: Some(ActivationSpec { idle_timeout }),
+        },
+    );
+
+    NamespaceSpec {
+        network: default_network(),
+        workloads,
+        services,
+    }
+}
+
 pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
     let wl_id = WorkloadName("shared".to_string());
 
@@ -334,6 +563,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 

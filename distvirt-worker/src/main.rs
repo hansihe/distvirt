@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let stream = tokio::net::TcpStream::connect(&cli.orchestrator).await?;
     let conn = WorkerConnection::accept(stream).await?;
 
+    let activity = std::sync::Arc::new(distvirt_common::ActivityTracker::new());
     let worker = distvirt_worker::worker::Worker::<
         _,
         _,
@@ -75,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         cli.component_dir,
         cli.public_endpoint,
         distvirt_worker::TunGatewayProvider,
+        activity,
     );
 
     worker.run(conn, cli.worker_secret).await

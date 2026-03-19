@@ -7,7 +7,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
 
-use super::{NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
+use super::{
+    NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm, copy_file_writable,
+    spawn_exit_monitor, spawn_serial_task, wait_for_file,
+};
 use crate::fabric::{FabricPort, Port};
 use crate::linux::net::PersistentTap;
 use crate::task_handle::TaskHandle;
@@ -23,20 +26,6 @@ impl Firecracker {
             firecracker_bin: firecracker_bin.into(),
         }
     }
-}
-
-/// Copy a file and ensure the destination is writable.
-///
-/// Firecracker needs writable disk images, but the source may live in a
-/// read-only location (e.g. Nix store). Each VM gets its own copy.
-async fn copy_file_writable(src: &Path, dest: &Path) -> anyhow::Result<()> {
-    tokio::fs::copy(src, dest)
-        .await
-        .with_context(|| format!("copy {} to {}", src.display(), dest.display()))?;
-    let mut perms = tokio::fs::metadata(dest).await?.permissions();
-    perms.set_readonly(false);
-    tokio::fs::set_permissions(dest, perms).await?;
-    Ok(())
 }
 
 /// Result of spawning the Firecracker process (before any API calls).
@@ -86,31 +75,6 @@ async fn spawn_firecracker(
     })
 }
 
-/// Spawn the pidfd-based exit monitor for a child process.
-/// Returns a watch receiver that fires with the exit status, plus the
-/// background task handle.
-fn spawn_exit_monitor(
-    child: &tokio::process::Child,
-) -> (watch::Receiver<Option<ExitStatus>>, TaskHandle<()>) {
-    let pid = child.id().expect("child has pid");
-    let (exit_tx, exit_rx) = watch::channel(None);
-    let handle = TaskHandle::spawn(async move {
-        let status = wait_for_exit_pidfd(pid).await;
-        let _ = exit_tx.send(Some(status));
-    });
-    (exit_rx, handle)
-}
-
-/// Spawn the serial console line-logging task.
-fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHandle<()> {
-    TaskHandle::spawn(async move {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            log::debug!("[serial] {}", line);
-        }
-    })
-}
 
 impl Vmm for Firecracker {
     type Instance = FirecrackerInstance;
@@ -816,22 +780,3 @@ fn parse_content_length(headers: &str) -> Option<usize> {
     None
 }
 
-/// Asynchronously wait for a process to exit using Linux's `pidfd_open` syscall.
-///
-/// Delegates to [`crate::linux::process::wait_for_exit_pidfd`].
-async fn wait_for_exit_pidfd(pid: u32) -> ExitStatus {
-    crate::linux::process::wait_for_exit_pidfd(pid).await
-}
-
-async fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if tokio::fs::try_exists(path).await.unwrap_or(false) {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("timeout waiting for {}", path.display());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}

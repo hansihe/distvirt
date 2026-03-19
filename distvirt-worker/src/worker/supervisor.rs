@@ -84,24 +84,28 @@ pub(crate) async fn pod_supervisor<
     resources: Option<distvirt_worker_protocol::ResourceRequirements>,
     volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
+    activity: Arc<distvirt_common::ActivityTracker>,
 ) {
-    let result = pod_launch(
-        &*vmm,
-        &*image_provider,
-        &fabric,
-        &kernel_path,
-        &rootfs_image_path,
-        &log_opener,
-        &event_tx,
-        &namespace_id,
-        &pod_id,
-        network,
-        containers,
-        resources,
-        volumes,
-        &cancel,
-    )
-    .await;
+    let result = {
+        let _busy = activity.busy_guard();
+        pod_launch(
+            &*vmm,
+            &*image_provider,
+            &fabric,
+            &kernel_path,
+            &rootfs_image_path,
+            &log_opener,
+            &event_tx,
+            &namespace_id,
+            &pod_id,
+            network,
+            containers,
+            resources,
+            volumes,
+            &cancel,
+        )
+        .await
+    };
     run_pod_supervisor::<_, F>(
         result,
         cancel,
@@ -127,19 +131,23 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static, F: crate::fs::Fs>(
     network: PodNetworkConfig,
     snapshot: SnapshotArtifacts,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
+    activity: Arc<distvirt_common::ActivityTracker>,
 ) {
-    let result = pod_restore(
-        &*vmm,
-        &fabric,
-        &event_tx,
-        &namespace_id,
-        &pod_id,
-        network,
-        snapshot,
-        &cancel,
-    )
-    .await
-    .map(|(vm, port_task)| (vm, None, port_task));
+    let result = {
+        let _busy = activity.busy_guard();
+        pod_restore(
+            &*vmm,
+            &fabric,
+            &event_tx,
+            &namespace_id,
+            &pod_id,
+            network,
+            snapshot,
+            &cancel,
+        )
+        .await
+        .map(|(vm, port_task)| (vm, None, port_task))
+    };
     run_pod_supervisor::<_, F>(
         result,
         cancel,
@@ -1002,6 +1010,7 @@ mod tests {
                     None,
                     vec![],
                     suspend_rx,
+                    Arc::new(distvirt_common::ActivityTracker::new()),
                 )
                 .await;
             }
@@ -1070,6 +1079,7 @@ mod tests {
                     None,
                     vec![],
                     suspend_rx,
+                    Arc::new(distvirt_common::ActivityTracker::new()),
                 )
                 .await;
             }
@@ -1129,6 +1139,7 @@ mod tests {
                 None,
                 vec![],
                 suspend_rx,
+                Arc::new(distvirt_common::ActivityTracker::new()),
             )
             .await;
         });
@@ -1187,6 +1198,7 @@ mod tests {
                     None,
                     vec![],
                     suspend_rx,
+                    Arc::new(distvirt_common::ActivityTracker::new()),
                 )
                 .await;
             }
