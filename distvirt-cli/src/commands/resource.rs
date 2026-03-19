@@ -63,6 +63,29 @@ pub async fn get(
                 }
             }
         }
+        "workloads" => {
+            let ns = namespace
+                .ok_or_else(|| anyhow::anyhow!("--namespace is required for listing workloads"))?;
+            let resp = client
+                .get_namespace_status(GetNamespaceStatusRequest {
+                    namespace_id: ns.to_string(),
+                })
+                .await
+                .map_err(client::handle_grpc_error)?;
+            let report = resp
+                .into_inner()
+                .status
+                .ok_or_else(|| anyhow::anyhow!("server returned empty status"))?;
+            match output {
+                OutputFormat::Text => format::print_workload_table(&report.workloads),
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::workloads_to_json(&report.workloads))?
+                    );
+                }
+            }
+        }
         "services" => {
             let ns = namespace
                 .ok_or_else(|| anyhow::anyhow!("--namespace is required for listing services"))?;
@@ -88,7 +111,7 @@ pub async fn get(
         }
         other => {
             anyhow::bail!(
-                "unknown resource type: '{}'. Try: namespaces, workers, pods, services",
+                "unknown resource type: '{}'. Try: namespaces, workers, pods, workloads, services",
                 other
             );
         }

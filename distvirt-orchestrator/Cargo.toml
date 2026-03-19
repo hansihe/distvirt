@@ -23,7 +23,11 @@ toml = "0.8"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 
+[features]
+test-trace = []
+
 [dev-dependencies]
+distvirt-orchestrator = { path = ".", features = ["test-trace"] }
 proptest = "1"
 stateright = "0.31"
 tokio-test = "0.4"

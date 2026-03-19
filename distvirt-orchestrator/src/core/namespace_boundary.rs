@@ -80,6 +80,7 @@ impl NamespaceWithBoundary {
     }
 
     /// Construct from a pre-configured NamespaceCore (for test setup).
+    #[allow(dead_code)]
     pub(crate) fn from_core(core: NamespaceCore) -> Self {
         NamespaceWithBoundary {
             core,
@@ -325,7 +326,7 @@ impl NamespaceWithBoundary {
     /// Translate a protocol-level worker event to an internal worker event.
     fn translate_worker_event(
         &mut self,
-        worker_id: WorkerId,
+        _worker_id: WorkerId,
         event: WorkerNamespaceEventKind,
     ) -> Option<InternalWorkerEvent> {
         match event {

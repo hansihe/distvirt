@@ -157,6 +157,7 @@ pub(crate) struct InternalNamespaceEffects {
 }
 
 impl InternalNamespaceEffects {
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.timer_actions.is_empty()
             && self.scheduler_messages.is_empty()

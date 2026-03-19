@@ -1307,6 +1307,7 @@ dependencies = [
  "anyhow",
  "clap",
  "distvirt-client-protocol",
+ "distvirt-orchestrator",
  "distvirt-sm-router",
  "distvirt-worker-protocol",
  "env_logger",

@@ -352,6 +352,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
                     &worker_id_ref.cloned(),
                 )),
                 spliced: false,
+                ip: wl.ip.clone(),
             },
         );
     }

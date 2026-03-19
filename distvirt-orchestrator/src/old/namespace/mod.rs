@@ -155,6 +155,7 @@ impl NamespaceStateMachine {
                 WorkloadStatusReport {
                     state: wl.state.as_str().to_string(),
                     pod_id: wl.state.pod_id().cloned(),
+                    ip: String::new(),
                     conditions: wl.conditions.clone(),
                 },
             );

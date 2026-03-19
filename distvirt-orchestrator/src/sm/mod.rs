@@ -1,4 +1,4 @@
-use distvirt_sm_router::{Aggregator, IncrementalAggregator, ListAggregator, SmHandler};
+use distvirt_sm_router::{Aggregator, ListAggregator, SmHandler};
 
 use crate::adapter::artifact::ArtifactRefIncrementalAggregator;
 use crate::adapter::dns_registry::{
@@ -768,8 +768,10 @@ distvirt_sm_router::router! {
     }
 }
 
-// TODO: temporary, switch back to plain Router when refactor stabilizes
+#[cfg(feature = "test-trace")]
 pub type DRouter = Router<distvirt_sm_router::trace::PanicTracer>;
+#[cfg(not(feature = "test-trace"))]
+pub type DRouter = Router<distvirt_sm_router::trace::NoopTracer>;
 
 #[cfg(test)]
 impl PodId {

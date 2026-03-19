@@ -132,6 +132,40 @@ pub fn print_pod_table(pods: &[PodInfo]) {
 }
 
 #[derive(Tabled)]
+struct WorkloadRow {
+    #[tabled(rename = "WORKLOAD")]
+    workload: String,
+    #[tabled(rename = "STATE")]
+    state: &'static str,
+    #[tabled(rename = "IP")]
+    ip: String,
+    #[tabled(rename = "SPLICED")]
+    spliced: &'static str,
+}
+
+pub fn print_workload_table(workloads: &std::collections::HashMap<String, WorkloadStatusReport>) {
+    let mut entries: Vec<_> = workloads.iter().collect();
+    entries.sort_by_key(|(id, _)| (*id).clone());
+    let rows: Vec<_> = entries
+        .into_iter()
+        .map(|(wl_id, wl)| {
+            let state = wl
+                .state
+                .as_ref()
+                .map(|s| workload_state_label(s))
+                .unwrap_or("unknown");
+            WorkloadRow {
+                workload: wl_id.clone(),
+                state,
+                ip: wl.ip.clone(),
+                spliced: if wl.spliced { "yes" } else { "no" },
+            }
+        })
+        .collect();
+    println!("{}", Table::new(rows).with(Style::blank()));
+}
+
+#[derive(Tabled)]
 struct ServiceRow {
     #[tabled(rename = "SERVICE")]
     service: String,
@@ -192,6 +226,29 @@ pub fn services_to_json(
                     "state": state,
                     "activation_enabled": s.activation_enabled,
                     "spliced": s.spliced,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+pub fn workloads_to_json(
+    workloads: &std::collections::HashMap<String, WorkloadStatusReport>,
+) -> serde_json::Value {
+    serde_json::json!(
+        workloads
+            .iter()
+            .map(|(id, w)| {
+                let state = w
+                    .state
+                    .as_ref()
+                    .map(|s| workload_state_label(s))
+                    .unwrap_or("unknown");
+                serde_json::json!({
+                    "workload_id": id,
+                    "state": state,
+                    "ip": w.ip,
+                    "spliced": w.spliced,
                 })
             })
             .collect::<Vec<_>>()

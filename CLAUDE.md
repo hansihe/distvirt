@@ -25,4 +25,4 @@ Worker has a few layers of tests:
 Contains protocol definitions for communication between the different components.
 
 ## Guidelines
-* If you want to check and test your code, just run the test command. Running the test command also compiles the code, no need for both.
+* If you want to check, build and test your code, just run the test command. Running the test command also compiles the code, no need for both.

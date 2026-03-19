@@ -21,6 +21,7 @@ use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
 use crate::core::ClientCommand;
+#[cfg(feature = "test-trace")]
 use distvirt_sm_router::trace::PanicTracer;
 
 use crate::core::wg_peers::{WgPeerOutput, WireGuardPeerManager};
@@ -100,7 +101,10 @@ impl NamespaceCore {
         network: &distvirt_worker_protocol::NetworkConfig,
         id_registry: IdRegistry,
     ) -> Self {
+        #[cfg(feature = "test-trace")]
         let mut router = Router::new_traced(16, PanicTracer::new());
+        #[cfg(not(feature = "test-trace"))]
+        let mut router = Router::new(16);
         router.create_timer(TIMER);
         router.create_schedule_request(SCHEDULE_REQUEST);
         router.create_fabric_endpoint(FABRIC_ENDPOINT);
@@ -590,17 +594,24 @@ impl NamespaceCore {
                 .signal_workload_status(router_id)
                 .map(|s| wl_status_str(s))
                 .unwrap_or("unknown");
-            let pod_id = self
-                .router
-                .get_workload(&router_id)
+            let wl_sm = self.router.get_workload(&router_id);
+            let pod_id = wl_sm
+                .as_ref()
                 .and_then(|wl| wl.pod_id)
                 .map(|pid| crate::types::PodId(pid.0));
+            let ip = wl_sm
+                .as_ref()
+                .and_then(|wl| wl.endpoint_id)
+                .and_then(|ep_id| self.router.get_endpoint(&ep_id))
+                .map(|ep| ep.ip.to_string())
+                .unwrap_or_default();
 
             workloads.insert(
                 WorkloadName(name.to_string()),
                 crate::types::WorkloadStatusReport {
                     state: state.to_string(),
                     pod_id,
+                    ip,
                     conditions: BTreeMap::new(),
                 },
             );
@@ -699,6 +710,7 @@ impl NamespaceCore {
     }
 
     /// Mutable access to the router (for test setup).
+    #[allow(dead_code)]
     pub(crate) fn router_mut(&mut self) -> &mut DRouter {
         &mut self.router
     }

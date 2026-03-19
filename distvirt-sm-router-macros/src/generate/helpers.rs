@@ -98,29 +98,6 @@ pub(super) fn nodes_with_signal_state(def: &TopologyDef) -> Vec<&Ident> {
     names
 }
 
-/// Returns the auto-ID index for a node, or None for manual-ID nodes.
-/// SMs come first (in declaration order), then ports.
-pub(super) fn auto_id_index(def: &TopologyDef, node_name: &Ident) -> Option<usize> {
-    let mut idx = 0usize;
-    for sm in &def.state_machines {
-        if sm.id_type.is_none() {
-            if sm.name == *node_name {
-                return Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    for port in &def.ports {
-        if port.id_type.is_none() {
-            if port.name == *node_name {
-                return Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    None
-}
-
 /// Returns a unique group index for a node (SM or port) for delivery grouping.
 /// SMs are indexed first (in declaration order), then ports.
 pub(super) fn node_group_index(def: &TopologyDef, node_name: &Ident) -> usize {

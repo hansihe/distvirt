@@ -142,6 +142,7 @@ pub struct NamespaceStatusReport {
 pub struct WorkloadStatusReport {
     pub state: String,
     pub pod_id: Option<PodId>,
+    pub ip: String,
     pub conditions: BTreeMap<String, String>,
 }
 

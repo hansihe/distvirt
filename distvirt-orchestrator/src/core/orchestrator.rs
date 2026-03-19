@@ -438,7 +438,7 @@ impl OrchestratorCore {
         };
 
         // Get network config for building the result.
-        let network = self.namespace_networks.get(namespace_id).cloned();
+        let _network = self.namespace_networks.get(namespace_id).cloned();
 
         // Route connect command to namespace.
         let ns = self.namespaces.get_mut(namespace_id).unwrap();
