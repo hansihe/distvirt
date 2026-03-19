@@ -668,14 +668,9 @@ impl Shell {
             }
         }
 
-        // Worker commands (routed through namespace logic).
-        for (worker_id, cmd) in effects.worker_commands {
-            if let Some(slot) = self.workers.get(&worker_id) {
-                slot.writer.send(cmd).await;
-            }
-        }
-
-        // Namespace-scoped broadcasts.
+        // Namespace-scoped broadcasts (endpoint updates, DNS, etc.).
+        // Must be sent before worker commands: pods depend on endpoints
+        // already being configured on the worker when they launch.
         for (namespace_id, cmd) in effects.broadcast_commands {
             if let Some(ns) = self.orchestrator.namespace(&namespace_id) {
                 for worker_id in ns.active_worker_ids() {
@@ -683,6 +678,13 @@ impl Shell {
                         slot.writer.send(cmd.clone()).await;
                     }
                 }
+            }
+        }
+
+        // Worker commands (routed through namespace logic).
+        for (worker_id, cmd) in effects.worker_commands {
+            if let Some(slot) = self.workers.get(&worker_id) {
+                slot.writer.send(cmd).await;
             }
         }
 

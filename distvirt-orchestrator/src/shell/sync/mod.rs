@@ -549,14 +549,9 @@ impl SyncShell {
     /// Execute effects from OrchestratorCore, converting them to pending events
     /// or buffered commands.
     fn execute_effects(&mut self, effects: OrchestratorEffects) {
-        // Targeted worker commands.
-        for (worker_id, cmd) in effects.worker_commands {
-            if let Some(state) = self.workers.get_mut(&worker_id) {
-                state.commands_sent.push(cmd);
-            }
-        }
-
-        // Broadcast commands scoped to a namespace.
+        // Broadcast commands scoped to a namespace (endpoint updates, DNS, etc.).
+        // Must be sent before worker commands: pods depend on endpoints
+        // already being configured on the worker when they launch.
         for (namespace_id, cmd) in effects.broadcast_commands {
             if let Some(ns) = self.core.namespace(&namespace_id) {
                 let active: Vec<GlobalWorkerId> = ns.active_worker_ids().collect();
@@ -565,6 +560,13 @@ impl SyncShell {
                         state.commands_sent.push(cmd.clone());
                     }
                 }
+            }
+        }
+
+        // Targeted worker commands.
+        for (worker_id, cmd) in effects.worker_commands {
+            if let Some(state) = self.workers.get_mut(&worker_id) {
+                state.commands_sent.push(cmd);
             }
         }
 

@@ -108,7 +108,58 @@ pub async fn connect(
     let private_key = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&private_key);
 
-    // 2. Call ConnectNetwork gRPC.
+    // 2. If --config mode, we can call ConnectNetwork immediately (no TUN needed).
+    //    Otherwise, create the TUN device first to avoid registering a peer that
+    //    we can't clean up when sudo re-exec generates a new keypair.
+    if config_only {
+        let resp = client
+            .connect_network(ConnectNetworkRequest {
+                namespace_id: namespace_id.to_string(),
+                client_public_key: public_key.as_bytes().to_vec(),
+            })
+            .await
+            .map_err(client::handle_grpc_error)?
+            .into_inner();
+
+        let server_public_key_bytes: [u8; 32] = resp
+            .server_public_key
+            .as_slice()
+            .try_into()
+            .context("server public key must be 32 bytes")?;
+        let client_ip = &resp.client_ip;
+        let subnet = &resp.subnet;
+        let prefix_len: u8 = subnet
+            .split('/')
+            .nth(1)
+            .context("subnet missing /prefix_len")?
+            .parse()
+            .context("invalid prefix length in subnet")?;
+
+        let private_key_b64 = BASE64.encode(private_key.to_bytes());
+        let server_pub_b64 = BASE64.encode(server_public_key_bytes);
+        println!("[Interface]");
+        println!("PrivateKey = {}", private_key_b64);
+        println!("Address = {}/{}", client_ip, prefix_len);
+        println!();
+        println!("[Peer]");
+        println!("PublicKey = {}", server_pub_b64);
+        println!("Endpoint = {}", resp.endpoint);
+        println!("AllowedIPs = {}", subnet);
+        println!("PersistentKeepalive = 25");
+        return Ok(());
+    }
+
+    // 3. Create TUN device BEFORE calling ConnectNetwork, so that sudo re-exec
+    //    happens before we register the peer (avoiding an orphaned peer).
+    let tun = match TunDevice::create() {
+        Ok(tun) => tun,
+        Err(e) if is_permission_denied(&e) => {
+            return reexec_with_sudo(&params);
+        }
+        Err(e) => return Err(e.context("failed to create TUN device")),
+    };
+
+    // 4. Call ConnectNetwork gRPC.
     let resp = client
         .connect_network(ConnectNetworkRequest {
             namespace_id: namespace_id.to_string(),
@@ -127,38 +178,12 @@ pub async fn connect(
     let client_ip = &resp.client_ip;
     let subnet = &resp.subnet;
 
-    // Parse prefix length from subnet CIDR (e.g. "172.16.0.0/24" → 24).
     let prefix_len: u8 = subnet
         .split('/')
         .nth(1)
         .context("subnet missing /prefix_len")?
         .parse()
         .context("invalid prefix length in subnet")?;
-
-    // 3. If --config: print wg-quick format and exit.
-    if config_only {
-        let private_key_b64 = BASE64.encode(private_key.to_bytes());
-        let server_pub_b64 = BASE64.encode(server_public_key_bytes);
-        println!("[Interface]");
-        println!("PrivateKey = {}", private_key_b64);
-        println!("Address = {}/{}", client_ip, prefix_len);
-        println!();
-        println!("[Peer]");
-        println!("PublicKey = {}", server_pub_b64);
-        println!("Endpoint = {}", endpoint);
-        println!("AllowedIPs = {}", subnet);
-        println!("PersistentKeepalive = 25");
-        return Ok(());
-    }
-
-    // 4. Create TUN device, escalating to sudo on permission denied.
-    let tun = match TunDevice::create() {
-        Ok(tun) => tun,
-        Err(e) if is_permission_denied(&e) => {
-            return reexec_with_sudo(&params);
-        }
-        Err(e) => return Err(e.context("failed to create TUN device")),
-    };
     let tun_name = tun.name.clone();
 
     // 5. Configure IP + routes.
