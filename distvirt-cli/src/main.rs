@@ -23,6 +23,7 @@ const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   connect       Connect to a namespace network via WireGuard
   disconnect    Disconnect from a namespace network
   clone         Clone a namespace
+  attach        Attach to a running workload's I/O
   splice        Splice a workload to a local worker
 
 \x1b[1;4mResource commands:\x1b[0m
@@ -155,6 +156,12 @@ enum TaskCommands {
     Disconnect {
         /// Namespace ID
         namespace_id: String,
+    },
+    /// Attach to a running workload's stdin/stdout/stderr
+    #[command(hide = true)]
+    Attach {
+        /// Target: "namespace/workload"
+        target: String,
     },
     /// Clone a namespace
     #[command(hide = true)]
@@ -328,6 +335,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Task(TaskCommands::Deactivate { target }) => {
                     commands::namespace::deactivate(client, &target).await?;
+                }
+                Commands::Task(TaskCommands::Attach { target }) => {
+                    let (namespace_id, workload_id) = target
+                        .split_once('/')
+                        .ok_or_else(|| anyhow::anyhow!("target must be namespace/workload"))?;
+                    commands::attach::attach(client, namespace_id, workload_id).await?;
                 }
                 Commands::Task(TaskCommands::Splice {
                     namespace_id,

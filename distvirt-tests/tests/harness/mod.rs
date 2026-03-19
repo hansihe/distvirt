@@ -22,6 +22,8 @@ use distvirt_orchestrator::core::EndpointDemandSignal;
 use distvirt_orchestrator::core::GlobalWorkerId;
 use distvirt_orchestrator::core::WorkerNamespaceEventKind;
 use distvirt_orchestrator::core::types::WorkerStateCoreEvent;
+use distvirt_orchestrator::event_bus::EventBusHandle;
+use distvirt_orchestrator::id_registry::IdRegistryMap;
 use distvirt_orchestrator::shell::r#async::{self, ShellHandle};
 use distvirt_orchestrator::types::*;
 use distvirt_worker::image_provider::stub::StubImageProvider;
@@ -60,6 +62,8 @@ fn test_timer_config() -> TimerConfig {
 
 pub struct TestCluster {
     pub shell: ShellHandle,
+    pub event_bus: EventBusHandle,
+    pub id_registry_map: IdRegistryMap,
     _shell_task: JoinHandle<()>,
     worker_handles: Vec<(GlobalWorkerId, JoinHandle<anyhow::Result<()>>)>,
     gateway_provider: SimGatewayProvider,
@@ -70,9 +74,11 @@ pub struct TestCluster {
 impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
-        let (shell, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config());
+        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config());
         TestCluster {
             shell,
+            event_bus,
+            id_registry_map,
             _shell_task: shell_task,
             worker_handles: Vec::new(),
             gateway_provider: SimGatewayProvider::new(),

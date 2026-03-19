@@ -12,4 +12,7 @@ pub mod types;
 mod util;
 pub mod wg_peers;
 
+pub mod event_bus;
 pub mod grpc;
+pub mod id_registry;
+pub mod log_bus;

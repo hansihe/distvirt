@@ -5,6 +5,7 @@
 
 use crate::adapter::dns_registry::DnsRegistryAction;
 use crate::adapter::endpoint::EndpointAction;
+use crate::adapter::observability::ObservabilityEvent;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::{TimerAction, TimerIdentity};
 use crate::core::scheduler::WorkerCandidate;
@@ -52,6 +53,7 @@ pub struct NamespaceEffects {
     pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
     /// Commands to broadcast to all active workers in this namespace.
     pub broadcast_commands: Vec<distvirt_worker_protocol::WorkerCommand>,
+    pub observability_events: Vec<ObservabilityEvent>,
 }
 
 impl NamespaceEffects {
@@ -151,6 +153,7 @@ pub(crate) struct InternalNamespaceEffects {
     pub pod_actions: Vec<PodAssignmentAction>,
     pub endpoint_actions: Vec<EndpointAction>,
     pub dns_registry_actions: Vec<DnsRegistryAction>,
+    pub observability_events: Vec<ObservabilityEvent>,
 }
 
 impl InternalNamespaceEffects {
@@ -338,6 +341,8 @@ pub struct OrchestratorEffects {
     /// Direct wire commands the shell must send (e.g. CreateNamespace).
     /// These bypass namespace logic — the shell just sends them on the writer.
     pub direct_worker_commands: Vec<DirectWorkerCommand>,
+    /// Observability events keyed by namespace.
+    pub observability_events: Vec<(NamespaceId, Vec<ObservabilityEvent>)>,
 }
 
 impl OrchestratorEffects {
@@ -348,5 +353,7 @@ impl OrchestratorEffects {
         self.global_broadcasts.extend(other.global_broadcasts);
         self.direct_worker_commands
             .extend(other.direct_worker_commands);
+        self.observability_events
+            .extend(other.observability_events);
     }
 }

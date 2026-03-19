@@ -5,6 +5,10 @@ use crate::adapter::dns_registry::{
     EndpointDnsIncrementalAggregator, WorkloadDnsIncrementalAggregator,
 };
 use crate::adapter::endpoint::EndpointIncrementalAggregator;
+use crate::adapter::observability::{
+    EndpointIdleTimerObsAggregator, EndpointStatusObsAggregator, PodStatusObsAggregator,
+    PodWorkerObsAggregator, WorkloadStatusObsAggregator,
+};
 use crate::adapter::pod_assignment::PodAssignmentIncrementalAggregator;
 use crate::adapter::schedule_request::ScheduleRequestIncrementalAggregator;
 use crate::adapter::timer::{
@@ -112,6 +116,13 @@ pub struct DnsRegistryId(pub u64);
 /// The singleton DNS registry port ID.
 pub const DNS_REGISTRY: DnsRegistryId = DnsRegistryId(0);
 
+/// Manual ID for the singleton observability port.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct ObservabilityId(pub u64);
+
+/// The singleton observability port ID.
+pub const OBSERVABILITY: ObservabilityId = ObservabilityId(0);
+
 /// DNS entry info carried by service/workload signals to the DNS registry port.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DnsEntryInfo {
@@ -184,6 +195,16 @@ impl Default for LeaseInfo {
     }
 }
 
+/// Whether a workload runs as a long-lived service or a run-to-completion job.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum RunPolicy {
+    /// Service: restart on completion, always try to maintain a running pod.
+    #[default]
+    Service,
+    /// Job: run once to completion (exit 0 = done, non-zero = retry with backoff).
+    Job,
+}
+
 /// Workload spec delivered by management port.
 ///
 /// Carries the full launch-relevant data so that the spec flows through the
@@ -201,6 +222,8 @@ pub struct WorkloadSpec {
     pub containers: Vec<distvirt_worker_protocol::ContainerSpec>,
     /// Resource requirements for LaunchPod commands.
     pub resources: Option<distvirt_worker_protocol::ResourceRequirements>,
+    /// Whether this workload runs as a service or a job.
+    pub run_policy: RunPolicy,
 }
 
 /// Service spec delivered by management port.
@@ -278,6 +301,8 @@ pub enum WlStatus {
     RetryBackoff,
     /// Max retries exhausted, terminal failure.
     Failed,
+    /// Job finished successfully, not relaunching.
+    Completed,
 }
 
 /// Timer key enum for workload-specific timers.
@@ -541,6 +566,7 @@ distvirt_sm_router::router! {
         DnsRegistry(DnsRegistryId),
         Artifact(ArtifactPortId),
         WireGuardPeer(auto),
+        Observability(ObservabilityId),
     }
     signals {
         // Service signals (slimmed down — activation logic moved to Endpoint)
@@ -609,6 +635,10 @@ distvirt_sm_router::router! {
         WorkloadDns: Workload -> DnsRegistry,
         WorkloadArtifactRef: Workload -> Artifact,
         ArtifactValidity: Artifact -> Workload,
+        // Observability edges
+        PodObservability: Pod -> Observability,
+        WorkloadObservability: Workload -> Observability,
+        EndpointObservability: Endpoint -> Observability,
     }
     events {
         AdminCommand(AdminCmd): Management -> Workload,
@@ -713,6 +743,27 @@ distvirt_sm_router::router! {
         Artifact::RefsInput {
             sources: [(WorkloadArtifactRef, Workload::ArtifactRef)],
             incremental_aggregator: ArtifactRefIncrementalAggregator,
+        },
+        // Observability inputs
+        Observability::PodStatusInput {
+            sources: [(PodObservability, Pod::Status)],
+            incremental_aggregator: PodStatusObsAggregator,
+        },
+        Observability::PodWorkerInput {
+            sources: [(PodObservability, Pod::AssignedWorker)],
+            incremental_aggregator: PodWorkerObsAggregator,
+        },
+        Observability::WorkloadStatusInput {
+            sources: [(WorkloadObservability, Workload::Status)],
+            incremental_aggregator: WorkloadStatusObsAggregator,
+        },
+        Observability::EndpointStatusInput {
+            sources: [(EndpointObservability, Endpoint::Status)],
+            incremental_aggregator: EndpointStatusObsAggregator,
+        },
+        Observability::EndpointIdleTimerInput {
+            sources: [(EndpointObservability, Endpoint::IdleTimerActive)],
+            incremental_aggregator: EndpointIdleTimerObsAggregator,
         },
     }
 }

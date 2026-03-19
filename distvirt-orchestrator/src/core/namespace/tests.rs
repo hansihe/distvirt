@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
 use crate::core::namespace_boundary::NamespaceWithBoundary;
+use crate::id_registry::IdRegistry;
 use crate::core::types::{NamespaceCoreEvent, NamespaceEffects, SchedulerMessage};
 use crate::core::{GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent, WorkerNamespaceEventKind};
 use crate::sm::{ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm};
@@ -38,7 +39,7 @@ const S1: crate::sm::ServiceId = crate::sm::ServiceId(1);
 
 /// Create a NamespaceWithBoundary with a pre-configured workload+service.
 fn create_configured_core() -> (NamespaceWithBoundary, GlobalWorkerId, crate::sm::PodId) {
-    let mut boundary = NamespaceWithBoundary::new(ns("test"), test_timer_config(), &test_network());
+    let mut boundary = NamespaceWithBoundary::new(ns("test"), test_timer_config(), &test_network(), IdRegistry::new());
 
     // Set up a workload with an always-on service to generate demand.
     // We need to access the router through the core — use the public accessor.
@@ -97,7 +98,7 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
 }
 
 fn create_empty_boundary() -> NamespaceWithBoundary {
-    NamespaceWithBoundary::new(ns("test"), test_timer_config(), &test_network())
+    NamespaceWithBoundary::new(ns("test"), test_timer_config(), &test_network(), IdRegistry::new())
 }
 
 /// Helper: connect a worker and confirm fabric creation.

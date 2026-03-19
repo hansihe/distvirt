@@ -226,6 +226,27 @@ dv splice <namespace> <workload> <worker-id>
 
 Runs in the foreground. Press Ctrl+C to unsplice.
 
+### `dv attach`
+
+Attach to the stdin/stdout/stderr of a running workload's entrypoint process. Runs in the foreground, forwarding I/O until detached.
+
+```
+dv attach <namespace>/<workload>
+```
+
+Detach with `Ctrl-P Ctrl-Q` (configurable via `--detach-keys`). Closing the terminal or pressing `Ctrl-C` sends the signal to the container process (same as Docker behavior).
+
+Whether the session is a TTY depends on the workload's container spec (`tty: true`), not a CLI flag — the PTY is allocated at process launch. The CLI automatically enters raw mode and forwards terminal resizes when the server reports a TTY session.
+
+```
+dv attach myapp/api                     # interactive attach
+dv attach myapp/api --detach-keys ctrl-] # custom detach sequence
+```
+
+Multiple clients can attach simultaneously — stdout/stderr are broadcast to all, stdin is delivered to one (last attach wins).
+
+**Implementation**: The guest-init agent holds the entrypoint's stdio file descriptors (PTY master FD or pipe FDs, depending on `tty` in the container spec) and multiplexes them over the host communication channel. The worker proxies streams between guest-init and the orchestrator. The orchestrator exposes a bidirectional gRPC streaming RPC (`AttachWorkload`) that the CLI connects to. The CLI sets the local terminal to raw mode and handles detach key detection.
+
 ### `dv clone`
 
 Clone a namespace. Creates a copy of the spec with all services set to activation-enabled (scale-to-zero). Everything starts dormant and activates on demand.
@@ -294,6 +315,7 @@ dv delete namespace myapp             # delete a namespace
 - `dv create` for resource types beyond namespaces
 - `dv describe` for pods, services, workloads
 - `dv delete` for resource types beyond namespaces
+- `dv exec <namespace>/<workload> -- <command>` — spawn a new process inside a running workload's container (requires guest-init process spawning support)
 - Directory-based namespace context (`.distvirt` file written by `dv up`, future commands in that directory default to the namespace)
 - `dv set` for inline spec mutations (`dv set myapp/api --image foo:latest`)
 - Worker management commands beyond `dv get workers`

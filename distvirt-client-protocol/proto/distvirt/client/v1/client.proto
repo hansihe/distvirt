@@ -18,6 +18,9 @@ service DistvirtClient {
     // Workload lifecycle hints
     rpc DeactivateWorkload(DeactivateWorkloadRequest) returns (DeactivateWorkloadResponse);
 
+    // Patch (partial update)
+    rpc PatchNamespace(PatchNamespaceRequest) returns (PatchNamespaceResponse);
+
     // Cloning
     rpc CloneNamespace(CloneNamespaceRequest) returns (CloneNamespaceResponse);
 
@@ -29,6 +32,9 @@ service DistvirtClient {
     // Developer network access
     rpc ConnectNetwork(ConnectNetworkRequest) returns (ConnectNetworkResponse);
     rpc DisconnectNetwork(DisconnectNetworkRequest) returns (DisconnectNetworkResponse);
+
+    // Workload I/O
+    rpc AttachWorkload(stream AttachWorkloadInput) returns (stream AttachWorkloadOutput);
 
     // Streaming subscriptions
     rpc WatchNamespaceStatus(WatchNamespaceStatusRequest) returns (stream NamespaceStatusEvent);
@@ -113,6 +119,7 @@ message ContainerConfig {
     string working_dir = 6;
     string user = 7;
     string hostname = 8;
+    bool tty = 9;              // allocate a PTY for the entrypoint at launch
 }
 
 message ServiceNetworkConfig {
@@ -271,6 +278,19 @@ message UnspliceRequest {
     string workload_id = 2;
 }
 message UnspliceResponse {}
+
+// --- Patch Namespace ---
+
+message PatchNamespaceRequest {
+    string namespace_id = 1;
+    // Upsert: create if absent, replace if present
+    map<string, WorkloadSpec> workloads = 2;
+    map<string, ServiceSpec> services = 3;
+    // Remove by name (ignored if absent)
+    repeated string remove_workloads = 4;
+    repeated string remove_services = 5;
+}
+message PatchNamespaceResponse {}
 
 // --- Deactivate Workload ---
 
@@ -502,11 +522,61 @@ enum ServiceDeactivationReason {
     SERVICE_DEACTIVATION_REASON_FORCE_DEACTIVATE = 2;
 }
 
+// --- Attach Workload ---
+
+message AttachWorkloadInput {
+    oneof input {
+        AttachStart start = 1;
+        AttachStdin stdin = 2;
+        AttachResize resize = 3;
+    }
+}
+
+message AttachStart {
+    string namespace_id = 1;
+    string workload_id = 2;
+}
+
+message AttachStdin {
+    bytes data = 1;
+}
+
+message AttachResize {
+    uint32 cols = 1;
+    uint32 rows = 2;
+}
+
+message AttachWorkloadOutput {
+    oneof output {
+        AttachStarted started = 1;
+        AttachStdout stdout = 2;
+        AttachStderr stderr = 3;
+        AttachExited exited = 4;
+    }
+}
+
+message AttachStarted {
+    bool tty = 1;              // whether the entrypoint is running with a PTY
+}
+
+message AttachStdout {
+    bytes data = 1;
+}
+
+message AttachStderr {
+    bytes data = 1;
+}
+
+message AttachExited {
+    int32 exit_code = 1;
+}
+
 // --- Streaming (Logs, Status Watch) ---
 
 message StreamLogsRequest {
     string namespace_id = 1;
     optional string workload_id = 2;
+    repeated string container_ids = 3;
 }
 
 message WatchNamespaceStatusRequest {
@@ -521,4 +591,5 @@ message LogChunk {
     string workload_id = 1;
     bytes data = 2;
     int64 timestamp_unix_ms = 3;
+    string container_id = 4;
 }

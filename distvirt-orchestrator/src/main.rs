@@ -41,14 +41,14 @@ async fn main() -> anyhow::Result<()> {
         suspend_timeout: std::time::Duration::from_secs(60),
         idle_timeout: std::time::Duration::from_secs(30),
     };
-    let (handle, shell_handle) =
+    let (handle, log_bus, event_bus, id_registry_map, shell_handle) =
         distvirt_orchestrator::shell::r#async::spawn(worker_secret, timer_config);
 
     // Start gRPC server.
     let grpc_addr = config.grpc.listen.parse()?;
     let grpc_handle = handle.clone();
     tokio::spawn(async move {
-        let svc = DistvirtClientService::new(grpc_handle);
+        let svc = DistvirtClientService::new(grpc_handle, log_bus, event_bus, id_registry_map);
         log::info!("gRPC server listening on {}", grpc_addr);
         let mut server = tonic::transport::Server::builder();
         let result = if let Some(secret) = client_secret {

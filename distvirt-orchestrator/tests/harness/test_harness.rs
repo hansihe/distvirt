@@ -84,6 +84,13 @@ impl TestHarness {
         self.shell.drain();
     }
 
+    pub fn patch_namespace(&mut self, ns_id: &str, patch: crate::harness::NamespacePatch) {
+        let namespace_id = NamespaceId::from(ns_id);
+        self.shell
+            .client_command(&namespace_id, ClientCommand::PatchSpec(patch));
+        self.shell.drain();
+    }
+
     pub fn delete_namespace(&mut self, ns_id: &str) {
         let namespace_id = NamespaceId::from(ns_id);
         self.shell.destroy_namespace(&namespace_id);
@@ -168,7 +175,9 @@ impl TestHarness {
         let wl = self.workload_state(ns_id, wl_name);
         let is_failed =
             wl.consecutive_failures >= wl.max_retries && (wl.has_demand || wl.committed_to_boot);
-        if is_failed {
+        if wl.completed {
+            WlStatus::Completed
+        } else if is_failed {
             WlStatus::Failed
         } else if wl.in_backoff {
             WlStatus::RetryBackoff

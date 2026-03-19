@@ -2,6 +2,7 @@ pub mod assertions;
 pub mod spec_builders;
 pub mod test_harness;
 
+pub use distvirt_orchestrator::types::NamespacePatch;
 pub use spec_builders::*;
 pub use test_harness::TestHarness;
 

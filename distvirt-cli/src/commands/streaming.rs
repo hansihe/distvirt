@@ -13,6 +13,7 @@ pub async fn logs(
         .stream_logs(StreamLogsRequest {
             namespace_id: namespace_id.to_string(),
             workload_id: workload.map(|w| w.to_string()),
+            container_ids: vec![],
         })
         .await
         .map_err(client::handle_grpc_error)?

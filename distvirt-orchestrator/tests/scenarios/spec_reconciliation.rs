@@ -104,6 +104,7 @@ fn test_add_workload_to_existing_namespace() {
             suspend_on_idle: false,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
     new_spec.services.insert(

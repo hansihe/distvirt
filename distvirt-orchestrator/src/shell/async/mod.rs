@@ -28,6 +28,9 @@ use crate::core::types::{
 };
 use crate::core::worker_state::WorkerTunnelInfo;
 use crate::core::{ClientError, ConnectResult, GlobalWorkerId, WorkerWriterHandle};
+use crate::event_bus::EventBusHandle;
+use crate::id_registry::IdRegistryMap;
+use crate::log_bus::LogBusHandle;
 use crate::types::{NamespaceId, NamespaceSpec};
 
 // =============================================================================
@@ -67,6 +70,11 @@ enum ShellCommand {
     UpdateNamespace {
         namespace_id: NamespaceId,
         spec: NamespaceSpec,
+        response: oneshot::Sender<Result<(), ClientError>>,
+    },
+    PatchNamespace {
+        namespace_id: NamespaceId,
+        patch: crate::types::NamespacePatch,
         response: oneshot::Sender<Result<(), ClientError>>,
     },
     GetNamespaceStatus {
@@ -166,6 +174,23 @@ impl ShellHandle {
             .send(ShellEvent::Command(ShellCommand::UpdateNamespace {
                 namespace_id,
                 spec,
+                response: tx,
+            }))
+            .await;
+        rx.await.unwrap_or(Err(ClientError::ShellGone))
+    }
+
+    pub async fn patch_namespace(
+        &self,
+        namespace_id: NamespaceId,
+        patch: crate::types::NamespacePatch,
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ShellEvent::Command(ShellCommand::PatchNamespace {
+                namespace_id,
+                patch,
                 response: tx,
             }))
             .await;
@@ -340,6 +365,9 @@ struct Shell {
     worker_secret: String,
 
     activity: Arc<AtomicU64>,
+
+    log_bus: LogBusHandle,
+    event_bus: EventBusHandle,
 }
 
 impl Shell {
@@ -414,6 +442,15 @@ impl Shell {
                     response,
                 } => {
                     let (result, effects) = self.orchestrator.update_namespace(&namespace_id, spec, now);
+                    self.execute_effects(effects).await;
+                    let _ = response.send(result);
+                }
+                ShellCommand::PatchNamespace {
+                    namespace_id,
+                    patch,
+                    response,
+                } => {
+                    let (result, effects) = self.orchestrator.patch_namespace(&namespace_id, patch, now);
                     self.execute_effects(effects).await;
                     let _ = response.send(result);
                 }
@@ -568,7 +605,10 @@ impl Shell {
         };
 
         // Split connection into reader/writer.
-        let (reader, writer, _log_rx, driver) = conn.into_split();
+        let (reader, writer, log_rx, driver) = conn.into_split();
+
+        // Spawn log stream ingest task.
+        spawn_log_ingest(log_rx, self.log_bus.clone());
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<distvirt_worker_protocol::WorkerCommand>(256);
         let writer_handle = tokio::spawn(worker_writer::run(cmd_rx, writer));
@@ -637,7 +677,53 @@ impl Shell {
                 slot.writer.send(cmd.clone()).await;
             }
         }
+
+        // Publish observability events to the event bus.
+        for (namespace_id, events) in effects.observability_events {
+            self.event_bus.publish(&namespace_id, events);
+        }
     }
+}
+
+/// Spawn a task that accepts worker log streams and publishes to the LogBus.
+fn spawn_log_ingest(
+    mut log_rx: mpsc::UnboundedReceiver<::yamux::Stream>,
+    log_bus: LogBusHandle,
+) {
+    tokio::spawn(async move {
+        while let Some(mut stream) = log_rx.recv().await {
+            let header: distvirt_worker_protocol::LogStreamHeader = match distvirt_worker_protocol::codec::recv_log_header(&mut stream).await {
+                Ok(h) => h,
+                Err(e) => {
+                    log::warn!("failed to read log stream header: {:#}", e);
+                    continue;
+                }
+            };
+            let bus = log_bus.clone();
+            tokio::spawn(async move {
+                use futures_lite::io::AsyncReadExt;
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            bus.publish(crate::log_bus::LogChunk {
+                                namespace_id: header.namespace_id.clone(),
+                                pod_id: header.pod_id.clone(),
+                                container_id: header.container_id.clone(),
+                                data: buf[..n].to_vec(),
+                                timestamp: std::time::Instant::now(),
+                            });
+                        }
+                        Err(e) => {
+                            log::debug!("log stream read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -648,16 +734,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-/// Spawn the new async shell. Returns (handle, join_handle).
+/// Spawn the new async shell. Returns (handle, log_bus, event_bus, id_registry_map, join_handle).
 pub fn spawn(
     worker_secret: String,
     timer_config: TimerConfig,
-) -> (ShellHandle, JoinHandle<()>) {
+) -> (ShellHandle, LogBusHandle, EventBusHandle, IdRegistryMap, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(256);
     let activity = Arc::new(AtomicU64::new(0));
+    let log_bus = LogBusHandle::new(256 * 1024); // 256 KiB per topic
+    let event_bus = EventBusHandle::new(1024); // 1024 events per namespace
+    let id_registry_map = IdRegistryMap::new();
 
     let shell = Shell {
-        orchestrator: OrchestratorCore::new(timer_config),
+        orchestrator: OrchestratorCore::new(timer_config, id_registry_map.clone()),
         next_worker_id: 0,
         workers: HashMap::new(),
         start: Instant::now(),
@@ -665,8 +754,10 @@ pub fn spawn(
         self_tx: tx.clone(),
         worker_secret,
         activity: activity.clone(),
+        log_bus: log_bus.clone(),
+        event_bus: event_bus.clone(),
     };
 
     let handle = tokio::spawn(shell.run());
-    (ShellHandle { tx, activity }, handle)
+    (ShellHandle { tx, activity }, log_bus, event_bus, id_registry_map, handle)
 }

@@ -220,7 +220,11 @@ pub fn print_event_line(event: &NamespaceEvent) {
 pub fn print_log_chunk(chunk: &LogChunk) {
     let text = String::from_utf8_lossy(&chunk.data);
     for line in text.lines() {
-        println!("[{}] {}", chunk.workload_id, line);
+        if chunk.container_id.is_empty() {
+            println!("[{}] {}", chunk.workload_id, line);
+        } else {
+            println!("[{}/{}] {}", chunk.workload_id, chunk.container_id, line);
+        }
     }
 }
 

@@ -7,10 +7,13 @@ use distvirt_client_protocol::proto;
 use distvirt_client_protocol::proto::distvirt_client_server::DistvirtClient;
 
 use crate::core::ClientError;
+use crate::event_bus::EventBusHandle;
+use crate::id_registry::IdRegistryMap;
+use crate::log_bus::LogBusHandle;
 use crate::shell::r#async::ShellHandle;
 use crate::types::NamespaceId;
 
-use conversions::{convert_pod_status_report, convert_proto_spec, convert_status_report, convert_worker_query_info};
+use conversions::{convert_pod_status_report, convert_proto_patch, convert_proto_spec, convert_status_report, convert_worker_query_info};
 
 fn client_error_to_status(err: ClientError) -> Status {
     match err {
@@ -39,11 +42,24 @@ pub fn check_client_auth(req: Request<()>, secret: &str) -> Result<Request<()>, 
 
 pub struct DistvirtClientService {
     handle: ShellHandle,
+    log_bus: LogBusHandle,
+    event_bus: EventBusHandle,
+    id_registry_map: IdRegistryMap,
 }
 
 impl DistvirtClientService {
-    pub fn new(handle: ShellHandle) -> Self {
-        DistvirtClientService { handle }
+    pub fn new(
+        handle: ShellHandle,
+        log_bus: LogBusHandle,
+        event_bus: EventBusHandle,
+        id_registry_map: IdRegistryMap,
+    ) -> Self {
+        DistvirtClientService {
+            handle,
+            log_bus,
+            event_bus,
+            id_registry_map,
+        }
     }
 }
 
@@ -87,6 +103,20 @@ impl DistvirtClient for DistvirtClientService {
             .await
             .map_err(client_error_to_status)?;
         Ok(Response::new(proto::UpdateNamespaceResponse {}))
+    }
+
+    async fn patch_namespace(
+        &self,
+        request: Request<proto::PatchNamespaceRequest>,
+    ) -> Result<Response<proto::PatchNamespaceResponse>, Status> {
+        let req = request.into_inner();
+        let ns_id = NamespaceId(req.namespace_id.clone());
+        let patch = convert_proto_patch(req)?;
+        self.handle
+            .patch_namespace(ns_id, patch)
+            .await
+            .map_err(client_error_to_status)?;
+        Ok(Response::new(proto::PatchNamespaceResponse {}))
     }
 
     async fn delete_namespace(
@@ -230,11 +260,60 @@ impl DistvirtClient for DistvirtClientService {
 
     async fn stream_logs(
         &self,
-        _request: Request<proto::StreamLogsRequest>,
+        request: Request<proto::StreamLogsRequest>,
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
-        Err(Status::unimplemented(
-            "StreamLogs not yet implemented in new core",
-        ))
+        let req = request.into_inner();
+        let namespace_id = NamespaceId(req.namespace_id);
+
+        // Resolve workload_id → pod_id(s) if a filter was provided.
+        let pod_filter = if let Some(ref workload_id) = req.workload_id {
+            let pods = self
+                .handle
+                .list_pods(namespace_id.clone())
+                .await
+                .map_err(client_error_to_status)?;
+            let pod_ids: Vec<distvirt_worker_protocol::PodId> = pods
+                .into_iter()
+                .filter(|p| p.workload_id.0 == *workload_id)
+                .map(|p| p.pod_id)
+                .collect();
+            Some(pod_ids)
+        } else {
+            None
+        };
+
+        let container_filter = if req.container_ids.is_empty() {
+            None
+        } else {
+            Some(req.container_ids)
+        };
+
+        let (historical, mut live_rx) = self.log_bus.subscribe(
+            &namespace_id,
+            pod_filter.as_deref(),
+            container_filter.as_deref(),
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+
+        tokio::spawn(async move {
+            // Send historical chunks first.
+            for chunk in historical {
+                let proto_chunk = conversions::convert_log_chunk(chunk);
+                if tx.send(Ok(proto_chunk)).await.is_err() {
+                    return;
+                }
+            }
+            // Then stream live chunks.
+            while let Some(chunk) = live_rx.recv().await {
+                let proto_chunk = conversions::convert_log_chunk(chunk);
+                if tx.send(Ok(proto_chunk)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn connect_network(
@@ -287,10 +366,54 @@ impl DistvirtClient for DistvirtClientService {
 
     async fn stream_events(
         &self,
-        _request: Request<proto::StreamEventsRequest>,
+        request: Request<proto::StreamEventsRequest>,
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
+        let req = request.into_inner();
+        let namespace_id = NamespaceId(req.namespace_id);
+
+        let registry = self
+            .id_registry_map
+            .get(&namespace_id)
+            .ok_or_else(|| Status::not_found("namespace not found"))?;
+
+        let (historical, mut live_rx) = self.event_bus.subscribe(&namespace_id);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+
+        tokio::spawn(async move {
+            // Send historical events first.
+            for event in &historical {
+                let proto_events =
+                    conversions::convert_observability_event(event, &registry);
+                for proto_event in proto_events {
+                    if tx.send(Ok(proto_event)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            // Then stream live events.
+            while let Some(event) = live_rx.recv().await {
+                let proto_events =
+                    conversions::convert_observability_event(&event, &registry);
+                for proto_event in proto_events {
+                    if tx.send(Ok(proto_event)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    type AttachWorkloadStream = ReceiverStream<Result<proto::AttachWorkloadOutput, Status>>;
+
+    async fn attach_workload(
+        &self,
+        _request: Request<tonic::Streaming<proto::AttachWorkloadInput>>,
+    ) -> Result<Response<Self::AttachWorkloadStream>, Status> {
         Err(Status::unimplemented(
-            "StreamEvents not yet implemented in new core",
+            "AttachWorkload not yet implemented",
         ))
     }
 }

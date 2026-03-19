@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::id_registry::IdRegistry;
 use crate::sm::{
     AdminCmd, DRouter, ManagementId, ServiceSm, ServiceSpec as SmServiceSpec, WorkloadId,
     WorkloadSm, WorkloadSpec as SmWorkloadSpec,
@@ -27,10 +28,13 @@ pub struct ManagementAdapter {
     workload_mgmt: HashMap<WorkloadId, ManagementId>,
     /// Management port per service
     service_mgmt: HashMap<crate::sm::ServiceId, ManagementId>,
+
+    /// Shared ID registry for external consumers.
+    id_registry: IdRegistry,
 }
 
 impl ManagementAdapter {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(id_registry: IdRegistry) -> Self {
         ManagementAdapter {
             next_workload_id: 1,
             next_service_id: 1,
@@ -40,6 +44,7 @@ impl ManagementAdapter {
             router_to_proto_svc: HashMap::new(),
             workload_mgmt: HashMap::new(),
             service_mgmt: HashMap::new(),
+            id_registry,
         }
     }
 
@@ -78,6 +83,7 @@ impl ManagementAdapter {
                 self.proto_to_router_wl.insert(name_str.clone(), router_id);
                 self.router_to_proto_wl.insert(router_id, name_str.clone());
                 self.workload_mgmt.insert(router_id, mgmt_id);
+                self.id_registry.register_workload(router_id, name_str.clone());
             }
         }
 
@@ -87,6 +93,7 @@ impl ManagementAdapter {
             if !new.workloads.contains_key(name) {
                 if let Some(router_id) = self.proto_to_router_wl.remove(name_str) {
                     self.router_to_proto_wl.remove(&router_id);
+                    self.id_registry.unregister_workload(&router_id);
                     if let Some(mgmt_id) = self.workload_mgmt.remove(&router_id) {
                         // Destroying the management port removes the spec signal,
                         // which causes the WorkloadSm to self-destruct.
@@ -121,6 +128,7 @@ impl ManagementAdapter {
                 self.router_to_proto_svc
                     .insert(router_id, name_str.to_owned());
                 self.service_mgmt.insert(router_id, mgmt_id);
+                self.id_registry.register_service(router_id, name_str.to_owned());
             }
         }
 
@@ -130,6 +138,7 @@ impl ManagementAdapter {
             if !new.services.contains_key(name) {
                 if let Some(router_id) = self.proto_to_router_svc.remove(name_str) {
                     self.router_to_proto_svc.remove(&router_id);
+                    self.id_registry.unregister_service(&router_id);
                     if let Some(mgmt_id) = self.service_mgmt.remove(&router_id) {
                         router.destroy_management(mgmt_id);
                     }
@@ -197,6 +206,28 @@ impl ManagementAdapter {
         }
     }
 
+    /// Update the ID registry with dynamic endpoint→service and pod→workload mappings.
+    /// Called after each reconcile cycle once the router has converged.
+    pub(crate) fn sync_dynamic_ids(&self, router: &DRouter) {
+        // Service → Endpoint: each ServiceSm stores its endpoint_id.
+        for (_name, &svc_id) in &self.proto_to_router_svc {
+            if let Some(svc_sm) = router.get_service(&svc_id) {
+                if let Some(ep_id) = svc_sm.endpoint_id {
+                    self.id_registry.register_endpoint(ep_id, svc_id);
+                }
+            }
+        }
+
+        // Workload → Pod: each WorkloadSm stores its pod_id.
+        for (_name, &wl_id) in &self.proto_to_router_wl {
+            if let Some(wl_sm) = router.get_workload(&wl_id) {
+                if let Some(pod_id) = wl_sm.pod_id {
+                    self.id_registry.register_pod(pod_id, wl_id);
+                }
+            }
+        }
+    }
+
     pub(crate) fn to_sm_workload_spec(spec: &crate::types::WorkloadSpec) -> SmWorkloadSpec {
         SmWorkloadSpec {
             image: spec
@@ -223,6 +254,10 @@ impl ManagementAdapter {
                     }),
                 }
             }),
+            run_policy: match spec.run_policy {
+                crate::types::RunPolicy::Service => crate::sm::RunPolicy::Service,
+                crate::types::RunPolicy::Job => crate::sm::RunPolicy::Job,
+            },
         }
     }
 

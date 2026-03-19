@@ -25,6 +25,16 @@ pub struct ResourceRequirements {
     pub limits: Option<ResourceValues>,
 }
 
+/// Whether a workload runs as a long-lived service or a run-to-completion job.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum RunPolicy {
+    /// Service: restart on completion, always try to maintain a running pod.
+    #[default]
+    Service,
+    /// Job: run once to completion (exit 0 = done, non-zero = retry with backoff).
+    Job,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub containers: Vec<ContainerSpec>,
@@ -40,6 +50,9 @@ pub struct WorkloadSpec {
     /// If None, workload is always-on (starts immediately).
     #[serde(default)]
     pub activation: Option<WorkloadActivationSpec>,
+    /// Whether this workload runs as a service or a job.
+    #[serde(default)]
+    pub run_policy: RunPolicy,
 }
 
 /// Workload-level activation configuration. Only passthrough is valid.
@@ -59,4 +72,17 @@ pub struct ServiceSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActivationSpec {
     pub idle_timeout: Duration,
+}
+
+/// Partial update to a namespace spec: upsert and/or remove individual resources.
+#[derive(Debug, Clone)]
+pub struct NamespacePatch {
+    /// Workloads to create or replace.
+    pub workloads: BTreeMap<WorkloadName, WorkloadSpec>,
+    /// Services to create or replace.
+    pub services: BTreeMap<String, ServiceSpec>,
+    /// Workloads to remove by name.
+    pub remove_workloads: Vec<WorkloadName>,
+    /// Services to remove by name.
+    pub remove_services: Vec<String>,
 }

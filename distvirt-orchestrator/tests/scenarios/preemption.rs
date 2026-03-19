@@ -22,6 +22,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: true,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
     workloads.insert(
@@ -32,6 +33,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: true,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 

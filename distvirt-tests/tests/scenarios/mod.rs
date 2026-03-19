@@ -6,6 +6,7 @@ mod flow_tracking;
 mod known_bugs;
 mod multi_service;
 mod multi_worker;
+mod observability_events;
 mod pod_lifecycle;
 mod pressure;
 mod retry_backoff;

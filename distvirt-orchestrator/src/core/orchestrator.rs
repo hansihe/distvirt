@@ -25,6 +25,7 @@ use super::types::{
 use super::worker_state::WorkerStateCore;
 use crate::adapter::timer::TimerConfig;
 use crate::core::{ClientCommand, ClientError, GlobalWorkerId, SchedulerDecision};
+use crate::id_registry::IdRegistryMap;
 use crate::sm::{ArtifactPortId, WorkerInfo};
 use crate::types::{NamespaceId, NamespaceSpec};
 
@@ -45,6 +46,9 @@ pub struct OrchestratorCore {
     namespace_segments: HashMap<NamespaceId, u16>,
     /// Namespace → network config (for sending CreateNamespace to new workers).
     namespace_networks: HashMap<NamespaceId, distvirt_worker_protocol::NetworkConfig>,
+
+    /// Shared per-namespace ID registries.
+    id_registry_map: IdRegistryMap,
 }
 
 struct ConnectedWorkerInfo {
@@ -54,7 +58,7 @@ struct ConnectedWorkerInfo {
 }
 
 impl OrchestratorCore {
-    pub fn new(timer_config: TimerConfig) -> Self {
+    pub fn new(timer_config: TimerConfig, id_registry_map: IdRegistryMap) -> Self {
         OrchestratorCore {
             namespaces: HashMap::new(),
             scheduler: SchedulerCore::new(),
@@ -66,6 +70,7 @@ impl OrchestratorCore {
             active_segment_ids: BTreeSet::new(),
             namespace_segments: HashMap::new(),
             namespace_networks: HashMap::new(),
+            id_registry_map,
         }
     }
 
@@ -96,7 +101,8 @@ impl OrchestratorCore {
             }
             OrchestratorInput::CreateNamespace { namespace_id, network } => {
                 if !self.namespaces.contains_key(&namespace_id) {
-                    let ns = NamespaceWithBoundary::new(namespace_id.clone(), self.timer_config.clone(), &network);
+                    let registry = self.id_registry_map.get_or_create(&namespace_id);
+                    let ns = NamespaceWithBoundary::new(namespace_id.clone(), self.timer_config.clone(), &network, registry);
                     self.namespaces.insert(namespace_id, ns);
                 }
             }
@@ -291,7 +297,8 @@ impl OrchestratorCore {
                 });
         self.route_worker_state_effects(ws_effects, &mut effects, now);
 
-        let ns = NamespaceWithBoundary::new(info.namespace_id.clone(), self.timer_config.clone(), &network);
+        let registry = self.id_registry_map.get_or_create(&info.namespace_id);
+        let ns = NamespaceWithBoundary::new(info.namespace_id.clone(), self.timer_config.clone(), &network, registry);
         self.namespaces.insert(info.namespace_id.clone(), ns);
 
         let workers: Vec<_> = self
@@ -383,6 +390,26 @@ impl OrchestratorCore {
         };
         let ns_effects = ns.process_event(NamespaceCoreEvent::ClientCommand(
             ClientCommand::UpdateSpec(spec),
+        ));
+        let mut effects = OrchestratorEffects::default();
+        self.route_namespace_effects(namespace_id, ns_effects, &mut effects, now);
+        (Ok(()), effects)
+    }
+
+    /// Partially update a namespace's spec (upsert/remove individual resources).
+    ///
+    /// Routes `ClientCommand::PatchSpec` to the target namespace.
+    pub fn patch_namespace(
+        &mut self,
+        namespace_id: &NamespaceId,
+        patch: crate::types::NamespacePatch,
+        now: Duration,
+    ) -> (Result<(), ClientError>, OrchestratorEffects) {
+        let Some(ns) = self.namespaces.get_mut(namespace_id) else {
+            return (Err(ClientError::NamespaceNotFound), OrchestratorEffects::default());
+        };
+        let ns_effects = ns.process_event(NamespaceCoreEvent::ClientCommand(
+            ClientCommand::PatchSpec(patch),
         ));
         let mut effects = OrchestratorEffects::default();
         self.route_namespace_effects(namespace_id, ns_effects, &mut effects, now);
@@ -488,6 +515,12 @@ impl OrchestratorCore {
 
         for cmd in ns_effects.broadcast_commands {
             effects.broadcast_commands.push((namespace_id.clone(), cmd));
+        }
+
+        if !ns_effects.observability_events.is_empty() {
+            effects
+                .observability_events
+                .push((namespace_id.clone(), ns_effects.observability_events));
         }
 
         for msg in ns_effects.scheduler_messages {

@@ -75,7 +75,6 @@ pub struct NamespaceOutput {
     pub timers_cancel: Vec<TimerKey>,
     pub pod_requests: Vec<PodRequest>,
     pub resume_requests: Vec<ResumeRequest>,
-    pub events: Vec<SmNamespaceEvent>,
     pub destroyed: bool,
 }
 

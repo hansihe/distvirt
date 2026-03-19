@@ -68,6 +68,9 @@ struct WlNewModel {
     /// When true, the model can deliver specs with suspend_on_idle=true and
     /// toggle it at runtime via ToggleSuspendOnIdle action.
     enable_suspend: bool,
+    /// Whether to enable job run policy toggling.
+    /// When true, the model can toggle between Service and Job run policies.
+    enable_job: bool,
 }
 
 // ============================================================================
@@ -98,6 +101,8 @@ struct WlNewModelState {
     artifact_env_confirmed: bool,
     /// Whether a pod was ever created with resume_artifact (for reachability).
     ever_resumed: bool,
+    /// Whether the SM was ever in the completed state (for reachability).
+    was_ever_completed: bool,
 }
 
 // ============================================================================
@@ -140,6 +145,8 @@ enum WlNewAction {
     AdminRestart,
     /// Admin scavenge command.
     AdminScavenge,
+    /// Toggle run policy between Service and Job.
+    ToggleRunPolicy,
 }
 
 // ============================================================================
@@ -274,6 +281,7 @@ impl Model for WlNewModel {
             artifact_port_exists: false,
             artifact_env_confirmed: false,
             ever_resumed: false,
+            was_ever_completed: false,
         }]
     }
 
@@ -311,6 +319,11 @@ impl Model for WlNewModel {
             // Toggle suspend_on_idle via spec change.
             if self.enable_suspend {
                 actions.push(WlNewAction::ToggleSuspendOnIdle);
+            }
+
+            // Toggle run policy via spec change.
+            if self.enable_job {
+                actions.push(WlNewAction::ToggleRunPolicy);
             }
         }
 
@@ -499,6 +512,19 @@ impl Model for WlNewModel {
             WlNewAction::AdminScavenge => {
                 apply_input(state, WorkloadInput::AdminCommand(AdminCmd::Scavenge))
             }
+            WlNewAction::ToggleRunPolicy => {
+                let current_image = state.sm.current_image.clone().unwrap_or_default();
+                let new_policy = match state.sm.run_policy {
+                    RunPolicy::Service => RunPolicy::Job,
+                    RunPolicy::Job => RunPolicy::Service,
+                };
+                let mut spec = make_spec(&current_image, state.sm.suspend_on_idle);
+                spec.run_policy = new_policy;
+                apply_input(
+                    state,
+                    WorkloadInput::SpecInput(Some((ManagementId(0), spec))),
+                )
+            }
         };
 
         // Sync pod_env with SM's view after effect processing:
@@ -507,6 +533,11 @@ impl Model for WlNewModel {
             if let PodEnvState::Pending { pod_id } = next.pod_env {
                 next.pod_env = PodEnvState::Running { pod_id };
             }
+        }
+
+        // Track if completed was ever reached.
+        if next.sm.completed {
+            next.was_ever_completed = true;
         }
 
         // If SM cleared pod_id, clear env too (safety net).
@@ -722,6 +753,64 @@ impl Model for WlNewModel {
             ));
         }
 
+        // Safety: completed implies quiescent (no pod, no backoff).
+        props.push(Property::<Self>::always(
+            "completed implies quiescent",
+            |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.sm.completed {
+                    state.sm.pod_id.is_none() && !state.sm.in_backoff
+                } else {
+                    true
+                }
+            },
+        ));
+
+        // Safety: no pod while completed.
+        props.push(Property::<Self>::always(
+            "no pod while completed",
+            |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.sm.completed {
+                    state.sm.pod_id.is_none()
+                } else {
+                    true
+                }
+            },
+        ));
+
+        // Safety: completed implies job policy.
+        props.push(Property::<Self>::always(
+            "completed implies job policy",
+            |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                if state.sm.completed {
+                    state.sm.run_policy == RunPolicy::Job
+                } else {
+                    true
+                }
+            },
+        ));
+
+        // Reachability: can reach completed (only with job enabled).
+        if self.enable_job {
+            props.push(Property::<Self>::sometimes(
+                "can reach completed",
+                |_model, state| state.sm.completed,
+            ));
+            // Reachability: can run again after completed (demand cycle re-enables).
+            props.push(Property::<Self>::sometimes(
+                "can run again after completed",
+                |_model, state| state.was_ever_completed && state.sm.pod_running,
+            ));
+        }
+
         // Reachability: can reach suspended state (only with suspend enabled).
         if self.enable_suspend {
             props.push(Property::<Self>::sometimes(
@@ -829,6 +918,7 @@ fn workload_new_basic() {
         num_services: 1,
         enable_pod_failure: false,
         enable_suspend: false,
+        enable_job: false,
     }
     .checker()
     .symmetry()
@@ -848,6 +938,7 @@ fn workload_new_two_services() {
         num_services: 2,
         enable_pod_failure: false,
         enable_suspend: false,
+        enable_job: false,
     }
     .checker()
     .symmetry()
@@ -867,6 +958,7 @@ fn workload_new_with_pod_failure() {
         num_services: 1,
         enable_pod_failure: true,
         enable_suspend: false,
+        enable_job: false,
     }
     .checker()
     .symmetry()
@@ -886,6 +978,7 @@ fn workload_new_suspend_basic() {
         num_services: 1,
         enable_pod_failure: false,
         enable_suspend: true,
+        enable_job: false,
     }
     .checker()
     .symmetry()
@@ -905,6 +998,7 @@ fn workload_new_suspend_with_failures() {
         num_services: 1,
         enable_pod_failure: true,
         enable_suspend: true,
+        enable_job: false,
     }
     .checker()
     .symmetry()
@@ -927,6 +1021,7 @@ fn workload_new_kitchen_sink() {
         num_services: 2,
         enable_pod_failure: true,
         enable_suspend: true,
+        enable_job: false,
     }
     .checker()
     .symmetry()
@@ -936,6 +1031,66 @@ fn workload_new_kitchen_sink() {
     result.assert_properties();
     eprintln!(
         "Workload new (kitchen sink): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_job_basic() {
+    let result = WlNewModel {
+        num_services: 1,
+        enable_pod_failure: false,
+        enable_suspend: false,
+        enable_job: true,
+    }
+    .checker()
+    .symmetry()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    eprintln!(
+        "Workload job (basic): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_job_with_failures() {
+    let result = WlNewModel {
+        num_services: 1,
+        enable_pod_failure: true,
+        enable_suspend: false,
+        enable_job: true,
+    }
+    .checker()
+    .symmetry()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    eprintln!(
+        "Workload job (with failures): {} unique states",
+        result.unique_state_count()
+    );
+}
+
+#[test]
+fn workload_job_kitchen_sink() {
+    let result = WlNewModel {
+        num_services: 2,
+        enable_pod_failure: true,
+        enable_suspend: true,
+        enable_job: true,
+    }
+    .checker()
+    .symmetry()
+    .spawn_dfs()
+    .join();
+
+    result.assert_properties();
+    eprintln!(
+        "Workload job (kitchen sink): {} unique states",
         result.unique_state_count()
     );
 }

@@ -255,6 +255,7 @@ impl<C: EndpointCtx> SmHandler<C> for EndpointSm {
         ctx.set_endpoint_timers_edges(vec![TIMER]);
         ctx.set_endpoint_fabric_endpoints_edges(vec![FABRIC_ENDPOINT]);
         ctx.set_endpoint_dns_edges(vec![DNS_REGISTRY]);
+        ctx.set_endpoint_observability_edges(vec![OBSERVABILITY]);
         self.derive_state();
         ctx.set_demand(self.compute_demand());
         self.update_status_signals(ctx);

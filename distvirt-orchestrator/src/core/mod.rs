@@ -130,6 +130,8 @@ pub enum WorkerNamespaceEventKind {
 pub enum ClientCommand {
     /// Apply a new namespace spec (creates/updates/removes workloads and services).
     UpdateSpec(NamespaceSpec),
+    /// Partially update a namespace spec (upsert/remove individual resources).
+    PatchSpec(crate::types::NamespacePatch),
     /// Restart a workload by protocol name.
     AdminRestart { workload_name: String },
     /// Scavenge a workload by protocol name.

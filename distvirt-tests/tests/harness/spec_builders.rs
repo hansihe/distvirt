@@ -56,6 +56,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             suspend_on_idle: false,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 
@@ -94,6 +95,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: true,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 
@@ -132,6 +134,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: false,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 
@@ -170,6 +173,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             suspend_on_idle: false,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
     workloads.insert(
@@ -180,6 +184,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             suspend_on_idle: false,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 
@@ -231,6 +236,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: true,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
     workloads.insert(
@@ -241,6 +247,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: true,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 
@@ -291,6 +298,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             suspend_on_idle: true,
             resources: None,
             activation: None,
+            run_policy: Default::default(),
         },
     );
 

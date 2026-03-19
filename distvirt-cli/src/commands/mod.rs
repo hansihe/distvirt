@@ -1,3 +1,4 @@
+pub mod attach;
 pub mod auth;
 pub mod connect;
 pub mod namespace;

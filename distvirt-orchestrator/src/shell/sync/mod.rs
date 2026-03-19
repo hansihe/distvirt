@@ -24,6 +24,8 @@ use std::time::Duration;
 use crate::adapter::timer::TimerConfig;
 use crate::core::namespace_boundary::NamespaceWithBoundary;
 use crate::core::orchestrator::OrchestratorCore;
+use crate::event_bus::EventBusHandle;
+use crate::id_registry::IdRegistryMap;
 use crate::core::types::{
     CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
     WorkerConnectedInfo, WorkerStateCoreEvent,
@@ -334,18 +336,35 @@ pub struct SyncShell {
     next_worker_id: u64,
     /// Pending events to process.
     pending: VecDeque<OrchestratorInput>,
+    /// Observability event bus (same as async shell — tests can subscribe).
+    event_bus: EventBusHandle,
+    /// Shared ID registries.
+    id_registry_map: IdRegistryMap,
 }
 
 impl SyncShell {
     /// Create a new sync shell with the given timer config.
     pub fn new(timer_config: TimerConfig) -> Self {
+        let id_registry_map = IdRegistryMap::new();
         SyncShell {
-            core: OrchestratorCore::new(timer_config),
+            core: OrchestratorCore::new(timer_config, id_registry_map.clone()),
             now: Duration::ZERO,
             workers: HashMap::new(),
             next_worker_id: 1,
             pending: VecDeque::new(),
+            event_bus: EventBusHandle::new(1024),
+            id_registry_map,
         }
+    }
+
+    /// Access the event bus for subscribing to observability events.
+    pub fn event_bus(&self) -> &EventBusHandle {
+        &self.event_bus
+    }
+
+    /// Access the shared ID registry map.
+    pub fn id_registry_map(&self) -> &IdRegistryMap {
+        &self.id_registry_map
     }
 
     /// Register a worker with default config.
@@ -563,6 +582,11 @@ impl SyncShell {
             if let Some(state) = self.workers.get_mut(&dwc.worker_id) {
                 state.commands_sent.push(dwc.command);
             }
+        }
+
+        // Publish observability events to the event bus.
+        for (namespace_id, events) in effects.observability_events {
+            self.event_bus.publish(&namespace_id, events);
         }
     }
 

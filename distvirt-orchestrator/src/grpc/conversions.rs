@@ -128,6 +128,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         suspend_on_idle: wl.suspend_on_idle,
         resources,
         activation,
+        run_policy: Default::default(),
     })
 }
 
@@ -259,6 +260,29 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
         ip,
         policy,
         activation,
+    })
+}
+
+// --- Proto -> Internal conversions (patch) ---
+
+pub(super) fn convert_proto_patch(
+    req: proto::PatchNamespaceRequest,
+) -> Result<crate::types::NamespacePatch, Status> {
+    let mut workloads = BTreeMap::new();
+    for (name, wl) in req.workloads {
+        workloads.insert(WorkloadName(name), convert_proto_workload_spec(wl)?);
+    }
+
+    let mut services = BTreeMap::new();
+    for (name, svc) in req.services {
+        services.insert(name, convert_proto_service_spec(svc)?);
+    }
+
+    Ok(crate::types::NamespacePatch {
+        workloads,
+        services,
+        remove_workloads: req.remove_workloads.into_iter().map(WorkloadName).collect(),
+        remove_services: req.remove_services,
     })
 }
 
@@ -442,143 +466,278 @@ fn convert_backend_need(need: &Option<BackendNeed>) -> i32 {
     }
 }
 
-// --- SM Event -> Proto Event conversion ---
+// --- LogChunk -> Proto conversion ---
 
-pub(super) fn convert_sm_event_to_proto(event: SmNamespaceEvent) -> proto::NamespaceEvent {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    match event {
-        SmNamespaceEvent::Workload {
-            workload_id,
-            event: wl_event,
-        } => {
-            let inner = match wl_event {
-                SmWorkloadEvent::DemandChanged { demanding_services } => {
-                    proto::workload_event::Event::DemandChanged(proto::WorkloadDemandChanged {
-                        demanding_services,
-                    })
-                }
-                SmWorkloadEvent::PodLaunching { pod_id, worker_id } => {
-                    proto::workload_event::Event::PodLaunching(proto::WorkloadPodLaunching {
-                        pod_id: pod_id.0.to_string(),
-                        worker_id: worker_id.0.to_string(),
-                    })
-                }
-                SmWorkloadEvent::PodRunning { pod_id, worker_id } => {
-                    proto::workload_event::Event::PodRunning(proto::WorkloadPodRunning {
-                        pod_id: pod_id.0.to_string(),
-                        worker_id: worker_id.0.to_string(),
-                    })
-                }
-                SmWorkloadEvent::PodStopped { exit_code } => {
-                    proto::workload_event::Event::PodStopped(proto::WorkloadPodStopped {
-                        exit_code,
-                    })
-                }
-                SmWorkloadEvent::PodFailed { reason } => {
-                    proto::workload_event::Event::PodFailed(proto::WorkloadPodFailed { reason })
-                }
-                SmWorkloadEvent::PodSuspending { pod_id, worker_id } => {
-                    proto::workload_event::Event::PodSuspending(proto::WorkloadPodSuspending {
-                        pod_id: pod_id.0.to_string(),
-                        worker_id: worker_id.0.to_string(),
-                    })
-                }
-                SmWorkloadEvent::PodSuspended {
-                    worker_id,
-                    artifact_id,
-                } => proto::workload_event::Event::PodSuspended(proto::WorkloadPodSuspended {
-                    worker_id: worker_id.0.to_string(),
-                    snapshot_id: artifact_id.0.to_string(),
-                }),
-                SmWorkloadEvent::PodSuspendFailed { reason } => {
-                    proto::workload_event::Event::PodSuspendFailed(
-                        proto::WorkloadPodSuspendFailed { reason },
-                    )
-                }
-                SmWorkloadEvent::PodResuming { pod_id, worker_id } => {
-                    proto::workload_event::Event::PodResuming(proto::WorkloadPodResuming {
-                        pod_id: pod_id.0.to_string(),
-                        worker_id: worker_id.0.to_string(),
-                    })
-                }
-            };
-            proto::NamespaceEvent {
-                timestamp_unix_ms: now_ms,
-                event: Some(proto::namespace_event::Event::WorkloadEvent(
-                    proto::WorkloadEvent {
-                        workload_id: workload_id.0,
-                        event: Some(inner),
-                    },
-                )),
-            }
-        }
-        SmNamespaceEvent::Service {
-            service_id,
-            workload_id,
-            event: svc_event,
-        } => {
-            let inner = match svc_event {
-                SmServiceEvent::Activated { trigger } => {
-                    let proto_trigger = match trigger {
-                        ServiceActivationTrigger::Traffic => {
-                            proto::ServiceActivationTrigger::Traffic
-                        }
-                    };
-                    proto::service_event::Event::Activated(proto::ServiceActivated {
-                        trigger: proto_trigger.into(),
-                    })
-                }
-                SmServiceEvent::BackendReady => {
-                    proto::service_event::Event::BackendReady(proto::ServiceBackendReady {})
-                }
-                SmServiceEvent::IdleTimerStarted { timeout } => {
-                    proto::service_event::Event::IdleTimerStarted(proto::ServiceIdleTimerStarted {
-                        timeout_ms: timeout.as_millis() as u64,
-                    })
-                }
-                SmServiceEvent::IdleTimerCancelled { reason } => {
-                    let proto_reason = match reason {
-                        IdleTimerCancelReason::NewTraffic => {
-                            proto::IdleTimerCancelReason::NewTraffic
-                        }
-                    };
-                    proto::service_event::Event::IdleTimerCancelled(
-                        proto::ServiceIdleTimerCancelled {
-                            reason: proto_reason.into(),
-                        },
-                    )
-                }
-                SmServiceEvent::IdleTimeoutFired => {
-                    proto::service_event::Event::IdleTimeoutFired(proto::ServiceIdleTimeoutFired {})
-                }
-                SmServiceEvent::Deactivated { reason } => {
-                    let proto_reason = match reason {
-                        ServiceDeactivationReason::IdleTimeout => {
-                            proto::ServiceDeactivationReason::IdleTimeout
-                        }
-                        ServiceDeactivationReason::ForceDeactivate => {
-                            proto::ServiceDeactivationReason::ForceDeactivate
-                        }
-                    };
-                    proto::service_event::Event::Deactivated(proto::ServiceDeactivated {
-                        reason: proto_reason.into(),
-                    })
-                }
-            };
-            proto::NamespaceEvent {
-                timestamp_unix_ms: now_ms,
-                event: Some(proto::namespace_event::Event::ServiceEvent(
-                    proto::ServiceEvent {
-                        service_id: service_id.clone(),
-                        workload_id: workload_id.0.clone(),
-                        event: Some(inner),
-                    },
-                )),
-            }
-        }
+pub(super) fn convert_log_chunk(chunk: crate::log_bus::LogChunk) -> proto::LogChunk {
+    let timestamp_unix_ms = {
+        // Convert Instant to system time approximation.
+        let elapsed = chunk.timestamp.elapsed();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        now_ms - elapsed.as_millis() as i64
+    };
+    proto::LogChunk {
+        workload_id: chunk.pod_id.0.to_string(),
+        container_id: chunk.container_id,
+        data: chunk.data,
+        timestamp_unix_ms,
     }
 }
+
+// --- Observability Event -> Proto Event conversion ---
+
+use crate::adapter::observability::{
+    EndpointEventKind, EndpointObservabilityEvent, ObservabilityEvent, PodEventKind,
+    PodObservabilityEvent, WorkloadEventKind, WorkloadObservabilityEvent,
+};
+use crate::id_registry::IdRegistry;
+use crate::sm::{self, endpoint::EndpointStatus};
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// Convert an `ObservabilityEvent` to zero or more proto `NamespaceEvent`s.
+/// Uses the IdRegistry to resolve router IDs to protocol-level string names.
+pub(super) fn convert_observability_event(
+    event: &ObservabilityEvent,
+    registry: &IdRegistry,
+) -> Vec<proto::NamespaceEvent> {
+    match event {
+        ObservabilityEvent::Pod(pod_event) => convert_pod_obs_event(pod_event, registry),
+        ObservabilityEvent::Workload(wl_event) => convert_workload_obs_event(wl_event, registry),
+        ObservabilityEvent::Endpoint(ep_event) => convert_endpoint_obs_event(ep_event, registry),
+    }
+}
+
+fn convert_pod_obs_event(
+    event: &PodObservabilityEvent,
+    registry: &IdRegistry,
+) -> Vec<proto::NamespaceEvent> {
+    let workload_name = registry
+        .pod_workload_name(&event.pod_id)
+        .unwrap_or_default();
+    let pod_id_str = event.pod_id.0.to_string();
+
+    let inner = match &event.event {
+        PodEventKind::Created => {
+            // Pod just created — no meaningful proto event yet (will get StatusChanged soon).
+            return vec![];
+        }
+        PodEventKind::Reaped { .. } => {
+            // Pod removed from router — no specific proto event.
+            return vec![];
+        }
+        PodEventKind::WorkerChanged { new, .. } => {
+            if let Some(worker_id) = new {
+                // Pod was scheduled to a worker.
+                Some(proto::workload_event::Event::PodLaunching(
+                    proto::WorkloadPodLaunching {
+                        pod_id: pod_id_str,
+                        worker_id: worker_id.0.to_string(),
+                    },
+                ))
+            } else {
+                return vec![];
+            }
+        }
+        PodEventKind::StatusChanged { old, new } => {
+            convert_pod_status_transition(&pod_id_str, old, new, registry)
+        }
+    };
+
+    match inner {
+        Some(wl_event) => vec![proto::NamespaceEvent {
+            timestamp_unix_ms: now_ms(),
+            event: Some(proto::namespace_event::Event::WorkloadEvent(
+                proto::WorkloadEvent {
+                    workload_id: workload_name,
+                    event: Some(wl_event),
+                },
+            )),
+        }],
+        None => vec![],
+    }
+}
+
+fn convert_pod_status_transition(
+    pod_id_str: &str,
+    old: &sm::PodStatus,
+    new: &sm::PodStatus,
+    _registry: &IdRegistry,
+) -> Option<proto::workload_event::Event> {
+    // Note: worker_id isn't in PodStatus — it comes from Pod::AssignedWorker signal.
+    // The WorkerChanged event fires separately with worker assignment info.
+
+    match (old, new) {
+        (_, sm::PodStatus::Running) => Some(proto::workload_event::Event::PodRunning(
+            proto::WorkloadPodRunning {
+                pod_id: pod_id_str.to_string(),
+                worker_id: String::new(), // filled by WorkerChanged event
+            },
+        )),
+        (_, sm::PodStatus::Suspending) => Some(proto::workload_event::Event::PodSuspending(
+            proto::WorkloadPodSuspending {
+                pod_id: pod_id_str.to_string(),
+                worker_id: String::new(),
+            },
+        )),
+        (_, sm::PodStatus::Suspended { .. }) => {
+            Some(proto::workload_event::Event::PodSuspended(
+                proto::WorkloadPodSuspended {
+                    worker_id: String::new(),
+                    snapshot_id: String::new(),
+                },
+            ))
+        }
+        (_, sm::PodStatus::Finished) => Some(proto::workload_event::Event::PodStopped(
+            proto::WorkloadPodStopped { exit_code: 0 },
+        )),
+        (_, sm::PodStatus::Failed) => Some(proto::workload_event::Event::PodFailed(
+            proto::WorkloadPodFailed {
+                reason: "pod failed".to_string(),
+            },
+        )),
+        (_, sm::PodStatus::Displaced) => Some(proto::workload_event::Event::PodFailed(
+            proto::WorkloadPodFailed {
+                reason: "pod displaced".to_string(),
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn convert_workload_obs_event(
+    event: &WorkloadObservabilityEvent,
+    registry: &IdRegistry,
+) -> Vec<proto::NamespaceEvent> {
+    let workload_name = registry
+        .workload_name(&event.workload_id)
+        .unwrap_or_default();
+
+    let inner = match &event.event {
+        WorkloadEventKind::StatusChanged { old, new } => {
+            convert_workload_status_transition(old, new)
+        }
+    };
+
+    match inner {
+        Some(wl_event) => vec![proto::NamespaceEvent {
+            timestamp_unix_ms: now_ms(),
+            event: Some(proto::namespace_event::Event::WorkloadEvent(
+                proto::WorkloadEvent {
+                    workload_id: workload_name,
+                    event: Some(wl_event),
+                },
+            )),
+        }],
+        None => vec![],
+    }
+}
+
+fn convert_workload_status_transition(
+    old: &sm::WlStatus,
+    new: &sm::WlStatus,
+) -> Option<proto::workload_event::Event> {
+    // Map workload status transitions to demand-change events.
+    // The WlStatus carries the high-level lifecycle state.
+    match (old, new) {
+        // Demand appeared: dormant → anything active.
+        (sm::WlStatus::Dormant, sm::WlStatus::Launching)
+        | (sm::WlStatus::Dormant, sm::WlStatus::WaitingForSpec) => {
+            Some(proto::workload_event::Event::DemandChanged(
+                proto::WorkloadDemandChanged {
+                    demanding_services: 1,
+                },
+            ))
+        }
+        // Demand gone: active → dormant.
+        (_, sm::WlStatus::Dormant) if *old != sm::WlStatus::Dormant => {
+            Some(proto::workload_event::Event::DemandChanged(
+                proto::WorkloadDemandChanged {
+                    demanding_services: 0,
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn convert_endpoint_obs_event(
+    event: &EndpointObservabilityEvent,
+    registry: &IdRegistry,
+) -> Vec<proto::NamespaceEvent> {
+    let service_name = registry
+        .endpoint_service_name(&event.endpoint_id)
+        .unwrap_or_default();
+    // Look up the workload behind this service.
+    let workload_name = String::new(); // TODO: service → workload mapping
+
+    let inner = match &event.event {
+        EndpointEventKind::StatusChanged { old, new } => {
+            convert_endpoint_status_transition(old, new)
+        }
+        EndpointEventKind::IdleTimerChanged { active } => {
+            if *active {
+                Some(proto::service_event::Event::IdleTimerStarted(
+                    proto::ServiceIdleTimerStarted { timeout_ms: 0 },
+                ))
+            } else {
+                Some(proto::service_event::Event::IdleTimerCancelled(
+                    proto::ServiceIdleTimerCancelled {
+                        reason: proto::IdleTimerCancelReason::NewTraffic.into(),
+                    },
+                ))
+            }
+        }
+    };
+
+    match inner {
+        Some(svc_event) => vec![proto::NamespaceEvent {
+            timestamp_unix_ms: now_ms(),
+            event: Some(proto::namespace_event::Event::ServiceEvent(
+                proto::ServiceEvent {
+                    service_id: service_name,
+                    workload_id: workload_name,
+                    event: Some(svc_event),
+                },
+            )),
+        }],
+        None => vec![],
+    }
+}
+
+fn convert_endpoint_status_transition(
+    old: &EndpointStatus,
+    new: &EndpointStatus,
+) -> Option<proto::service_event::Event> {
+    match (old, new) {
+        (EndpointStatus::Idle, EndpointStatus::NeedBackend)
+        | (EndpointStatus::Idle, EndpointStatus::Active) => {
+            Some(proto::service_event::Event::Activated(
+                proto::ServiceActivated {
+                    trigger: proto::ServiceActivationTrigger::Traffic.into(),
+                },
+            ))
+        }
+        (EndpointStatus::NeedBackend, EndpointStatus::Active) => {
+            Some(proto::service_event::Event::BackendReady(
+                proto::ServiceBackendReady {},
+            ))
+        }
+        (_, EndpointStatus::Idle) if *old != EndpointStatus::Idle => {
+            Some(proto::service_event::Event::Deactivated(
+                proto::ServiceDeactivated {
+                    reason: proto::ServiceDeactivationReason::IdleTimeout.into(),
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+

@@ -65,6 +65,11 @@ pub struct WorkloadSm {
 
     /// Endpoint SM owned by this workload (if any).
     pub endpoint_id: Option<EndpointId>,
+
+    /// Run policy: Service (restart on completion) or Job (run once).
+    pub run_policy: RunPolicy,
+    /// True when a Job has finished successfully (exit code 0).
+    pub completed: bool,
 }
 
 impl WorkloadSm {
@@ -96,6 +101,8 @@ impl WorkloadSm {
             current_image: None,
             pod_ip: std::net::Ipv4Addr::UNSPECIFIED,
             endpoint_id: None,
+            run_policy: RunPolicy::Service,
+            completed: false,
         }
     }
 
@@ -115,6 +122,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
 
     fn initialize(&mut self, ctx: &mut C) {
         ctx.set_workload_timers_edges(vec![TIMER]);
+        ctx.set_workload_observability_edges(vec![OBSERVABILITY]);
         self.update_status_signals(ctx);
     }
 
@@ -133,6 +141,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     self.committed_to_boot = false;
                     self.consecutive_failures = 0;
                     self.in_backoff = false;
+                    self.completed = false; // allow re-run on next activation
                 }
 
                 ctx.set_endpoint_readiness_edges(demand.endpoint_ids);
@@ -177,6 +186,18 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     let old_suspend_on_idle = self.suspend_on_idle;
                     self.suspend_on_idle = spec.suspend_on_idle;
 
+                    // --- Update run_policy from spec ---
+                    let old_run_policy = self.run_policy.clone();
+                    self.run_policy = spec.run_policy.clone();
+
+                    // Job→Service while completed: clear completed so reconcile launches.
+                    if old_run_policy == RunPolicy::Job
+                        && self.run_policy == RunPolicy::Service
+                        && self.completed
+                    {
+                        self.completed = false;
+                    }
+
                     // --- Detect pod-affecting spec changes (image) ---
                     let image_changed = self.current_image.as_deref() != Some(spec.image.as_str());
                     self.current_image = Some(spec.image.clone());
@@ -187,6 +208,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.spec_version += 1;
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
+                        self.completed = false; // new image = re-run the job
 
                         // Discard any suspended artifact — it was produced
                         // from the old image and cannot be resumed.
@@ -314,6 +336,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.committed_to_boot = false;
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
+                        self.completed = false;
                         self.clear_artifact_ref(ctx);
                         self.destroy_current_pod(ctx);
                         self.reconcile(ctx);
@@ -324,6 +347,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         // an intentional restart, not a stale-spec detection.
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
+                        self.completed = false;
                         self.destroy_current_pod(ctx);
                         self.launched_with_spec_version = self.spec_version;
                         self.reconcile(ctx);
@@ -434,10 +458,16 @@ impl WorkloadSm {
         self.pod_id = None;
         // pod_worker_id will be cleared by PodWorkerInput signal propagation.
 
-        // No failure increment — graceful exit is not a failure.
-        // Re-evaluate commitment.
-        if !self.has_demand {
+        if self.run_policy == RunPolicy::Job {
+            // Job finished successfully — mark completed, don't relaunch.
+            self.completed = true;
             self.committed_to_boot = false;
+        } else {
+            // Service: no failure increment — graceful exit is not a failure.
+            // Re-evaluate commitment.
+            if !self.has_demand {
+                self.committed_to_boot = false;
+            }
         }
 
         self.reconcile(ctx);
@@ -553,7 +583,9 @@ impl WorkloadSm {
     pub(crate) fn update_status_signals(&self, ctx: &mut impl WorkloadCtx) {
         let is_failed = self.consecutive_failures >= self.max_retries
             && (self.has_demand || self.committed_to_boot);
-        let status = if is_failed {
+        let status = if self.completed {
+            WlStatus::Completed
+        } else if is_failed {
             WlStatus::Failed
         } else if self.in_backoff {
             WlStatus::RetryBackoff
@@ -587,7 +619,8 @@ impl WorkloadSm {
         let want_pod = self.has_spec
             && (self.has_demand || self.committed_to_boot)
             && !self.in_backoff
-            && !is_failed;
+            && !is_failed
+            && !self.completed;
         self.wants_pod = want_pod;
 
         if want_pod && self.pod_id.is_none() {

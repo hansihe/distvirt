@@ -46,7 +46,7 @@ Client                               Orchestrator
   |                                       |
 ```
 
-No client-streaming or bidirectional-streaming RPCs are needed. The protocol is either unary (one request, one response) or server-streaming (one request, many responses).
+Most RPCs are either unary (one request, one response) or server-streaming (one request, many responses). The exception is `AttachWorkload`, which uses bidirectional streaming to forward stdin/stdout/stderr between the client and a running workload's entrypoint process.
 
 ### Connection Lifecycle
 
@@ -132,6 +132,9 @@ service DistvirtClient {
     // --- Developer network access ---
     rpc ConnectNetwork(ConnectNetworkRequest) returns (ConnectNetworkResponse);
     rpc DisconnectNetwork(DisconnectNetworkRequest) returns (DisconnectNetworkResponse);
+
+    // --- Workload I/O ---
+    rpc AttachWorkload(stream AttachWorkloadInput) returns (stream AttachWorkloadOutput);
 
     // --- Streaming subscriptions ---
     rpc WatchNamespaceStatus(WatchNamespaceStatusRequest) returns (stream NamespaceStatusEvent);
@@ -236,6 +239,7 @@ message ContainerConfig {
     string working_dir = 6;
     string user = 7;
     string hostname = 8;
+    bool tty = 9;              // allocate a PTY for the entrypoint at launch
 }
 
 message ServiceNetworkConfig {
@@ -479,6 +483,78 @@ message ServiceOverrides {
 ```
 
 Note: the server implementation currently ignores `overrides` -- it clones the source namespace as-is.
+
+### AttachWorkload (Bidirectional Streaming)
+
+Attaches to the stdin/stdout/stderr of a running workload's entrypoint process. This is the only bidirectional streaming RPC in the protocol.
+
+Whether the entrypoint runs with a PTY is determined at launch time by `ContainerConfig.tty` in the workload spec — not at attach time. The guest-init allocates (or doesn't) a PTY when starting the process, and attach simply connects to whatever streams already exist.
+
+The first client message must be `AttachStart` to identify the target. Subsequent client messages carry stdin data or terminal resize events. Server messages carry stdout/stderr data or an exit notification when the process terminates.
+
+```protobuf
+message AttachWorkloadInput {
+    oneof input {
+        AttachStart start = 1;
+        AttachStdin stdin = 2;
+        AttachResize resize = 3;
+    }
+}
+
+message AttachStart {
+    string namespace_id = 1;
+    string workload_id = 2;
+}
+
+message AttachStdin {
+    bytes data = 1;
+}
+
+message AttachResize {
+    uint32 cols = 1;
+    uint32 rows = 2;
+}
+
+message AttachWorkloadOutput {
+    oneof output {
+        AttachStarted started = 1;
+        AttachStdout stdout = 2;
+        AttachStderr stderr = 3;
+        AttachExited exited = 4;
+    }
+}
+
+message AttachStarted {
+    bool tty = 1;              // whether the entrypoint is running with a PTY
+}
+
+message AttachStdout {
+    bytes data = 1;
+}
+
+message AttachStderr {
+    bytes data = 1;
+}
+
+message AttachExited {
+    int32 exit_code = 1;
+}
+```
+
+**Stream lifecycle:**
+
+1. Client sends `AttachStart` with namespace/workload.
+2. Server responds with `AttachStarted`, which reports whether the session is a TTY. The CLI uses this to decide whether to enter raw mode.
+3. Client sends `AttachStdin` messages; server sends `AttachStdout`/`AttachStderr` messages.
+4. When the entrypoint process exits, server sends `AttachExited` with the exit code and closes the stream.
+5. If the client cancels the stream (detach), the entrypoint process is **not** killed — it continues running.
+
+**TTY vs non-TTY:** The PTY is allocated at process start based on `ContainerConfig.tty`. When the entrypoint has a PTY, stdout and stderr are merged (standard PTY behavior) — the server only sends `AttachStdout`. The client should send `AttachResize` when the local terminal size changes. When the entrypoint has no PTY, stdout and stderr are separate pipe-backed streams and `AttachResize` is ignored.
+
+**Error cases:**
+- Workload not found: `NOT_FOUND`
+- Workload not running (dormant, launching, etc.): `FAILED_PRECONDITION`
+- Workload is spliced: `FAILED_PRECONDITION` (the local worker owns the process, not the orchestrator)
 
 ### Layer 2: Resource Queries
 
@@ -784,6 +860,6 @@ The internal orchestrator state machine never sees protobuf types. This keeps th
 
 1. **Server-side auth**: Authentication is client-side only. Server-side validation needs to be implemented before any multi-tenant or internet-facing deployment.
 2. **Reflection / health**: Should we enable gRPC server reflection and the standard health checking service? Useful for tooling (grpcurl, grpc-health-probe). Low cost to add.
-3. **Log streaming granularity**: Should `StreamLogs` support streaming stderr/stdout separately? Or is a merged stream sufficient?
+3. **Log streaming granularity**: Should `StreamLogs` support streaming stderr/stdout separately? Or is a merged stream sufficient? (Note: `AttachWorkload` does separate stdout/stderr in non-TTY mode.)
 4. **WatchNamespaceStatus**: Needs implementation -- currently a stub returning `UNIMPLEMENTED`.
 5. **Event history**: Should `StreamEvents` support a lookback window (e.g. last N events or last T seconds)? Without it, events before the stream opens are lost. Could be a simple ring buffer in the orchestrator.

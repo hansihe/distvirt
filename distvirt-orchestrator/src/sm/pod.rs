@@ -112,6 +112,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
     fn initialize(&mut self, ctx: &mut C) {
         ctx.set_pod_timers_edges(vec![TIMER]);
         ctx.set_pod_schedule_intent_edges(vec![SCHEDULE_REQUEST]);
+        ctx.set_pod_observability_edges(vec![OBSERVABILITY]);
         ctx.set_schedule_request(self.make_schedule_request());
         self.update_timer_signal(ctx);
     }

@@ -13,6 +13,7 @@ use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::TimerConfig;
 use crate::core::{GlobalWorkerId, SchedulerDecision, WorkerNamespaceEventKind};
+use crate::id_registry::IdRegistry;
 use crate::sm::{ArtifactId, ArtifactPortId, DRouter, PodId, WorkerId};
 use crate::types::{NamespaceId, NamespaceSpec};
 
@@ -67,9 +68,10 @@ impl NamespaceWithBoundary {
         namespace_id: NamespaceId,
         timer_config: TimerConfig,
         network: &distvirt_worker_protocol::NetworkConfig,
+        id_registry: IdRegistry,
     ) -> Self {
         NamespaceWithBoundary {
-            core: NamespaceCore::new(namespace_id, timer_config, network),
+            core: NamespaceCore::new(namespace_id, timer_config, network, id_registry),
             pending_workers: HashMap::new(),
             active_workers: HashMap::new(),
             deferred_grants: Vec::new(),
@@ -378,6 +380,7 @@ impl NamespaceWithBoundary {
             combined.pod_actions.extend(effects.pod_actions);
             combined.endpoint_actions.extend(effects.endpoint_actions);
             combined.dns_registry_actions.extend(effects.dns_registry_actions);
+            combined.observability_events.extend(effects.observability_events);
         }
         combined
     }
@@ -552,6 +555,11 @@ impl NamespaceWithBoundary {
                 );
             }
         }
+
+        // Observability events pass through directly (router IDs = u64 values).
+        effects
+            .observability_events
+            .extend(internal.observability_events);
     }
 
     /// Allocate a new artifact port ID for suspend operations.

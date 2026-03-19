@@ -15,7 +15,6 @@
 //! remains testable without any wire format dependencies.
 
 mod client;
-mod events;
 mod namespace_io;
 mod orchestrator_io;
 mod specs;
@@ -35,7 +34,6 @@ pub use crate::sm::BackendNeed;
 
 // Re-export all submodule types.
 pub use client::*;
-pub use events::*;
 pub use namespace_io::*;
 pub use orchestrator_io::*;
 pub use specs::*;

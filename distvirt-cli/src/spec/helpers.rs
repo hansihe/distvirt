@@ -1,0 +1,147 @@
+use std::net::Ipv4Addr;
+
+use anyhow::{Context, bail};
+use distvirt_client_protocol::*;
+
+use super::types::*;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+pub(super) fn resolve_resources(
+    workload_res: &Option<SpecResources>,
+    defaults: &Option<SpecDefaults>,
+) -> (Option<SpecResourceValues>, Option<SpecResourceValues>) {
+    let default_res = defaults.as_ref().and_then(|d| d.resources.as_ref());
+
+    let limits = workload_res
+        .as_ref()
+        .and_then(|r| r.limits.clone())
+        .or_else(|| default_res.and_then(|r| r.limits.clone()));
+
+    let requests = workload_res
+        .as_ref()
+        .and_then(|r| r.requests.clone())
+        .or_else(|| default_res.and_then(|r| r.requests.clone()));
+
+    (requests, limits)
+}
+
+pub(super) fn resolve_activation(
+    svc_activation: &Option<SpecActivation>,
+    defaults: &Option<SpecDefaults>,
+) -> Option<ActivationSpec> {
+    let activation = svc_activation
+        .as_ref()
+        .or_else(|| defaults.as_ref().and_then(|d| d.activation.as_ref()));
+
+    let activation = match activation {
+        Some(a) => a,
+        None => return None,
+    };
+
+    // postgres warning and duration errors are already reported by validation;
+    // here we just skip unsupported activators and trust durations are valid.
+
+    let activator = if let Some(ref passthrough) = activation.passthrough {
+        let idle_timeout_ms =
+            parse_duration_ms(&passthrough.idle_timeout).expect("validated earlier");
+        Some(ActivatorConfig {
+            activator: Some(activator_config::Activator::Passthrough(
+                PassthroughActivator { idle_timeout_ms },
+            )),
+        })
+    } else if activation.http2.is_some() {
+        Some(ActivatorConfig {
+            activator: Some(activator_config::Activator::Http2(Http2Activator {})),
+        })
+    } else if let Some(ref tcp) = activation.tcp {
+        let idle_timeout_ms = tcp
+            .idle_timeout
+            .as_ref()
+            .map(|s| parse_duration_ms(s).expect("validated earlier"))
+            .unwrap_or(0);
+        Some(ActivatorConfig {
+            activator: Some(activator_config::Activator::Tcp(TcpActivator {
+                ports: tcp.ports.clone().unwrap_or_default(),
+                idle_timeout_ms,
+            })),
+        })
+    } else {
+        None
+    };
+
+    Some(ActivationSpec {
+        activator,
+        buffer_policy: None,
+    })
+}
+
+pub(super) fn convert_expose(expose: &Option<Vec<SpecExpose>>) -> Vec<ExposeSpec> {
+    expose
+        .as_ref()
+        .map(|specs| {
+            specs
+                .iter()
+                .map(|e| {
+                    let protocol = match e.protocol.as_deref() {
+                        Some("udp") | Some("UDP") => ExposeProtocol::Udp.into(),
+                        _ => ExposeProtocol::Tcp.into(),
+                    };
+                    ExposeSpec {
+                        container_port: e.container_port,
+                        host_port: e.host_port,
+                        protocol,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn parse_cidr(cidr: &str) -> anyhow::Result<(Ipv4Addr, u8)> {
+    let (ip_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid CIDR: {}", cidr))?;
+    let ip: Ipv4Addr = ip_str.parse().context("invalid IP in CIDR")?;
+    let prefix: u8 = prefix_str.parse().context("invalid prefix in CIDR")?;
+    Ok((ip, prefix))
+}
+
+pub(super) fn ip_to_u32(ip: Ipv4Addr) -> u32 {
+    u32::from(ip)
+}
+
+pub(super) fn u32_to_ip(val: u32) -> Ipv4Addr {
+    Ipv4Addr::from(val)
+}
+
+pub(super) fn ip_to_mac(ip: &str) -> String {
+    // Generate a deterministic MAC from IP: 02:00:xx:xx:xx:xx
+    let addr: Ipv4Addr = ip.parse().unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
+    let octets = addr.octets();
+    format!(
+        "02:00:{:02X}:{:02X}:{:02X}:{:02X}",
+        octets[0], octets[1], octets[2], octets[3]
+    )
+}
+
+/// Parse a human-readable duration string into milliseconds.
+/// Supports: "30s", "5m", "1h", "500ms"
+pub(super) fn parse_duration_ms(s: &str) -> anyhow::Result<u64> {
+    let s = s.trim();
+    if let Some(val) = s.strip_suffix("ms") {
+        return Ok(val.trim().parse::<u64>()?);
+    }
+    if let Some(val) = s.strip_suffix('s') {
+        return Ok(val.trim().parse::<u64>()? * 1_000);
+    }
+    if let Some(val) = s.strip_suffix('m') {
+        return Ok(val.trim().parse::<u64>()? * 60_000);
+    }
+    if let Some(val) = s.strip_suffix('h') {
+        return Ok(val.trim().parse::<u64>()? * 3_600_000);
+    }
+    bail!("unsupported duration format: '{}' (use ms/s/m/h suffix)", s);
+}

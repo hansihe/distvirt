@@ -15,6 +15,8 @@ use crate::adapter::dns_registry::{DnsRegistryAction, DnsRegistryAdapter};
 use crate::adapter::endpoint::{EndpointAction, EndpointAdapter};
 use crate::adapter::endpoint_demand::EndpointDemandAdapter;
 use crate::adapter::management::ManagementAdapter;
+use crate::adapter::observability::{ObservabilityAdapter, ObservabilityEvent};
+use crate::id_registry::IdRegistry;
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig};
@@ -23,9 +25,9 @@ use distvirt_sm_router::trace::PanicTracer;
 
 use crate::core::wg_peers::{WgPeerOutput, WireGuardPeerManager};
 use crate::sm::{
-    AdminCmd, DNS_REGISTRY, DRouter, FABRIC_ENDPOINT, LeaseInfo, PodId, PodStatus, Router,
-    SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WireGuardPeerEndpointInfo, WireGuardPeerId, WlStatus,
-    WorkerId, endpoint::EndpointStatus,
+    AdminCmd, DNS_REGISTRY, DRouter, FABRIC_ENDPOINT, LeaseInfo, OBSERVABILITY, PodId, PodStatus,
+    Router, SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WireGuardPeerEndpointInfo, WireGuardPeerId,
+    WlStatus, WorkerId, endpoint::EndpointStatus,
 };
 use crate::types::{NamespaceId, NamespaceSpec, NamespaceStatusReport, WorkloadName};
 
@@ -51,6 +53,7 @@ pub(crate) struct Adapters {
     pub(crate) endpoint: EndpointAdapter,
     pub(crate) dns_registry: DnsRegistryAdapter,
     artifact: ArtifactAdapter,
+    observability: ObservabilityAdapter,
 }
 
 // =============================================================================
@@ -63,6 +66,7 @@ struct ReconcileActions {
     pod_actions: Vec<PodAssignmentAction>,
     endpoint_actions: Vec<EndpointAction>,
     dns_registry_actions: Vec<DnsRegistryAction>,
+    observability_events: Vec<ObservabilityEvent>,
 }
 
 // =============================================================================
@@ -94,12 +98,14 @@ impl NamespaceCore {
         namespace_id: NamespaceId,
         timer_config: TimerConfig,
         network: &distvirt_worker_protocol::NetworkConfig,
+        id_registry: IdRegistry,
     ) -> Self {
         let mut router = Router::new_traced(16, PanicTracer::new());
         router.create_timer(TIMER);
         router.create_schedule_request(SCHEDULE_REQUEST);
         router.create_fabric_endpoint(FABRIC_ENDPOINT);
         router.create_dns_registry(DNS_REGISTRY);
+        router.create_observability(OBSERVABILITY);
 
         NamespaceCore {
             namespace_id,
@@ -108,11 +114,12 @@ impl NamespaceCore {
                 timer: TimerAdapter::new(timer_config),
                 pod_assignment: PodAssignmentAdapter::new(),
                 schedule_request: ScheduleRequestAdapter::new(SCHEDULE_REQUEST),
-                management: ManagementAdapter::new(),
+                management: ManagementAdapter::new(id_registry),
                 endpoint_demand: EndpointDemandAdapter::new(),
                 endpoint: EndpointAdapter::new(FABRIC_ENDPOINT),
                 dns_registry: DnsRegistryAdapter::new(DNS_REGISTRY),
                 artifact: ArtifactAdapter::new(),
+                observability: ObservabilityAdapter::new(OBSERVABILITY),
             },
             leases: HashMap::new(),
             worker_pod_edges: HashMap::new(),
@@ -300,6 +307,34 @@ impl NamespaceCore {
 
                 self.current_spec = Some(new_spec);
             }
+            ClientCommand::PatchSpec(patch) => {
+                if let Some(current) = self.current_spec.as_ref() {
+                    let mut new_spec = current.clone();
+
+                    // Removals first
+                    for name in &patch.remove_workloads {
+                        new_spec.workloads.remove(name);
+                    }
+                    for name in &patch.remove_services {
+                        new_spec.services.remove(name);
+                    }
+
+                    // Upserts
+                    for (name, spec) in patch.workloads {
+                        new_spec.workloads.insert(name, spec);
+                    }
+                    for (name, spec) in patch.services {
+                        new_spec.services.insert(name, spec);
+                    }
+
+                    self.adapters.management.apply_namespace_spec(
+                        &mut self.router,
+                        self.current_spec.as_ref(),
+                        &new_spec,
+                    );
+                    self.current_spec = Some(new_spec);
+                }
+            }
             ClientCommand::AdminRestart { workload_name } => {
                 self.adapters.management.send_admin_command(
                     &mut self.router,
@@ -459,6 +494,13 @@ impl NamespaceCore {
             self.adapters.dns_registry.reconcile(&mut self.router);
         let artifact_mut = self.adapters.artifact.reconcile(&mut self.router);
 
+        // Observability runs last — read-only, never mutates router.
+        let observability_events = self.adapters.observability.reconcile(&mut self.router);
+
+        // Sync dynamic ID mappings (endpoint→service, pod→workload) now that
+        // the router has converged and SMs have their current endpoint/pod IDs.
+        self.adapters.management.sync_dynamic_ids(&self.router);
+
         let mutated = timer_mut || sched_mut || pod_mut || ep_mut || dns_mut || artifact_mut;
 
         (
@@ -468,6 +510,7 @@ impl NamespaceCore {
                 pod_actions,
                 endpoint_actions,
                 dns_registry_actions,
+                observability_events,
             },
             mutated,
         )
@@ -516,6 +559,11 @@ impl NamespaceCore {
         effects
             .dns_registry_actions
             .extend(actions.dns_registry_actions);
+
+        // Observability events pass through directly.
+        effects
+            .observability_events
+            .extend(actions.observability_events);
     }
 
     /// Create a new worker port in the router with the given ID.
@@ -686,6 +734,7 @@ fn wl_status_str(status: &WlStatus) -> &'static str {
         WlStatus::Suspended => "suspended",
         WlStatus::RetryBackoff => "retry_backoff",
         WlStatus::Failed => "failed",
+        WlStatus::Completed => "completed",
     }
 }
 

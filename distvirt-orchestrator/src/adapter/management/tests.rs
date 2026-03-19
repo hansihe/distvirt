@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
 
+use crate::id_registry::IdRegistry;
 use crate::sm::{AdminCmd, DRouter, SCHEDULE_REQUEST, TIMER};
 use crate::types::{ActivationSpec, NamespaceSpec, ServiceSpec, WorkloadSpec};
 
@@ -38,6 +39,7 @@ fn simple_workload_spec() -> WorkloadSpec {
         suspend_on_idle: false,
         resources: None,
         activation: None,
+        run_policy: Default::default(),
     }
 }
 
@@ -83,7 +85,7 @@ fn make_namespace_spec(
 #[test]
 fn create_workload_from_spec() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec = make_namespace_spec(vec![("web", simple_workload_spec())], vec![]);
 
@@ -106,7 +108,7 @@ fn create_workload_from_spec() {
 #[test]
 fn update_workload_spec() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec1 = make_namespace_spec(vec![("web", simple_workload_spec())], vec![]);
     adapter.apply_namespace_spec(&mut router, None, &spec1);
@@ -136,7 +138,7 @@ fn update_workload_spec() {
 #[test]
 fn remove_workload_destroys_management() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec1 = make_namespace_spec(vec![("web", simple_workload_spec())], vec![]);
     adapter.apply_namespace_spec(&mut router, None, &spec1);
@@ -159,7 +161,7 @@ fn remove_workload_destroys_management() {
 #[test]
 fn create_service_linked_to_workload() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec = make_namespace_spec(
         vec![("web", simple_workload_spec())],
@@ -186,7 +188,7 @@ fn create_service_linked_to_workload() {
 #[test]
 fn admin_command_dispatched() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec = make_namespace_spec(
         vec![("web", simple_workload_spec())],
@@ -217,7 +219,7 @@ fn admin_command_dispatched() {
 #[test]
 fn activate_service_command() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let mut svc_spec = simple_service_spec("web");
     svc_spec.activation = Some(ActivationSpec {
@@ -258,7 +260,7 @@ fn activate_service_command() {
 #[test]
 fn multiple_workloads_and_services() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec = make_namespace_spec(
         vec![
@@ -300,7 +302,7 @@ fn multiple_workloads_and_services() {
 #[test]
 fn proto_name_roundtrip() {
     let mut router = make_router();
-    let mut adapter = ManagementAdapter::new();
+    let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let spec = make_namespace_spec(
         vec![("my-workload", simple_workload_spec())],
