@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 pub const VSOCK_CONTROL_PORT: u32 = 1024;
 
+/// A volume mount specification for binding a volume into a container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeMount {
+    pub name: String,
+    pub mount_path: String,
+}
+
 /// Messages sent from host to guest over vsock.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -11,6 +18,13 @@ pub enum HostMessage {
         device: String,
         #[serde(default)]
         dns_servers: Vec<String>,
+        #[serde(default)]
+        volume_mounts: Vec<VolumeMount>,
+    },
+    MountVolume {
+        name: String,
+        device: String,
+        read_only: bool,
     },
     StartContainer {
         id: String,
@@ -71,6 +85,9 @@ pub enum GuestMessage {
     SuspendReady,
     ContainerAdded {
         id: String,
+    },
+    VolumeMounted {
+        name: String,
     },
     ContainerStarted {
         id: String,

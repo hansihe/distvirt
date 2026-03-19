@@ -196,9 +196,11 @@ pub async fn launch_pod(
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 

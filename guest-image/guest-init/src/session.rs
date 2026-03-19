@@ -7,8 +7,21 @@ use async_io::Async;
 use futures::io::AsyncRead;
 
 use crate::yamux_driver::YamuxHandle;
-use crate::{net, vsock};
+use crate::{net, util, vsock};
 use distvirt_guest_protocol::{GuestMessage, HostMessage, StreamHeader};
+
+/// Mount a volume device at /volumes/<name>.
+fn mount_volume(name: &str, device: &str, read_only: bool) -> anyhow::Result<()> {
+    let mount_point = format!("/volumes/{}", name);
+    let flags = if read_only {
+        libc::MS_RDONLY as libc::c_ulong
+    } else {
+        0
+    };
+    util::mount(device, &mount_point, "ext4", flags, None)?;
+    log::info!("mounted volume '{}' at {}", name, mount_point);
+    Ok(())
+}
 
 /// Result of executing a host command.
 pub enum CommandResult {
@@ -31,13 +44,30 @@ pub fn execute_command(
     ex: &LocalExecutor<'_>,
 ) -> CommandResult {
     match cmd {
+        HostMessage::MountVolume {
+            name,
+            device,
+            read_only,
+        } => {
+            log::info!("MountVolume: name={}, device={}, read_only={}", name, device, read_only);
+            match mount_volume(&name, &device, read_only) {
+                Ok(()) => CommandResult::Response(GuestMessage::VolumeMounted { name }),
+                Err(e) => {
+                    log::error!("MountVolume failed: {:#}", e);
+                    CommandResult::Response(GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    })
+                }
+            }
+        }
         HostMessage::AddContainer {
             id,
             device,
             dns_servers,
+            volume_mounts,
         } => {
             log::info!("AddContainer: id={}, device={}", id, device);
-            match containers.add(id.clone(), device, &dns_servers) {
+            match containers.add(id.clone(), device, &dns_servers, &volume_mounts) {
                 Ok(()) => CommandResult::Response(GuestMessage::ContainerAdded { id }),
                 Err(e) => {
                     log::error!("AddContainer failed: {:#}", e);

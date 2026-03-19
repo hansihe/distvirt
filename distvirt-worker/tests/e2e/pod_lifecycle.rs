@@ -53,9 +53,11 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -137,9 +139,11 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -209,9 +213,11 @@ async fn test_stop_pod() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -289,9 +295,11 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -356,9 +364,11 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -433,9 +443,11 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -503,9 +515,11 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 

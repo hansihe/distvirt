@@ -235,9 +235,11 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                     hostname: None,
                     capture_output: false,
                     stdin: false,
+                    volume_mounts: vec![],
                 },
             }],
             resources: None,
+            volumes: vec![],
         })
         .await?;
 
@@ -287,9 +289,11 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                     hostname: None,
                     capture_output: true,
                     stdin: false,
+                    volume_mounts: vec![],
                 },
             }],
             resources: None,
+            volumes: vec![],
         })
         .await?;
 

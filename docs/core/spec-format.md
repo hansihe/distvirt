@@ -52,6 +52,9 @@ workloads:
         working_dir: /app
         user: "1000:1000"
         hostname: api
+        volume_mounts:
+          - name: cache
+            mount_path: /var/cache/app
     resources:
       requests:
         memory_mb: 256
@@ -59,6 +62,9 @@ workloads:
       limits:
         memory_mb: 512
         vcpus: 2
+    volumes:
+      - name: cache
+        empty_dir: {}
     services:
       api:
         activation:
@@ -100,6 +106,9 @@ workloads:
     activation:                  # Workload-level activation. If omitted, always-on.
       passthrough:               # Only passthrough is valid on workloads.
         idle_timeout: <duration>
+    volumes:                    # Pod-scoped volume definitions. See Volumes.
+      - name: <string>         # Volume name. Referenced by volume_mounts.
+        empty_dir: {}          # Volume type (exactly one). See Volumes.
     containers:
       - name: <string>         # Container ID within pod. Default: "main".
         image: <oci-ref>       # Required. OCI image reference.
@@ -110,6 +119,9 @@ workloads:
         user: "<uid>[:<gid>]"  # Run as user/group.
         hostname: <string>     # Container hostname.
         tty: <bool>            # Allocate a TTY. Default: false.
+        volume_mounts:          # Mount volumes into this container.
+          - name: <string>     # References a volume from the workload's volumes list.
+            mount_path: <path> # Absolute path inside the container.
     resources:
       requests:                 # Scheduling weight. What the orchestrator uses for placement.
         memory_mb: <uint>
@@ -157,6 +169,91 @@ resources:
 `requests` and `limits` are independent — if only one is specified, the other is left unset (zero values). If neither is specified, system defaults apply.
 
 Resource defaults can be set at the namespace level via the `defaults` block (see Defaults).
+
+---
+
+## Volumes
+
+Volumes provide storage to containers. They are defined at the workload level (pod-scoped) and mounted into individual containers via `volume_mounts`. This two-level design allows multiple containers in the same workload to share a volume.
+
+Volumes survive suspend/resume — their backing storage is snapshotted alongside the VM.
+
+### Volume types
+
+Volume type is specified as a tagged union (exactly one key), following the same pattern as activators.
+
+#### empty_dir
+
+**[Implemented]**
+
+An empty filesystem created when the workload starts and destroyed when the workload is removed. In Firecracker terms, this is a fresh ext4 block device image attached to the VM.
+
+```yaml
+workloads:
+  api:
+    volumes:
+      - name: scratch
+        empty_dir: {}
+      - name: large-scratch
+        empty_dir:
+          size_mb: 1024         # Optional. Maximum size in MB. Default: 64.
+    containers:
+      - image: docker.io/myorg/api:latest
+        volume_mounts:
+          - name: scratch
+            mount_path: /tmp/data
+          - name: large-scratch
+            mount_path: /var/cache
+```
+
+#### config_data
+
+**[Implemented]**
+
+Inline file content baked into a read-only filesystem image at spec render time. Useful for configuration files, certificates, and other small static data without needing a separate config management system.
+
+```yaml
+volumes:
+  - name: config
+    config_data:
+      files:
+        - path: nginx.conf
+          content: |
+            server {
+                listen 80;
+                location / { proxy_pass http://api:8080; }
+            }
+        - path: certs/ca.pem
+          content: "..."
+```
+
+#### persistent_volume
+
+**[Planned]**
+
+A named volume backed by a storage pool that survives workload removal. Details TBD — will involve pool management, size provisioning, and migration concerns.
+
+```yaml
+volumes:
+  - name: data
+    persistent_volume:
+      pool: fast-ssd
+      size_mb: 10240
+```
+
+### Volume mounts
+
+Each container declares which volumes to mount and where:
+
+```yaml
+containers:
+  - image: docker.io/myorg/api:latest
+    volume_mounts:
+      - name: scratch           # Must reference a volume from the workload's volumes list.
+        mount_path: /tmp/data   # Absolute path inside the container. Required.
+```
+
+A volume can be mounted into multiple containers within the same workload (shared storage between main container and a sidecar, for example).
 
 ---
 
@@ -459,7 +556,12 @@ workloads.<id>.activation         -> (workload activation)         Planned
 workloads.<id>.resources.requests -> ResourceRequirements.requests Implemented
 workloads.<id>.resources.limits   -> ResourceRequirements.limits   Implemented
 workloads.<id>.healthcheck        -> (dropped)                     Parsed, ignored
+workloads.<id>.volumes[]          -> VolumeSpec                    Implemented
+  .empty_dir                      -> VolumeType::EmptyDir          Implemented
+  .config_data                    -> VolumeType::ConfigData        Implemented
+  .persistent_volume              -> VolumeType::PersistentVolume  Planned
 workloads.<id>.containers[]       -> ContainerSpec                 Implemented
+  .volume_mounts[]                -> VolumeMountSpec               Implemented
 services.<id>                     -> ServiceSpec                   Implemented
 services.<id>.ip                  -> ServiceNetworkConfig.ip       Implemented
 services.<id>.activation          -> ActivationSpec                Implemented
@@ -486,6 +588,7 @@ services.<id>.expose              -> ExposeSpec                    Implemented
 | Network | Implicit/multi-network | Explicit single subnet |
 | Dependencies | `depends_on` ordering | Implicit via service activation |
 | Multi-container | N/A | Multiple containers per workload |
+| Volumes | Named volumes, bind mounts | Pod-scoped volumes (empty_dir, config_data, persistent_volume) |
 | Namespace defaults | N/A | `defaults` block |
 
 ---

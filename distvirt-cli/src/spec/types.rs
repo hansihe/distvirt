@@ -71,6 +71,7 @@ pub struct SpecWorkload {
     #[serde(default)]
     pub respects_demand: bool,
     pub activation: Option<SpecWorkloadActivation>,
+    pub volumes: Option<Vec<SpecVolume>>,
     pub containers: Vec<SpecContainer>,
     pub resources: Option<SpecResources>,
     pub healthcheck: Option<UnsupportedField>,
@@ -97,6 +98,41 @@ pub struct SpecContainer {
     pub hostname: Option<String>,
     #[serde(default)]
     pub tty: bool,
+    pub volume_mounts: Option<Vec<SpecVolumeMount>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecVolume {
+    pub name: String,
+    pub empty_dir: Option<SpecEmptyDir>,
+    pub config_data: Option<SpecConfigData>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecEmptyDir {
+    pub size_mb: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecConfigData {
+    pub files: Vec<SpecConfigDataFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecConfigDataFile {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecVolumeMount {
+    pub name: String,
+    pub mount_path: String,
 }
 
 #[derive(Debug, Deserialize)]

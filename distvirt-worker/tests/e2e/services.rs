@@ -57,9 +57,11 @@ async fn test_registry_sync() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -166,9 +168,11 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -272,9 +276,11 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -350,9 +356,11 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -470,9 +478,11 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -525,9 +535,11 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 

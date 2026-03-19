@@ -45,6 +45,14 @@ pub struct BalloonConfig {
     pub stats_polling_interval_s: u32,
 }
 
+/// An additional block device to attach to the VM (for volumes).
+#[derive(Clone, Debug)]
+pub struct AdditionalDrive {
+    pub drive_id: String,
+    pub image_path: PathBuf,
+    pub read_only: bool,
+}
+
 /// Configuration for launching a VM.
 pub struct VmConfig {
     pub kernel_path: PathBuf,
@@ -60,11 +68,20 @@ pub struct VmConfig {
     /// Commands to bake into a config drive for pre-vsock execution.
     /// When non-empty, a config drive image is created and attached to the VM.
     pub initial_commands: Vec<HostMessage>,
+    /// Additional block devices to attach (volume images).
+    pub additional_drives: Vec<AdditionalDrive>,
 }
 
 /// Metadata persisted as `metadata.json` in a snapshot directory.
 ///
 /// Contains the source paths needed to reconstruct the VM environment on restore.
+/// Volume drive info persisted in snapshot metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotVolumeDrive {
+    pub filename: String,
+    pub read_only: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
     /// Absolute path to the kernel image used for boot (needed by Firecracker restore).
@@ -77,6 +94,9 @@ pub struct SnapshotMetadata {
     /// Whether serial console output was enabled (needed for restore to pipe stdout).
     #[serde(default)]
     pub serial_console: bool,
+    /// Volume drives attached to the VM (needed for snapshot/restore).
+    #[serde(default)]
+    pub volume_drives: Vec<SnapshotVolumeDrive>,
 }
 
 /// Artifacts produced by a VM snapshot.

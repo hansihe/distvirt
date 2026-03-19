@@ -24,6 +24,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
     workloads.insert(
@@ -36,6 +37,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 

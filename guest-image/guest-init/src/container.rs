@@ -77,12 +77,14 @@ impl ContainerManager {
         }
     }
 
-    /// Mount the block device as ext4 at /containers/<id> and write resolv.conf.
+    /// Mount the block device as ext4 at /containers/<id>, write resolv.conf,
+    /// and bind-mount any volume mounts into the container rootfs.
     pub fn add(
         &mut self,
         id: String,
         device: String,
         dns_servers: &[String],
+        volume_mounts: &[distvirt_guest_protocol::VolumeMount],
     ) -> anyhow::Result<()> {
         if self.containers.contains_key(&id) {
             bail!("container {} already exists", id);
@@ -92,6 +94,23 @@ impl ContainerManager {
         util::mount(&device, &mount_point, "ext4", 0, None)
             .with_context(|| format!("mount {} on {}", device, mount_point))?;
         log::info!("mounted {} at {}", device, mount_point);
+
+        // Bind-mount volumes into the container rootfs.
+        for vm in volume_mounts {
+            let source = format!("/volumes/{}", vm.name);
+            let target = format!(
+                "{}/{}",
+                mount_point,
+                vm.mount_path.trim_start_matches('/')
+            );
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create mount target {}", target))?;
+            util::mount(&source, &target, "", libc::MS_BIND as libc::c_ulong, None)
+                .with_context(|| {
+                    format!("bind mount volume '{}' at {}", vm.name, target)
+                })?;
+            log::info!("bind-mounted volume '{}' at {}", vm.name, target);
+        }
 
         // Ensure /etc exists in the rootfs.
         let etc_dir = format!("{}/etc", mount_point);

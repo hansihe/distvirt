@@ -588,6 +588,10 @@ impl NamespaceWithBoundary {
             .map(|s| s.containers.clone())
             .unwrap_or_default();
         let resources = spec.as_ref().and_then(|s| s.resources.clone());
+        let volumes = spec
+            .as_ref()
+            .map(|s| s.volumes.clone())
+            .unwrap_or_default();
 
         distvirt_worker_protocol::WorkerCommand::LaunchPod {
             namespace_id: self.core.namespace_id().clone(),
@@ -595,6 +599,7 @@ impl NamespaceWithBoundary {
             network,
             containers,
             resources,
+            volumes,
         }
     }
 

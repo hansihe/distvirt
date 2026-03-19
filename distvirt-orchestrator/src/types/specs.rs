@@ -57,6 +57,9 @@ pub struct WorkloadSpec {
     /// If false, the workload is always-on regardless of demand.
     #[serde(default)]
     pub respects_demand: bool,
+    /// Pod-scoped volumes. Mounted into containers via volume_mounts.
+    #[serde(default)]
+    pub volumes: Vec<VolumeSpec>,
 }
 
 /// Workload-level activation configuration. Only passthrough is valid.

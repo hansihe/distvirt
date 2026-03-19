@@ -90,6 +90,31 @@ pub struct ContainerConfig {
     pub hostname: Option<String>,
     pub capture_output: bool,
     pub stdin: bool,
+    pub volume_mounts: Vec<VolumeMountSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VolumeMountSpec {
+    pub name: String,
+    pub mount_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VolumeType {
+    EmptyDir { size_mb: u64 },
+    ConfigData { files: Vec<ConfigDataFile> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VolumeSpec {
+    pub name: String,
+    pub volume_type: VolumeType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConfigDataFile {
+    pub path: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -284,6 +309,7 @@ pub enum WorkerCommand {
         network: PodNetworkConfig,
         containers: Vec<ContainerSpec>,
         resources: Option<ResourceRequirements>,
+        volumes: Vec<VolumeSpec>,
     },
     StopPod {
         namespace_id: NamespaceId,

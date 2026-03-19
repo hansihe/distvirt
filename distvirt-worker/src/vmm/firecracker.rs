@@ -224,6 +224,30 @@ impl Vmm for Firecracker {
             .context("configure config drive")?;
         }
 
+        // Copy and register additional drives (volumes).
+        for drive in &config.additional_drives {
+            let filename = drive
+                .image_path
+                .file_name()
+                .context("additional drive has no filename")?
+                .to_str()
+                .context("additional drive filename is not valid UTF-8")?;
+            copy_file_writable(&drive.image_path, &tmpdir.path().join(filename)).await?;
+            api_request(
+                "PUT",
+                &api_socket,
+                &format!("/drives/{}", drive.drive_id),
+                &serde_json::json!({
+                    "drive_id": &drive.drive_id,
+                    "path_on_host": format!("./{}", filename),
+                    "is_root_device": false,
+                    "is_read_only": drive.read_only,
+                }),
+            )
+            .await
+            .with_context(|| format!("configure additional drive '{}'", drive.drive_id))?;
+        }
+
         api_request(
             "PUT",
             &api_socket,
@@ -323,6 +347,21 @@ impl Vmm for Firecracker {
         let (exit_rx, _exit_monitor) = spawn_exit_monitor(&child);
         let _serial_task = serial_stdout.map(spawn_serial_task);
 
+        let volume_drives: Vec<super::SnapshotVolumeDrive> = config
+            .additional_drives
+            .iter()
+            .map(|d| super::SnapshotVolumeDrive {
+                filename: d
+                    .image_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                read_only: d.read_only,
+            })
+            .collect();
+
         Ok(FirecrackerInstance {
             child,
             vsock_uds_path,
@@ -336,6 +375,7 @@ impl Vmm for Firecracker {
             rootfs_source_path: config.rootfs_image_path.clone(),
             balloon_configured: config.balloon.is_some(),
             serial_console: config.serial_console,
+            volume_drives,
         })
     }
 
@@ -361,6 +401,16 @@ impl Vmm for Firecracker {
             &tmpdir.path().join("container.ext4"),
         )
         .await?;
+
+        // 2b. Copy volume images from snapshot.
+        for vd in &metadata.volume_drives {
+            copy_file_writable(
+                &snapshot_dir.join(&vd.filename),
+                &tmpdir.path().join(&vd.filename),
+            )
+            .await
+            .with_context(|| format!("copy volume image '{}' from snapshot", vd.filename))?;
+        }
 
         // 3. Copy snapshot.bin and mem.bin from snapshot dir into tmpdir.
         tokio::fs::copy(
@@ -450,6 +500,7 @@ impl Vmm for Firecracker {
             rootfs_source_path: metadata.rootfs_source_path.clone(),
             balloon_configured: metadata.balloon_configured,
             serial_console: metadata.serial_console,
+            volume_drives: metadata.volume_drives.clone(),
         })
     }
 }
@@ -473,6 +524,8 @@ pub struct FirecrackerInstance {
     balloon_configured: bool,
     /// Whether serial console output is enabled.
     serial_console: bool,
+    /// Volume drives attached to the VM (for snapshot/restore).
+    volume_drives: Vec<super::SnapshotVolumeDrive>,
 }
 
 impl Drop for FirecrackerInstance {
@@ -599,6 +652,16 @@ impl VmInstance for FirecrackerInstance {
         .await
         .context("copy container.ext4 to snapshot dir")?;
 
+        // 3b. Copy volume images from tmpdir into snapshot dir.
+        for vd in &self.volume_drives {
+            tokio::fs::copy(
+                tmpdir_path.join(&vd.filename),
+                snapshot_dir.join(&vd.filename),
+            )
+            .await
+            .with_context(|| format!("copy volume '{}' to snapshot dir", vd.filename))?;
+        }
+
         // 4. Copy snapshot.bin and mem.bin from tmpdir into snapshot dir.
         tokio::fs::copy(
             tmpdir_path.join("snapshot.bin"),
@@ -616,6 +679,7 @@ impl VmInstance for FirecrackerInstance {
             rootfs_source_path: self.rootfs_source_path.clone(),
             balloon_configured: self.balloon_configured,
             serial_console: self.serial_console,
+            volume_drives: self.volume_drives.clone(),
         };
         let metadata_json =
             serde_json::to_vec_pretty(&metadata).context("serialize snapshot metadata")?;

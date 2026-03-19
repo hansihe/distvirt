@@ -493,6 +493,7 @@ impl<
                 network,
                 containers,
                 resources,
+                volumes,
             } => {
                 self.handle_launch_pod(
                     &namespace_id,
@@ -500,6 +501,7 @@ impl<
                     network,
                     containers,
                     resources,
+                    volumes,
                     log_opener,
                 )
                 .await
@@ -713,6 +715,7 @@ impl<
         network: PodNetworkConfig,
         containers: Vec<ContainerSpec>,
         resources: Option<distvirt_worker_protocol::ResourceRequirements>,
+        volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
         log_opener: &LogStreamOpener,
     ) -> Result<(), FatalError> {
         let ns = self.namespaces.get_mut(namespace_id).ok_or_else(|| {
@@ -748,6 +751,7 @@ impl<
                 network,
                 containers,
                 resources,
+                volumes,
                 suspend_rx,
             )
             .await;
@@ -1327,6 +1331,7 @@ mod tests {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }]
     }
@@ -1551,6 +1556,7 @@ mod tests {
             make_pod_network(),
             make_containers(),
             None,
+            vec![],
             &log_opener,
         )
         .await

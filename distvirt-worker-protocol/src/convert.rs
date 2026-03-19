@@ -157,6 +157,16 @@ pub fn write_container_config(
     }
     builder.set_capture_output(val.capture_output);
     builder.set_stdin(val.stdin);
+    {
+        let mut mounts = builder
+            .reborrow()
+            .init_volume_mounts(val.volume_mounts.len() as u32);
+        for (i, m) in val.volume_mounts.iter().enumerate() {
+            let mut mb = mounts.reborrow().get(i as u32);
+            mb.set_name(&m.name);
+            mb.set_mount_path(&m.mount_path);
+        }
+    }
 }
 
 pub fn read_container_config(
@@ -207,7 +217,67 @@ pub fn read_container_config(
         },
         capture_output: reader.get_capture_output(),
         stdin: reader.get_stdin(),
+        volume_mounts: {
+            let mounts = reader.get_volume_mounts()?;
+            let mut v = Vec::with_capacity(mounts.len() as usize);
+            for i in 0..mounts.len() {
+                let m = mounts.get(i);
+                v.push(VolumeMountSpec {
+                    name: m.get_name()?.to_string()?,
+                    mount_path: m.get_mount_path()?.to_string()?,
+                });
+            }
+            v
+        },
     })
+}
+
+pub fn write_volume_spec(
+    builder: schema::volume_spec::Builder<'_>,
+    val: &VolumeSpec,
+) {
+    let mut b = builder;
+    b.set_name(&val.name);
+    match &val.volume_type {
+        VolumeType::EmptyDir { size_mb } => {
+            b.init_empty_dir().set_size_mb(*size_mb);
+        }
+        VolumeType::ConfigData { files } => {
+            let mut cd = b.init_config_data();
+            let mut list = cd.reborrow().init_files(files.len() as u32);
+            for (i, f) in files.iter().enumerate() {
+                let mut fb = list.reborrow().get(i as u32);
+                fb.set_path(&f.path);
+                fb.set_content(&f.content);
+            }
+        }
+    }
+}
+
+pub fn read_volume_spec(
+    reader: schema::volume_spec::Reader<'_>,
+) -> capnp::Result<VolumeSpec> {
+    let name = reader.get_name()?.to_string()?;
+    let volume_type = match reader.which()? {
+        schema::volume_spec::EmptyDir(ed) => {
+            VolumeType::EmptyDir {
+                size_mb: ed.get_size_mb(),
+            }
+        }
+        schema::volume_spec::ConfigData(cd) => {
+            let files_list = cd.get_files()?;
+            let mut files = Vec::with_capacity(files_list.len() as usize);
+            for i in 0..files_list.len() {
+                let f = files_list.get(i);
+                files.push(ConfigDataFile {
+                    path: f.get_path()?.to_string()?,
+                    content: f.get_content()?.to_string()?,
+                });
+            }
+            VolumeType::ConfigData { files }
+        }
+    };
+    Ok(VolumeSpec { name, volume_type })
 }
 
 pub fn write_resource_values(
@@ -820,6 +890,7 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
             network,
             containers,
             resources,
+            volumes,
         } => {
             let mut b = builder.init_launch_pod();
             b.set_namespace_id(namespace_id.as_ref());
@@ -834,6 +905,12 @@ pub fn write_worker_command(mut builder: schema::worker_command::Builder<'_>, cm
                 write_resource_requirements(&mut b.reborrow().init_resources(), res);
             } else {
                 b.set_has_resources(false);
+            }
+            {
+                let mut vol_list = b.reborrow().init_volumes(volumes.len() as u32);
+                for (i, vol) in volumes.iter().enumerate() {
+                    write_volume_spec(vol_list.reborrow().get(i as u32), vol);
+                }
             }
         }
         WorkerCommand::StopPod {
@@ -1025,12 +1102,18 @@ pub fn read_worker_command(
             } else {
                 None
             };
+            let vol_list = r.get_volumes()?;
+            let mut volumes = Vec::with_capacity(vol_list.len() as usize);
+            for i in 0..vol_list.len() {
+                volumes.push(read_volume_spec(vol_list.get(i))?);
+            }
             Ok(WorkerCommand::LaunchPod {
                 namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
                 pod_id: PodId(read_u64_id(r.get_pod_id()?.to_str()?)?),
                 network: read_pod_network_config(r.get_network()?)?,
                 containers,
                 resources,
+                volumes,
             })
         }
         StopPod(r) => {

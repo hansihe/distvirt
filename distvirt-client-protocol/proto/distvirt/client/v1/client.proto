@@ -59,6 +59,7 @@ message WorkloadSpec {
     // If true, the workload respects demand signals and starts dormant.
     // If false (default), the workload is always-on.
     bool respects_demand = 6;
+    repeated VolumeSpec volumes = 7;
 }
 
 message ResourceValues {
@@ -123,6 +124,35 @@ message ContainerConfig {
     string user = 7;
     string hostname = 8;
     bool tty = 9;              // allocate a PTY for the entrypoint at launch
+    repeated VolumeMountSpec volume_mounts = 10;
+}
+
+// --- Volume Types ---
+
+message VolumeSpec {
+    string name = 1;
+    oneof volume_type {
+        EmptyDirVolume empty_dir = 2;
+        ConfigDataVolume config_data = 3;
+    }
+}
+
+message EmptyDirVolume {
+    uint64 size_mb = 1;        // optional max size in MB; 0 means default
+}
+
+message ConfigDataVolume {
+    repeated ConfigDataFile files = 1;
+}
+
+message ConfigDataFile {
+    string path = 1;           // relative path within the volume
+    string content = 2;        // file content (UTF-8)
+}
+
+message VolumeMountSpec {
+    string name = 1;           // references VolumeSpec.name on the workload
+    string mount_path = 2;     // absolute path inside the container
 }
 
 message ServiceNetworkConfig {

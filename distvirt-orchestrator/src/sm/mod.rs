@@ -230,6 +230,8 @@ pub struct WorkloadSpec {
     /// Workload-level activation config. Controls the workload-owned endpoint's
     /// idle timeout behavior.
     pub activation: Option<WorkloadActivationSpec>,
+    /// Pod-scoped volumes. Passed through to LaunchPod command.
+    pub volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
 }
 
 /// Workload-level activation configuration.

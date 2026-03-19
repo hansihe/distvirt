@@ -11,6 +11,7 @@ pub mod resource_monitor;
 pub mod sim_traffic;
 pub mod task_handle;
 pub mod vmm;
+pub mod volume;
 pub mod vsock_client;
 pub mod worker;
 

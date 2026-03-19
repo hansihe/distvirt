@@ -20,6 +20,7 @@ fn default_container_spec() -> ContainerSpec {
             hostname: None,
             capture_output: true,
             stdin: false,
+            volume_mounts: vec![],
         },
     }
 }
@@ -69,9 +70,11 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -145,9 +148,11 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -206,9 +211,11 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -280,9 +287,11 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -345,9 +354,11 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -404,6 +415,7 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
         network: net1,
         containers: vec![default_container_spec()],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -414,6 +426,7 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
         network: net2,
         containers: vec![default_container_spec()],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -517,6 +530,7 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
         network: pod_net,
         containers: vec![default_container_spec()],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -560,6 +574,7 @@ async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
         network: pod_net,
         containers: vec![default_container_spec()],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 

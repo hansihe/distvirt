@@ -86,6 +86,8 @@ struct ContainerConfig {
   # via a log stream. See LogStreamHeader.
   stdin @10 :Bool;
   # Whether to enable stdin forwarding for this container.
+  volumeMounts @11 :List(VolumeMountSpec);
+  # Volumes to mount into this container.
 }
 
 # Specification for a container within a pod.
@@ -100,6 +102,45 @@ struct ContainerSpec {
   # OCI image reference (e.g., "docker.io/library/nginx:latest").
   config @2 :ContainerConfig;
   # Execution configuration (merged with OCI image defaults).
+}
+
+# Volume specification for a pod.
+#
+# Volumes are defined at the workload/pod level and mounted into individual
+# containers via VolumeMountSpec on ContainerConfig. A volume's lifetime is
+# tied to the pod — it is created at pod launch and survives suspend/resume.
+struct VolumeSpec {
+  name @0 :Text;
+  # Volume name. Referenced by VolumeMountSpec entries on containers.
+  union {
+    emptyDir :group {
+      # An empty filesystem created at pod launch, destroyed when the pod is removed.
+      # Backed by a fresh ext4 block device image attached to the VM.
+      sizeMb @1 :UInt64;
+      # Maximum size in MB. 0 means use the default.
+    }
+    configData :group {
+      # Inline file content baked into a read-only filesystem image.
+      # Useful for configuration files, certificates, and other small static data.
+      files @2 :List(ConfigDataFile);
+    }
+  }
+}
+
+# A single file entry within a configData volume.
+struct ConfigDataFile {
+  path @0 :Text;
+  # Relative path within the volume (e.g. "nginx.conf" or "certs/ca.pem").
+  content @1 :Text;
+  # File content (UTF-8).
+}
+
+# Mount a volume into a container at a specific path.
+struct VolumeMountSpec {
+  name @0 :Text;
+  # References a VolumeSpec.name on the workload.
+  mountPath @1 :Text;
+  # Absolute path inside the container where the volume is mounted.
 }
 
 # A DNS registry entry mapping a name to an IP address.
@@ -421,6 +462,8 @@ struct LaunchPodCmd {
   containers @3 :List(ContainerSpec);
   hasResources @4 :Bool;
   resources @5 :ResourceRequirements;
+  volumes @6 :List(VolumeSpec);
+  # Pod-scoped volume definitions. Mounted into containers via ContainerConfig.volumeMounts.
 }
 
 # Stop a running pod.

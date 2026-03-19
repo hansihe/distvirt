@@ -103,9 +103,11 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
                     hostname: None,
                     capture_output: false,
                     stdin: false,
+                    volume_mounts: vec![],
                 },
             }],
             resources: None,
+            volumes: vec![],
         })
         .await?;
 

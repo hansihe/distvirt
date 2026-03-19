@@ -275,18 +275,50 @@ impl<I: VmInstance> ManagedVm<I> {
         Ok(())
     }
 
+    /// Mount a volume device in the guest.
+    pub async fn mount_volume(
+        &mut self,
+        name: &str,
+        device: &str,
+        read_only: bool,
+    ) -> anyhow::Result<()> {
+        self.session
+            .send(&HostMessage::MountVolume {
+                name: name.to_string(),
+                device: device.to_string(),
+                read_only,
+            })
+            .await
+            .context("send MountVolume")?;
+
+        let msg: GuestMessage = self
+            .session
+            .recv()
+            .await
+            .context("receive VolumeMounted")?;
+        match msg {
+            GuestMessage::VolumeMounted { name } => log::info!("volume mounted: {}", name),
+            GuestMessage::Error { message } => bail!("MountVolume failed: {}", message),
+            other => bail!("expected VolumeMounted, got {:?}", other),
+        }
+
+        Ok(())
+    }
+
     /// Add a container filesystem to the guest.
     pub async fn add_container(
         &mut self,
         id: &str,
         device: &str,
         dns_servers: &[String],
+        volume_mounts: Vec<distvirt_guest_protocol::VolumeMount>,
     ) -> anyhow::Result<()> {
         self.session
             .send(&HostMessage::AddContainer {
                 id: id.to_string(),
                 device: device.to_string(),
                 dns_servers: dns_servers.to_vec(),
+                volume_mounts,
             })
             .await
             .context("send AddContainer")?;

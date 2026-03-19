@@ -232,6 +232,7 @@ impl VmInstance for TestVmInstance {
             rootfs_source_path: "/dev/null".into(),
             balloon_configured: false,
             serial_console: false,
+            volume_drives: vec![],
         };
 
         // Write metadata.json.

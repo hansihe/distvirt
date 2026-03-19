@@ -106,6 +106,7 @@ fn test_add_workload_to_existing_namespace() {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
     new_spec.services.insert(

@@ -14,3 +14,10 @@ workloads:
       - image: docker.io/library/caddy:2.11.2-alpine
     respects_demand: false
     suspend_on_idle: false
+  db:
+    containers:
+      - image: docker.io/library/postgres:14.22-trixie
+        env:
+          POSTGRES_PASSWORD: password
+    respects_demand: false
+    suspend_on_idle: false

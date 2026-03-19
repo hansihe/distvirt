@@ -123,6 +123,102 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                 );
             }
 
+            // Volume validation
+            if let Some(ref volumes) = wl.volumes {
+                let mut vol_names: HashSet<&str> = HashSet::new();
+                for (vi, vol) in volumes.iter().enumerate() {
+                    let vol_path = wl_path.key("volumes").index(vi);
+
+                    // Name must be non-empty
+                    if vol.name.is_empty() {
+                        errs.error(vol_path.key("name"), "volume name is empty");
+                    }
+
+                    // Duplicate volume name check
+                    if !vol.name.is_empty() && !vol_names.insert(vol.name.as_str()) {
+                        errs.error(
+                            vol_path.key("name"),
+                            format!("duplicate volume name '{}'", vol.name),
+                        );
+                    }
+
+                    // Exactly one volume type
+                    let type_count = vol.empty_dir.is_some() as u8
+                        + vol.config_data.is_some() as u8;
+                    if type_count == 0 {
+                        errs.error(
+                            vol_path.clone(),
+                            "volume must specify exactly one type (empty_dir, config_data)",
+                        );
+                    } else if type_count > 1 {
+                        errs.error(
+                            vol_path.clone(),
+                            "volume must specify exactly one type, but multiple were given",
+                        );
+                    }
+
+                    // config_data validation
+                    if let Some(ref cd) = vol.config_data {
+                        if cd.files.is_empty() {
+                            errs.error(vol_path.key("config_data").key("files"), "files list is empty");
+                        }
+                        for (fi, file) in cd.files.iter().enumerate() {
+                            if file.path.is_empty() {
+                                errs.error(
+                                    vol_path.key("config_data").key("files").index(fi).key("path"),
+                                    "file path is empty",
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Validate volume_mounts reference valid volume names
+                for (ci, container) in wl.containers.iter().enumerate() {
+                    if let Some(ref mounts) = container.volume_mounts {
+                        for (mi, mount) in mounts.iter().enumerate() {
+                            let mount_path = wl_path
+                                .key("containers")
+                                .index(ci)
+                                .key("volume_mounts")
+                                .index(mi);
+                            if mount.mount_path.is_empty() {
+                                errs.error(mount_path.key("mount_path"), "mount_path is empty");
+                            }
+                            if !vol_names.contains(mount.name.as_str()) {
+                                errs.error(
+                                    mount_path.key("name"),
+                                    format!(
+                                        "volume '{}' is not defined in workload '{}'",
+                                        mount.name, wid
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No volumes defined — check no container references volumes
+                for (ci, container) in wl.containers.iter().enumerate() {
+                    if let Some(ref mounts) = container.volume_mounts {
+                        for (mi, mount) in mounts.iter().enumerate() {
+                            errs.error(
+                                wl_path
+                                    .key("containers")
+                                    .index(ci)
+                                    .key("volume_mounts")
+                                    .index(mi)
+                                    .key("name"),
+                                format!(
+                                    "volume '{}' is not defined in workload '{}' (no volumes declared)",
+                                    mount.name, wid
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
             // Warn if activation is configured but respects_demand is false
             if !wl.respects_demand {
                 if wl.activation.is_some() {
@@ -570,6 +666,19 @@ fn build_namespace_spec(
                             format!("container-{}", i)
                         }
                     });
+                    let volume_mounts = c
+                        .volume_mounts
+                        .as_ref()
+                        .map(|mounts| {
+                            mounts
+                                .iter()
+                                .map(|m| VolumeMountSpec {
+                                    name: m.name.clone(),
+                                    mount_path: m.mount_path.clone(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     ContainerSpec {
                         name,
                         image: c.image.clone(),
@@ -581,10 +690,44 @@ fn build_namespace_spec(
                             user: c.user.clone().unwrap_or_default(),
                             hostname: c.hostname.clone().unwrap_or_default(),
                             tty: c.tty,
+                            volume_mounts,
                         }),
                     }
                 })
                 .collect();
+
+            let volumes: Vec<VolumeSpec> = wl
+                .volumes
+                .as_ref()
+                .map(|vols| {
+                    vols.iter()
+                        .map(|v| {
+                            let volume_type = if let Some(ref ed) = v.empty_dir {
+                                Some(volume_spec::VolumeType::EmptyDir(EmptyDirVolume {
+                                    size_mb: ed.size_mb.unwrap_or(0),
+                                }))
+                            } else if let Some(ref cd) = v.config_data {
+                                Some(volume_spec::VolumeType::ConfigData(ConfigDataVolume {
+                                    files: cd
+                                        .files
+                                        .iter()
+                                        .map(|f| ConfigDataFile {
+                                            path: f.path.clone(),
+                                            content: f.content.clone(),
+                                        })
+                                        .collect(),
+                                }))
+                            } else {
+                                None // shouldn't happen after validation
+                            };
+                            VolumeSpec {
+                                name: v.name.clone(),
+                                volume_type,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             let wl_activation = wl.activation.as_ref().and_then(|a| {
                 a.passthrough.as_ref().map(|passthrough| {
@@ -613,6 +756,7 @@ fn build_namespace_spec(
                     resources,
                     activation: wl_activation,
                     respects_demand: wl.respects_demand,
+                    volumes,
                 },
             );
 

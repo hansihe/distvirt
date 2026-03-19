@@ -28,6 +28,7 @@ fn simple_workload_spec() -> WorkloadSpec {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         network: distvirt_worker_protocol::PodNetworkConfig {
@@ -41,6 +42,7 @@ fn simple_workload_spec() -> WorkloadSpec {
         activation: None,
         run_policy: Default::default(),
         respects_demand: false,
+        volumes: vec![],
     }
 }
 

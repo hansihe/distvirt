@@ -184,6 +184,7 @@ async fn main() -> Result<()> {
             stats_polling_interval_s: 1,
         }),
         initial_commands: vec![],
+        additional_drives: vec![],
     };
     let instance = vmm.launch(&config).await.context("launch VM")?;
     eprintln!("       -> VM process launched");
@@ -200,7 +201,7 @@ async fn main() -> Result<()> {
     let container_id = "mem-stress-0";
 
     eprintln!("       -> adding container filesystem (device=/dev/vdb)...");
-    vm.add_container(container_id, "/dev/vdb", &[])
+    vm.add_container(container_id, "/dev/vdb", &[], vec![])
         .await
         .context("add container")?;
     eprintln!("       -> container filesystem added");
@@ -219,6 +220,7 @@ async fn main() -> Result<()> {
         hostname: Some("mem-testbench".to_string()),
         capture_output: true,
         stdin: false,
+        volume_mounts: vec![],
     };
 
     let pid = vm

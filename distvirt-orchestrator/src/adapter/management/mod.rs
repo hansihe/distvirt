@@ -273,6 +273,7 @@ impl ManagementAdapter {
                     idle_timeout: a.idle_timeout,
                 }
             }),
+            volumes: spec.volumes.clone(),
         }
     }
 

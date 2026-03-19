@@ -122,6 +122,35 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         })
     });
 
+    let volumes = wl
+        .volumes
+        .into_iter()
+        .map(|v| {
+            let volume_type = match v.volume_type {
+                Some(proto::volume_spec::VolumeType::EmptyDir(ed)) => {
+                    VolumeType::EmptyDir { size_mb: ed.size_mb }
+                }
+                Some(proto::volume_spec::VolumeType::ConfigData(cd)) => {
+                    VolumeType::ConfigData {
+                        files: cd
+                            .files
+                            .into_iter()
+                            .map(|f| ConfigDataFile {
+                                path: f.path,
+                                content: f.content,
+                            })
+                            .collect(),
+                    }
+                }
+                None => VolumeType::EmptyDir { size_mb: 0 },
+            };
+            VolumeSpec {
+                name: v.name,
+                volume_type,
+            }
+        })
+        .collect();
+
     Ok(WorkloadSpec {
         containers,
         network: pod_network,
@@ -130,6 +159,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         activation,
         run_policy: Default::default(),
         respects_demand: wl.respects_demand,
+        volumes,
     })
 }
 
@@ -141,6 +171,15 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
     } else {
         parse_user_field(&config.user)?
     };
+
+    let volume_mounts = config
+        .volume_mounts
+        .into_iter()
+        .map(|m| VolumeMountSpec {
+            name: m.name,
+            mount_path: m.mount_path,
+        })
+        .collect();
 
     Ok(ContainerSpec {
         container_id: c.name,
@@ -167,6 +206,7 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
             },
             capture_output: true,
             stdin: false,
+            volume_mounts,
         },
     })
 }

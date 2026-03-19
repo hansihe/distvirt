@@ -53,9 +53,11 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -291,9 +293,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -363,9 +367,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -523,9 +529,11 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -667,9 +675,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -743,9 +753,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 
@@ -878,9 +890,11 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                 hostname: None,
                 capture_output: true,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }],
         resources: None,
+        volumes: vec![],
     })
     .await?;
 

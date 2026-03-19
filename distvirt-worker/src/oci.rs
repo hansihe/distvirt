@@ -137,5 +137,6 @@ pub fn merge_config(
         hostname: overrides.hostname.clone(),
         capture_output: overrides.capture_output,
         stdin: overrides.stdin,
+        volume_mounts: overrides.volume_mounts.clone(),
     })
 }

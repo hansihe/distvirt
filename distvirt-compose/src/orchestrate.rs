@@ -34,6 +34,7 @@ fn build_container_config(spec: &ServiceSpec) -> ContainerConfig {
         hostname: spec.hostname.clone(),
         capture_output: true,
         stdin: false,
+        volume_mounts: vec![],
     }
 }
 
@@ -198,6 +199,7 @@ pub async fn run_compose(
             },
             containers: vec![container_spec],
             resources: None,
+            volumes: vec![],
         })
         .await
         .with_context(|| format!("send launch pod '{}'", planned.name))?;

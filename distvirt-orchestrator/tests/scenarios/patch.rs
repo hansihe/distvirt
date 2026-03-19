@@ -26,6 +26,7 @@ fn test_patch_add_workload() {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
     let mut services = BTreeMap::new();
@@ -123,6 +124,7 @@ fn test_patch_replace_workload_image() {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
     h.patch_namespace(

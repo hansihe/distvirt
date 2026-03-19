@@ -82,6 +82,7 @@ pub(crate) async fn pod_supervisor<
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
     resources: Option<distvirt_worker_protocol::ResourceRequirements>,
+    volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
     let result = pod_launch(
@@ -97,6 +98,7 @@ pub(crate) async fn pod_supervisor<
         network,
         containers,
         resources,
+        volumes,
         &cancel,
     )
     .await;
@@ -259,6 +261,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     network: PodNetworkConfig,
     containers: Vec<ContainerSpec>,
     resources: Option<distvirt_worker_protocol::ResourceRequirements>,
+    volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<(
     ManagedVm<V::Instance>,
@@ -279,6 +282,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         }
     };
 
+    let container_id = container.container_id.clone();
+    let container_volume_mounts = container.config.volume_mounts.clone();
     let config = if let Some(ref oci_config) = artifact.oci_config {
         oci::merge_config(oci_config, &container.config)?
     } else {
@@ -316,6 +321,22 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         }
     });
 
+    // Prepare volume images in a temp directory.
+    let vol_tmpdir = tempfile::tempdir().context("create tmpdir for volumes")?;
+    let prepared_volumes = crate::volume::prepare_volumes(&volumes, vol_tmpdir.path())
+        .await
+        .context("prepare volumes")?;
+
+    let additional_drives: Vec<crate::vmm::AdditionalDrive> = prepared_volumes
+        .iter()
+        .enumerate()
+        .map(|(i, pv)| crate::vmm::AdditionalDrive {
+            drive_id: format!("vol{}", i),
+            image_path: pv.image_path.clone(),
+            read_only: pv.read_only,
+        })
+        .collect();
+
     let vm_config = VmConfig {
         kernel_path: kernel_path.clone(),
         rootfs_image_path: rootfs_image_path.clone(),
@@ -326,6 +347,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         serial_console: true,
         balloon,
         initial_commands: vec![],
+        additional_drives,
     };
 
     let instance = tokio::select! {
@@ -349,13 +371,30 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         result = async {
             vm.configure_network("eth0", &net_config).await?;
 
+            // Mount pod-scoped volumes before adding containers.
+            // Device assignment: vda=rootfs, vdb=container, vdc=config (if present),
+            // then volumes start at the next available device letter.
+            let vol_device_offset: u8 = 2 + if vm_config.initial_commands.is_empty() { 0 } else { 1 };
+            for (i, pv) in prepared_volumes.iter().enumerate() {
+                let device = format!("/dev/vd{}", (b'a' + vol_device_offset + i as u8) as char);
+                vm.mount_volume(&pv.name, &device, pv.read_only).await?;
+            }
+
             let dns_servers = vec![network.gateway.to_string()];
 
-            let container_id = &container.container_id;
-            vm.add_container(container_id, "/dev/vdb", &dns_servers)
+            // Build volume mounts for this container from the container's config.
+            let volume_mounts: Vec<distvirt_guest_protocol::VolumeMount> = container_volume_mounts
+                .iter()
+                .map(|vm| distvirt_guest_protocol::VolumeMount {
+                    name: vm.name.clone(),
+                    mount_path: vm.mount_path.clone(),
+                })
+                .collect();
+
+            vm.add_container(&container_id, "/dev/vdb", &dns_servers, volume_mounts)
                 .await?;
 
-            vm.start_container(container_id, &config).await?;
+            vm.start_container(&container_id, &config).await?;
 
             // Set up log streaming via yamux log streams.
             let io_session = if config.capture_output {
@@ -910,6 +949,7 @@ mod tests {
                 hostname: None,
                 capture_output: false,
                 stdin: false,
+                volume_mounts: vec![],
             },
         }]
     }
@@ -960,6 +1000,7 @@ mod tests {
                     make_pod_network(),
                     make_containers(),
                     None,
+                    vec![],
                     suspend_rx,
                 )
                 .await;
@@ -1027,6 +1068,7 @@ mod tests {
                     make_pod_network(),
                     make_containers(),
                     None,
+                    vec![],
                     suspend_rx,
                 )
                 .await;
@@ -1085,6 +1127,7 @@ mod tests {
                 make_pod_network(),
                 make_containers(),
                 None,
+                vec![],
                 suspend_rx,
             )
             .await;
@@ -1142,6 +1185,7 @@ mod tests {
                     make_pod_network(),
                     make_containers(),
                     None,
+                    vec![],
                     suspend_rx,
                 )
                 .await;

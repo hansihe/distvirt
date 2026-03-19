@@ -221,6 +221,9 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
             HostMessage::ConfigureNetwork { .. } => {
                 write_framed(&mut control, &GuestMessage::NetworkConfigured).await?;
             }
+            HostMessage::MountVolume { name, .. } => {
+                write_framed(&mut control, &GuestMessage::VolumeMounted { name }).await?;
+            }
             HostMessage::AddContainer { id, .. } => {
                 write_framed(&mut control, &GuestMessage::ContainerAdded { id }).await?;
             }

@@ -48,6 +48,7 @@ fn container_spec(image: &str) -> distvirt_worker_protocol::ContainerSpec {
             hostname: None,
             capture_output: false,
             stdin: false,
+            volume_mounts: vec![],
         },
     }
 }
@@ -76,6 +77,7 @@ fn always_on_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 

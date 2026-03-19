@@ -39,6 +39,7 @@ pub fn container_spec(image: &str) -> ContainerSpec {
             hostname: None,
             capture_output: false,
             stdin: false,
+            volume_mounts: vec![],
         },
     }
 }

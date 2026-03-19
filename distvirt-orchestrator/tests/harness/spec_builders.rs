@@ -55,6 +55,7 @@ pub fn container_spec(image: &str) -> ContainerSpec {
             hostname: None,
             capture_output: false,
             stdin: false,
+            volume_mounts: vec![],
         },
     }
 }
@@ -75,6 +76,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 
@@ -116,6 +118,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 
@@ -161,6 +164,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 
@@ -205,6 +209,7 @@ pub fn multi_service_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: true,
+            volumes: vec![],
         },
     );
 
@@ -294,6 +299,7 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 
@@ -348,6 +354,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
     workloads.insert(
@@ -360,6 +367,7 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
             activation: None,
             run_policy: Default::default(),
             respects_demand: false,
+            volumes: vec![],
         },
     );
 
