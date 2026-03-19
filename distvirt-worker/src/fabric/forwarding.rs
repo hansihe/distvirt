@@ -226,14 +226,14 @@ async fn dispatch_frame<P: FramePort>(
                 continue;
             }
             EndpointAction::Buffered { service_id } => {
-                log::trace!("fabric: frame to {} buffered", dst_ip);
+                log::debug!("fabric: frame to {} buffered (service={:?})", dst_ip, service_id);
                 if should_activate {
                     emit_activation(ctx, dst_ip, service_id).await;
                 }
                 return;
             }
             EndpointAction::Drop { service_id } => {
-                log::trace!("fabric: frame to {} dropped", dst_ip);
+                log::debug!("fabric: frame to {} dropped (service={:?})", dst_ip, service_id);
                 if should_activate {
                     emit_activation(ctx, dst_ip, service_id).await;
                 }
@@ -352,6 +352,10 @@ async fn dispatch_frame<P: FramePort>(
                             log::warn!("fabric: SNAT send error: {}", e);
                         }
                     } else {
+                        log::debug!(
+                            "fabric: delivering to LocalPod port {} ({} -> {})",
+                            port_id, src_ip, dst_ip
+                        );
                         if let Err(e) = dst_port.send_frame(pkt).await {
                             log::warn!("fabric: deliver_to_port error: {}", e);
                         }
