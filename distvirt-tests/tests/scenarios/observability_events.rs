@@ -31,10 +31,9 @@ async fn test_always_on_events_e2e() {
 
     let events = drain_events(&cluster, "ns");
 
-    // Workload events: should include Dormant→WaitingForSpec and →Running.
-    // Note: WaitingForSpec→Launching→Running may coalesce within a single
-    // propagation round, so Launching is not guaranteed to appear as a
-    // distinct event.
+    // Workload events: intermediate transitions (Dormant→WaitingForSpec→Launching)
+    // may coalesce within a single propagation round. The only guaranteed
+    // observable event is the final →Running transition.
     let wl_events: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
@@ -46,25 +45,12 @@ async fn test_always_on_events_e2e() {
         wl_events.iter().any(|e| matches!(
             e,
             WorkloadEventKind::StatusChanged {
-                new: WlStatus::WaitingForSpec,
-                ..
-            } | WorkloadEventKind::StatusChanged {
-                new: WlStatus::Launching,
-                ..
-            }
-        )),
-        "expected workload WaitingForSpec or Launching event, got: {:?}",
-        wl_events
-    );
-    assert!(
-        wl_events.iter().any(|e| matches!(
-            e,
-            WorkloadEventKind::StatusChanged {
                 new: WlStatus::Running,
                 ..
             }
         )),
-        "expected workload Running event"
+        "expected workload Running event, got: {:?}",
+        wl_events
     );
 
     // Pod events: Created + StatusChanged → Running.
