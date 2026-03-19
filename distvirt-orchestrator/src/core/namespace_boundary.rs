@@ -578,10 +578,11 @@ impl NamespaceWithBoundary {
         proto_pod_id: &distvirt_worker_protocol::PodId,
         spec: &Option<crate::sm::WorkloadSpec>,
     ) -> distvirt_worker_protocol::WorkerCommand {
-        let network = spec
+        let mut network = spec
             .as_ref()
             .and_then(|s| s.network.clone())
             .unwrap_or_else(default_pod_network);
+        self.fill_network_from_namespace(&mut network);
         let containers = spec
             .as_ref()
             .map(|s| s.containers.clone())
@@ -607,10 +608,11 @@ impl NamespaceWithBoundary {
         let pool_id = self.active_workers.get(&worker_id)
             .and_then(|w| w.default_pool.clone())
             .expect("resume target worker must have a pool");
-        let network = spec
+        let mut network = spec
             .as_ref()
             .and_then(|s| s.network.clone())
             .unwrap_or_else(default_pod_network);
+        self.fill_network_from_namespace(&mut network);
 
         distvirt_worker_protocol::WorkerCommand::ResumePod {
             namespace_id: self.core.namespace_id().clone(),
@@ -618,6 +620,14 @@ impl NamespaceWithBoundary {
             artifact_id: proto_artifact_id.clone(),
             network,
             pool_id,
+        }
+    }
+
+    /// Populate gateway and netmask on a PodNetworkConfig from the namespace's NetworkConfig.
+    fn fill_network_from_namespace(&self, network: &mut distvirt_worker_protocol::PodNetworkConfig) {
+        if let Some(spec) = self.core.current_spec() {
+            network.gateway = spec.network.gateway;
+            network.netmask = prefix_len_to_netmask(spec.network.prefix_len);
         }
     }
 
@@ -755,4 +765,14 @@ fn default_pod_network() -> distvirt_worker_protocol::PodNetworkConfig {
         gateway: std::net::Ipv4Addr::new(0, 0, 0, 0),
         netmask: String::new(),
     }
+}
+
+/// Convert a CIDR prefix length (e.g. 24) to a dotted-decimal netmask string (e.g. "255.255.255.0").
+fn prefix_len_to_netmask(prefix_len: u8) -> String {
+    let mask = if prefix_len == 0 {
+        0u32
+    } else {
+        !0u32 << (32 - prefix_len)
+    };
+    std::net::Ipv4Addr::from(mask).to_string()
 }

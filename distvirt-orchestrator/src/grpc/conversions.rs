@@ -70,7 +70,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         .parse()
         .map_err(|_| Status::invalid_argument(format!("invalid workload IP: '{}'", network.ip)))?;
     // Gateway and netmask are populated from the namespace's NetworkConfig
-    // during pod launch in NamespaceStateMachine::handle_launch_pod.
+    // during pod launch/resume in NamespaceWithBoundary::fill_network_from_namespace.
     // Generate a locally-administered unicast MAC from the IP so the guest
     // network stack gets a valid hardware address.
     let ip_octets = ip.octets();
