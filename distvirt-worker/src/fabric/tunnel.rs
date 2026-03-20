@@ -91,7 +91,8 @@ pub struct TunnelTransport {
     _recv_task: TaskHandle<()>,
     encryption: Option<EncryptionConfig>,
     /// Sender to notify egress loops when handshake completes for a peer.
-    handshake_done_tx: watch::Sender<u64>,
+    /// A clone lives in the recv task; this field keeps the sender alive.
+    _handshake_done_tx: watch::Sender<u64>,
     /// Counter incremented each time a handshake completes, used to wake
     /// egress loops that are waiting for transport state.
     handshake_done_rx: watch::Receiver<u64>,
@@ -155,7 +156,7 @@ impl TunnelTransport {
             udp_socket,
             _recv_task: recv_task,
             encryption,
-            handshake_done_tx,
+            _handshake_done_tx: handshake_done_tx,
             handshake_done_rx,
         })
     }

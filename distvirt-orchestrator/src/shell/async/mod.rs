@@ -1,11 +1,10 @@
-//! Async production shell wrapping `OrchestratorCore`.
+//! Async production shell wrapping `OrchestratorCore` + `NamespaceUnit`s.
 //!
-//! This module owns an `OrchestratorCore`, handles all I/O (channels, timers,
-//! worker connections), and executes effects produced by the core.
-//! The shell contains **no logic** — only boilerplate.
+//! The shell owns both the orchestrator and all namespace units, routing
+//! messages between them in a delivery loop (same structure as the sync shell).
 //!
-//! Timers are driven via the core's `TimerWheel` — the shell queries
-//! `next_deadline()` and sleeps until that instant, then calls `advance_to()`.
+//! Timers are per-namespace — the shell queries all namespaces for their
+//! `next_deadline()` and sleeps until the earliest one.
 
 mod worker_reader;
 mod worker_writer;
@@ -21,29 +20,29 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::adapter::timer::TimerConfig;
+use crate::core::namespace::NamespaceUnit;
 use crate::core::orchestrator::OrchestratorCore;
 use crate::core::types::{
-    CreateNamespaceInfo, NamespaceCoreEvent, OrchestratorEffects, OrchestratorInput,
-    SchedulerCoreInput, WorkerConnectedInfo, WorkerStateCoreEvent,
+    CreateNamespaceInfo, NamespaceOutput, OrchestratorInputNew, OrchestratorOutput,
+    OrchestratorToNamespace, SchedulerCoreInput, WorkerConnectedInfo, WorkerStateCoreEvent,
 };
-use crate::core::worker_state::WorkerTunnelInfo;
-use crate::core::{ClientError, ConnectResult, GlobalWorkerId, WorkerWriterHandle};
+use crate::core::orchestrator::worker_state::WorkerTunnelInfo;
+use crate::core::{ClientCommand, ClientError, ConnectResult, GlobalWorkerId, WorkerWriterHandle};
 use crate::event_bus::EventBusHandle;
 use crate::id_registry::IdRegistryMap;
 use crate::log_bus::LogBusHandle;
 use crate::types::{NamespaceId, NamespaceSpec};
 
 // =============================================================================
-// Shell event — everything the shell can receive
+// Shell event
 // =============================================================================
 
 enum ShellEvent {
-    /// External command (worker connection, namespace create/destroy).
     Command(ShellCommand),
-    /// Namespace-scoped event from a worker reader.
+    /// Namespace-scoped event from a worker reader — route to namespace directly.
     NamespaceEvent {
         namespace_id: NamespaceId,
-        event: NamespaceCoreEvent,
+        event: OrchestratorToNamespace,
     },
     /// Worker state event from a worker reader.
     WorkerStateEvent(WorkerStateCoreEvent),
@@ -53,7 +52,6 @@ enum ShellEvent {
     WorkerDisconnected { worker_id: GlobalWorkerId },
 }
 
-/// Commands sent to the shell from external callers.
 enum ShellCommand {
     WorkerConnection {
         conn: OrchestratorConnection,
@@ -95,11 +93,11 @@ enum ShellCommand {
         response: oneshot::Sender<Result<(), ClientError>>,
     },
     ListWorkers {
-        response: oneshot::Sender<Vec<crate::core::worker_state::WorkerQueryInfo>>,
+        response: oneshot::Sender<Vec<crate::core::orchestrator::worker_state::WorkerQueryInfo>>,
     },
     GetWorker {
         worker_id: GlobalWorkerId,
-        response: oneshot::Sender<Result<crate::core::worker_state::WorkerQueryInfo, ClientError>>,
+        response: oneshot::Sender<Result<crate::core::orchestrator::worker_state::WorkerQueryInfo, ClientError>>,
     },
     ListPods {
         namespace_id: NamespaceId,
@@ -257,7 +255,7 @@ impl ShellHandle {
         rx.await.unwrap_or(Err(ClientError::ShellGone))
     }
 
-    pub async fn list_workers(&self) -> Result<Vec<crate::core::worker_state::WorkerQueryInfo>, ClientError> {
+    pub async fn list_workers(&self) -> Result<Vec<crate::core::orchestrator::worker_state::WorkerQueryInfo>, ClientError> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -268,7 +266,7 @@ impl ShellHandle {
         rx.await.map_err(|_| ClientError::ShellGone)
     }
 
-    pub async fn get_worker(&self, worker_id: GlobalWorkerId) -> Result<crate::core::worker_state::WorkerQueryInfo, ClientError> {
+    pub async fn get_worker(&self, worker_id: GlobalWorkerId) -> Result<crate::core::orchestrator::worker_state::WorkerQueryInfo, ClientError> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -336,7 +334,7 @@ impl ShellHandle {
 }
 
 // =============================================================================
-// Per-worker slot (async-only state)
+// Per-worker slot
 // =============================================================================
 
 struct WorkerSlot {
@@ -355,14 +353,12 @@ struct WorkerSlot {
 
 struct Shell {
     orchestrator: OrchestratorCore,
+    namespaces: HashMap<NamespaceId, NamespaceUnit>,
 
     next_worker_id: u64,
-
     workers: HashMap<GlobalWorkerId, WorkerSlot>,
 
-    /// Boot instant — used to convert between logical Duration and real Instant.
     start: Instant,
-
     rx: mpsc::Receiver<ShellEvent>,
     self_tx: mpsc::Sender<ShellEvent>,
 
@@ -371,25 +367,30 @@ struct Shell {
     wireguard_listen_port: u16,
 
     activity: Arc<ActivityTracker>,
-
     log_bus: LogBusHandle,
     event_bus: EventBusHandle,
 }
 
 impl Shell {
-    /// Current logical time (Duration since shell boot).
     fn now(&self) -> Duration {
         self.start.elapsed()
     }
 
+    /// Compute the earliest deadline across all namespace timer wheels.
+    fn next_deadline(&self) -> Option<Duration> {
+        self.namespaces
+            .values()
+            .filter_map(|ns| ns.next_deadline())
+            .min()
+    }
+
     async fn run(mut self) {
         loop {
-            // Compute the next timer deadline as a real Instant.
-            let timer_sleep = match self.orchestrator.next_deadline() {
+            let timer_sleep = match self.next_deadline() {
                 Some(deadline) => tokio::time::sleep_until(self.start + deadline),
                 None => tokio::time::sleep(Duration::MAX),
             };
-            let has_timer = self.orchestrator.next_deadline().is_some();
+            let has_timer = self.next_deadline().is_some();
 
             tokio::select! {
                 event = self.rx.recv() => {
@@ -398,16 +399,32 @@ impl Shell {
                     self.activity.tick();
                 }
                 _ = timer_sleep, if has_timer => {
-                    // Timer expired — advance_to will fire it and process effects.
+                    // Timer expired.
                 }
             }
 
-            // After either branch, fire any expired timers.
+            // After either branch, fire any expired timers on all namespaces.
             let now = self.now();
-            let effects = self.orchestrator.advance_to(now);
-            self.execute_effects(effects).await;
+            let ns_ids: Vec<_> = self.namespaces.keys().cloned().collect();
+            for ns_id in ns_ids {
+                if let Some(ns) = self.namespaces.get_mut(&ns_id) {
+                    let ns_output = ns.advance_to(now);
+                    self.route_namespace_output(&ns_id, ns_output).await;
+                }
+            }
+            // Drain any pending orchestrator messages from timer processing.
+            self.drain_pending().await;
             self.activity.tick();
         }
+    }
+
+    /// Drain pending orchestrator inputs (from namespace outputs) until quiescent.
+    /// In the current single-task model this is a no-op since we process
+    /// namespace outputs immediately. But it's here for correctness if
+    /// route_namespace_output queues orchestrator inputs.
+    async fn drain_pending(&mut self) {
+        // Currently, route_namespace_output processes orchestrator messages inline.
+        // This is a placeholder for the future multi-task model.
     }
 
     async fn handle_event(&mut self, event: ShellEvent) {
@@ -424,22 +441,52 @@ impl Shell {
                     network,
                     response,
                 } => {
-                    let (result, effects) = self.orchestrator.create_namespace(
-                        CreateNamespaceInfo {
-                            namespace_id,
-                            network,
-                        },
-                        now,
-                    );
-                    self.execute_effects(effects).await;
-                    let _ = response.send(result);
+                    let (result, output) = self.orchestrator.create_namespace(CreateNamespaceInfo {
+                        namespace_id: namespace_id.clone(),
+                        network,
+                    });
+                    self.route_orchestrator_output(output).await;
+
+                    let client_result = match result {
+                        Ok(creation_info) => {
+                            let ns = NamespaceUnit::new(
+                                namespace_id.clone(),
+                                creation_info.timer_config,
+                                &creation_info.network,
+                                creation_info.id_registry,
+                            );
+                            self.namespaces.insert(namespace_id.clone(), ns);
+
+                            // Send WorkerConnected to the new namespace for each connected worker.
+                            for summary in creation_info.connected_workers {
+                                if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                                    let ns_output = ns.process(
+                                        OrchestratorToNamespace::WorkerConnected {
+                                            worker_id: summary.worker_id,
+                                            proto_worker_id: summary.proto_worker_id,
+                                            info: crate::sm::WorkerInfo {
+                                                capacity: summary.max_pods,
+                                                default_pool: summary.default_pool,
+                                            },
+                                        },
+                                        now,
+                                    );
+                                    self.route_namespace_output(&namespace_id, ns_output).await;
+                                }
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    };
+                    let _ = response.send(client_result);
                 }
                 ShellCommand::DestroyNamespace {
                     namespace_id,
                     response,
                 } => {
-                    let (result, effects) = self.orchestrator.destroy_namespace(&namespace_id);
-                    self.execute_effects(effects).await;
+                    self.namespaces.remove(&namespace_id);
+                    let (result, output) = self.orchestrator.destroy_namespace(&namespace_id);
+                    self.route_orchestrator_output(output).await;
                     let _ = response.send(result);
                 }
                 ShellCommand::UpdateNamespace {
@@ -447,8 +494,16 @@ impl Shell {
                     spec,
                     response,
                 } => {
-                    let (result, effects) = self.orchestrator.update_namespace(&namespace_id, spec, now);
-                    self.execute_effects(effects).await;
+                    let result = if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                        let ns_output = ns.process(
+                            OrchestratorToNamespace::ClientCommand(ClientCommand::UpdateSpec(spec)),
+                            now,
+                        );
+                        self.route_namespace_output(&namespace_id, ns_output).await;
+                        Ok(())
+                    } else {
+                        Err(ClientError::NamespaceNotFound)
+                    };
                     let _ = response.send(result);
                 }
                 ShellCommand::PatchNamespace {
@@ -456,19 +511,29 @@ impl Shell {
                     patch,
                     response,
                 } => {
-                    let (result, effects) = self.orchestrator.patch_namespace(&namespace_id, patch, now);
-                    self.execute_effects(effects).await;
+                    let result = if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                        let ns_output = ns.process(
+                            OrchestratorToNamespace::ClientCommand(ClientCommand::PatchSpec(patch)),
+                            now,
+                        );
+                        self.route_namespace_output(&namespace_id, ns_output).await;
+                        Ok(())
+                    } else {
+                        Err(ClientError::NamespaceNotFound)
+                    };
                     let _ = response.send(result);
                 }
                 ShellCommand::GetNamespaceStatus {
                     namespace_id,
                     response,
                 } => {
-                    let result = self.orchestrator.get_namespace_status(&namespace_id);
+                    let result = self.namespaces.get(&namespace_id)
+                        .map(|ns| ns.status_report())
+                        .ok_or(ClientError::NamespaceNotFound);
                     let _ = response.send(result);
                 }
                 ShellCommand::ListNamespaces { response } => {
-                    let result = self.orchestrator.list_namespaces();
+                    let result: Vec<_> = self.namespaces.values().map(|ns| ns.status_report()).collect();
                     let _ = response.send(result);
                 }
                 ShellCommand::ConnectNetwork {
@@ -476,12 +541,7 @@ impl Shell {
                     client_public_key,
                     response,
                 } => {
-                    let (result, effects) = self.orchestrator.connect_network(
-                        &namespace_id,
-                        client_public_key,
-                        now,
-                    );
-                    self.execute_effects(effects).await;
+                    let result = self.handle_connect_network(&namespace_id, client_public_key, now).await;
                     let _ = response.send(result);
                 }
                 ShellCommand::DisconnectNetwork {
@@ -489,12 +549,18 @@ impl Shell {
                     client_public_key,
                     response,
                 } => {
-                    let (result, effects) = self.orchestrator.disconnect_network(
-                        &namespace_id,
-                        client_public_key,
-                        now,
-                    );
-                    self.execute_effects(effects).await;
+                    let result = if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                        let ns_output = ns.process(
+                            OrchestratorToNamespace::ClientCommand(ClientCommand::Disconnect {
+                                client_public_key,
+                            }),
+                            now,
+                        );
+                        self.route_namespace_output(&namespace_id, ns_output).await;
+                        Ok(())
+                    } else {
+                        Err(ClientError::NamespaceNotFound)
+                    };
                     let _ = response.send(result);
                 }
                 ShellCommand::ListWorkers { response } => {
@@ -512,7 +578,12 @@ impl Shell {
                     namespace_id,
                     response,
                 } => {
-                    let result = self.orchestrator.list_pods(&namespace_id);
+                    let result = self.namespaces.get(&namespace_id)
+                        .map(|ns| {
+                            let report = ns.status_report();
+                            report.pods.into_values().collect()
+                        })
+                        .ok_or(ClientError::NamespaceNotFound);
                     let _ = response.send(result);
                 }
                 ShellCommand::InjectNamespaceEvent {
@@ -521,24 +592,21 @@ impl Shell {
                     event,
                     response,
                 } => {
-                    let effects = self.orchestrator.process(
-                        OrchestratorInput::NamespaceEvent {
-                            namespace_id,
-                            event: NamespaceCoreEvent::WorkerEvent(crate::core::WorkerNamespaceEvent {
+                    if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                        let ns_output = ns.process(
+                            OrchestratorToNamespace::WorkerEvent(crate::core::WorkerNamespaceEvent {
                                 worker_id,
                                 event,
                             }),
-                        },
-                        now,
-                    );
-                    self.execute_effects(effects).await;
+                            now,
+                        );
+                        self.route_namespace_output(&namespace_id, ns_output).await;
+                    }
                     let _ = response.send(());
                 }
                 ShellCommand::InjectWorkerStateEvent { event, response } => {
-                    let effects = self
-                        .orchestrator
-                        .process(OrchestratorInput::WorkerStateEvent(event), now);
-                    self.execute_effects(effects).await;
+                    let output = self.orchestrator.process(OrchestratorInputNew::WorkerStateEvent(event));
+                    self.route_orchestrator_output(output).await;
                     let _ = response.send(());
                 }
             },
@@ -546,37 +614,78 @@ impl Shell {
                 namespace_id,
                 event,
             } => {
-                let effects = self.orchestrator.process(
-                    OrchestratorInput::NamespaceEvent {
-                        namespace_id,
-                        event,
-                    },
-                    now,
-                );
-                self.execute_effects(effects).await;
+                if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
+                    let ns_output = ns.process(event, now);
+                    self.route_namespace_output(&namespace_id, ns_output).await;
+                }
             }
             ShellEvent::WorkerStateEvent(event) => {
-                let effects = self
-                    .orchestrator
-                    .process(OrchestratorInput::WorkerStateEvent(event), now);
-                self.execute_effects(effects).await;
+                let output = self.orchestrator.process(OrchestratorInputNew::WorkerStateEvent(event));
+                self.route_orchestrator_output(output).await;
             }
             ShellEvent::SchedulerInput(input) => {
-                let effects = self
-                    .orchestrator
-                    .process(OrchestratorInput::SchedulerEvent(input), now);
-                self.execute_effects(effects).await;
+                let output = self.orchestrator.process(OrchestratorInputNew::SchedulerEvent(input));
+                self.route_orchestrator_output(output).await;
             }
             ShellEvent::WorkerDisconnected { worker_id } => {
-                let effects = self.orchestrator.worker_disconnected(worker_id, now);
-                self.execute_effects(effects).await;
+                let output = self.orchestrator.worker_disconnected(worker_id, now);
+                self.route_orchestrator_output(output).await;
+                // Process namespace messages from worker disconnect.
+                self.drain_ns_messages().await;
                 self.workers.remove(&worker_id);
             }
         }
     }
 
-    /// Handshake a new worker connection. The only place with real I/O logic,
-    /// but it's purely protocol plumbing — no domain decisions.
+    async fn handle_connect_network(
+        &mut self,
+        namespace_id: &NamespaceId,
+        client_public_key: [u8; 32],
+        now: Duration,
+    ) -> Result<ConnectResult, ClientError> {
+        if !self.namespaces.contains_key(namespace_id) {
+            return Err(ClientError::NamespaceNotFound);
+        }
+
+        let (worker_id, wg_info, public_endpoint) = match self.orchestrator.find_wireguard_worker() {
+            Some((wid, wg, ep)) => (wid, wg.clone(), ep.to_string()),
+            None => return Err(ClientError::NoTunnelWorker),
+        };
+
+        let ns = self.namespaces.get_mut(namespace_id).unwrap();
+        let ns_output = ns.process(
+            OrchestratorToNamespace::ClientCommand(ClientCommand::Connect {
+                client_public_key,
+                worker_id,
+            }),
+            now,
+        );
+        self.route_namespace_output(namespace_id, ns_output).await;
+
+        let ns = self.namespaces.get(namespace_id).unwrap();
+        let wg_peers = ns.wg_peers();
+        let client_ip = match wg_peers.peers.get(&client_public_key) {
+            Some(info) => info.client_ip,
+            None => return Err(ClientError::IpExhausted),
+        };
+
+        let subnet_cidr = wg_peers.subnet_cidr();
+        let endpoint = format!("{}:{}", public_endpoint, wg_info.listen_port);
+
+        Ok(ConnectResult {
+            server_public_key: wg_info.public_key,
+            endpoint,
+            client_ip,
+            subnet: subnet_cidr,
+        })
+    }
+
+    /// Drain namespace messages from pending orchestrator output.
+    async fn drain_ns_messages(&mut self) {
+        // In the current inline model, namespace messages are processed
+        // immediately in route_orchestrator_output. This is a no-op.
+    }
+
     async fn handle_worker_connection(
         &mut self,
         mut conn: OrchestratorConnection,
@@ -589,16 +698,13 @@ impl Shell {
 
         let global_id = crate::sm::WorkerId(self.next_worker_id);
         self.next_worker_id += 1;
-        let proto_worker_id =
-            distvirt_worker_protocol::WorkerId::from(global_id.0);
+        let proto_worker_id = distvirt_worker_protocol::WorkerId::from(global_id.0);
 
         conn.send_accepted(&distvirt_worker_protocol::WorkerAccepted {
             worker_id: proto_worker_id.clone(),
-            adapters: vec![
-                distvirt_worker_protocol::AdapterConfig::WireGuard {
-                    listen_port: self.wireguard_listen_port,
-                },
-            ],
+            adapters: vec![distvirt_worker_protocol::AdapterConfig::WireGuard {
+                listen_port: self.wireguard_listen_port,
+            }],
             tunnel_encrypted: self.tunnel_encrypted,
             pools: vec![],
         })
@@ -615,17 +721,14 @@ impl Shell {
         };
 
         let wireguard_info = match (ready.wireguard_listen_port, ready.wireguard_public_key) {
-            (Some(port), Some(key)) => Some(crate::core::worker_state::WireguardAdapterInfo {
+            (Some(port), Some(key)) => Some(crate::core::orchestrator::worker_state::WireguardAdapterInfo {
                 listen_port: port,
                 public_key: key,
             }),
             _ => None,
         };
 
-        // Split connection into reader/writer.
         let (reader, writer, log_rx, driver) = conn.into_split();
-
-        // Spawn log stream ingest task.
         spawn_log_ingest(log_rx, self.log_bus.clone());
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<distvirt_worker_protocol::WorkerCommand>(256);
@@ -635,9 +738,7 @@ impl Shell {
         let reader_handle = worker_reader::spawn(global_id, reader, self.self_tx.clone());
 
         let now = self.now();
-
-        // Tell the orchestrator about the new worker (handles all fan-out).
-        let effects = self.orchestrator.worker_connected(
+        let output = self.orchestrator.worker_connected(
             WorkerConnectedInfo {
                 worker_id: global_id,
                 capabilities: hello.capabilities,
@@ -647,7 +748,7 @@ impl Shell {
             },
             now,
         );
-        self.execute_effects(effects).await;
+        self.route_orchestrator_output(output).await;
 
         self.workers.insert(
             global_id,
@@ -662,64 +763,158 @@ impl Shell {
         Ok(())
     }
 
-    /// Execute effects produced by the sync orchestrator.
-    /// Pure boilerplate: send commands on the wire.
-    async fn execute_effects(&mut self, effects: OrchestratorEffects) {
-        // Direct wire commands (e.g. CreateNamespace sent before fabric is ready).
-        for direct in effects.direct_worker_commands {
+    /// Route orchestrator output: deliver namespace messages inline, send wire commands.
+    async fn route_orchestrator_output(&mut self, output: OrchestratorOutput) {
+        let now = self.now();
+
+        // Direct wire commands.
+        for direct in output.direct_worker_commands {
             if let Some(slot) = self.workers.get(&direct.worker_id) {
                 slot.writer.send(direct.command).await;
             }
         }
 
-        // Namespace-scoped broadcasts (endpoint updates, DNS, etc.).
-        // Must be sent before worker commands: pods depend on endpoints
-        // already being configured on the worker when they launch.
-        for (namespace_id, cmd) in effects.broadcast_commands {
-            if let Some(ns) = self.orchestrator.namespace(&namespace_id) {
-                for worker_id in ns.active_worker_ids() {
-                    if let Some(slot) = self.workers.get(&worker_id) {
-                        slot.writer.send(cmd.clone()).await;
-                    }
-                }
-            }
-        }
-
-        // Worker commands (routed through namespace logic).
-        for (worker_id, cmd) in effects.worker_commands {
-            if let Some(slot) = self.workers.get(&worker_id) {
-                slot.writer.send(cmd).await;
-            }
-        }
-
         // Global broadcasts.
-        for cmd in effects.global_broadcasts {
+        for cmd in output.global_broadcasts {
             for slot in self.workers.values() {
                 slot.writer.send(cmd.clone()).await;
             }
         }
 
-        // Publish observability events to the event bus.
-        for (namespace_id, events) in effects.observability_events {
-            self.event_bus.publish(&namespace_id, events);
+        // Worker commands (e.g. DeleteArtifact).
+        for (worker_id, cmd) in output.worker_commands {
+            if let Some(slot) = self.workers.get(&worker_id) {
+                slot.writer.send(cmd).await;
+            }
+        }
+
+        // Deliver namespace messages inline.
+        for (ns_id, msg) in output.to_namespaces {
+            if let Some(ns) = self.namespaces.get_mut(&ns_id) {
+                let ns_output = ns.process(msg, now);
+                self.route_namespace_output_inner(&ns_id, ns_output).await;
+            }
+        }
+    }
+
+    /// Route namespace output: send wire commands, process orchestrator messages inline.
+    async fn route_namespace_output(&mut self, namespace_id: &NamespaceId, output: NamespaceOutput) {
+        self.route_namespace_output_inner(namespace_id, output).await;
+    }
+
+    async fn route_namespace_output_inner(&mut self, namespace_id: &NamespaceId, output: NamespaceOutput) {
+        let now = self.now();
+
+        // Namespace-scoped broadcasts.
+        if !output.broadcast_commands.is_empty() {
+            if let Some(ns) = self.namespaces.get(namespace_id) {
+                for cmd in &output.broadcast_commands {
+                    for worker_id in ns.active_worker_ids() {
+                        if let Some(slot) = self.workers.get(&worker_id) {
+                            slot.writer.send(cmd.clone()).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Targeted worker commands.
+        for (worker_id, cmd) in output.worker_commands {
+            if let Some(slot) = self.workers.get(&worker_id) {
+                slot.writer.send(cmd).await;
+            }
+        }
+
+        // Observability events.
+        if !output.observability_events.is_empty() {
+            self.event_bus
+                .publish(namespace_id, output.observability_events);
+        }
+
+        // Process orchestrator messages inline.
+        for msg in output.to_orchestrator {
+            let orch_output = self.orchestrator.process(OrchestratorInputNew::FromNamespace {
+                namespace_id: namespace_id.clone(),
+                message: msg,
+            });
+            // Recursively route orchestrator output (scheduler decisions → namespace messages).
+            // This is bounded: scheduler decisions don't produce further scheduler messages.
+            self.route_orchestrator_output_inner_no_recurse(orch_output, now).await;
+        }
+    }
+
+    /// Route orchestrator output without recursing into namespace processing for to_namespaces.
+    /// Instead, process namespace messages inline.
+    async fn route_orchestrator_output_inner_no_recurse(&mut self, output: OrchestratorOutput, now: Duration) {
+        // Direct wire commands.
+        for direct in output.direct_worker_commands {
+            if let Some(slot) = self.workers.get(&direct.worker_id) {
+                slot.writer.send(direct.command).await;
+            }
+        }
+
+        // Global broadcasts.
+        for cmd in output.global_broadcasts {
+            for slot in self.workers.values() {
+                slot.writer.send(cmd.clone()).await;
+            }
+        }
+
+        // Worker commands.
+        for (worker_id, cmd) in output.worker_commands {
+            if let Some(slot) = self.workers.get(&worker_id) {
+                slot.writer.send(cmd).await;
+            }
+        }
+
+        // Deliver namespace messages inline.
+        for (ns_id, msg) in output.to_namespaces {
+            if let Some(ns) = self.namespaces.get_mut(&ns_id) {
+                let ns_output = ns.process(msg, now);
+                // Only send wire effects, don't recurse into orchestrator messages.
+                // Scheduler decisions should not produce further scheduler messages.
+                if !ns_output.broadcast_commands.is_empty() {
+                    if let Some(ns_ref) = self.namespaces.get(&ns_id) {
+                        for cmd in &ns_output.broadcast_commands {
+                            for worker_id in ns_ref.active_worker_ids() {
+                                if let Some(slot) = self.workers.get(&worker_id) {
+                                    slot.writer.send(cmd.clone()).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                for (worker_id, cmd) in ns_output.worker_commands {
+                    if let Some(slot) = self.workers.get(&worker_id) {
+                        slot.writer.send(cmd).await;
+                    }
+                }
+                if !ns_output.observability_events.is_empty() {
+                    self.event_bus.publish(&ns_id, ns_output.observability_events);
+                }
+                debug_assert!(
+                    ns_output.to_orchestrator.is_empty(),
+                    "scheduler decisions should not produce new scheduler messages"
+                );
+            }
         }
     }
 }
 
-/// Spawn a task that accepts worker log streams and publishes to the LogBus.
 fn spawn_log_ingest(
     mut log_rx: mpsc::UnboundedReceiver<::yamux::Stream>,
     log_bus: LogBusHandle,
 ) {
     tokio::spawn(async move {
         while let Some(mut stream) = log_rx.recv().await {
-            let header: distvirt_worker_protocol::LogStreamHeader = match distvirt_worker_protocol::codec::recv_log_header(&mut stream).await {
-                Ok(h) => h,
-                Err(e) => {
-                    log::warn!("failed to read log stream header: {:#}", e);
-                    continue;
-                }
-            };
+            let header: distvirt_worker_protocol::LogStreamHeader =
+                match distvirt_worker_protocol::codec::recv_log_header(&mut stream).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        log::warn!("failed to read log stream header: {:#}", e);
+                        continue;
+                    }
+                };
             let bus = log_bus.clone();
             tokio::spawn(async move {
                 use futures_lite::io::AsyncReadExt;
@@ -755,7 +950,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-/// Spawn the new async shell. Returns (handle, log_bus, event_bus, id_registry_map, join_handle).
 pub fn spawn(
     worker_secret: String,
     timer_config: TimerConfig,
@@ -764,12 +958,13 @@ pub fn spawn(
     activity: Arc<ActivityTracker>,
 ) -> (ShellHandle, LogBusHandle, EventBusHandle, IdRegistryMap, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(256);
-    let log_bus = LogBusHandle::new(256 * 1024); // 256 KiB per topic
-    let event_bus = EventBusHandle::new(1024); // 1024 events per namespace
+    let log_bus = LogBusHandle::new(256 * 1024);
+    let event_bus = EventBusHandle::new(1024);
     let id_registry_map = IdRegistryMap::new();
 
     let shell = Shell {
         orchestrator: OrchestratorCore::new(timer_config, id_registry_map.clone()),
+        namespaces: HashMap::new(),
         next_worker_id: 0,
         workers: HashMap::new(),
         start: Instant::now(),

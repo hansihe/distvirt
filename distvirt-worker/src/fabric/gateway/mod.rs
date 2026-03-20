@@ -172,6 +172,7 @@ pub struct FabricGateway<E: EgressPort = TunEgress> {
     pod_subnet_bits: u32,
 }
 
+#[cfg(test)]
 impl FabricGateway<ChannelEgress> {
     /// Create a new fabric gateway backed by channels (no root, for testing).
     ///

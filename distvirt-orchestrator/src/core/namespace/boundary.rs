@@ -17,8 +17,8 @@ use crate::id_registry::IdRegistry;
 use crate::sm::{ArtifactId, ArtifactPortId, DRouter, PodId, WorkerId};
 use crate::types::{NamespaceId, NamespaceSpec};
 
-use super::namespace::NamespaceCore;
-use super::types::{
+use super::inner::NamespaceCore;
+use crate::core::types::{
     InternalNamespaceEvent, InternalSchedulerMessage, InternalWorkerEvent, NamespaceCoreEvent,
     NamespaceEffects, SchedulerMessage,
 };
@@ -367,8 +367,8 @@ impl NamespaceWithBoundary {
         &mut self,
         worker_id: WorkerId,
         pod_ids: Vec<PodId>,
-    ) -> super::types::InternalNamespaceEffects {
-        let mut combined = super::types::InternalNamespaceEffects::default();
+    ) -> crate::core::types::InternalNamespaceEffects {
+        let mut combined = crate::core::types::InternalNamespaceEffects::default();
         for pod_id in pod_ids {
             let effects = self.core.process_event(
                 InternalNamespaceEvent::SchedulerGrant {
@@ -392,7 +392,7 @@ impl NamespaceWithBoundary {
 
     fn translate_effects(
         &mut self,
-        internal: super::types::InternalNamespaceEffects,
+        internal: crate::core::types::InternalNamespaceEffects,
         effects: &mut NamespaceEffects,
     ) {
         // Timer actions pass through.
@@ -739,7 +739,7 @@ impl NamespaceWithBoundary {
     }
 
     /// Access the WireGuard peer manager (for reading peer state).
-    pub fn wg_peers(&self) -> &crate::core::wg_peers::WireGuardPeerManager {
+    pub fn wg_peers(&self) -> &crate::core::namespace::wg_peers::WireGuardPeerManager {
         self.core.wg_peers()
     }
 

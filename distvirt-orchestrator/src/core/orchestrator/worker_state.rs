@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::GlobalWorkerId;
 use crate::core::pressure::{PressureBands, WorkerPressure, WorkerPsi};
-use crate::core::scheduler::WorkerCandidate;
+use super::scheduler::WorkerCandidate;
 use crate::types::NamespaceId;
 
-use super::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects};
+use crate::core::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects};
 
 // =============================================================================
 // Tunnel config (from WorkerReady handshake)
@@ -259,17 +259,6 @@ impl WorkerStateCore {
         effects
     }
 
-    /// Find the first worker with tunnel info. Returns (worker_id, tunnel_info, public_endpoint).
-    pub(crate) fn find_tunnel_worker(&self) -> Option<(GlobalWorkerId, &WorkerTunnelInfo, &str)> {
-        for (&wid, state) in &self.workers {
-            if let Some(ref tunnel) = state.tunnel_info {
-                if !state.capabilities.public_endpoint.is_empty() {
-                    return Some((wid, tunnel, &state.capabilities.public_endpoint));
-                }
-            }
-        }
-        None
-    }
 
     /// Find the first worker with a WireGuard adapter. Returns (worker_id, wireguard_info, public_endpoint).
     pub(crate) fn find_wireguard_worker(&self) -> Option<(GlobalWorkerId, &WireguardAdapterInfo, &str)> {

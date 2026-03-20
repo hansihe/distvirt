@@ -330,7 +330,7 @@ pub(super) fn convert_proto_patch(
 // --- Internal -> Proto conversions (workers/pods) ---
 
 pub(super) fn convert_worker_query_info(
-    info: crate::core::worker_state::WorkerQueryInfo,
+    info: crate::core::orchestrator::worker_state::WorkerQueryInfo,
 ) -> proto::WorkerInfo {
     proto::WorkerInfo {
         worker_id: info.worker_id.0.to_string(),

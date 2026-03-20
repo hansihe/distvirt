@@ -8,8 +8,8 @@ use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::observability::ObservabilityEvent;
 use crate::adapter::pod_assignment::PodAssignmentAction;
 use crate::adapter::timer::{TimerAction, TimerIdentity};
-use crate::core::scheduler::WorkerCandidate;
-use crate::core::worker_state::{WorkerTunnelInfo, WireguardAdapterInfo};
+use crate::core::orchestrator::scheduler::WorkerCandidate;
+use crate::core::orchestrator::worker_state::{WorkerTunnelInfo, WireguardAdapterInfo};
 use crate::core::{
     ArtifactPlacementEvent, ClientCommand, EndpointDemandSignal, GlobalWorkerId,
     SchedulerDecision, WorkerNamespaceEvent,
@@ -287,24 +287,6 @@ pub struct WorkerStateEffects {
 // Orchestrator-level input/output
 // =============================================================================
 
-/// Top-level input to OrchestratorCore.
-pub enum OrchestratorInput {
-    NamespaceEvent {
-        namespace_id: NamespaceId,
-        event: NamespaceCoreEvent,
-    },
-    WorkerStateEvent(WorkerStateCoreEvent),
-    /// Direct scheduler input (e.g. artifact placement events from workers).
-    SchedulerEvent(SchedulerCoreInput),
-    CreateNamespace {
-        namespace_id: NamespaceId,
-        network: distvirt_worker_protocol::NetworkConfig,
-    },
-    DestroyNamespace {
-        namespace_id: NamespaceId,
-    },
-}
-
 /// Information needed to register a new worker with the orchestrator.
 /// Produced by the async shell after handshake, consumed by OrchestratorCore.
 pub struct WorkerConnectedInfo {
@@ -328,35 +310,115 @@ pub struct DirectWorkerCommand {
     pub command: distvirt_worker_protocol::WorkerCommand,
 }
 
-/// Top-level output from OrchestratorCore.
-///
-/// Timer actions are **not** included here — they are absorbed internally
-/// by the core's `TimerWheel`. Shells drive time via `advance_to()` /
-/// `next_deadline()` instead.
-#[derive(Default)]
-pub struct OrchestratorEffects {
-    /// Commands targeted at specific workers (routed through namespace logic).
-    pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
-    /// Commands to broadcast to all workers in a specific namespace.
-    pub broadcast_commands: Vec<(NamespaceId, distvirt_worker_protocol::WorkerCommand)>,
-    /// Commands to broadcast to all connected workers globally (e.g. worker registry sync).
-    pub global_broadcasts: Vec<distvirt_worker_protocol::WorkerCommand>,
-    /// Direct wire commands the shell must send (e.g. CreateNamespace).
-    /// These bypass namespace logic — the shell just sends them on the writer.
-    pub direct_worker_commands: Vec<DirectWorkerCommand>,
-    /// Observability events keyed by namespace.
-    pub observability_events: Vec<(NamespaceId, Vec<ObservabilityEvent>)>,
+// =============================================================================
+// Split-core types (orchestrator ↔ namespace communication)
+// =============================================================================
+
+/// Orchestrator → Namespace message.
+/// Essentially `NamespaceCoreEvent` without `TimerFired` (timers are per-namespace now).
+pub enum OrchestratorToNamespace {
+    WorkerConnected {
+        worker_id: GlobalWorkerId,
+        proto_worker_id: distvirt_worker_protocol::WorkerId,
+        info: crate::sm::WorkerInfo,
+    },
+    WorkerDisconnected {
+        worker_id: GlobalWorkerId,
+    },
+    SchedulerDecision(SchedulerDecision),
+    ArtifactInvalidated {
+        artifact_port_id: ArtifactPortId,
+    },
+    WorkerEvent(WorkerNamespaceEvent),
+    ClientCommand(ClientCommand),
 }
 
-impl OrchestratorEffects {
-    /// Merge another set of effects into this one.
-    pub fn merge(&mut self, other: OrchestratorEffects) {
+impl OrchestratorToNamespace {
+    /// Convert to internal NamespaceCoreEvent for the boundary layer.
+    pub fn into_core_event(self) -> NamespaceCoreEvent {
+        match self {
+            Self::WorkerConnected { worker_id, proto_worker_id, info } => {
+                NamespaceCoreEvent::WorkerConnected { worker_id, proto_worker_id, info }
+            }
+            Self::WorkerDisconnected { worker_id } => {
+                NamespaceCoreEvent::WorkerDisconnected { worker_id }
+            }
+            Self::SchedulerDecision(d) => NamespaceCoreEvent::SchedulerDecision(d),
+            Self::ArtifactInvalidated { artifact_port_id } => {
+                NamespaceCoreEvent::ArtifactInvalidated { artifact_port_id }
+            }
+            Self::WorkerEvent(e) => NamespaceCoreEvent::WorkerEvent(e),
+            Self::ClientCommand(c) => NamespaceCoreEvent::ClientCommand(c),
+        }
+    }
+}
+
+/// Namespace → Orchestrator message.
+pub enum NamespaceToOrchestrator {
+    SchedulerMessage(SchedulerMessage),
+}
+
+/// Output from `NamespaceUnit::process()` and `advance_to()`.
+#[derive(Default)]
+pub struct NamespaceOutput {
+    pub to_orchestrator: Vec<NamespaceToOrchestrator>,
+    pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
+    /// Commands to broadcast to all active workers in this namespace.
+    /// The shell resolves which workers are active via `active_worker_ids()`.
+    pub broadcast_commands: Vec<distvirt_worker_protocol::WorkerCommand>,
+    pub observability_events: Vec<ObservabilityEvent>,
+}
+
+impl NamespaceOutput {
+    /// Merge another output into this one.
+    pub fn merge(&mut self, other: NamespaceOutput) {
+        self.to_orchestrator.extend(other.to_orchestrator);
         self.worker_commands.extend(other.worker_commands);
         self.broadcast_commands.extend(other.broadcast_commands);
-        self.global_broadcasts.extend(other.global_broadcasts);
-        self.direct_worker_commands
-            .extend(other.direct_worker_commands);
-        self.observability_events
-            .extend(other.observability_events);
+        self.observability_events.extend(other.observability_events);
     }
+}
+
+/// Output from `OrchestratorCore::process()`.
+#[derive(Default)]
+pub struct OrchestratorOutput {
+    pub to_namespaces: Vec<(NamespaceId, OrchestratorToNamespace)>,
+    pub worker_commands: Vec<(GlobalWorkerId, distvirt_worker_protocol::WorkerCommand)>,
+    pub direct_worker_commands: Vec<DirectWorkerCommand>,
+    pub global_broadcasts: Vec<distvirt_worker_protocol::WorkerCommand>,
+}
+
+impl OrchestratorOutput {
+    pub fn merge(&mut self, other: OrchestratorOutput) {
+        self.to_namespaces.extend(other.to_namespaces);
+        self.worker_commands.extend(other.worker_commands);
+        self.direct_worker_commands.extend(other.direct_worker_commands);
+        self.global_broadcasts.extend(other.global_broadcasts);
+    }
+}
+
+/// New top-level input to OrchestratorCore (split version).
+pub enum OrchestratorInputNew {
+    WorkerStateEvent(WorkerStateCoreEvent),
+    SchedulerEvent(SchedulerCoreInput),
+    FromNamespace {
+        namespace_id: NamespaceId,
+        message: NamespaceToOrchestrator,
+    },
+}
+
+/// Information returned by `create_namespace` for the shell to construct a `NamespaceUnit`.
+pub struct NamespaceCreationInfo {
+    pub network: distvirt_worker_protocol::NetworkConfig,
+    pub id_registry: crate::id_registry::IdRegistry,
+    pub timer_config: crate::adapter::timer::TimerConfig,
+    pub connected_workers: Vec<ConnectedWorkerSummary>,
+}
+
+/// Summary of a connected worker, for namespace creation fan-out.
+pub struct ConnectedWorkerSummary {
+    pub worker_id: GlobalWorkerId,
+    pub proto_worker_id: distvirt_worker_protocol::WorkerId,
+    pub max_pods: u32,
+    pub default_pool: Option<distvirt_worker_protocol::PoolId>,
 }

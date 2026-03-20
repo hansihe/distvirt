@@ -24,7 +24,7 @@ use crate::core::ClientCommand;
 #[cfg(feature = "test-trace")]
 use distvirt_sm_router::trace::PanicTracer;
 
-use crate::core::wg_peers::{WgPeerOutput, WireGuardPeerManager};
+use crate::core::namespace::wg_peers::{WgPeerOutput, WireGuardPeerManager};
 use crate::sm::{
     AdminCmd, DNS_REGISTRY, DRouter, FABRIC_ENDPOINT, LeaseInfo, OBSERVABILITY, PodId, PodStatus,
     Router, SCHEDULE_REQUEST, ScheduleLeaseId, TIMER, WireGuardPeerEndpointInfo, WireGuardPeerId,
@@ -32,7 +32,7 @@ use crate::sm::{
 };
 use crate::types::{NamespaceId, NamespaceSpec, NamespaceStatusReport, WorkloadName};
 
-use super::types::{
+use crate::core::types::{
     InternalNamespaceEffects, InternalNamespaceEvent, InternalSchedulerMessage, InternalWorkerEvent,
 };
 
@@ -378,7 +378,7 @@ impl NamespaceCore {
     fn handle_wg_connect(&mut self, client_public_key: [u8; 32], worker_id: WorkerId) {
         let result = self.wg_peer_mgr.connect(client_public_key);
         match result {
-            crate::core::wg_peers::ConnectResult::Ok { client_ip, outputs } => {
+            crate::core::namespace::wg_peers::ConnectResult::Ok { client_ip, outputs } => {
                 for output in outputs {
                     match output {
                         WgPeerOutput::AddPeer {
@@ -414,7 +414,7 @@ impl NamespaceCore {
                 }
                 let _ = client_ip; // IP is returned to caller via ConnectResult at orchestrator level.
             }
-            crate::core::wg_peers::ConnectResult::Error { .. } => {
+            crate::core::namespace::wg_peers::ConnectResult::Error { .. } => {
                 // Error is returned to caller at orchestrator level.
             }
         }

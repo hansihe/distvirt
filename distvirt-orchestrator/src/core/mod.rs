@@ -9,15 +9,10 @@ use tokio::sync::mpsc;
 use crate::{sm::PodId, types::NamespaceSpec};
 
 pub mod namespace;
-pub mod namespace_boundary;
 pub mod orchestrator;
 pub(crate) mod pressure;
-pub(crate) mod scheduler;
-pub mod timer_wheel;
 pub mod types;
-pub mod wg_peers;
 pub mod worker_event;
-pub mod worker_state;
 
 // =============================================================================
 // Global worker identity

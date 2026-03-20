@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use distvirt_activator::types::Action;
 use distvirt_worker_protocol::{ServiceId, ServicePolicy, WorkerId};
-use tonic::service;
 
 use super::flow::FlowTracker;
 use super::port::PortId;

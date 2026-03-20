@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::core::{ArtifactPlacementEvent, GlobalWorkerId, scheduler::ArtifactStatus};
+use crate::core::{ArtifactPlacementEvent, GlobalWorkerId};
+use super::ArtifactStatus;
 
 /// Artifact placement table: tracks which artifacts exist on which workers.
 #[derive(Default)]

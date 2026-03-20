@@ -37,7 +37,6 @@ pub enum TcpFlowState {
 /// State for a tracked flow.
 #[derive(Debug, Clone)]
 pub struct FlowState {
-    pub first_seen: Instant,
     pub last_seen: Instant,
     pub tcp_state: TcpFlowState,
 }
@@ -101,7 +100,6 @@ impl FlowTracker {
             self.flows.insert(
                 key,
                 FlowState {
-                    first_seen: now,
                     last_seen: now,
                     tcp_state: if ack {
                         TcpFlowState::Established
@@ -142,7 +140,7 @@ impl FlowTracker {
         });
     }
 
-    /// Number of tracked flows (for diagnostics).
+    #[cfg(test)]
     pub fn flow_count(&self) -> usize {
         self.flows.len()
     }

@@ -21,6 +21,9 @@ Worker has a few layers of tests:
 * Integration tests
 * E2E tests. Since these spin up VMs, they require root to run
 
+### distvirt-tests
+Contains cross-worker-orchestrator tests. Used to validate E2E behaviour between the two. Uses mocked VMs.
+
 ### distvirt-*-protocol
 Contains protocol definitions for communication between the different components.
 

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
-use crate::core::namespace_boundary::NamespaceWithBoundary;
+use crate::core::namespace::boundary::NamespaceWithBoundary;
 use crate::id_registry::IdRegistry;
 use crate::core::types::{NamespaceCoreEvent, NamespaceEffects, SchedulerMessage};
 use crate::core::{GlobalWorkerId, SchedulerDecision, WorkerNamespaceEvent, WorkerNamespaceEventKind};

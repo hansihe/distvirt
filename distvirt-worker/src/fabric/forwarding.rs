@@ -92,11 +92,10 @@ impl<P: FramePort> Drop for PortGuard<P> {
 }
 
 /// Source of a packet being dispatched through the fabric.
-enum FrameSource<'a, P: FramePort> {
+enum FrameSource {
     /// Packet from a local port.
     Port {
         port_id: PortId,
-        port: &'a SharedPort<P>,
     },
     /// Packet from the gateway (TUN ingress).
     Gateway,
@@ -141,7 +140,7 @@ fn insert_reverse_nat<P: FramePort>(
 /// Routes all traffic by destination IP. Internal format is `[vnet][IP]`.
 async fn dispatch_frame<P: FramePort>(
     packet: &[u8],
-    source: FrameSource<'_, P>,
+    source: FrameSource,
     ctx: &FabricContext<P>,
 ) {
     let mut owned_packet: Option<Vec<u8>> = None;
@@ -441,10 +440,7 @@ pub(super) async fn port_read_loop<P: FramePort>(
         );
         dispatch_frame(
             frame,
-            FrameSource::Port {
-                port_id,
-                port: &port,
-            },
+            FrameSource::Port { port_id },
             &ctx,
         )
         .await;

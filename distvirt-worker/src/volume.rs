@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use anyhow::Context;
 use distvirt_worker_protocol::{ConfigDataFile, VolumeSpec, VolumeType};
@@ -53,6 +54,8 @@ async fn create_empty_dir_image(path: &Path, size_mb: u64) -> anyhow::Result<()>
         .arg("-s")
         .arg(format!("{}M", size_mb))
         .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await
         .context("run truncate")?;
@@ -64,6 +67,8 @@ async fn create_empty_dir_image(path: &Path, size_mb: u64) -> anyhow::Result<()>
         .arg("-F")
         .arg("-q")
         .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await
         .context("run mkfs.ext4")?;
@@ -102,6 +107,8 @@ async fn create_config_data_image(
         .arg("-s")
         .arg(format!("{}K", size_kb))
         .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await
         .context("run truncate for config_data")?;
@@ -117,6 +124,8 @@ async fn create_config_data_image(
         .arg("-F")
         .arg("-q")
         .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await
         .context("run mke2fs")?;

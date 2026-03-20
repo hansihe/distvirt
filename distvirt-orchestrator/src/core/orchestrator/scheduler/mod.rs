@@ -5,12 +5,12 @@
 
 use std::collections::HashMap;
 
-use crate::core::scheduler::placement_table::PlacementTable;
+use self::placement_table::PlacementTable;
 use crate::core::{GlobalWorkerId, SchedulerDecision};
 use crate::sm::PodId;
 use crate::types::{NamespaceId, PressureBand};
 
-use super::types::SchedulerCoreInput;
+use crate::core::types::SchedulerCoreInput;
 
 mod placement_table;
 
