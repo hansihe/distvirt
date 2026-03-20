@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 // === worker_disconnect ===
@@ -232,7 +231,7 @@ fn test_worker_condition_in_status_report() {
 #[test]
 fn test_multi_worker_reschedule() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker();
+    let _w1 = h.add_worker();
     let _w2 = h.add_worker();
     h.create_namespace("ns", always_on_spec());
     h.converge();
@@ -245,4 +244,11 @@ fn test_multi_worker_reschedule() {
     h.converge();
     // Should be rescheduled to the other worker
     h.assert_workload_running("ns", "echo");
+    let new_assigned = h
+        .workload_global_worker_id("ns", "echo")
+        .expect("running workload should have worker_id");
+    assert_ne!(
+        new_assigned, assigned,
+        "workload should have been rescheduled to a different worker"
+    );
 }

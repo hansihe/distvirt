@@ -19,12 +19,7 @@ fn test_image_change_restarts_running_workload() {
 
     // Update spec with new image
     let mut new_spec = always_on_spec();
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("echo".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/alpine:v2".to_string();
+    new_spec.set_image("echo", "docker.io/library/alpine:v2");
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -52,12 +47,7 @@ fn test_image_change_on_suspended_workload() {
 
     // Update spec with new image
     let mut new_spec = activation_spec(timeout);
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("web".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/nginx:v2".to_string();
+    new_spec.set_image("web", "docker.io/library/nginx:v2");
     h.update_namespace("ns", new_spec);
     h.converge();
 

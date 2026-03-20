@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 /// Workload is Suspending (handler suppresses SuspendPod response).
@@ -24,23 +23,7 @@ fn test_demand_during_suspend_immediate_resume() {
     h.advance_past_idle_timeout("ns", "web-svc");
     h.assert_workload_suspending("ns", "web");
 
-    // Capture the pod_id and artifact_id from suspending state
-    let pod_id = h
-        .workload_proto_pod_id("ns", "web")
-        .expect("expected pod_id");
-    // The artifact_id is assigned by the namespace core's IdMaps when suspend begins.
-    // We need to extract it from the worker commands (SuspendPod command has the artifact_id).
-    let artifact_id = {
-        let cmds = h.worker(&w1).commands();
-        cmds.iter()
-            .find_map(|cmd| match cmd {
-                WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
-                _ => None,
-            })
-            .expect("expected SuspendPod command with artifact_id")
-    };
-
-    // Low-level: inject demand (EndpointActivation) while suspending
+    // Inject demand (EndpointActivation) while suspending
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
@@ -52,29 +35,11 @@ fn test_demand_during_suspend_immediate_resume() {
     // Still suspending but with Demand pending
     h.assert_workload_suspending("ns", "web");
 
-    // Low-level: inject artifact events + PodSuspended
-    h.worker(&w1).send_event(WorkerEvent::ArtifactWriteStarted {
-        namespace_id: "ns".into(),
-        artifact_id: artifact_id.clone(),
-        pool_id: "local".into(),
-    });
-    h.worker(&w1)
-        .send_event(WorkerEvent::ArtifactWriteCommitted {
-            namespace_id: "ns".into(),
-            artifact_id: artifact_id.clone(),
-            pool_id: "local".into(),
-            size_bytes: 1024,
-        });
-    h.worker(&w1).send_event(WorkerEvent::PodSuspended {
-        namespace_id: "ns".into(),
-        pod_id,
-        artifact_id: artifact_id.clone(),
-        artifact_size_bytes: 1024,
-        pool_id: "local".into(),
-    });
-    h.converge();
+    // Complete the suspend (injects artifact events + PodSuspended)
+    h.complete_suspend(&w1, "ns", "web");
 
-    // Fixed: Workload correctly transitions through Suspended → Resuming → Running.
+    // Workload should transition through Suspended → Resuming → Running.
+    // Verify it used ResumePod (not cold LaunchPod) since the artifact was preserved.
     let status = h.workload_status("ns", "web");
     assert!(
         matches!(
@@ -85,6 +50,11 @@ fn test_demand_during_suspend_immediate_resume() {
         "Expected Resuming/Launching or Running after demand-during-suspend, got {:?}",
         status
     );
+
+    // The key assertion: a ResumePod should have been issued (immediate resume, not cold start).
+    h.assert_worker_received_command_matching(&w1, "ResumePod after demand-during-suspend", |cmd| {
+        matches!(cmd, WorkerCommand::ResumePod { .. })
+    });
 }
 
 /// Start launching (handler suppresses LaunchPod response). Inject DemandDown (ForceDeactivate).
@@ -157,10 +127,6 @@ fn test_demand_up_during_resume() {
     h.converge();
     h.assert_workload_resuming("ns", "shared");
 
-    let pod_id = h
-        .workload_proto_pod_id("ns", "shared")
-        .expect("expected pod_id");
-
     // Low-level: activate svc-b too (second demand while resuming)
     let svc_b_ip = h.service_ip("ns", "svc-b");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
@@ -172,11 +138,7 @@ fn test_demand_up_during_resume() {
     h.assert_workload_resuming("ns", "shared");
 
     // Inject PodRunning
-    h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
-        pod_id,
-    });
-    h.converge();
+    h.inject_pod_running(&w1, "ns", "shared");
 
     // Should be Running with both services active
     h.assert_workload_running("ns", "shared");
@@ -195,18 +157,9 @@ fn test_spec_change_during_launch() {
     h.converge();
     h.assert_workload_launching("ns", "echo");
 
-    let pod_id = h
-        .workload_proto_pod_id("ns", "echo")
-        .expect("expected pod_id");
-
     // Update spec with new image
     let mut new_spec = always_on_spec();
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("echo".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/alpine:v2".to_string();
+    new_spec.set_image("echo", "docker.io/library/alpine:v2");
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -214,11 +167,7 @@ fn test_spec_change_during_launch() {
     h.assert_workload_launching("ns", "echo");
 
     // Low-level: inject PodRunning from the old launch
-    h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
-        pod_id,
-    });
-    h.converge();
+    h.inject_pod_running(&w1, "ns", "echo");
 
     h.assert_workload_launching("ns", "echo");
 
@@ -247,51 +196,14 @@ fn test_spec_change_during_suspend() {
     h.advance_past_idle_timeout("ns", "web-svc");
     h.assert_workload_suspending("ns", "web");
 
-    let pod_id = h
-        .workload_proto_pod_id("ns", "web")
-        .expect("expected pod_id");
-    let artifact_id = {
-        let cmds = h.worker(&w1).commands();
-        cmds.iter()
-            .find_map(|cmd| match cmd {
-                WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
-                _ => None,
-            })
-            .expect("expected SuspendPod command with artifact_id")
-    };
-
     // Update spec with new image while suspending
     let mut new_spec = activation_spec(timeout);
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("web".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/nginx:v2".to_string();
+    new_spec.set_image("web", "docker.io/library/nginx:v2");
     h.update_namespace("ns", new_spec);
     h.converge();
 
-    // Low-level: inject artifact events + PodSuspended
-    h.worker(&w1).send_event(WorkerEvent::ArtifactWriteStarted {
-        namespace_id: "ns".into(),
-        artifact_id: artifact_id.clone(),
-        pool_id: "local".into(),
-    });
-    h.worker(&w1)
-        .send_event(WorkerEvent::ArtifactWriteCommitted {
-            namespace_id: "ns".into(),
-            artifact_id: artifact_id.clone(),
-            pool_id: "local".into(),
-            size_bytes: 1024,
-        });
-    h.worker(&w1).send_event(WorkerEvent::PodSuspended {
-        namespace_id: "ns".into(),
-        pod_id,
-        artifact_id: artifact_id.clone(),
-        artifact_size_bytes: 1024,
-        pool_id: "local".into(),
-    });
-    h.converge();
+    // Complete the suspend (injects artifact events + PodSuspended)
+    h.complete_suspend(&w1, "ns", "web");
 
     h.assert_workload_dormant("ns", "web");
 

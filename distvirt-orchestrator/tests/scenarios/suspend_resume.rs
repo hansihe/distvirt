@@ -127,18 +127,8 @@ fn test_pod_exit_during_suspend() {
     h.advance_past_idle_timeout("ns1", "web-svc");
     h.assert_workload_suspending("ns1", "web");
 
-    // Get the pod_id from the workload state so we can inject the right event.
-    let pod_id = h
-        .workload_proto_pod_id("ns1", "web")
-        .expect("expected pod_id");
-
     // Pod crashes while suspending: inject PodFailed.
-    h.worker(&w1).send_event(WorkerEvent::PodFailed {
-        namespace_id: "ns1".into(),
-        pod_id: pod_id.clone(),
-        error: "VM crashed during suspend".to_string(),
-    });
-    h.converge();
+    h.inject_pod_failed(&w1, "ns1", "web", "VM crashed during suspend");
 
     // A pod crash during an intentional deactivation should not count as a failure.
     h.assert_workload_dormant("ns1", "web");
@@ -169,17 +159,8 @@ fn test_pod_exited_during_suspend() {
     h.advance_past_idle_timeout("ns1", "web-svc");
     h.assert_workload_suspending("ns1", "web");
 
-    let pod_id = h
-        .workload_proto_pod_id("ns1", "web")
-        .expect("expected pod_id");
-
     // Inject PodExited (exit_code: 1) while suspending.
-    h.worker(&w1).send_event(WorkerEvent::PodExited {
-        namespace_id: "ns1".into(),
-        pod_id,
-        exit_code: 1,
-    });
-    h.converge();
+    h.inject_pod_exited(&w1, "ns1", "web", 1);
 
     h.assert_workload_dormant("ns1", "web");
 
@@ -234,6 +215,13 @@ fn test_delete_during_resume() {
 
     // In the new system, destroy is immediate — namespace is gone after delete.
     h.assert_namespace_absent("ns");
+
+    // Verify StopPod was issued for the resuming pod.
+    h.assert_worker_received_command_matching(
+        &w1,
+        "StopPod for resuming pod after namespace deletion",
+        |cmd| matches!(cmd, distvirt_worker_protocol::WorkerCommand::StopPod { .. }),
+    );
 }
 
 /// Spec change (image update) during resume sets PendingIntent::Restart.
@@ -275,12 +263,7 @@ fn test_spec_change_during_resume() {
 
     // Update spec with new image while resuming.
     let mut new_spec = activation_spec(timeout);
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("web".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/nginx:v2".to_string();
+    new_spec.set_image("web", "docker.io/library/nginx:v2");
     h.update_namespace("ns", new_spec);
     h.converge();
 

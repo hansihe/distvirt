@@ -31,21 +31,19 @@ fn test_fabric_route_update_on_pod_launch() {
         .workload_global_worker_id("ns1", "echo")
         .expect("expected worker_id");
 
-    // The other worker should have received an EndpointSync or EndpointUpdate with endpoint entries.
+    // The other worker should have service endpoint with backend for the service IP.
     let other_worker_id = if pod_worker_id == w1 { &w2 } else { &w1 };
-
-    h.assert_worker_received_command_matching(
+    h.assert_worker_has_service_endpoint_with_backend(
         other_worker_id,
-        "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            ) || matches!(
-                cmd,
-                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-            )
-        },
+        "ns1",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+
+    // The hosting worker should also have the endpoint entry.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &pod_worker_id,
+        "ns1",
+        Ipv4Addr::new(172, 16, 0, 100),
     );
 }
 
@@ -65,13 +63,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.converge();
 
     // Activate via EndpointActivation.
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns1".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(h.proto_service_id("ns1", "web-svc")),
-    });
-    h.converge();
-    h.assert_workload_running("ns1", "web");
+    h.activate_service_on("ns1", "web-svc", &w1);
 
     // Determine which worker hosts the pod.
     let pod_worker_id = h
@@ -79,66 +71,33 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
         .expect("expected worker_id");
     let other_worker_id = if pod_worker_id == w1 { w2 } else { w1 };
 
-    // The other worker should have received an EndpointSync or EndpointUpdate with endpoints.
-    h.assert_worker_received_command_matching(
+    // The other worker should have a service endpoint with backend after launch.
+    h.assert_worker_has_service_endpoint_with_backend(
         &other_worker_id,
-        "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            ) || matches!(
-                cmd,
-                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-            )
-        },
+        "ns1",
+        Ipv4Addr::new(172, 16, 0, 100),
     );
 
     // Idle → suspend.
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
-        namespace_id: "ns1".into(),
-        ip: h.service_ip("ns1", "web-svc"),
-        service_id: Some(h.proto_service_id("ns1", "web-svc")),
-        active: false,
-    });
-    h.converge();
+    h.deactivate_service_on("ns1", "web-svc", &w1);
     h.advance_time(Duration::from_secs(31));
     h.assert_workload_suspended("ns1", "web");
 
-    // After suspend, an EndpointUpdate should have been sent (service backend becomes None).
-    h.assert_worker_received_command_matching(
+    // After suspend, the service endpoint should have no backend (pod is gone).
+    h.assert_worker_has_service_endpoint_without_backend(
         &other_worker_id,
-        "EndpointUpdate with upserted endpoints (after suspend, backend=None)",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            )
-        },
+        "ns1",
+        Ipv4Addr::new(172, 16, 0, 100),
     );
 
     // Re-activate via EndpointActivation → resume.
-    h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns1".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
-        service_id: Some(h.proto_service_id("ns1", "web-svc")),
-    });
-    h.converge();
-    h.assert_workload_running("ns1", "web");
+    h.activate_service_on("ns1", "web-svc", &w1);
 
-    // After resume, new EndpointUpdate(s) with upserted entries should have been sent.
-    // There should be at least 2 EndpointUpdate with upserted entries: one from initial launch,
-    // one from resume.
-    let other_commands = h.worker(&other_worker_id).commands();
-    let endpoint_upserts: Vec<_> = other_commands
-        .iter()
-        .filter(|cmd| matches!(cmd, WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()))
-        .collect();
-    assert!(
-        endpoint_upserts.len() >= 2,
-        "expected at least 2 EndpointUpdate with upserted entries (launch + resume), got {}: {:#?}",
-        endpoint_upserts.len(),
-        endpoint_upserts,
+    // After resume, the service endpoint should have a backend again.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &other_worker_id,
+        "ns1",
+        Ipv4Addr::new(172, 16, 0, 100),
     );
 }
 
@@ -291,8 +250,124 @@ fn test_route_miss_demand_leak() {
     });
     h.converge();
 
-    // Step 5: Advance past idle timeout.
+    // Step 4: Advance past idle timeout.
     h.advance_past_idle_timeout("ns", "web-svc");
     h.assert_service_idle("ns", "web-svc");
     h.assert_workload_suspended("ns", "web");
+
+    // After suspension, the service endpoint should have no backend.
+    h.assert_worker_has_service_endpoint_without_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+}
+
+// =============================================================================
+// Endpoint table validation tests
+// =============================================================================
+
+/// Verify endpoint table contains correct entries after always-on namespace creation.
+#[test]
+fn test_endpoint_table_populated_on_always_on_create() {
+    let mut h = TestHarness::new();
+    let w1 = h.add_worker();
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
+    h.assert_workload_running("ns", "echo");
+
+    // Service endpoint should exist with backend (workload is running).
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+}
+
+/// Verify that when a workload is rescheduled (hosting worker disconnects in a
+/// two-worker setup), the remaining worker's endpoint table is updated with the
+/// new backend placement.
+#[test]
+fn test_endpoint_updated_after_reschedule() {
+    let mut h = TestHarness::new();
+    let w1 = h.add_worker();
+    let w2 = h.add_worker();
+    h.create_namespace("ns", always_on_spec());
+    h.converge();
+    h.assert_workload_running("ns", "echo");
+
+    let pod_worker = h
+        .workload_global_worker_id("ns", "echo")
+        .expect("expected worker");
+    let other = if pod_worker == w1 { w2 } else { w1 };
+
+    // Before disconnect: both workers should have endpoint with backend.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &other,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+
+    // Disconnect the hosting worker → workload reschedules to the other.
+    h.disconnect_worker(&pod_worker);
+    h.converge();
+    h.assert_workload_running("ns", "echo");
+
+    // After reschedule: remaining worker should still have endpoint with backend.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &other,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+}
+
+/// Verify endpoint backend is set to None for activation-based services when workload is dormant,
+/// and populated once the workload starts running.
+#[test]
+fn test_endpoint_backend_lifecycle_activation() {
+    let mut h = TestHarness::new();
+    let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
+    let timeout = Duration::from_secs(30);
+    h.create_namespace("ns", activation_spec(timeout));
+    h.converge();
+    h.assert_workload_dormant("ns", "web");
+
+    // Before activation: service endpoint should exist but without a backend.
+    h.assert_worker_has_service_endpoint_without_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+
+    // Activate → running
+    h.activate_service("ns", "web-svc");
+
+    // After activation: service endpoint should have a backend.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+
+    // Suspend
+    h.deactivate_service("ns", "web-svc");
+    h.advance_past_idle_timeout("ns", "web-svc");
+    h.assert_workload_suspended("ns", "web");
+
+    // After suspend: backend should be gone again.
+    h.assert_worker_has_service_endpoint_without_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+
+    // Resume
+    h.activate_service("ns", "web-svc");
+
+    // After resume: backend should be back.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
 }

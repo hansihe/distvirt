@@ -11,6 +11,23 @@ use distvirt_worker_protocol::{
 static POD_OCTET: AtomicU8 = AtomicU8::new(10);
 static SERVICE_OCTET: AtomicU8 = AtomicU8::new(100);
 
+/// Extension methods for mutating NamespaceSpec in tests.
+pub trait NamespaceSpecExt {
+    /// Set the container image for a workload's first container.
+    fn set_image(&mut self, wl_name: &str, image: &str) -> &mut Self;
+}
+
+impl NamespaceSpecExt for NamespaceSpec {
+    fn set_image(&mut self, wl_name: &str, image: &str) -> &mut Self {
+        self.workloads
+            .get_mut(&WorkloadName(wl_name.to_string()))
+            .unwrap_or_else(|| panic!("workload '{}' not found in spec", wl_name))
+            .containers[0]
+            .image_ref = image.to_string();
+        self
+    }
+}
+
 /// Auto-allocate a unique pod network config (for multi-namespace tests).
 pub fn next_pod_network() -> PodNetworkConfig {
     let octet = POD_OCTET.fetch_add(1, Ordering::Relaxed);

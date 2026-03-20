@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 // =============================================================================
@@ -135,21 +134,12 @@ fn test_failed_workload_recovery_via_spec_change() {
     h.converge();
 
     // Drive to Failed: advance through all 5 retries
-    for attempt in 1..5u32 {
-        let backoff = Duration::from_secs(1u64 << (attempt - 1).min(5));
-        h.advance_time(backoff + Duration::from_millis(100));
-    }
-    h.assert_workload_failed("ns", "echo");
+    h.drive_to_failed("ns", "echo");
 
     // Now switch handler to succeed and update spec with new image
     should_fail.store(false, Ordering::SeqCst);
     let mut new_spec = always_on_spec();
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("echo".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/alpine:new".to_string();
+    new_spec.set_image("echo", "docker.io/library/alpine:new");
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -166,18 +156,8 @@ fn test_pod_exit_while_running() {
     h.converge();
     h.assert_workload_running("ns", "echo");
 
-    // Get the pod_id of the running workload
-    let pod_id = h
-        .workload_proto_pod_id("ns", "echo")
-        .expect("expected pod_id");
-
     // Inject PodExited with non-zero exit code
-    h.worker(&w1).send_event(WorkerEvent::PodExited {
-        namespace_id: "ns".into(),
-        pod_id,
-        exit_code: 1,
-    });
-    h.converge();
+    h.inject_pod_exited(&w1, "ns", "echo", 1);
 
     // Should enter RetryBackoff (failure counted)
     h.assert_workload_retry_backoff("ns", "echo");
@@ -197,17 +177,8 @@ fn test_pod_exit_code_zero_no_backoff() {
     h.converge();
     h.assert_workload_running("ns", "echo");
 
-    let pod_id = h
-        .workload_proto_pod_id("ns", "echo")
-        .expect("expected pod_id");
-
     // Inject clean exit
-    h.worker(&w1).send_event(WorkerEvent::PodExited {
-        namespace_id: "ns".into(),
-        pod_id,
-        exit_code: 0,
-    });
-    h.converge();
+    h.inject_pod_exited(&w1, "ns", "echo", 0);
 
     // Clean exit: consecutive_failures should be 0, so immediate WaitingForCapacity → Running
     // (no backoff)
@@ -397,11 +368,7 @@ fn test_failed_condition_lifecycle() {
     h.converge();
 
     // Drive to Failed: advance through all 5 retries.
-    for attempt in 1..5u32 {
-        let backoff = Duration::from_secs(1u64 << (attempt - 1).min(5));
-        h.advance_time(backoff + Duration::from_millis(100));
-    }
-    h.assert_workload_failed("ns", "echo");
+    h.drive_to_failed("ns", "echo");
 
     // Failed condition should be set.
     let conditions = h.workload_conditions("ns", "echo");
@@ -414,12 +381,7 @@ fn test_failed_condition_lifecycle() {
     // Recover via spec change.
     should_fail.store(false, Ordering::SeqCst);
     let mut new_spec = always_on_spec();
-    new_spec
-        .workloads
-        .get_mut(&WorkloadName("echo".to_string()))
-        .unwrap()
-        .containers[0]
-        .image_ref = "docker.io/library/alpine:fixed".to_string();
+    new_spec.set_image("echo", "docker.io/library/alpine:fixed");
     h.update_namespace("ns", new_spec);
     h.converge();
 
@@ -432,45 +394,6 @@ fn test_failed_condition_lifecycle() {
     );
 }
 
-/// Verify that workload conditions appear in the status report.
-#[test]
-fn test_failed_condition_in_status_report() {
-    let mut h = TestHarness::new();
-    h.add_worker_with(MockWorkerConfig::with_launch_failure());
-    h.create_namespace("ns", always_on_spec());
-    h.converge();
-
-    // Drive to Failed.
-    for attempt in 1..5u32 {
-        let backoff = Duration::from_secs(1u64 << (attempt - 1).min(5));
-        h.advance_time(backoff + Duration::from_millis(100));
-    }
-    h.assert_workload_failed("ns", "echo");
-
-    // Check status report includes the failed condition.
-    let conditions = h.workload_conditions("ns", "echo");
-    assert!(
-        conditions.contains_key("failed"),
-        "status report should include 'failed' workload condition, got: {:?}",
-        conditions
-    );
-}
-
-/// Verify retry-backoff condition appears in status report during backoff.
-#[test]
-fn test_retry_backoff_condition_in_status_report() {
-    let mut h = TestHarness::new();
-    h.add_worker_with(MockWorkerConfig::with_launch_failure());
-    h.create_namespace("ns", always_on_spec());
-    h.converge();
-
-    // After first failure: RetryBackoff.
-    h.assert_workload_retry_backoff("ns", "echo");
-
-    let conditions = h.workload_conditions("ns", "echo");
-    assert!(
-        conditions.contains_key("retry-backoff"),
-        "status report should include 'retry-backoff' workload condition during backoff, got: {:?}",
-        conditions
-    );
-}
+// test_failed_condition_in_status_report and test_retry_backoff_condition_in_status_report
+// were removed: they were strict subsets of test_failed_condition_lifecycle and
+// test_retry_backoff_condition_lifecycle respectively.

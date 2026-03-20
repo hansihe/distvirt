@@ -1,7 +1,10 @@
+use std::net::Ipv4Addr;
+
 use distvirt_orchestrator::core::GlobalWorkerId;
 use distvirt_orchestrator::sm::WlStatus;
 use distvirt_orchestrator::sm::endpoint::EndpointStatus;
 use distvirt_orchestrator::types::NamespaceId;
+use distvirt_worker_protocol::{EndpointKind, EndpointSpec, WorkerCommand};
 
 use super::test_harness::TestHarness;
 
@@ -251,5 +254,128 @@ impl TestHarness {
 
     pub fn assert_service_condition_clear(&self, _ns_id: &str, _svc_id: &str, _key: &str) {
         panic!("assert_service_condition_clear not implemented for SyncShell harness");
+    }
+
+    // =========================================================================
+    // Endpoint table assertions
+    // =========================================================================
+
+    /// Materialize the effective endpoint table for a namespace on a worker by
+    /// replaying EndpointSync/EndpointUpdate commands from the command log.
+    pub fn worker_endpoint_entries(
+        &self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+    ) -> Vec<EndpointSpec> {
+        let ns_id_typed = NamespaceId::from(ns_id);
+        let commands = self.shell.worker_commands(worker_id);
+
+        let mut entries: Vec<EndpointSpec> = Vec::new();
+        let mut last_sync_idx: Option<usize> = None;
+
+        for (i, cmd) in commands.iter().enumerate() {
+            if let WorkerCommand::EndpointSync {
+                namespace_id,
+                endpoints,
+            } = cmd
+            {
+                if *namespace_id == ns_id_typed {
+                    last_sync_idx = Some(i);
+                    entries = endpoints.clone();
+                }
+            }
+        }
+
+        let start = last_sync_idx.map_or(0, |i| i + 1);
+        for cmd in &commands[start..] {
+            if let WorkerCommand::EndpointUpdate {
+                namespace_id,
+                upserted,
+                removed_ips,
+            } = cmd
+            {
+                if *namespace_id == ns_id_typed {
+                    entries.retain(|e| !removed_ips.contains(&e.ip));
+                    for entry in upserted {
+                        entries.retain(|e| e.ip != entry.ip);
+                        entries.push(entry.clone());
+                    }
+                }
+            }
+        }
+
+        entries
+    }
+
+    /// Assert that a worker's endpoint table contains a Service entry for the given IP.
+    pub fn assert_worker_has_service_endpoint(
+        &self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        ip: Ipv4Addr,
+    ) {
+        let entries = self.worker_endpoint_entries(worker_id, ns_id);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.ip == ip && matches!(e.kind, EndpointKind::Service { .. })),
+            "expected Service endpoint for {} on worker {:?}, got: {:#?}",
+            ip,
+            worker_id,
+            entries,
+        );
+    }
+
+    /// Assert that a worker's endpoint table contains a Service entry with a backend for the given IP.
+    pub fn assert_worker_has_service_endpoint_with_backend(
+        &self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        ip: Ipv4Addr,
+    ) {
+        let entries = self.worker_endpoint_entries(worker_id, ns_id);
+        assert!(
+            entries.iter().any(|e| e.ip == ip
+                && matches!(e.kind, EndpointKind::Service { backend: Some(_), .. })),
+            "expected Service endpoint with backend for {} on worker {:?}, got: {:#?}",
+            ip,
+            worker_id,
+            entries,
+        );
+    }
+
+    /// Assert that a worker's endpoint table contains a Service entry without a backend.
+    pub fn assert_worker_has_service_endpoint_without_backend(
+        &self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        ip: Ipv4Addr,
+    ) {
+        let entries = self.worker_endpoint_entries(worker_id, ns_id);
+        assert!(
+            entries.iter().any(|e| e.ip == ip
+                && matches!(e.kind, EndpointKind::Service { backend: None, .. })),
+            "expected Service endpoint without backend for {} on worker {:?}, got: {:#?}",
+            ip,
+            worker_id,
+            entries,
+        );
+    }
+
+    /// Assert that a worker's endpoint table does NOT contain an entry for the given IP.
+    pub fn assert_worker_has_no_endpoint(
+        &self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        ip: Ipv4Addr,
+    ) {
+        let entries = self.worker_endpoint_entries(worker_id, ns_id);
+        assert!(
+            !entries.iter().any(|e| e.ip == ip),
+            "expected NO endpoint for {} on worker {:?}, but found: {:#?}",
+            ip,
+            worker_id,
+            entries,
+        );
     }
 }

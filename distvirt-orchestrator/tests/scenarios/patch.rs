@@ -9,7 +9,7 @@ use distvirt_worker_protocol::{ServicePolicy, WorkerCommand};
 #[test]
 fn test_patch_add_workload() {
     let mut h = TestHarness::new();
-    h.add_worker();
+    let w1 = h.add_worker();
     h.create_namespace("ns", always_on_spec());
     h.converge();
     h.assert_workload_running("ns", "echo");
@@ -57,6 +57,10 @@ fn test_patch_add_workload() {
     // Both workloads should be running
     h.assert_workload_running("ns", "echo");
     h.assert_workload_running("ns", "echo-b");
+
+    // Both services should have endpoint entries with backends.
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 100));
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 101));
 }
 
 /// Patch: remove a workload from a two-workload namespace.
@@ -96,9 +100,14 @@ fn test_patch_remove_workload() {
         "removed service 'svc-b' should not exist in spec"
     );
 
-    // StopPod should have been issued
-    let stop_count = h.worker_command_count(&w1, |c| matches!(c, WorkerCommand::StopPod { .. }));
-    assert!(stop_count >= 1, "expected StopPod for removed workload");
+    // Exactly 1 StopPod should have been issued for the removed workload.
+    h.assert_worker_command_count(&w1, "StopPod for removed workload", 1, |c| {
+        matches!(c, WorkerCommand::StopPod { .. })
+    });
+
+    // svc-a endpoint should still be present, svc-b should be removed.
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 100));
+    h.assert_worker_has_no_endpoint(&w1, "ns", Ipv4Addr::new(172, 16, 0, 101));
 }
 
 /// Patch: replace an existing workload's image (upsert over existing key).

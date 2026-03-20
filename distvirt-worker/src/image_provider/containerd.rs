@@ -190,7 +190,12 @@ async fn setup_auth_stream(
     let stream = ReceiverStream::new(rx);
     let mut req = Request::new(stream);
     let md = req.metadata_mut();
-    md.insert("containerd-namespace", namespace.parse().unwrap());
+    md.insert(
+        "containerd-namespace",
+        namespace
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid containerd namespace header value {:?}: {}", namespace, e))?,
+    );
     let resp = streaming.stream(req).await.context("opening auth stream")?;
 
     let mut inbound = resp.into_inner();

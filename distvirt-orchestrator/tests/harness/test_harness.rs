@@ -8,7 +8,7 @@ use distvirt_orchestrator::shell::sync::{MockWorkerConfig, SyncShell};
 use distvirt_orchestrator::sm::endpoint::{EndpointSm, EndpointState, EndpointStatus};
 use distvirt_orchestrator::sm::{ServiceSm, WlStatus, WorkloadSm};
 use distvirt_orchestrator::types::NamespaceSpec;
-use distvirt_worker_protocol::{NamespaceId, PsiMetrics, ServiceId, WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::{NamespaceId, PsiMetrics, WorkerCommand, WorkerEvent};
 
 fn test_timer_config() -> TimerConfig {
     TimerConfig {
@@ -197,7 +197,7 @@ impl TestHarness {
     }
 
     pub fn service_status(&self, ns_id: &str, svc_name: &str) -> EndpointStatus {
-        let svc = self.service_state_sm(ns_id, svc_name);
+        let _svc = self.service_state_sm(ns_id, svc_name);
         let svc_ep = self.service_enpoint_state_sm(ns_id, svc_name);
         match &svc_ep.state {
             EndpointState::Idle => EndpointStatus::Idle,
@@ -289,18 +289,26 @@ impl TestHarness {
     }
 
     pub fn activate_service(&mut self, ns_id: &str, svc_id: &str) {
-        let namespace_id = NamespaceId::from(ns_id);
-        let svc_ip = self.service_ip(ns_id, svc_id);
-        let wl_name = self.workload_for_service(ns_id, svc_id);
-
         let worker_id = *self
             .shell
             .worker_ids()
             .next()
             .expect("no workers in harness");
+        self.activate_service_on(ns_id, svc_id, &worker_id);
+    }
+
+    pub fn activate_service_on(
+        &mut self,
+        ns_id: &str,
+        svc_id: &str,
+        worker_id: &GlobalWorkerId,
+    ) {
+        let namespace_id = NamespaceId::from(ns_id);
+        let svc_ip = self.service_ip(ns_id, svc_id);
+        let wl_name = self.workload_for_service(ns_id, svc_id);
 
         self.shell.queue_worker_event(
-            worker_id,
+            *worker_id,
             WorkerEvent::EndpointDemandTraffic {
                 namespace_id,
                 ip: svc_ip,
@@ -313,17 +321,25 @@ impl TestHarness {
     }
 
     pub fn deactivate_service(&mut self, ns_id: &str, svc_id: &str) {
-        let namespace_id = NamespaceId::from(ns_id);
-        let svc_ip = self.service_ip(ns_id, svc_id);
-
         let worker_id = *self
             .shell
             .worker_ids()
             .next()
             .expect("no workers in harness");
+        self.deactivate_service_on(ns_id, svc_id, &worker_id);
+    }
+
+    pub fn deactivate_service_on(
+        &mut self,
+        ns_id: &str,
+        svc_id: &str,
+        worker_id: &GlobalWorkerId,
+    ) {
+        let namespace_id = NamespaceId::from(ns_id);
+        let svc_ip = self.service_ip(ns_id, svc_id);
 
         self.shell.queue_worker_event(
-            worker_id,
+            *worker_id,
             WorkerEvent::EndpointDemandActive {
                 namespace_id,
                 ip: svc_ip,
@@ -368,6 +384,125 @@ impl TestHarness {
     // =========================================================================
     // Event injection
     // =========================================================================
+
+    /// Inject a PodRunning event for a workload's current pod.
+    pub fn inject_pod_running(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        self.worker(worker_id).send_event(WorkerEvent::PodRunning {
+            namespace_id: ns_id.into(),
+            pod_id,
+        });
+        self.converge();
+    }
+
+    /// Inject a PodExited event for a workload's current pod.
+    pub fn inject_pod_exited(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+        exit_code: i32,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        self.worker(worker_id).send_event(WorkerEvent::PodExited {
+            namespace_id: ns_id.into(),
+            pod_id,
+            exit_code,
+        });
+        self.converge();
+    }
+
+    /// Inject a PodFailed event for a workload's current pod.
+    pub fn inject_pod_failed(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+        error: &str,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        self.worker(worker_id).send_event(WorkerEvent::PodFailed {
+            namespace_id: ns_id.into(),
+            pod_id,
+            error: error.to_string(),
+        });
+        self.converge();
+    }
+
+    /// Complete a pending suspend by injecting ArtifactWriteStarted →
+    /// ArtifactWriteCommitted → PodSuspended events.
+    ///
+    /// Extracts pod_id and artifact_id from current state/commands automatically.
+    /// Call this when the workload is in Suspending state (e.g. after using a
+    /// suspend-hang handler).
+    pub fn complete_suspend(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        let artifact_id = {
+            let cmds = self.shell.worker_commands(worker_id);
+            cmds.iter()
+                .find_map(|cmd| match cmd {
+                    WorkerCommand::SuspendPod { artifact_id, .. } => Some(artifact_id.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no SuspendPod command found for worker {:?}",
+                        worker_id
+                    )
+                })
+        };
+
+        self.worker(worker_id)
+            .send_event(WorkerEvent::ArtifactWriteStarted {
+                namespace_id: ns_id.into(),
+                artifact_id: artifact_id.clone(),
+                pool_id: "local".into(),
+            });
+        self.worker(worker_id)
+            .send_event(WorkerEvent::ArtifactWriteCommitted {
+                namespace_id: ns_id.into(),
+                artifact_id: artifact_id.clone(),
+                pool_id: "local".into(),
+                size_bytes: 1024,
+            });
+        self.worker(worker_id)
+            .send_event(WorkerEvent::PodSuspended {
+                namespace_id: ns_id.into(),
+                pod_id,
+                artifact_id,
+                artifact_size_bytes: 1024,
+                pool_id: "local".into(),
+            });
+        self.converge();
+    }
+
+    /// Advance time through all retry backoff cycles until the workload enters
+    /// Failed state. Assumes the worker handler keeps failing LaunchPod.
+    pub fn drive_to_failed(&mut self, ns_id: &str, wl_name: &str) {
+        for attempt in 1..5u32 {
+            let backoff = std::time::Duration::from_secs(1u64 << (attempt - 1).min(5));
+            self.advance_time(backoff + std::time::Duration::from_millis(100));
+        }
+        self.assert_workload_failed(ns_id, wl_name);
+    }
 
     pub fn send_event_to_workload(&self, _ns_id: &str, _wl_id: &str, _event: WorkerEvent) {
         panic!("send_event_to_workload not implemented for SyncShell harness");

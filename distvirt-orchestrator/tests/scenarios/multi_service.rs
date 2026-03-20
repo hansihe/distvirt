@@ -3,9 +3,8 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-#[allow(unused_imports)]
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
+use distvirt_worker_protocol::WorkerEvent;
 
 /// Two services back same workload. Activate A → workload launches.
 /// Activate B → workload already running.
@@ -126,24 +125,21 @@ fn test_always_on_multi_service_both_get_create_service() {
     // Workload should be running (always-on).
     h.assert_workload_running("ns", "shared");
 
-    // Worker should have received EndpointSync or EndpointUpdate containing both services.
-    h.assert_worker_received_command_matching(
-        &w1,
-        "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-            ) || matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            )
-        },
-    );
-
     // Both services should be Active (always-on with running workload).
     h.assert_service_active("ns", "svc-a");
     h.assert_service_active("ns", "svc-b");
+
+    // Worker endpoint table should contain both service IPs with backends.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 101),
+    );
 }
 
 /// Issue 3: Add a new service to a workload that is already Running via spec update.
@@ -178,25 +174,22 @@ fn test_add_service_to_running_workload() {
     // Workload should still be running (no restart).
     h.assert_workload_running("ns", "echo");
 
-    // Worker should have received EndpointSync or EndpointUpdate including the new service.
-    h.assert_worker_received_command_matching(
-        &w1,
-        "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-            ) || matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            )
-        },
-    );
-
     // New service should be Active (workload is already Running).
     h.assert_service_active("ns", "echo-svc-2");
     // Original service unaffected.
     h.assert_service_active("ns", "echo-svc");
+
+    // Worker endpoint table should contain both service IPs with backends.
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w1,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 101),
+    );
 }
 
 /// Issue 3: Add a new activation service to a workload that is Suspended.
@@ -260,19 +253,11 @@ fn test_add_service_to_suspended_workload() {
 
     let web_svc_2_id = h.proto_service_id("ns", "web-svc-2");
 
-    // EndpointSync or EndpointUpdate should have been sent including the new service.
-    h.assert_worker_received_command_matching(
+    // Worker endpoint table should contain the new service IP (without backend since workload is suspended).
+    h.assert_worker_has_service_endpoint_without_backend(
         &w1,
-        "EndpointSync or EndpointUpdate with endpoints",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-            ) || matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            )
-        },
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 101),
     );
 
     // Activating the new service should resume the workload.
@@ -291,7 +276,7 @@ fn test_add_service_to_suspended_workload() {
 #[test]
 fn test_late_joining_worker_receives_create_service() {
     let mut h = TestHarness::new();
-    let w1 = h.add_worker();
+    let _w1 = h.add_worker();
     h.create_namespace("ns", always_on_multi_service_spec());
     h.converge();
     h.assert_workload_running("ns", "shared");
@@ -300,19 +285,16 @@ fn test_late_joining_worker_receives_create_service() {
     let w2 = h.add_worker();
     h.converge();
 
-    // The second worker should have received EndpointSync with all endpoints.
-    h.assert_worker_received_command_matching(
+    // The second worker should have received endpoint entries for both service IPs.
+    h.assert_worker_has_service_endpoint_with_backend(
         &w2,
-        "EndpointSync or EndpointUpdate with endpoints on w2",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointSync { endpoints, .. } if !endpoints.is_empty()
-            ) || matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { upserted, .. } if !upserted.is_empty()
-            )
-        },
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 100),
+    );
+    h.assert_worker_has_service_endpoint_with_backend(
+        &w2,
+        "ns",
+        Ipv4Addr::new(172, 16, 0, 101),
     );
 }
 
@@ -355,17 +337,10 @@ fn test_remove_service_updates_demand() {
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
-    // EndpointUpdate with removed_ips should have been issued for svc-b's IP.
-    h.assert_worker_received_command_matching(
-        &w1,
-        "EndpointUpdate with removed_ips for svc-b",
-        |cmd| {
-            matches!(
-                cmd,
-                WorkerCommand::EndpointUpdate { removed_ips, .. } if !removed_ips.is_empty()
-            )
-        },
-    );
+    // svc-b's IP should have been removed from the endpoint table.
+    h.assert_worker_has_no_endpoint(&w1, "ns", Ipv4Addr::new(172, 16, 0, 101));
+    // svc-a should still be present with a backend.
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 100));
 
     // svc-b should no longer exist in the namespace.
     let ns = h.namespace("ns");
@@ -406,13 +381,16 @@ fn test_remove_only_active_service_drops_demand() {
 
     // Service removal should immediately drop demand to 0 via reconciliation
     // (no idle timer involved — the service is gone, not idling).
-    // suspend_on_idle=true → workload should begin suspending/suspended immediately.
-    let state = h.workload_state("ns", "shared");
+    // suspend_on_idle=true → workload should begin suspending or have already suspended.
+    let status = h.workload_status("ns", "shared");
     assert!(
-        state.awaiting_suspend
-            || state.artifact_port.is_some()
-            || (!state.has_demand && !state.pod_running),
-        "workload should begin deactivation immediately after service removal, got {:?}",
-        state,
+        matches!(
+            status,
+            distvirt_orchestrator::sm::WlStatus::Suspending
+                | distvirt_orchestrator::sm::WlStatus::Suspended
+                | distvirt_orchestrator::sm::WlStatus::Dormant
+        ),
+        "workload should be Suspending, Suspended, or Dormant after service removal, got {:?}",
+        status,
     );
 }
