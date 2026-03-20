@@ -12,8 +12,6 @@ use crate::core::{
     GlobalWorkerId,
     worker_event::{ClassifiedWorkerEvent, classify},
 };
-use crate::core::types::{NamespaceCoreEvent, OrchestratorToNamespace};
-
 use super::ShellEvent;
 
 /// Spawn a worker reader task.
@@ -39,7 +37,7 @@ async fn run(
                         event,
                     } => ShellEvent::NamespaceEvent {
                         namespace_id,
-                        event: core_event_to_ns_message(event),
+                        event,
                     },
                     ClassifiedWorkerEvent::WorkerState(event) => {
                         ShellEvent::WorkerStateEvent(event)
@@ -65,29 +63,3 @@ async fn run(
         .await;
 }
 
-/// Convert a classified NamespaceCoreEvent to OrchestratorToNamespace.
-fn core_event_to_ns_message(event: NamespaceCoreEvent) -> OrchestratorToNamespace {
-    match event {
-        NamespaceCoreEvent::WorkerEvent(e) => OrchestratorToNamespace::WorkerEvent(e),
-        NamespaceCoreEvent::SchedulerDecision(d) => OrchestratorToNamespace::SchedulerDecision(d),
-        NamespaceCoreEvent::WorkerConnected {
-            worker_id,
-            proto_worker_id,
-            info,
-        } => OrchestratorToNamespace::WorkerConnected {
-            worker_id,
-            proto_worker_id,
-            info,
-        },
-        NamespaceCoreEvent::WorkerDisconnected { worker_id } => {
-            OrchestratorToNamespace::WorkerDisconnected { worker_id }
-        }
-        NamespaceCoreEvent::ClientCommand(c) => OrchestratorToNamespace::ClientCommand(c),
-        NamespaceCoreEvent::ArtifactInvalidated { artifact_port_id } => {
-            OrchestratorToNamespace::ArtifactInvalidated { artifact_port_id }
-        }
-        NamespaceCoreEvent::TimerFired { .. } => {
-            unreachable!("TimerFired events should not come from worker events")
-        }
-    }
-}

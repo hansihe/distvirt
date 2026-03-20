@@ -13,14 +13,14 @@ use crate::{
     types::NamespaceId,
 };
 
-use super::types::{NamespaceCoreEvent, SchedulerCoreInput, WorkerStateCoreEvent};
+use super::types::{OrchestratorToNamespace, SchedulerCoreInput, WorkerStateCoreEvent};
 
 /// Where a wire-level WorkerEvent should be routed.
 pub(crate) enum ClassifiedWorkerEvent {
-    /// Namespace-scoped event — route through OrchestratorCore as NamespaceEvent.
+    /// Namespace-scoped event — route to the namespace directly.
     Namespace {
         namespace_id: NamespaceId,
-        event: NamespaceCoreEvent,
+        event: OrchestratorToNamespace,
     },
     /// Global worker state event — route through OrchestratorCore as WorkerStateEvent.
     WorkerState(WorkerStateCoreEvent),
@@ -226,7 +226,7 @@ fn ns_event(
 ) -> ClassifiedWorkerEvent {
     ClassifiedWorkerEvent::Namespace {
         namespace_id: NamespaceId::from(proto_namespace_id.as_ref()),
-        event: NamespaceCoreEvent::WorkerEvent(WorkerNamespaceEvent {
+        event: OrchestratorToNamespace::WorkerEvent(WorkerNamespaceEvent {
             worker_id,
             event: kind,
         }),

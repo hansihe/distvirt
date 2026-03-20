@@ -3,49 +3,22 @@
 //! These types define the inputs and outputs of the core state machines,
 //! free of any async or channel dependencies.
 
-use crate::adapter::dns_registry::DnsRegistryAction;
-use crate::adapter::endpoint::EndpointAction;
 use crate::adapter::observability::ObservabilityEvent;
-use crate::adapter::pod_assignment::PodAssignmentAction;
-use crate::adapter::timer::{TimerAction, TimerIdentity};
+use crate::adapter::timer::TimerAction;
 use crate::core::orchestrator::scheduler::WorkerCandidate;
 use crate::core::orchestrator::worker_state::{WorkerTunnelInfo, WireguardAdapterInfo};
 use crate::core::{
-    ArtifactPlacementEvent, ClientCommand, EndpointDemandSignal, GlobalWorkerId,
+    ArtifactPlacementEvent, ClientCommand, GlobalWorkerId,
     SchedulerDecision, WorkerNamespaceEvent,
 };
-use crate::sm::{ArtifactPortId, PodId, WorkerId};
+use crate::sm::{ArtifactPortId, PodId};
 use crate::types::NamespaceId;
 
 // =============================================================================
 // Namespace core input/output
 // =============================================================================
 
-/// Input events for NamespaceCore (no channel handles).
-pub enum NamespaceCoreEvent {
-    WorkerEvent(WorkerNamespaceEvent),
-    SchedulerDecision(SchedulerDecision),
-    TimerFired {
-        identity: TimerIdentity,
-        generation: u64,
-    },
-    WorkerConnected {
-        worker_id: GlobalWorkerId,
-        proto_worker_id: distvirt_worker_protocol::WorkerId,
-        info: crate::sm::WorkerInfo,
-    },
-    WorkerDisconnected {
-        worker_id: GlobalWorkerId,
-    },
-    ClientCommand(ClientCommand),
-    /// Scheduler determined this artifact is unreachable (all workers with
-    /// access disconnected). Destroy the artifact port so workloads learn.
-    ArtifactInvalidated {
-        artifact_port_id: ArtifactPortId,
-    },
-}
-
-/// Output effects from NamespaceCore after processing an event.
+/// Output effects from Namespace after processing an event.
 #[derive(Default)]
 pub struct NamespaceEffects {
     pub timer_actions: Vec<TimerAction>,
@@ -83,108 +56,6 @@ pub enum SchedulerMessage {
     ArtifactReleased {
         namespace_id: NamespaceId,
         proto_artifact_id: distvirt_worker_protocol::ArtifactId,
-    },
-}
-
-// =============================================================================
-// Internal (router-level) event/effect types for NamespaceCore
-// =============================================================================
-
-/// Input events for NamespaceCore — all IDs are router-internal.
-pub(crate) enum InternalNamespaceEvent {
-    WorkerEvent {
-        worker_id: WorkerId,
-        event: InternalWorkerEvent,
-    },
-    SchedulerGrant {
-        worker_id: WorkerId,
-        pod_id: PodId,
-    },
-    SchedulerRevoke {
-        pod_id: PodId,
-    },
-    TimerFired {
-        identity: TimerIdentity,
-    },
-    WorkerActivated {
-        worker_id: WorkerId,
-        info: crate::sm::WorkerInfo,
-    },
-    WorkerDeactivated {
-        worker_id: WorkerId,
-    },
-    ClientCommand(ClientCommand),
-    /// Scheduler broadcast: this artifact is unreachable, destroy its port.
-    ArtifactInvalidated {
-        artifact_port_id: ArtifactPortId,
-    },
-}
-
-/// Worker-reported events using router-internal IDs.
-pub(crate) enum InternalWorkerEvent {
-    PodRunning {
-        pod_id: PodId,
-    },
-    PodExited {
-        pod_id: PodId,
-        exit_code: i32,
-    },
-    PodFailed {
-        pod_id: PodId,
-    },
-    PodSuspended {
-        pod_id: PodId,
-        artifact_id: ArtifactPortId,
-    },
-    PodSuspendFailed {
-        pod_id: PodId,
-    },
-    EndpointDemand {
-        ip: std::net::Ipv4Addr,
-        signal: EndpointDemandSignal,
-    },
-}
-
-/// Output effects from NamespaceCore — all IDs are router-internal.
-#[derive(Default)]
-pub(crate) struct InternalNamespaceEffects {
-    pub timer_actions: Vec<TimerAction>,
-    pub scheduler_messages: Vec<InternalSchedulerMessage>,
-    pub pod_actions: Vec<PodAssignmentAction>,
-    pub endpoint_actions: Vec<EndpointAction>,
-    pub dns_registry_actions: Vec<DnsRegistryAction>,
-    pub observability_events: Vec<ObservabilityEvent>,
-}
-
-impl InternalNamespaceEffects {
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.timer_actions.is_empty()
-            && self.scheduler_messages.is_empty()
-            && self.pod_actions.is_empty()
-            && self.endpoint_actions.is_empty()
-            && self.dns_registry_actions.is_empty()
-    }
-}
-
-/// Internal scheduler messages using router IDs.
-pub(crate) enum InternalSchedulerMessage {
-    RequestLease {
-        namespace_id: NamespaceId,
-        pod_id: PodId,
-        resume_artifact: Option<ArtifactPortId>,
-    },
-    DropRequest {
-        namespace_id: NamespaceId,
-        pod_id: PodId,
-    },
-    ArtifactReferenced {
-        namespace_id: NamespaceId,
-        artifact_port_id: ArtifactPortId,
-    },
-    ArtifactReleased {
-        namespace_id: NamespaceId,
-        artifact_port_id: ArtifactPortId,
     },
 }
 
@@ -315,7 +186,6 @@ pub struct DirectWorkerCommand {
 // =============================================================================
 
 /// Orchestrator → Namespace message.
-/// Essentially `NamespaceCoreEvent` without `TimerFired` (timers are per-namespace now).
 pub enum OrchestratorToNamespace {
     WorkerConnected {
         worker_id: GlobalWorkerId,
@@ -331,26 +201,6 @@ pub enum OrchestratorToNamespace {
     },
     WorkerEvent(WorkerNamespaceEvent),
     ClientCommand(ClientCommand),
-}
-
-impl OrchestratorToNamespace {
-    /// Convert to internal NamespaceCoreEvent for the boundary layer.
-    pub fn into_core_event(self) -> NamespaceCoreEvent {
-        match self {
-            Self::WorkerConnected { worker_id, proto_worker_id, info } => {
-                NamespaceCoreEvent::WorkerConnected { worker_id, proto_worker_id, info }
-            }
-            Self::WorkerDisconnected { worker_id } => {
-                NamespaceCoreEvent::WorkerDisconnected { worker_id }
-            }
-            Self::SchedulerDecision(d) => NamespaceCoreEvent::SchedulerDecision(d),
-            Self::ArtifactInvalidated { artifact_port_id } => {
-                NamespaceCoreEvent::ArtifactInvalidated { artifact_port_id }
-            }
-            Self::WorkerEvent(e) => NamespaceCoreEvent::WorkerEvent(e),
-            Self::ClientCommand(c) => NamespaceCoreEvent::ClientCommand(c),
-        }
-    }
 }
 
 /// Namespace → Orchestrator message.

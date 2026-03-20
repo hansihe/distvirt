@@ -13,7 +13,7 @@ pub(crate) enum PodAssignmentAction {
         pod_id: crate::sm::PodId,
         request: crate::sm::PodScheduleRequest,
         /// Full workload spec for building the protocol LaunchPod command.
-        /// Populated by NamespaceCore after the adapter produces the action.
+        /// Populated by Namespace after the adapter produces the action.
         spec: Option<crate::sm::WorkloadSpec>,
     },
     Resume {
@@ -21,7 +21,7 @@ pub(crate) enum PodAssignmentAction {
         pod_id: crate::sm::PodId,
         artifact_id: crate::sm::ArtifactPortId,
         /// Full workload spec for building the protocol ResumePod command.
-        /// Populated by NamespaceCore after the adapter produces the action.
+        /// Populated by Namespace after the adapter produces the action.
         spec: Option<crate::sm::WorkloadSpec>,
     },
     Stop {

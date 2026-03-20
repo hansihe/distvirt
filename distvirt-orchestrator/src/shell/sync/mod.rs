@@ -756,9 +756,7 @@ impl SyncShell {
                 event,
             } => {
                 // Route namespace events directly to namespace pending queue.
-                // Convert NamespaceCoreEvent back to OrchestratorToNamespace.
-                let msg = core_event_to_ns_message(event);
-                self.ns_pending.push_back((namespace_id, msg));
+                self.ns_pending.push_back((namespace_id, event));
             }
             ClassifiedWorkerEvent::WorkerState(event) => {
                 self.orch_pending
@@ -807,33 +805,3 @@ impl SyncShell {
     }
 }
 
-/// Convert a classified NamespaceCoreEvent into an OrchestratorToNamespace message.
-/// This is used when routing classified worker events directly to namespaces.
-fn core_event_to_ns_message(
-    event: crate::core::types::NamespaceCoreEvent,
-) -> OrchestratorToNamespace {
-    use crate::core::types::NamespaceCoreEvent;
-    match event {
-        NamespaceCoreEvent::WorkerEvent(e) => OrchestratorToNamespace::WorkerEvent(e),
-        NamespaceCoreEvent::SchedulerDecision(d) => OrchestratorToNamespace::SchedulerDecision(d),
-        NamespaceCoreEvent::WorkerConnected {
-            worker_id,
-            proto_worker_id,
-            info,
-        } => OrchestratorToNamespace::WorkerConnected {
-            worker_id,
-            proto_worker_id,
-            info,
-        },
-        NamespaceCoreEvent::WorkerDisconnected { worker_id } => {
-            OrchestratorToNamespace::WorkerDisconnected { worker_id }
-        }
-        NamespaceCoreEvent::ClientCommand(c) => OrchestratorToNamespace::ClientCommand(c),
-        NamespaceCoreEvent::ArtifactInvalidated { artifact_port_id } => {
-            OrchestratorToNamespace::ArtifactInvalidated { artifact_port_id }
-        }
-        NamespaceCoreEvent::TimerFired { .. } => {
-            unreachable!("TimerFired events should not be classified from worker events")
-        }
-    }
-}
