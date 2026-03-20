@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use anyhow::bail;
 
-use super::helpers::{ip_to_u32, parse_cidr, u32_to_ip};
+use crate::helpers::{ip_to_u32, parse_cidr, u32_to_ip};
 
 // ---------------------------------------------------------------------------
 // IpAllocator — stable, hash-based IP assignment

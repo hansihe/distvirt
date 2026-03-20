@@ -2,8 +2,8 @@ use std::fmt;
 
 use annotate_snippets::{Level, Renderer, Snippet};
 
-use super::path::YamlPath;
-use super::snippet::resolve_span;
+use crate::path::YamlPath;
+use crate::snippet::resolve_span;
 
 // ---------------------------------------------------------------------------
 // SpecErrors — multi-error collector with source-aware rendering
@@ -11,7 +11,7 @@ use super::snippet::resolve_span;
 
 /// Identifies which source file an error's path should be resolved against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SourceId(usize);
+pub(crate) struct SourceId(usize);
 
 /// A single validation error with a structured path indicating where in the spec it occurred.
 #[derive(Debug)]
@@ -29,7 +29,7 @@ struct Source {
 
 /// Collects validation errors and warnings. If any errors are present after
 /// validation, they are all reported together with source snippets.
-pub(super) struct SpecErrors {
+pub(crate) struct SpecErrors {
     sources: Vec<Source>,
     errors: Vec<SpecError>,
     warnings: Vec<SpecError>,
@@ -37,7 +37,7 @@ pub(super) struct SpecErrors {
 }
 
 impl SpecErrors {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sources: Vec::new(),
             errors: Vec::new(),
@@ -48,7 +48,7 @@ impl SpecErrors {
 
     /// Register a source file for span resolution. Returns a `SourceId` that
     /// can be passed to `error_in` / `warn_in`.
-    pub(super) fn add_source(&mut self, name: impl Into<String>, content: impl Into<String>) -> SourceId {
+    pub(crate) fn add_source(&mut self, name: impl Into<String>, content: impl Into<String>) -> SourceId {
         let id = SourceId(self.sources.len());
         self.sources.push(Source {
             name: name.into(),
@@ -57,17 +57,17 @@ impl SpecErrors {
         id
     }
 
-    pub(super) fn error(&mut self, path: YamlPath, msg: impl Into<String>) {
+    pub(crate) fn error(&mut self, path: YamlPath, msg: impl Into<String>) {
         let source_id = self.default_source;
         self.error_in(source_id, path, msg);
     }
 
-    pub(super) fn warn(&mut self, path: YamlPath, msg: impl Into<String>) {
+    pub(crate) fn warn(&mut self, path: YamlPath, msg: impl Into<String>) {
         let source_id = self.default_source;
         self.warn_in(source_id, path, msg);
     }
 
-    pub(super) fn error_in(&mut self, source_id: SourceId, path: YamlPath, msg: impl Into<String>) {
+    pub(crate) fn error_in(&mut self, source_id: SourceId, path: YamlPath, msg: impl Into<String>) {
         self.errors.push(SpecError {
             path,
             message: msg.into(),
@@ -75,7 +75,7 @@ impl SpecErrors {
         });
     }
 
-    pub(super) fn warn_in(&mut self, source_id: SourceId, path: YamlPath, msg: impl Into<String>) {
+    pub(crate) fn warn_in(&mut self, source_id: SourceId, path: YamlPath, msg: impl Into<String>) {
         self.warnings.push(SpecError {
             path,
             message: msg.into(),
@@ -83,12 +83,12 @@ impl SpecErrors {
         });
     }
 
-    pub(super) fn has_errors(&self) -> bool {
+    pub(crate) fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 
     /// Format all errors/warnings into a single anyhow::Error, or Ok(()) if none.
-    pub(super) fn into_result(self) -> anyhow::Result<()> {
+    pub(crate) fn into_result(self) -> anyhow::Result<()> {
         if self.errors.is_empty() && self.warnings.is_empty() {
             return Ok(());
         }

@@ -1,0 +1,14 @@
+[package]
+name = "distvirt-sdk-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "distvirt_sdk_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+distvirt-client = { path = "../../distvirt-client" }
+prost = "0.13"
+pyo3 = { version = "0.28", features = ["extension-module"] }

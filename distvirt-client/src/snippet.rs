@@ -1,6 +1,6 @@
 use saphyr::{LoadableYamlNode, MarkedYaml};
 
-use super::path::{PathSegment, YamlPath};
+use crate::path::{PathSegment, YamlPath};
 
 // ---------------------------------------------------------------------------
 // Span resolution: walk a MarkedYaml tree following a YamlPath
@@ -8,7 +8,7 @@ use super::path::{PathSegment, YamlPath};
 
 /// A resolved byte range in a source file.
 #[derive(Debug, Clone)]
-pub(super) struct ResolvedSpan {
+pub(crate) struct ResolvedSpan {
     /// Byte offset of the start of the node.
     pub start: usize,
     /// Byte offset of the end of the node.
@@ -20,7 +20,7 @@ pub(super) struct ResolvedSpan {
 /// Parses the source with saphyr's `MarkedYaml` loader, then walks the tree
 /// following the path segments. Returns `None` if parsing fails or the path
 /// doesn't exist in the tree.
-pub(super) fn resolve_span(source: &str, path: &YamlPath) -> Option<ResolvedSpan> {
+pub(crate) fn resolve_span(source: &str, path: &YamlPath) -> Option<ResolvedSpan> {
     let docs = MarkedYaml::load_from_str(source).ok()?;
     let doc = docs.into_iter().next()?;
 
@@ -55,7 +55,7 @@ pub(super) fn resolve_span(source: &str, path: &YamlPath) -> Option<ResolvedSpan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::path::YamlPath;
+    use crate::path::YamlPath;
 
     #[test]
     fn resolve_simple_key() {

@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::Deserialize;
 
-use super::types::SpecFile;
+use crate::types::SpecFile;
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -23,7 +23,7 @@ pub struct ParsedSpec {
 }
 
 /// Format a serde-saphyr error with source snippets when available.
-pub(super) fn render_yaml_error(err: serde_saphyr::Error) -> String {
+pub(crate) fn render_yaml_error(err: serde_saphyr::Error) -> String {
     err.render()
 }
 

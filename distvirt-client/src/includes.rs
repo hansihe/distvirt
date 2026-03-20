@@ -4,9 +4,9 @@ use std::path::Path;
 use anyhow::bail;
 use std::fs;
 
-use super::errors::{SourceId, SpecErrors};
-use super::path::YamlPath;
-use super::types::{SpecFile, SpecIncludeOverrides};
+use crate::errors::{SourceId, SpecErrors};
+use crate::path::YamlPath;
+use crate::types::{SpecFile, SpecIncludeOverrides};
 
 // ---------------------------------------------------------------------------
 // Fragment include resolution
@@ -14,7 +14,7 @@ use super::types::{SpecFile, SpecIncludeOverrides};
 
 /// Resolve `include` entries in a namespace spec, loading and merging fragments.
 /// `spec_path` is the path to the namespace spec file (used for relative path resolution).
-pub fn resolve_includes(parsed: &mut super::parse::ParsedSpec, spec_path: &Path) -> anyhow::Result<()> {
+pub fn resolve_includes(parsed: &mut crate::parse::ParsedSpec, spec_path: &Path) -> anyhow::Result<()> {
     let spec = &mut parsed.spec;
     let includes = match spec.include.take() {
         Some(inc) if !inc.is_empty() => inc,
@@ -55,7 +55,7 @@ pub fn resolve_includes(parsed: &mut super::parse::ParsedSpec, spec_path: &Path)
         let mut fragment: SpecFile = match serde_saphyr::from_str(&substituted) {
             Ok(f) => f,
             Err(e) => {
-                errs.error(label.clone(), format!("YAML parse error:\n{}", super::parse::render_yaml_error(e)));
+                errs.error(label.clone(), format!("YAML parse error:\n{}", crate::parse::render_yaml_error(e)));
                 continue;
             }
         };

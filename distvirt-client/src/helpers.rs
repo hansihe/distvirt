@@ -3,13 +3,13 @@ use std::net::Ipv4Addr;
 use anyhow::{Context, bail};
 use distvirt_client_protocol::*;
 
-use super::types::*;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn resolve_resources(
+pub(crate) fn resolve_resources(
     workload_res: &Option<SpecResources>,
     defaults: &Option<SpecDefaults>,
 ) -> (Option<SpecResourceValues>, Option<SpecResourceValues>) {
@@ -28,7 +28,7 @@ pub(super) fn resolve_resources(
     (requests, limits)
 }
 
-pub(super) fn resolve_activation(
+pub(crate) fn resolve_activation(
     svc_activation: &Option<SpecActivation>,
     defaults: &Option<SpecDefaults>,
 ) -> Option<ActivationSpec> {
@@ -78,7 +78,7 @@ pub(super) fn resolve_activation(
     })
 }
 
-pub(super) fn convert_expose(expose: &Option<Vec<SpecExpose>>) -> Vec<ExposeSpec> {
+pub(crate) fn convert_expose(expose: &Option<Vec<SpecExpose>>) -> Vec<ExposeSpec> {
     expose
         .as_ref()
         .map(|specs| {
@@ -100,7 +100,7 @@ pub(super) fn convert_expose(expose: &Option<Vec<SpecExpose>>) -> Vec<ExposeSpec
         .unwrap_or_default()
 }
 
-pub(super) fn parse_cidr(cidr: &str) -> anyhow::Result<(Ipv4Addr, u8)> {
+pub(crate) fn parse_cidr(cidr: &str) -> anyhow::Result<(Ipv4Addr, u8)> {
     let (ip_str, prefix_str) = cidr
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid CIDR: {}", cidr))?;
@@ -109,15 +109,15 @@ pub(super) fn parse_cidr(cidr: &str) -> anyhow::Result<(Ipv4Addr, u8)> {
     Ok((ip, prefix))
 }
 
-pub(super) fn ip_to_u32(ip: Ipv4Addr) -> u32 {
+pub(crate) fn ip_to_u32(ip: Ipv4Addr) -> u32 {
     u32::from(ip)
 }
 
-pub(super) fn u32_to_ip(val: u32) -> Ipv4Addr {
+pub(crate) fn u32_to_ip(val: u32) -> Ipv4Addr {
     Ipv4Addr::from(val)
 }
 
-pub(super) fn ip_to_mac(ip: &str) -> String {
+pub(crate) fn ip_to_mac(ip: &str) -> String {
     // Generate a deterministic MAC from IP: 02:00:xx:xx:xx:xx
     let addr: Ipv4Addr = ip.parse().unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
     let octets = addr.octets();
@@ -129,7 +129,7 @@ pub(super) fn ip_to_mac(ip: &str) -> String {
 
 /// Parse a human-readable duration string into milliseconds.
 /// Supports: "30s", "5m", "1h", "500ms"
-pub(super) fn parse_duration_ms(s: &str) -> anyhow::Result<u64> {
+pub(crate) fn parse_duration_ms(s: &str) -> anyhow::Result<u64> {
     let s = s.trim();
     if let Some(val) = s.strip_suffix("ms") {
         return Ok(val.trim().parse::<u64>()?);

@@ -1,8 +1,8 @@
-use super::convert::spec_to_namespace_spec;
-use super::helpers::parse_duration_ms;
-use super::includes::resolve_includes;
-use super::ip_alloc::IpAllocator;
-use super::parse::{try_parse, ParsedSpec};
+use crate::convert::spec_to_namespace_spec;
+use crate::helpers::parse_duration_ms;
+use crate::includes::resolve_includes;
+use crate::ip_alloc::IpAllocator;
+use crate::parse::{try_parse, ParsedSpec};
 
 use distvirt_client_protocol::*;
 

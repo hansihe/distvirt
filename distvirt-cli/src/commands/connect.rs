@@ -343,7 +343,7 @@ async fn run_tunnel(
             loop {
                 let n = tun.read_packet(&mut tun_buf).await?;
                 let ip_packet = &tun_buf[..n];
-                eprintln!("  tun ▶ wg: {}", describe_ip_packet(ip_packet));
+                log::trace!("tun ▶ wg: {}", describe_ip_packet(ip_packet));
 
                 let result = {
                     let mut t = tunn.lock().await;
@@ -352,14 +352,14 @@ async fn run_tunnel(
 
                 match result {
                     TunnResult::WriteToNetwork(data) => {
-                        eprintln!("  wg  ▶ udp: {} bytes encrypted → {}", data.len(), endpoint);
+                        log::trace!("wg ▶ udp: {} bytes encrypted → {}", data.len(), endpoint);
                         udp.send_to(data, endpoint).await?;
                     }
                     TunnResult::Err(e) => {
-                        eprintln!("  wg  encapsulate error: {:?}", e);
+                        log::warn!("wg encapsulate error: {:?}", e);
                     }
                     other => {
-                        eprintln!("  wg  encapsulate unexpected: {}", describe_tunn_result(&other));
+                        log::warn!("wg encapsulate unexpected: {}", describe_tunn_result(&other));
                     }
                 }
             }
@@ -380,7 +380,7 @@ async fn run_tunnel(
                 let (n, src) = udp.recv_from(&mut recv_buf).await?;
                 let datagram = &recv_buf[..n];
 
-                eprintln!("  udp ◀ {}: {} bytes", src, n);
+                log::trace!("udp ◀ {}: {} bytes", src, n);
                 let result = {
                     let mut t = tunn.lock().await;
                     t.decapsulate(Some(src.ip()), datagram, &mut dec_buf)
@@ -388,13 +388,13 @@ async fn run_tunnel(
 
                 match result {
                     TunnResult::Done => {
-                        eprintln!("  wg  ◀ decapsulate: Done (no data)");
+                        log::trace!("wg ◀ decapsulate: Done (no data)");
                     }
                     TunnResult::Err(e) => {
-                        eprintln!("  wg  ◀ decapsulate error: {:?}", e);
+                        log::warn!("wg decapsulate error: {:?}", e);
                     }
                     TunnResult::WriteToNetwork(data) => {
-                        eprintln!("  wg  ◀ decapsulate: handshake response, sending {} bytes", data.len());
+                        log::debug!("wg ◀ handshake response, sending {} bytes", data.len());
                         let data = data.to_vec();
                         udp.send_to(&data, endpoint).await?;
                         // Handshake continuation loop.
@@ -407,7 +407,7 @@ async fn run_tunnel(
                             match cont {
                                 TunnResult::Done => break,
                                 TunnResult::WriteToNetwork(data) => {
-                                    eprintln!("  wg  ◀ handshake continuation: sending {} bytes", data.len());
+                                    log::debug!("wg ◀ handshake continuation: sending {} bytes", data.len());
                                     let data = data.to_vec();
                                     udp.send_to(&data, endpoint).await?;
                                 }
@@ -416,11 +416,11 @@ async fn run_tunnel(
                         }
                     }
                     TunnResult::WriteToTunnelV4(ip_packet, _) => {
-                        eprintln!("  wg  ◀ tun: {}", describe_ip_packet(ip_packet));
+                        log::trace!("wg ◀ tun: {}", describe_ip_packet(ip_packet));
                         tun.write_packet(ip_packet).await?;
                     }
                     TunnResult::WriteToTunnelV6(_, _) => {
-                        eprintln!("  wg  ◀ dropping IPv6 packet");
+                        log::debug!("wg ◀ dropping IPv6 packet");
                     }
                 }
             }
@@ -449,10 +449,10 @@ async fn run_tunnel(
                 match result {
                     TunnResult::Done => {}
                     TunnResult::Err(e) => {
-                        eprintln!("  wg  timer error: {:?}", e);
+                        log::warn!("wg timer error: {:?}", e);
                     }
                     TunnResult::WriteToNetwork(data) => {
-                        eprintln!("  wg  timer: sending {} bytes (handshake init / keepalive)", data.len());
+                        log::debug!("wg timer: sending {} bytes (handshake init / keepalive)", data.len());
                         let data = data.to_vec();
                         udp.send_to(&data, endpoint).await?;
                     }
@@ -464,10 +464,10 @@ async fn run_tunnel(
                 let is_connected = time_since_hs.is_some();
                 if is_connected && !was_connected {
                     let rtt_str = rtt.map(|r| format!(" rtt={}ms", r)).unwrap_or_default();
-                    eprintln!("  wg  handshake complete!{}", rtt_str);
+                    eprintln!("wg handshake complete!{}", rtt_str);
                     was_connected = true;
                 } else if !is_connected && was_connected {
-                    eprintln!("  wg  session lost, re-handshaking...");
+                    eprintln!("wg session lost, re-handshaking...");
                     was_connected = false;
                 }
 
@@ -478,8 +478,8 @@ async fn run_tunnel(
                         Some(d) => format!("{}s ago", d.as_secs()),
                         None => "no session".to_string(),
                     };
-                    eprintln!(
-                        "  wg  status: handshake={}, tx={}, rx={}, loss={:.1}%",
+                    log::debug!(
+                        "wg status: handshake={}, tx={}, rx={}, loss={:.1}%",
                         hs_str, tx_bytes, rx_bytes, loss * 100.0
                     );
                 }

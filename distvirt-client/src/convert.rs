@@ -3,11 +3,11 @@ use std::net::Ipv4Addr;
 
 use distvirt_client_protocol::*;
 
-use super::errors::SpecErrors;
-use super::helpers::{convert_expose, ip_to_mac, parse_cidr, parse_duration_ms, resolve_activation, resolve_resources};
-use super::ip_alloc::IpAllocator;
-use super::path::YamlPath;
-use super::types::*;
+use crate::errors::SpecErrors;
+use crate::helpers::{convert_expose, ip_to_mac, parse_cidr, parse_duration_ms, resolve_activation, resolve_resources};
+use crate::ip_alloc::IpAllocator;
+use crate::path::YamlPath;
+use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // Conversion to proto NamespaceSpec
@@ -18,7 +18,7 @@ use super::types::*;
 ///
 /// Runs multi-phase validation first, collecting all errors and reporting them
 /// together so users can fix everything in one pass.
-pub fn spec_to_namespace_spec(parsed: &super::parse::ParsedSpec) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
+pub fn spec_to_namespace_spec(parsed: &crate::parse::ParsedSpec) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
     let spec = &parsed.spec;
     let mut errs = SpecErrors::new();
     errs.add_source(&parsed.file_name, &parsed.source);

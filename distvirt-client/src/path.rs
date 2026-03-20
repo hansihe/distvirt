@@ -7,7 +7,7 @@ use std::fmt;
 /// A segment in a YAML path, used both for display and for resolving
 /// spans in a MarkedYaml tree.
 #[derive(Debug, Clone)]
-pub(super) enum PathSegment {
+pub(crate) enum PathSegment {
     /// A YAML mapping key (e.g. `workloads`, `api`, `ip`).
     Key(String),
     /// A YAML sequence index (e.g. `containers[0]`).
@@ -23,7 +23,7 @@ pub(super) enum PathSegment {
 /// - Formatting human-readable error locations (e.g. `workloads.api.ip`)
 /// - Resolving byte spans in a `MarkedYaml` tree for snippet rendering
 #[derive(Debug, Clone)]
-pub(super) struct YamlPath {
+pub(crate) struct YamlPath {
     segments: Vec<PathSegment>,
 }
 

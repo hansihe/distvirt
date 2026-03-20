@@ -1243,13 +1243,13 @@ dependencies = [
 name = "distvirt-cli"
 version = "0.1.0"
 dependencies = [
- "annotate-snippets 0.11.5",
  "anyhow",
  "base64 0.22.1",
  "boringtun",
  "clap",
  "crossterm",
  "dirs 6.0.0",
+ "distvirt-client",
  "distvirt-client-protocol",
  "distvirt-worker",
  "distvirt-worker-protocol",
@@ -1259,16 +1259,27 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "rand 0.8.5",
- "saphyr",
  "serde",
- "serde-saphyr",
  "serde_json",
  "tabled",
- "tempfile",
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
  "tonic",
+]
+
+[[package]]
+name = "distvirt-client"
+version = "0.1.0"
+dependencies = [
+ "annotate-snippets 0.11.5",
+ "anyhow",
+ "distvirt-client-protocol",
+ "log",
+ "saphyr",
+ "serde",
+ "serde-saphyr",
+ "tempfile",
 ]
 
 [[package]]
@@ -1334,6 +1345,16 @@ dependencies = [
  "tonic",
  "x25519-dalek",
  "yamux",
+]
+
+[[package]]
+name = "distvirt-sdk-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "distvirt-client",
+ "prost",
+ "pyo3",
 ]
 
 [[package]]
@@ -3025,6 +3046,64 @@ dependencies = [
  "log",
  "sptr",
  "wasmtime-math",
+]
+
+[[package]]
+name = "pyo3"
+version = "0.28.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf85e27e86080aafd5a22eae58a162e133a589551542b3e5cee4beb27e54f8e1"
+dependencies = [
+ "libc",
+ "once_cell",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.28.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bf94ee265674bf76c09fa430b0e99c26e319c945d96ca0d5a8215f31bf81cf7"
+dependencies = [
+ "target-lexicon",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.28.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "491aa5fc66d8059dd44a75f4580a2962c1862a1c2945359db36f6c2818b748dc"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.28.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5d671734e9d7a43449f8480f8b38115df67bef8d21f76837fa75ee7aaa5e52e"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.28.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22faaa1ce6c430a1f71658760497291065e6450d7b5dc2bcf254d49f66ee700a"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "pyo3-build-config",
+ "quote",
+ "syn",
 ]
 
 [[package]]

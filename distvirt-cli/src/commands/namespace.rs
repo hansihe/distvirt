@@ -5,7 +5,6 @@ use distvirt_client_protocol::*;
 
 use crate::client::{self, Client};
 use crate::format;
-use crate::spec;
 
 /// Find the spec file to use. Checks distvirt.yaml, distvirt.yml, then
 /// docker-compose.yml in the current directory.
@@ -23,9 +22,9 @@ fn find_default_file() -> anyhow::Result<std::path::PathBuf> {
 
 /// Parse a spec file and return (optional namespace_id, NamespaceSpec).
 fn parse_spec_file(file: &Path) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
-    if let Some(mut native) = spec::try_parse(file)? {
-        spec::resolve_includes(&mut native, file)?;
-        let (ns_id, proto_spec) = spec::spec_to_namespace_spec(&native)?;
+    if let Some(mut native) = distvirt_client::try_parse(file)? {
+        distvirt_client::resolve_includes(&mut native, file)?;
+        let (ns_id, proto_spec) = distvirt_client::spec_to_namespace_spec(&native)?;
         return Ok((ns_id, proto_spec));
     }
 
@@ -40,12 +39,12 @@ pub fn validate(file: Option<&Path>) -> anyhow::Result<()> {
         None => find_default_file()?,
     };
 
-    let mut parsed = match spec::try_parse(&file)? {
+    let mut parsed = match distvirt_client::try_parse(&file)? {
         Some(p) => p,
         None => bail!("'{}' is not a native distvirt spec file", file.display()),
     };
-    spec::resolve_includes(&mut parsed, &file)?;
-    let (ns_id, proto) = spec::spec_to_namespace_spec(&parsed)?;
+    distvirt_client::resolve_includes(&mut parsed, &file)?;
+    let (ns_id, proto) = distvirt_client::spec_to_namespace_spec(&parsed)?;
 
     let n_workloads = proto.workloads.len();
     let n_services = proto.services.len();
