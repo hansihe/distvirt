@@ -251,28 +251,21 @@ impl ManagementAdapter {
                 distvirt_worker_protocol::ResourceRequirements {
                     requests: r.requests.as_ref().map(|v| {
                         distvirt_worker_protocol::ResourceValues {
-                            memory_mib: v.memory_mb,
+                            memory_mib: v.memory_mib,
                             vcpus: v.vcpus,
                         }
                     }),
                     limits: r.limits.as_ref().map(|v| {
                         distvirt_worker_protocol::ResourceValues {
-                            memory_mib: v.memory_mb,
+                            memory_mib: v.memory_mib,
                             vcpus: v.vcpus,
                         }
                     }),
                 }
             }),
-            run_policy: match spec.run_policy {
-                crate::types::RunPolicy::Service => crate::sm::RunPolicy::Service,
-                crate::types::RunPolicy::Job => crate::sm::RunPolicy::Job,
-            },
+            run_policy: spec.run_policy.clone(),
             respects_demand: spec.respects_demand,
-            activation: spec.activation.as_ref().map(|a| {
-                crate::sm::WorkloadActivationSpec {
-                    idle_timeout: a.idle_timeout,
-                }
-            }),
+            activation: spec.activation.clone(),
             volumes: spec.volumes.clone(),
         }
     }

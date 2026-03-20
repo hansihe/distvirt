@@ -11,6 +11,7 @@ use crate::{sm::PodId, types::NamespaceSpec};
 pub mod namespace;
 pub mod namespace_boundary;
 pub mod orchestrator;
+pub(crate) mod pressure;
 pub(crate) mod scheduler;
 pub mod timer_wheel;
 pub mod types;

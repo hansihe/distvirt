@@ -195,15 +195,8 @@ impl Default for LeaseInfo {
     }
 }
 
-/// Whether a workload runs as a long-lived service or a run-to-completion job.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub enum RunPolicy {
-    /// Service: restart on completion, always try to maintain a running pod.
-    #[default]
-    Service,
-    /// Job: run once to completion (exit 0 = done, non-zero = retry with backoff).
-    Job,
-}
+pub use crate::types::ActivationSpec;
+pub use crate::types::RunPolicy;
 
 /// Workload spec delivered by management port.
 ///
@@ -229,15 +222,9 @@ pub struct WorkloadSpec {
     pub respects_demand: bool,
     /// Workload-level activation config. Controls the workload-owned endpoint's
     /// idle timeout behavior.
-    pub activation: Option<WorkloadActivationSpec>,
+    pub activation: Option<ActivationSpec>,
     /// Pod-scoped volumes. Passed through to LaunchPod command.
     pub volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
-}
-
-/// Workload-level activation configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WorkloadActivationSpec {
-    pub idle_timeout: std::time::Duration,
 }
 
 /// Service spec delivered by management port.

@@ -16,7 +16,6 @@
 
 mod client;
 mod namespace_io;
-mod orchestrator_io;
 mod specs;
 mod states;
 
@@ -35,7 +34,6 @@ pub use crate::sm::BackendNeed;
 // Re-export all submodule types.
 pub use client::*;
 pub use namespace_io::*;
-pub use orchestrator_io::*;
 pub use specs::*;
 pub use states::*;
 

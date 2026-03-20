@@ -15,7 +15,8 @@ pub struct NamespaceSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResourceValues {
-    pub memory_mb: u64,
+    #[serde(alias = "memory_mb")]
+    pub memory_mib: u64,
     pub vcpus: u32,
 }
 
@@ -49,7 +50,7 @@ pub struct WorkloadSpec {
     /// Workload-level activation. If Some, workload is activation-based (starts dormant).
     /// If None, workload is always-on (starts immediately).
     #[serde(default)]
-    pub activation: Option<WorkloadActivationSpec>,
+    pub activation: Option<ActivationSpec>,
     /// Whether this workload runs as a service or a job.
     #[serde(default)]
     pub run_policy: RunPolicy,
@@ -60,12 +61,6 @@ pub struct WorkloadSpec {
     /// Pod-scoped volumes. Mounted into containers via volume_mounts.
     #[serde(default)]
     pub volumes: Vec<VolumeSpec>,
-}
-
-/// Workload-level activation configuration. Only passthrough is valid.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WorkloadActivationSpec {
-    pub idle_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

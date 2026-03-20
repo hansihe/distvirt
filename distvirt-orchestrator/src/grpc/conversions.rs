@@ -96,11 +96,11 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
 
     let resources = wl.resources.map(|r| ResourceRequirements {
         requests: r.requests.map(|v| ResourceValues {
-            memory_mb: v.memory_mb,
+            memory_mib: v.memory_mb,
             vcpus: v.vcpus,
         }),
         limits: r.limits.map(|v| ResourceValues {
-            memory_mb: v.memory_mb,
+            memory_mib: v.memory_mb,
             vcpus: v.vcpus,
         }),
     });
@@ -110,7 +110,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         act.activator.and_then(|cfg| {
             cfg.activator.and_then(|a| match a {
                 proto::activator_config::Activator::Passthrough(p) => {
-                    Some(WorkloadActivationSpec {
+                    Some(ActivationSpec {
                         idle_timeout: Duration::from_millis(p.idle_timeout_ms),
                     })
                 }

@@ -6,8 +6,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::GlobalWorkerId;
+use crate::core::pressure::{PressureBands, WorkerPressure, WorkerPsi};
 use crate::core::scheduler::WorkerCandidate;
-use crate::types::{NamespaceId, PressureBands, WorkerPressure, WorkerPsi};
+use crate::types::NamespaceId;
 
 use super::types::{SchedulerCoreInput, WorkerStateCoreEvent, WorkerStateEffects};
 
