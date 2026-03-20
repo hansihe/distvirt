@@ -198,23 +198,30 @@ impl Default for LeaseInfo {
 pub use crate::types::ActivationSpec;
 pub use crate::types::RunPolicy;
 
-/// Workload spec delivered by management port.
+/// Pod-affecting spec fields. Changes to any field here require pod recreation.
 ///
-/// Carries the full launch-relevant data so that the spec flows through the
-/// router signal graph and downstream actions can build protocol commands
-/// without consulting side caches.
+/// Adding a new field automatically triggers restart detection via `PartialEq`
+/// comparison in the Workload SM — no manual change-detection code needed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub struct WorkloadSpec {
+pub struct PodSpec {
     pub image: String,
-    /// If true, suspend the pod instead of destroying it when demand drops.
-    /// Enables fast resume from snapshot on re-activation.
-    pub suspend_on_idle: bool,
     /// Pod network configuration for LaunchPod/ResumePod commands.
     pub network: Option<distvirt_worker_protocol::PodNetworkConfig>,
     /// Container specs for LaunchPod commands.
     pub containers: Vec<distvirt_worker_protocol::ContainerSpec>,
     /// Resource requirements for LaunchPod commands.
     pub resources: Option<distvirt_worker_protocol::ResourceRequirements>,
+    /// Pod-scoped volumes. Passed through to LaunchPod command.
+    pub volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
+}
+
+/// Hot-reconfigurable workload config. Changes here are applied live without
+/// pod restart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct WorkloadConfig {
+    /// If true, suspend the pod instead of destroying it when demand drops.
+    /// Enables fast resume from snapshot on re-activation.
+    pub suspend_on_idle: bool,
     /// Whether this workload runs as a service or a job.
     pub run_policy: RunPolicy,
     /// If true, the workload respects demand signals and starts dormant.
@@ -223,8 +230,19 @@ pub struct WorkloadSpec {
     /// Workload-level activation config. Controls the workload-owned endpoint's
     /// idle timeout behavior.
     pub activation: Option<ActivationSpec>,
-    /// Pod-scoped volumes. Passed through to LaunchPod command.
-    pub volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
+}
+
+/// Workload spec delivered by management port.
+///
+/// Carries the full launch-relevant data so that the spec flows through the
+/// router signal graph and downstream actions can build protocol commands
+/// without consulting side caches.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct WorkloadSpec {
+    /// Pod-affecting fields — changes trigger pod recreation.
+    pub pod_spec: PodSpec,
+    /// Hot-reconfigurable fields — changes applied without restart.
+    pub config: WorkloadConfig,
 }
 
 /// Service spec delivered by management port.

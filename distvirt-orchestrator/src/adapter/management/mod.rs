@@ -239,34 +239,38 @@ impl ManagementAdapter {
 
     pub(crate) fn to_sm_workload_spec(spec: &crate::types::WorkloadSpec) -> SmWorkloadSpec {
         SmWorkloadSpec {
-            image: spec
-                .containers
-                .first()
-                .map(|c| c.image_ref.clone())
-                .unwrap_or_default(),
-            suspend_on_idle: spec.suspend_on_idle,
-            network: Some(spec.network.clone()),
-            containers: spec.containers.clone(),
-            resources: spec.resources.as_ref().map(|r| {
-                distvirt_worker_protocol::ResourceRequirements {
-                    requests: r.requests.as_ref().map(|v| {
-                        distvirt_worker_protocol::ResourceValues {
-                            memory_mib: v.memory_mib,
-                            vcpus: v.vcpus,
-                        }
-                    }),
-                    limits: r.limits.as_ref().map(|v| {
-                        distvirt_worker_protocol::ResourceValues {
-                            memory_mib: v.memory_mib,
-                            vcpus: v.vcpus,
-                        }
-                    }),
-                }
-            }),
-            run_policy: spec.run_policy.clone(),
-            respects_demand: spec.respects_demand,
-            activation: spec.activation.clone(),
-            volumes: spec.volumes.clone(),
+            pod_spec: crate::sm::PodSpec {
+                image: spec
+                    .containers
+                    .first()
+                    .map(|c| c.image_ref.clone())
+                    .unwrap_or_default(),
+                network: Some(spec.network.clone()),
+                containers: spec.containers.clone(),
+                resources: spec.resources.as_ref().map(|r| {
+                    distvirt_worker_protocol::ResourceRequirements {
+                        requests: r.requests.as_ref().map(|v| {
+                            distvirt_worker_protocol::ResourceValues {
+                                memory_mib: v.memory_mib,
+                                vcpus: v.vcpus,
+                            }
+                        }),
+                        limits: r.limits.as_ref().map(|v| {
+                            distvirt_worker_protocol::ResourceValues {
+                                memory_mib: v.memory_mib,
+                                vcpus: v.vcpus,
+                            }
+                        }),
+                    }
+                }),
+                volumes: spec.volumes.clone(),
+            },
+            config: crate::sm::WorkloadConfig {
+                suspend_on_idle: spec.suspend_on_idle,
+                run_policy: spec.run_policy.clone(),
+                respects_demand: spec.respects_demand,
+                activation: spec.activation.clone(),
+            },
         }
     }
 

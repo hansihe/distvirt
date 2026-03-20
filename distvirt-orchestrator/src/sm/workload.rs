@@ -54,10 +54,10 @@ pub struct WorkloadSm {
     /// from touching the pod until it reaches a terminal state.
     pub awaiting_suspend: bool,
 
-    /// The image from the last delivered spec. Used to detect pod-affecting
-    /// spec changes (only image changes bump spec_version and trigger restarts;
-    /// behavioral flags like suspend_on_idle do not).
-    pub current_image: Option<String>,
+    /// The pod-affecting spec from the last delivery. Used to detect changes
+    /// that require pod recreation (any field change in PodSpec bumps
+    /// spec_version and triggers restart).
+    pub current_pod_spec: Option<PodSpec>,
 
     /// Pod IP from spec's network config, included in ReadyInfo for downstream
     /// consumers (endpoint signals).
@@ -101,7 +101,7 @@ impl WorkloadSm {
             artifact_confirmed: false,
             artifact_confirm_gen: 0,
             awaiting_suspend: false,
-            current_image: None,
+            current_pod_spec: None,
             pod_ip: std::net::Ipv4Addr::UNSPECIFIED,
             endpoint_id: None,
             run_policy: RunPolicy::Service,
@@ -180,21 +180,23 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 if let Some((_, ref spec)) = spec_opt {
                     // --- Update pod_ip from spec network config ---
                     self.pod_ip = spec
+                        .pod_spec
                         .network
                         .as_ref()
                         .map(|n| n.ip)
                         .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
 
                     // --- Create/update workload-owned endpoint ---
-                    if let Some(ref network) = spec.network {
+                    if let Some(ref network) = spec.pod_spec.network {
                         if self.endpoint_id.is_none() {
                             let ep_id = ctx.create_endpoint(
-                                endpoint::EndpointSm::new(spec.respects_demand),
+                                endpoint::EndpointSm::new(spec.config.respects_demand),
                             );
                             self.endpoint_id = Some(ep_id);
                             ctx.set_workload_endpoint_ownership_edges(vec![ep_id]);
                         }
                         let idle_timeout = spec
+                            .config
                             .activation
                             .as_ref()
                             .map(|a| a.idle_timeout)
@@ -202,7 +204,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         ctx.set_endpoint_config(Some(endpoint::EndpointConfig {
                             kind: endpoint::EndpointKind::Workload,
                             workload: ctx.id(),
-                            has_activation: spec.respects_demand,
+                            has_activation: spec.config.respects_demand,
                             idle_timeout,
                             ip: network.ip,
                             dns_entry: None,
@@ -210,15 +212,15 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     }
 
                     // --- Update respects_demand from spec ---
-                    self.respects_demand = spec.respects_demand;
+                    self.respects_demand = spec.config.respects_demand;
 
                     // --- Update suspend_on_idle from spec ---
                     let old_suspend_on_idle = self.suspend_on_idle;
-                    self.suspend_on_idle = spec.suspend_on_idle;
+                    self.suspend_on_idle = spec.config.suspend_on_idle;
 
                     // --- Update run_policy from spec ---
                     let old_run_policy = self.run_policy.clone();
-                    self.run_policy = spec.run_policy.clone();
+                    self.run_policy = spec.config.run_policy.clone();
 
                     // Job→Service while completed: clear completed so reconcile launches.
                     if old_run_policy == RunPolicy::Job
@@ -228,12 +230,13 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.completed = false;
                     }
 
-                    // --- Detect pod-affecting spec changes (image) ---
-                    let image_changed = self.current_image.as_deref() != Some(spec.image.as_str());
-                    self.current_image = Some(spec.image.clone());
+                    // --- Detect pod-affecting spec changes ---
+                    let pod_spec_changed =
+                        self.current_pod_spec.as_ref() != Some(&spec.pod_spec);
+                    self.current_pod_spec = Some(spec.pod_spec.clone());
 
-                    if self.has_spec && image_changed {
-                        // Image changed (Some→Some). Increment version so we
+                    if self.has_spec && pod_spec_changed {
+                        // Pod spec changed (Some→Some). Increment version so we
                         // detect stale launches via on_pod_running.
                         self.spec_version += 1;
 
@@ -242,10 +245,10 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
 
                         self.consecutive_failures = 0;
                         self.in_backoff = false;
-                        self.completed = false; // new image = re-run the job
+                        self.completed = false;
 
                         // Discard any suspended artifact — it was produced
-                        // from the old image and cannot be resumed.
+                        // from the old spec and cannot be resumed.
                         self.clear_artifact_ref(ctx);
 
                         // If pod is already Running, restart immediately.
@@ -271,7 +274,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 if self.has_spec && !new_has_spec {
                     // Spec removed — clean up and self-destruct.
                     self.destroy_current_pod(ctx);
-                    self.current_image = None;
+                    self.current_pod_spec = None;
                     ctx.self_destruct();
                     return;
                 }

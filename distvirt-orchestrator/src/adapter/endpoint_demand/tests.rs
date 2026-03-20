@@ -1,8 +1,8 @@
 use super::*;
 use crate::core::EndpointDemandSignal;
 use crate::sm::{
-    DRouter, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, TIMER, WorkerId, WorkerInfo,
-    WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, PodSpec, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, TIMER, WorkerId,
+    WorkerInfo, WorkloadConfig, WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -26,9 +26,8 @@ fn setup_activation_service(router: &mut DRouter) -> (WorkerId, EndpointId) {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -162,9 +161,8 @@ fn remove_worker_cleans_up() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 

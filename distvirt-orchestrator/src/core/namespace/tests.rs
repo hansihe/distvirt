@@ -76,9 +76,8 @@ fn create_configured_boundary() -> NamespaceWithBoundary {
     core.router_mut().set_management_wl_spec(
         mgmt,
         crate::sm::WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: crate::sm::PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: crate::sm::WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 

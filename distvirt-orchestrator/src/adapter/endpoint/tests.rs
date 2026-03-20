@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm::{
-    DRouter, FABRIC_ENDPOINT, PodId, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, TIMER,
-    WorkerInfo, WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, FABRIC_ENDPOINT, PodId, PodSpec, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec,
+    TIMER, WorkerInfo, WorkloadConfig, WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -24,8 +24,8 @@ fn setup_workload(router: &mut DRouter) -> (crate::sm::WorkerId, PodId) {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig::default(),
         },
     );
 
@@ -197,8 +197,8 @@ fn multiple_services_change() {
     router.set_management_wl_spec(
         mgmt1,
         WorkloadSpec {
-            image: "app:v1".into(),
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig::default(),
         },
     );
     router.create_service(S1, ServiceSm::new());
@@ -218,8 +218,8 @@ fn multiple_services_change() {
     router.set_management_wl_spec(
         mgmt2,
         WorkloadSpec {
-            image: "app:v2".into(),
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v2".into(), ..Default::default() },
+            config: WorkloadConfig::default(),
         },
     );
     router.create_service(s2_id, ServiceSm::new());

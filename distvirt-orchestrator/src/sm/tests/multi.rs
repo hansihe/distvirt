@@ -33,9 +33,8 @@ fn shared_worker_death_independent_failure() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -160,9 +159,8 @@ fn service_retarget_workload() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -249,9 +247,8 @@ fn independent_workload_subgraphs() {
     router.set_management_wl_spec(
         mgmt1,
         WorkloadSpec {
-            image: "app-a:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app-a:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
     router.set_service_config_edges(mgmt1, vec![S1]);
@@ -273,9 +270,8 @@ fn independent_workload_subgraphs() {
     router.set_management_wl_spec(
         mgmt2,
         WorkloadSpec {
-            image: "app-b:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app-b:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
     router.set_service_config_edges(mgmt2, vec![S2]);
@@ -362,9 +358,8 @@ fn service_fan_in_with_retarget() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -469,9 +464,8 @@ fn service_self_destructs_on_spec_removal() {
     router.set_management_wl_spec(
         mgmt_wl,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -554,9 +548,8 @@ fn full_teardown_cascade() {
     router.set_management_wl_spec(
         mgmt_wl,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 

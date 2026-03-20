@@ -115,9 +115,8 @@ fn setup_workload_with_pending_pod(
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -188,9 +187,8 @@ fn setup_running_workload(router: &mut Router, max_retries: u32) -> (ManagementI
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -231,10 +229,8 @@ fn setup_running_suspendable_workload(
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            suspend_on_idle: true,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: true, respects_demand: true, ..Default::default() },
         },
     );
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::sm::{
-    DRouter, DNS_REGISTRY, FABRIC_ENDPOINT, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec,
-    TIMER, WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, DNS_REGISTRY, FABRIC_ENDPOINT, PodSpec, SCHEDULE_REQUEST, ServiceId, ServiceSm,
+    ServiceSpec, TIMER, WorkloadConfig, WorkloadId, WorkloadSm, WorkloadSpec,
 };
 
 const W1: WorkloadId = WorkloadId(1);
@@ -28,8 +28,8 @@ fn service_with_dns_produces_add_action() {
     router.create_workload(W1, WorkloadSm::new());
     router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec {
-        image: "app:v1".into(),
-        ..Default::default()
+        pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+        config: WorkloadConfig::default(),
     });
 
     router.create_service(S1, ServiceSm::new());
@@ -69,8 +69,8 @@ fn service_removal_produces_remove_action() {
     router.create_workload(W1, WorkloadSm::new());
     router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec {
-        image: "app:v1".into(),
-        ..Default::default()
+        pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+        config: WorkloadConfig::default(),
     });
 
     router.create_service(S1, ServiceSm::new());
@@ -110,8 +110,8 @@ fn no_dns_info_no_actions() {
     router.create_workload(W1, WorkloadSm::new());
     router.set_workload_config_edges(mgmt, vec![W1]);
     router.set_management_wl_spec(mgmt, WorkloadSpec {
-        image: "app:v1".into(),
-        ..Default::default()
+        pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+        config: WorkloadConfig::default(),
     });
 
     // Service without DNS info.

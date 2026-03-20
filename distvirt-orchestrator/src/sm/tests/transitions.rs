@@ -83,9 +83,8 @@ fn spec_change_during_launch_triggers_restart() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v2".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v2".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -121,9 +120,8 @@ fn spec_change_while_running_restarts_immediately() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v2".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v2".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -182,9 +180,8 @@ fn scavenge_idle_workload() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -304,9 +301,8 @@ fn spec_change_and_demand_drop_during_launch() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v2".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v2".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
     router.set_endpoint_demand_active(demand_port, false);

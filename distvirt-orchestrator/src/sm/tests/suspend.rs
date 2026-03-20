@@ -218,10 +218,8 @@ fn spec_change_during_suspend() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v2".into(),
-            suspend_on_idle: true,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v2".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: true, respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -415,10 +413,8 @@ fn suspend_on_idle_disabled_during_suspend() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            suspend_on_idle: false,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: false, respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -456,10 +452,8 @@ fn suspend_on_idle_disabled_discards_artifact() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            suspend_on_idle: false,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: false, respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -495,10 +489,8 @@ fn suspend_on_idle_enabled_with_running_pod() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            suspend_on_idle: true,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: true, respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -542,10 +534,8 @@ fn suspend_on_idle_change_no_restart() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            suspend_on_idle: true,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: true, respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();
@@ -572,10 +562,8 @@ fn image_and_suspend_change_together() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v2".into(),
-            suspend_on_idle: true,
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v2".into(), ..Default::default() },
+            config: WorkloadConfig { suspend_on_idle: true, respects_demand: true, ..Default::default() },
         },
     );
     router.propagate();

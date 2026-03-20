@@ -258,10 +258,8 @@ fn make_demand(count: u32) -> DemandInfo {
 /// Build a WorkloadSpec with the given image and the current SM's suspend_on_idle.
 fn make_spec(image: &str, suspend_on_idle: bool) -> WorkloadSpec {
     WorkloadSpec {
-        image: image.into(),
-        suspend_on_idle,
-        respects_demand: true,
-        ..Default::default()
+        pod_spec: PodSpec { image: image.into(), ..Default::default() },
+        config: WorkloadConfig { suspend_on_idle, respects_demand: true, ..Default::default() },
     }
 }
 
@@ -415,7 +413,7 @@ impl Model for WlNewModel {
             }
             WlNewAction::ChangeImage => {
                 // Toggle between v1 and v2 to always produce a different image.
-                let new_image = if state.sm.current_image.as_deref() == Some("app:v1") {
+                let new_image = if state.sm.current_pod_spec.as_ref().map(|s| s.image.as_str()) == Some("app:v1") {
                     "app:v2"
                 } else {
                     "app:v1"
@@ -430,7 +428,7 @@ impl Model for WlNewModel {
             }
             WlNewAction::ToggleSuspendOnIdle => {
                 // Same image, flipped suspend_on_idle.
-                let current_image = state.sm.current_image.clone().unwrap_or_default();
+                let current_image = state.sm.current_pod_spec.as_ref().map(|s| s.image.clone()).unwrap_or_default();
                 apply_input(
                     state,
                     WorkloadInput::SpecInput(Some((
@@ -530,13 +528,13 @@ impl Model for WlNewModel {
                 apply_input(state, WorkloadInput::AdminCommand(AdminCmd::Scavenge))
             }
             WlNewAction::ToggleRunPolicy => {
-                let current_image = state.sm.current_image.clone().unwrap_or_default();
+                let current_image = state.sm.current_pod_spec.as_ref().map(|s| s.image.clone()).unwrap_or_default();
                 let new_policy = match state.sm.run_policy {
                     RunPolicy::Service => RunPolicy::Job,
                     RunPolicy::Job => RunPolicy::Service,
                 };
                 let mut spec = make_spec(&current_image, state.sm.suspend_on_idle);
-                spec.run_policy = new_policy;
+                spec.config.run_policy = new_policy;
                 apply_input(
                     state,
                     WorkloadInput::SpecInput(Some((ManagementId(0), spec))),
@@ -911,11 +909,11 @@ impl Representative for WlNewModelState {
             s.sm.pod_worker_id = Some(WorkerId(0));
         }
 
-        // current_image: the SM only checks whether the delivered image differs
-        // from current_image. The model's ChangeImage action always toggles, so
-        // the actual string value doesn't matter — only Some vs None.
-        if let Some(_) = s.sm.current_image {
-            s.sm.current_image = Some(String::new());
+        // current_pod_spec: the SM only checks whether the delivered pod_spec differs
+        // from current_pod_spec. The model's ChangeImage action always toggles, so
+        // the actual value doesn't matter — only Some vs None.
+        if let Some(_) = s.sm.current_pod_spec {
+            s.sm.current_pod_spec = Some(PodSpec::default());
         }
 
         // pod_ip: only used to construct ReadyInfo. The actual IP value doesn't

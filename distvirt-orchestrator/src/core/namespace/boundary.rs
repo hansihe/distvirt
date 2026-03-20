@@ -580,17 +580,17 @@ impl NamespaceWithBoundary {
     ) -> distvirt_worker_protocol::WorkerCommand {
         let mut network = spec
             .as_ref()
-            .and_then(|s| s.network.clone())
+            .and_then(|s| s.pod_spec.network.clone())
             .unwrap_or_else(default_pod_network);
         self.fill_network_from_namespace(&mut network);
         let containers = spec
             .as_ref()
-            .map(|s| s.containers.clone())
+            .map(|s| s.pod_spec.containers.clone())
             .unwrap_or_default();
-        let resources = spec.as_ref().and_then(|s| s.resources.clone());
+        let resources = spec.as_ref().and_then(|s| s.pod_spec.resources.clone());
         let volumes = spec
             .as_ref()
-            .map(|s| s.volumes.clone())
+            .map(|s| s.pod_spec.volumes.clone())
             .unwrap_or_default();
 
         distvirt_worker_protocol::WorkerCommand::LaunchPod {
@@ -615,7 +615,7 @@ impl NamespaceWithBoundary {
             .expect("resume target worker must have a pool");
         let mut network = spec
             .as_ref()
-            .and_then(|s| s.network.clone())
+            .and_then(|s| s.pod_spec.network.clone())
             .unwrap_or_else(default_pod_network);
         self.fill_network_from_namespace(&mut network);
 

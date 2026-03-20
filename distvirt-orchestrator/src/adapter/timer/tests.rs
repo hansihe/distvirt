@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::sm::{
-    DRouter, EndpointId, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, WorkerInfo,
-    WorkloadId, WorkloadSm, WorkloadSpec,
+    DRouter, EndpointId, PodSpec, SCHEDULE_REQUEST, ServiceId, ServiceSm, ServiceSpec, WorkerInfo,
+    WorkloadConfig, WorkloadId, WorkloadSm, WorkloadSpec,
     endpoint::{EndpointState, EndpointTimerKey},
 };
 
@@ -37,9 +37,8 @@ fn setup_workload(
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -241,9 +240,8 @@ fn generation_change_restarts_timer() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -354,9 +352,8 @@ fn multiple_sm_kinds_in_one_cycle() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -455,9 +452,8 @@ fn fire_dispatches_workload_timer() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 
@@ -515,9 +511,8 @@ fn fire_dispatches_endpoint_timer() {
     router.set_management_wl_spec(
         mgmt,
         WorkloadSpec {
-            image: "app:v1".into(),
-            respects_demand: true,
-            ..Default::default()
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
         },
     );
 

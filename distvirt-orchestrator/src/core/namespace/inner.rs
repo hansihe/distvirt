@@ -678,7 +678,7 @@ impl NamespaceCore {
             let ip = pod_sm
                 .launch_spec
                 .as_ref()
-                .and_then(|s| s.network.as_ref())
+                .and_then(|s| s.pod_spec.network.as_ref())
                 .map(|n| n.ip.to_string())
                 .unwrap_or_default();
             let state = sm_pod_status_to_client(&pod_sm.status);

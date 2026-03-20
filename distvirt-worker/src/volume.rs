@@ -13,6 +13,14 @@ pub struct PreparedVolume {
 }
 
 /// Create ext4 images for all volumes in `work_dir`.
+///
+/// Subprocess stdio is explicitly set to `Stdio::null()` to work around a
+/// suspected tokio bug: when the test binary's stderr is a TTY and multiple
+/// `current_thread` + `start_paused` runtimes run in parallel (as in
+/// `cargo test`), inheriting the TTY causes intermittent subprocess failures
+/// ("No such file or directory while setting up superblock" from mkfs.ext4).
+/// Suppressing stdio eliminates the issue. See also `TestVmm` in test_vmm.rs
+/// for a similar `std::fs` workaround.
 pub async fn prepare_volumes(
     volumes: &[VolumeSpec],
     work_dir: &Path,
