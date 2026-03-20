@@ -305,6 +305,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     ctx.set_pod_ownership_edges(vec![]);
                     ctx.set_pod_intent(PodIntent::None);
                     ctx.set_readiness(None);
+                    ctx.set_placement(None);
                 }
 
                 if let Some(artifact_id) = suspended_artifact {
@@ -324,6 +325,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     // pod_worker_id will be cleared by PodWorkerInput signal propagation.
                     self.awaiting_suspend = false;
                     ctx.set_readiness(None);
+                    ctx.set_placement(None);
                     // Remove edge → pod will self-destruct (terminal + no owner).
                     ctx.set_pod_ownership_edges(vec![]);
                     ctx.set_pod_intent(PodIntent::None);
@@ -343,6 +345,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 } else if !self.pod_running && was_running {
                     // Pod lost running status.
                     ctx.set_readiness(None);
+                    ctx.set_placement(None);
                     self.reconcile(ctx);
                 } else {
                     self.reconcile(ctx);
@@ -354,7 +357,10 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                 let new_worker_id = workers.into_iter().next().flatten();
                 if new_worker_id != self.pod_worker_id {
                     self.pod_worker_id = new_worker_id;
-                    // If pod is running, update readiness with the real worker ID.
+                    // Always forward placement to endpoints so the worker can
+                    // prepare the endpoint table entry before the pod is running.
+                    ctx.set_placement(new_worker_id);
+                    // If pod is running, also update readiness with the real worker ID.
                     if self.pod_running {
                         self.update_readiness(ctx);
                     }
@@ -489,6 +495,7 @@ impl WorkloadSm {
         self.awaiting_suspend = false;
         self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
+        ctx.set_placement(None);
 
         // Remove ownership edge — pod is terminal (Finished),
         // so removing the edge triggers self-destruct.
@@ -523,6 +530,7 @@ impl WorkloadSm {
         self.awaiting_suspend = false;
         self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
+        ctx.set_placement(None);
 
         // Keep the ownership edge — the pod is terminal (Failed) but we
         // retain it for inspectability. It will be reaped on transition out
@@ -561,6 +569,7 @@ impl WorkloadSm {
     pub(crate) fn on_pod_displaced(&mut self, ctx: &mut impl WorkloadCtx) {
         self.awaiting_suspend = false;
         ctx.set_readiness(None);
+        ctx.set_placement(None);
 
         // Remove ownership edge — pod is terminal (Displaced),
         // so removing the edge triggers self-destruct.
@@ -613,6 +622,7 @@ impl WorkloadSm {
         self.awaiting_suspend = false;
         self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
+        ctx.set_placement(None);
     }
 
     pub(crate) fn update_timer_signal(&self, ctx: &mut impl WorkloadCtx) {
@@ -716,6 +726,7 @@ impl WorkloadSm {
                 ctx.set_pod_intent(PodIntent::None);
                 self.pod_id = None;
                 ctx.set_readiness(None);
+                ctx.set_placement(None);
             }
         } else {
             ctx.set_pod_intent(PodIntent::None);

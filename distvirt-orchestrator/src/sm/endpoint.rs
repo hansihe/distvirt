@@ -78,6 +78,9 @@ pub struct EndpointSm {
     pub last_readiness: Option<ReadyInfo>,
     /// Current active level from demand aggregation. Only written by handle_activate.
     pub active_level: bool,
+    /// Worker placement from the workload (forwarded from pod lease).
+    /// Set before the pod is running so the worker can prepare the endpoint table.
+    pub placement_worker_id: Option<WorkerId>,
     /// What kind of entity owns this endpoint.
     pub kind: Option<EndpointKind>,
     /// IP from config, used to construct EndpointInfo.
@@ -96,6 +99,7 @@ impl EndpointSm {
             idle_timeout: std::time::Duration::ZERO,
             last_readiness: None,
             active_level: false,
+            placement_worker_id: None,
             kind: None,
             ip: std::net::Ipv4Addr::UNSPECIFIED,
             dns_entry: None,
@@ -168,6 +172,20 @@ impl EndpointSm {
                     }),
                 })
             }
+            // Workload endpoints always emit info once kind is known, so the
+            // worker has an endpoint table entry before the pod launches.
+            // If placement is known, include it so the worker can transition
+            // the entry to LocalPod before the VM's TAP port is attached.
+            (_, Some(kind @ EndpointKind::Workload)) => Some(EndpointInfo {
+                kind: kind.clone(),
+                ip: self.ip,
+                backend: self.placement_worker_id.map(|wid| EndpointBackendInfo {
+                    ip: None,
+                    worker_id: wid,
+                }),
+            }),
+            // Activation-based services emit without backend so the worker
+            // can buffer frames and trigger activation.
             (EndpointState::NeedBackend | EndpointState::Idle, Some(kind))
                 if self.has_activation =>
             {
@@ -213,6 +231,10 @@ impl EndpointSm {
 
     pub(crate) fn handle_readiness(&mut self, ready: Option<ReadyInfo>) {
         self.last_readiness = ready;
+    }
+
+    pub(crate) fn handle_placement(&mut self, worker_id: Option<WorkerId>) {
+        self.placement_worker_id = worker_id;
     }
 
     /// Level-based active input from demand aggregation.
@@ -267,6 +289,10 @@ impl<C: EndpointCtx> SmHandler<C> for EndpointSm {
             EndpointInput::ReadinessInput(readiness_list) => {
                 let ready = readiness_list.into_iter().next().flatten();
                 self.handle_readiness(ready);
+            }
+            EndpointInput::PlacementInput(placement_list) => {
+                let worker_id = placement_list.into_iter().next().flatten();
+                self.handle_placement(worker_id);
             }
             EndpointInput::EndpointDemandTraffic(()) => self.handle_traffic_event(ctx),
             EndpointInput::BackendNeedInput(need) => self.handle_activate(need, ctx),

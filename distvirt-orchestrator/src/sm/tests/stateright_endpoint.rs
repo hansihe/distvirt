@@ -52,6 +52,8 @@ struct EndpointModelState {
     config_present: bool,
     /// Current readiness from the workload.
     readiness_env: ReadinessEnv,
+    /// Current placement from the workload.
+    placement_env: PlacementEnv,
     /// Current active level from demand aggregation.
     active_level: bool,
     /// Whether the demand signal is set (extracted from effects).
@@ -69,11 +71,23 @@ struct EndpointModelState {
 // ============================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum PlacementEnv {
+    /// No placement known.
+    None,
+    /// Workload has forwarded worker placement.
+    Placed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum EndpointAction {
     /// Workload becomes ready (ReadinessInput with Some).
     WorkloadReady,
     /// Workload becomes unready (ReadinessInput with None).
     WorkloadUnready,
+    /// Workload forwards placement (PlacementInput with Some).
+    PlacementSet,
+    /// Workload clears placement (PlacementInput with None).
+    PlacementClear,
     /// Active level goes high (BackendNeedInput(true)).
     ActiveLevelOn,
     /// Active level goes low (BackendNeedInput(false)).
@@ -213,6 +227,7 @@ impl Model for EndpointModel {
             sm,
             config_present: true,
             readiness_env: ReadinessEnv::None,
+            placement_env: PlacementEnv::None,
             active_level: false,
             timer_pending: false,
             timer_generation: 0,
@@ -234,6 +249,18 @@ impl Model for EndpointModel {
                 actions.push(EndpointAction::WorkloadUnready);
                 // Also allow re-delivering ready (workload pod changed).
                 actions.push(EndpointAction::WorkloadReady);
+            }
+        }
+
+        // Placement changes.
+        match state.placement_env {
+            PlacementEnv::None => {
+                actions.push(EndpointAction::PlacementSet);
+            }
+            PlacementEnv::Placed => {
+                actions.push(EndpointAction::PlacementClear);
+                // Also allow re-delivering placement (worker changed).
+                actions.push(EndpointAction::PlacementSet);
             }
         }
 
@@ -277,6 +304,20 @@ impl Model for EndpointModel {
             EndpointAction::WorkloadUnready => {
                 let mut s = apply_endpoint_input(state, EndpointInput::ReadinessInput(vec![None]));
                 s.readiness_env = ReadinessEnv::None;
+                s
+            }
+            EndpointAction::PlacementSet => {
+                let mut s = apply_endpoint_input(
+                    state,
+                    EndpointInput::PlacementInput(vec![Some(WorkerId(1))]),
+                );
+                s.placement_env = PlacementEnv::Placed;
+                s
+            }
+            EndpointAction::PlacementClear => {
+                let mut s =
+                    apply_endpoint_input(state, EndpointInput::PlacementInput(vec![None]));
+                s.placement_env = PlacementEnv::None;
                 s
             }
             EndpointAction::ActiveLevelOn => {
@@ -393,6 +434,14 @@ impl Model for EndpointModel {
                 } else {
                     true
                 }
+            }),
+            // Safety: placement_worker_id tracks placement env.
+            Property::<Self>::always("placement env matches SM", |_model, state| {
+                if state.self_destructed {
+                    return true;
+                }
+                state.sm.placement_worker_id.is_some()
+                    == (state.placement_env == PlacementEnv::Placed)
             }),
             // Safety: env active_level tracks SM active_level.
             Property::<Self>::always("active_level env matches SM", |_model, state| {
@@ -538,6 +587,12 @@ impl Representative for EndpointModelState {
             info.pod_id = PodId(0);
             info.worker_id = WorkerId(0);
             info.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
+        }
+
+        // placement_worker_id: only used to construct EndpointInfo backend.
+        // The actual WorkerId value doesn't affect SM decision-making.
+        if let Some(_) = s.sm.placement_worker_id {
+            s.sm.placement_worker_id = Some(WorkerId(0));
         }
 
         // Normalize endpoint config fields — don't affect SM logic.

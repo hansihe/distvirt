@@ -217,6 +217,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                     Some(info) if !had_lease && matches!(self.status, PodStatus::Pending) => {
                         // Lease granted — target the assigned worker.
                         self.assigned_worker = Some(info.worker_id);
+                        ctx.set_assigned_worker(Some(info.worker_id));
                         ctx.set_pod_placement_edges(vec![info.worker_id]);
                     }
                     None if had_lease && !self.status.is_terminal() => {

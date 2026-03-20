@@ -597,6 +597,7 @@ distvirt_sm_router::router! {
         WireGuardPeer::EndpointInfo(Option<WireGuardPeerEndpointInfo>),
         // Workload (unchanged)
         Workload::Readiness(Option<ReadyInfo>),
+        Workload::Placement(Option<WorkerId>),
         Workload::DnsEntry(Option<DnsEntryInfo>),
         Workload::PodIntent(PodIntent),
         Workload::PodLaunchSpec(Option<WorkloadSpec>),
@@ -697,6 +698,10 @@ distvirt_sm_router::router! {
         Endpoint::ReadinessInput {
             sources: [(EndpointReadiness, Workload::Readiness)],
             aggregator: ListAggregator<WorkloadId, Option<ReadyInfo>>,
+        },
+        Endpoint::PlacementInput {
+            sources: [(EndpointReadiness, Workload::Placement)],
+            aggregator: ListAggregator<WorkloadId, Option<WorkerId>>,
         },
         Endpoint::BackendNeedInput {
             sources: [(EndpointPortDemand, EndpointDemand::Active)],
