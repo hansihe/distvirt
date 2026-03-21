@@ -3,11 +3,11 @@ use std::net::Ipv4Addr;
 
 use distvirt_client_protocol::*;
 
-use crate::errors::SpecErrors;
-use crate::helpers::{convert_expose, ip_to_mac, parse_cidr, parse_duration_ms, resolve_activation, resolve_resources};
-use crate::ip_alloc::IpAllocator;
-use crate::path::YamlPath;
-use crate::types::*;
+use crate::errors::{SpecError, SpecErrors};
+use super::helpers::{convert_expose, ip_to_mac, parse_cidr, parse_duration_ms, resolve_activation, resolve_resources};
+use super::ip_alloc::IpAllocator;
+use super::path::YamlPath;
+use super::types::*;
 
 // ---------------------------------------------------------------------------
 // Conversion to proto NamespaceSpec
@@ -18,7 +18,7 @@ use crate::types::*;
 ///
 /// Runs multi-phase validation first, collecting all errors and reporting them
 /// together so users can fix everything in one pass.
-pub fn spec_to_namespace_spec(parsed: &crate::parse::ParsedSpec) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
+pub fn spec_to_namespace_spec(parsed: &super::parse::ParsedSpec) -> Result<(Option<String>, NamespaceSpec), SpecError> {
     let spec = &parsed.spec;
     let mut errs = SpecErrors::new();
     errs.add_source(&parsed.file_name, &parsed.source);
@@ -591,17 +591,23 @@ fn build_namespace_spec(
     namespace_id: Option<String>,
     subnet_str: &str,
     allocator: &mut IpAllocator,
-) -> anyhow::Result<(Option<String>, NamespaceSpec)> {
+) -> Result<(Option<String>, NamespaceSpec), SpecError> {
     // Reserve all explicit IPs
     if let Some(ref spec_workloads) = spec.workloads {
         for (_, wl) in spec_workloads {
             if let Some(ref ip) = wl.ip {
-                allocator.reserve(ip.parse()?)?;
+                let addr: Ipv4Addr = ip.parse().map_err(|_| SpecError::Validation {
+                        message: format!("invalid IP: {ip}"),
+                    })?;
+                    allocator.reserve(addr)?;
             }
             if let Some(ref inline_services) = wl.services {
                 for (_, svc) in inline_services {
                     if let Some(ref ip) = svc.ip {
-                        allocator.reserve(ip.parse()?)?;
+                        let addr: Ipv4Addr = ip.parse().map_err(|_| SpecError::Validation {
+                        message: format!("invalid IP: {ip}"),
+                    })?;
+                    allocator.reserve(addr)?;
                     }
                 }
             }
@@ -610,7 +616,10 @@ fn build_namespace_spec(
     if let Some(ref top_services) = spec.services {
         for (_, svc) in top_services {
             if let Some(ref ip) = svc.ip {
-                allocator.reserve(ip.parse()?)?;
+                let addr: Ipv4Addr = ip.parse().map_err(|_| SpecError::Validation {
+                        message: format!("invalid IP: {ip}"),
+                    })?;
+                    allocator.reserve(addr)?;
             }
         }
     }

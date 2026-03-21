@@ -1,22 +1,12 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use boringtun::noise::{Tunn, TunnResult};
-use boringtun::x25519::{PublicKey, StaticSecret};
 use distvirt_client_protocol::*;
-use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 
-use rand::rngs::OsRng;
-
+use distvirt_client::connect::{ProvisionedTunnel, wg_quick_config};
 use distvirt_client::connection::{handle_grpc_error, Client, ConnectionParams};
-use crate::platform::{TunDevice, add_route, configure_interface, remove_route};
-
-const MAX_PACKET_SIZE: usize = 65536;
 
 /// Check whether an anyhow error chain contains a permission-denied I/O error.
 fn is_permission_denied(err: &anyhow::Error) -> bool {
@@ -103,145 +93,49 @@ pub async fn connect(
     namespace_id: &str,
     config_only: bool,
 ) -> anyhow::Result<()> {
-    // 1. Generate ephemeral X25519 keypair.
-    let private_key = StaticSecret::random_from_rng(OsRng);
-    let public_key = PublicKey::from(&private_key);
-
-    // 2. If --config mode, we can call ConnectNetwork immediately (no TUN needed).
-    //    Otherwise, create the TUN device first to avoid registering a peer that
-    //    we can't clean up when sudo re-exec generates a new keypair.
     if config_only {
-        let resp = client
-            .connect_network(ConnectNetworkRequest {
-                namespace_id: namespace_id.to_string(),
-                client_public_key: public_key.as_bytes().to_vec(),
-            })
-            .await
-            .map_err(handle_grpc_error)?
-            .into_inner();
-
-        let server_public_key_bytes: [u8; 32] = resp
-            .server_public_key
-            .as_slice()
-            .try_into()
-            .context("server public key must be 32 bytes")?;
-        let client_ip = &resp.client_ip;
-        let subnet = &resp.subnet;
-        let prefix_len: u8 = subnet
-            .split('/')
-            .nth(1)
-            .context("subnet missing /prefix_len")?
-            .parse()
-            .context("invalid prefix length in subnet")?;
-
-        let private_key_b64 = BASE64.encode(private_key.to_bytes());
-        let server_pub_b64 = BASE64.encode(server_public_key_bytes);
-        println!("[Interface]");
-        println!("PrivateKey = {}", private_key_b64);
-        println!("Address = {}/{}", client_ip, prefix_len);
-        println!();
-        println!("[Peer]");
-        println!("PublicKey = {}", server_pub_b64);
-        println!("Endpoint = {}", resp.endpoint);
-        println!("AllowedIPs = {}", subnet);
-        println!("PersistentKeepalive = 25");
+        let config = wg_quick_config(&mut client, namespace_id).await?;
+        print!("{}", config);
         return Ok(());
     }
 
-    // 3. Create TUN device BEFORE calling ConnectNetwork, so that sudo re-exec
-    //    happens before we register the peer (avoiding an orphaned peer).
-    let tun = match TunDevice::create() {
-        Ok(tun) => tun,
+    let provisioned = ProvisionedTunnel::connect(&mut client, namespace_id).await?;
+
+    // Materialize as kernel TUN tunnel (requires root).
+    let tunnel = match provisioned.into_kernel().await {
+        Ok(t) => t,
         Err(e) if is_permission_denied(&e) => {
-            return reexec_with_sudo(&params);
+            return reexec_with_sudo(params);
         }
-        Err(e) => return Err(e.context("failed to create TUN device")),
+        Err(e) => return Err(e),
     };
-
-    // 4. Call ConnectNetwork gRPC.
-    let resp = client
-        .connect_network(ConnectNetworkRequest {
-            namespace_id: namespace_id.to_string(),
-            client_public_key: public_key.as_bytes().to_vec(),
-        })
-        .await
-        .map_err(handle_grpc_error)?
-        .into_inner();
-
-    let server_public_key_bytes: [u8; 32] = resp
-        .server_public_key
-        .as_slice()
-        .try_into()
-        .context("server public key must be 32 bytes")?;
-    let endpoint: SocketAddr = resp.endpoint.parse().context("invalid endpoint address")?;
-    let client_ip = &resp.client_ip;
-    let subnet = &resp.subnet;
-
-    let prefix_len: u8 = subnet
-        .split('/')
-        .nth(1)
-        .context("subnet missing /prefix_len")?
-        .parse()
-        .context("invalid prefix length in subnet")?;
-    let tun_name = tun.name.clone();
-
-    // 5. Configure IP + routes.
-    configure_interface(&tun_name, client_ip, prefix_len)?;
-    add_route(subnet, &tun_name)?;
-
-    // 6. Create boringtun tunnel.
-    let server_public = PublicKey::from(server_public_key_bytes);
-    let tunn = Tunn::new(
-        private_key.clone(),
-        server_public,
-        None,
-        Some(25), // persistent keepalive
-        0,
-        None,
-    );
-    let tunn = Arc::new(Mutex::new(tunn));
-
-    // 7. Open UDP socket.
-    let udp = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
     // Write connection state file.
     let state = ConnectionState {
-        public_key: BASE64.encode(public_key.as_bytes()),
+        public_key: BASE64.encode(tunnel.public_key()),
         pid: std::process::id(),
     };
     let state_path = state_file_path(namespace_id)?;
     std::fs::write(&state_path, serde_json::to_string(&state)?)?;
 
-    // 8. Print connection info.
-    eprintln!("connected to namespace '{}' via {}", namespace_id, tun_name);
-    eprintln!("  client IP: {}", client_ip);
-    eprintln!("  subnet:    {}", subnet);
-    eprintln!("  endpoint:  {}", endpoint);
+    let info = tunnel.info();
+    eprintln!("connected to namespace '{}' via {}", namespace_id, tunnel.tun_name());
+    eprintln!("  client IP: {}", info.client_ip);
+    eprintln!("  subnet:    {}", info.subnet);
+    eprintln!("  endpoint:  {}", info.endpoint);
     eprintln!("press Ctrl+C to disconnect");
 
-    // 9. Run packet forwarding loop.
-    let result = run_tunnel(tun, Arc::clone(&tunn), Arc::clone(&udp), endpoint).await;
+    let result = tokio::select! {
+        _ = tokio::signal::ctrl_c() => Ok(()),
+        r = tunnel.run() => r,
+    };
 
-    // 10. Cleanup on exit.
     eprintln!("\ndisconnecting...");
 
     // Remove state file.
     let _ = std::fs::remove_file(&state_path);
 
-    // Remove route (best-effort, interface going away will clean it too).
-    let _ = remove_route(subnet, &tun_name);
-
-    // Call DisconnectNetwork gRPC.
-    let disconnect_result = client
-        .disconnect_network(DisconnectNetworkRequest {
-            namespace_id: namespace_id.to_string(),
-            client_public_key: public_key.as_bytes().to_vec(),
-        })
-        .await;
-
-    if let Err(e) = disconnect_result {
-        log::warn!("disconnect gRPC failed: {}", e);
-    }
+    tunnel.disconnect(&mut client, namespace_id).await?;
 
     eprintln!("disconnected");
 
@@ -295,215 +189,4 @@ pub async fn disconnect(mut client: Client, namespace_id: &str) -> anyhow::Resul
 
     eprintln!("disconnected from namespace '{}'", namespace_id);
     Ok(())
-}
-
-/// Format a brief description of an IP packet for logging.
-fn describe_ip_packet(pkt: &[u8]) -> String {
-    if pkt.len() < 20 {
-        return format!("{} bytes (runt)", pkt.len());
-    }
-    let proto = pkt[9];
-    let src = std::net::Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
-    let dst = std::net::Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
-    let proto_name = match proto {
-        1 => "ICMP",
-        6 => "TCP",
-        17 => "UDP",
-        _ => "??",
-    };
-    let ihl = (pkt[0] & 0x0f) as usize * 4;
-    let ports = if (proto == 6 || proto == 17) && pkt.len() >= ihl + 4 {
-        let sp = u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]);
-        let dp = u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]);
-        format!(" {}→{}", sp, dp)
-    } else {
-        String::new()
-    };
-    format!("{} {} → {}{} ({} bytes)", proto_name, src, dst, ports, pkt.len())
-}
-
-/// Main tunnel forwarding loop. Returns on Ctrl+C or error.
-async fn run_tunnel(
-    tun: TunDevice,
-    tunn: Arc<Mutex<Tunn>>,
-    udp: Arc<UdpSocket>,
-    endpoint: SocketAddr,
-) -> anyhow::Result<()> {
-    let tun: Arc<TunDevice> = Arc::new(tun);
-
-    // TUN → WireGuard → UDP
-    let tun_to_udp = {
-        let tun: Arc<TunDevice> = Arc::clone(&tun);
-        let tunn = Arc::clone(&tunn);
-        let udp = Arc::clone(&udp);
-        async move {
-            let mut tun_buf = vec![0u8; MAX_PACKET_SIZE];
-            let mut enc_buf = vec![0u8; MAX_PACKET_SIZE];
-            loop {
-                let n = tun.read_packet(&mut tun_buf).await?;
-                let ip_packet = &tun_buf[..n];
-                log::trace!("tun ▶ wg: {}", describe_ip_packet(ip_packet));
-
-                let result = {
-                    let mut t = tunn.lock().await;
-                    t.encapsulate(ip_packet, &mut enc_buf)
-                };
-
-                match result {
-                    TunnResult::WriteToNetwork(data) => {
-                        log::trace!("wg ▶ udp: {} bytes encrypted → {}", data.len(), endpoint);
-                        udp.send_to(data, endpoint).await?;
-                    }
-                    TunnResult::Err(e) => {
-                        log::warn!("wg encapsulate error: {:?}", e);
-                    }
-                    other => {
-                        log::warn!("wg encapsulate unexpected: {}", describe_tunn_result(&other));
-                    }
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        }
-    };
-
-    // UDP → WireGuard → TUN
-    let udp_to_tun = {
-        let tun: Arc<TunDevice> = Arc::clone(&tun);
-        let tunn = Arc::clone(&tunn);
-        let udp = Arc::clone(&udp);
-        async move {
-            let mut recv_buf = vec![0u8; MAX_PACKET_SIZE];
-            let mut dec_buf = vec![0u8; MAX_PACKET_SIZE];
-            loop {
-                let (n, src) = udp.recv_from(&mut recv_buf).await?;
-                let datagram = &recv_buf[..n];
-
-                log::trace!("udp ◀ {}: {} bytes", src, n);
-                let result = {
-                    let mut t = tunn.lock().await;
-                    t.decapsulate(Some(src.ip()), datagram, &mut dec_buf)
-                };
-
-                match result {
-                    TunnResult::Done => {
-                        log::trace!("wg ◀ decapsulate: Done (no data)");
-                    }
-                    TunnResult::Err(e) => {
-                        log::warn!("wg decapsulate error: {:?}", e);
-                    }
-                    TunnResult::WriteToNetwork(data) => {
-                        log::debug!("wg ◀ handshake response, sending {} bytes", data.len());
-                        let data = data.to_vec();
-                        udp.send_to(&data, endpoint).await?;
-                        // Handshake continuation loop.
-                        let mut cont_buf = vec![0u8; MAX_PACKET_SIZE];
-                        loop {
-                            let cont = {
-                                let mut t = tunn.lock().await;
-                                t.decapsulate(None, &[], &mut cont_buf)
-                            };
-                            match cont {
-                                TunnResult::Done => break,
-                                TunnResult::WriteToNetwork(data) => {
-                                    log::debug!("wg ◀ handshake continuation: sending {} bytes", data.len());
-                                    let data = data.to_vec();
-                                    udp.send_to(&data, endpoint).await?;
-                                }
-                                _ => break,
-                            }
-                        }
-                    }
-                    TunnResult::WriteToTunnelV4(ip_packet, _) => {
-                        log::trace!("wg ◀ tun: {}", describe_ip_packet(ip_packet));
-                        tun.write_packet(ip_packet).await?;
-                    }
-                    TunnResult::WriteToTunnelV6(_, _) => {
-                        log::debug!("wg ◀ dropping IPv6 packet");
-                    }
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        }
-    };
-
-    // Timer task: update_timers every 250ms, also prints WireGuard status periodically
-    let timer = {
-        let tunn = Arc::clone(&tunn);
-        let udp = Arc::clone(&udp);
-        async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-            let mut timer_buf = vec![0u8; MAX_PACKET_SIZE];
-            let mut was_connected = false;
-            let mut status_tick: u32 = 0;
-            loop {
-                interval.tick().await;
-                let (result, stats) = {
-                    let mut t = tunn.lock().await;
-                    let r = t.update_timers(&mut timer_buf);
-                    let s = t.stats();
-                    (r, s)
-                };
-                match result {
-                    TunnResult::Done => {}
-                    TunnResult::Err(e) => {
-                        log::warn!("wg timer error: {:?}", e);
-                    }
-                    TunnResult::WriteToNetwork(data) => {
-                        log::debug!("wg timer: sending {} bytes (handshake init / keepalive)", data.len());
-                        let data = data.to_vec();
-                        udp.send_to(&data, endpoint).await?;
-                    }
-                    _ => {}
-                }
-
-                // Check handshake status.
-                let (time_since_hs, tx_bytes, rx_bytes, loss, rtt) = stats;
-                let is_connected = time_since_hs.is_some();
-                if is_connected && !was_connected {
-                    let rtt_str = rtt.map(|r| format!(" rtt={}ms", r)).unwrap_or_default();
-                    eprintln!("wg handshake complete!{}", rtt_str);
-                    was_connected = true;
-                } else if !is_connected && was_connected {
-                    eprintln!("wg session lost, re-handshaking...");
-                    was_connected = false;
-                }
-
-                // Print periodic status every ~5s (20 ticks * 250ms).
-                status_tick += 1;
-                if status_tick % 20 == 0 {
-                    let hs_str = match time_since_hs {
-                        Some(d) => format!("{}s ago", d.as_secs()),
-                        None => "no session".to_string(),
-                    };
-                    log::debug!(
-                        "wg status: handshake={}, tx={}, rx={}, loss={:.1}%",
-                        hs_str, tx_bytes, rx_bytes, loss * 100.0
-                    );
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        }
-    };
-
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            Ok(())
-        }
-        r = tun_to_udp => r,
-        r = udp_to_tun => r,
-        r = timer => r,
-    }
-}
-
-fn describe_tunn_result(result: &TunnResult) -> String {
-    match result {
-        TunnResult::Done => "Done".to_string(),
-        TunnResult::Err(e) => format!("Err({:?})", e),
-        TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
-        TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
-        TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
-    }
 }

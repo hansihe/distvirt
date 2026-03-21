@@ -8,6 +8,7 @@ use tonic::Streaming;
 use distvirt_client_protocol as proto;
 
 use crate::connection::{handle_grpc_error, Client};
+use crate::errors::ApiError;
 use crate::model::{NamespaceModel, StateChange};
 
 /// A live view of a namespace that applies events to a local model.
@@ -21,7 +22,7 @@ impl NamespaceWatcher {
     ///
     /// Events are subscribed *before* the status fetch so that no events are
     /// lost between the snapshot and the stream.
-    pub async fn start(client: &mut Client, namespace_id: &str) -> anyhow::Result<Self> {
+    pub async fn start(client: &mut Client, namespace_id: &str) -> Result<Self, ApiError> {
         // Subscribe first
         let events = client
             .stream_events(proto::StreamEventsRequest {
@@ -44,7 +45,7 @@ impl NamespaceWatcher {
         let status = resp
             .into_inner()
             .status
-            .ok_or_else(|| anyhow::anyhow!("server returned empty status"))?;
+            .ok_or(ApiError::EmptyResponse)?;
 
         let model = NamespaceModel::from_status(&status);
 
@@ -54,7 +55,7 @@ impl NamespaceWatcher {
     /// Block until the next event, apply it to the model, return what changed.
     ///
     /// Returns `Ok(None)` when the event stream ends.
-    pub async fn next(&mut self) -> anyhow::Result<Option<StateChange>> {
+    pub async fn next(&mut self) -> Result<Option<StateChange>, ApiError> {
         loop {
             match self.events.message().await {
                 Ok(Some(event)) => {
@@ -74,7 +75,7 @@ impl NamespaceWatcher {
     /// Returns `Ok(())` when the predicate is satisfied.
     /// Returns `Err` if the stream ends before the predicate is satisfied,
     /// or on a gRPC error.
-    pub async fn wait_for<F>(&mut self, predicate: F) -> anyhow::Result<()>
+    pub async fn wait_for<F>(&mut self, predicate: F) -> Result<(), ApiError>
     where
         F: Fn(&NamespaceModel) -> bool,
     {
@@ -91,9 +92,7 @@ impl NamespaceWatcher {
                     }
                 }
                 None => {
-                    return Err(anyhow::anyhow!(
-                        "event stream ended before predicate was satisfied"
-                    ));
+                    return Err(ApiError::StreamEnded);
                 }
             }
         }

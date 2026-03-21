@@ -1,8 +1,8 @@
-use crate::convert::spec_to_namespace_spec;
-use crate::helpers::parse_duration_ms;
-use crate::includes::resolve_includes;
-use crate::ip_alloc::IpAllocator;
-use crate::parse::{try_parse, ParsedSpec};
+use crate::spec::convert::spec_to_namespace_spec;
+use crate::spec::helpers::parse_duration_ms;
+use crate::spec::includes::resolve_includes;
+use crate::spec::ip_alloc::IpAllocator;
+use crate::spec::parse::{try_parse, ParsedSpec};
 
 use distvirt_client_protocol::*;
 

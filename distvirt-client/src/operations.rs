@@ -2,6 +2,7 @@ use distvirt_client_protocol::*;
 use tonic::Streaming;
 
 use crate::connection::{handle_grpc_error, Client};
+use crate::errors::ApiError;
 
 pub enum ApplyOutcome {
     Created,
@@ -13,7 +14,7 @@ pub async fn apply(
     client: &mut Client,
     namespace_id: &str,
     spec: &NamespaceSpec,
-) -> anyhow::Result<ApplyOutcome> {
+) -> Result<ApplyOutcome, ApiError> {
     let result = client
         .create_namespace(CreateNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -50,7 +51,7 @@ pub async fn sync(
     client: &mut Client,
     namespace_id: &str,
     spec: &NamespaceSpec,
-) -> anyhow::Result<SyncOutcome> {
+) -> Result<SyncOutcome, ApiError> {
     let result = client
         .create_namespace(CreateNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -75,7 +76,7 @@ pub async fn sync(
 }
 
 /// Delete a namespace.
-pub async fn down(client: &mut Client, namespace_id: &str) -> anyhow::Result<()> {
+pub async fn down(client: &mut Client, namespace_id: &str) -> Result<(), ApiError> {
     client
         .delete_namespace(DeleteNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -90,7 +91,7 @@ pub async fn clone_namespace(
     client: &mut Client,
     source: &str,
     target: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), ApiError> {
     client
         .clone_namespace(CloneNamespaceRequest {
             source_namespace_id: source.to_string(),
@@ -112,7 +113,7 @@ pub async fn deactivate(
     client: &mut Client,
     namespace_id: &str,
     workload_id: &str,
-) -> anyhow::Result<DeactivateOutcome> {
+) -> Result<DeactivateOutcome, ApiError> {
     let resp = client
         .deactivate_workload(DeactivateWorkloadRequest {
             namespace_id: namespace_id.to_string(),
@@ -133,7 +134,7 @@ pub async fn stream_logs(
     client: &mut Client,
     namespace_id: &str,
     workload_id: Option<&str>,
-) -> anyhow::Result<Streaming<LogChunk>> {
+) -> Result<Streaming<LogChunk>, ApiError> {
     let stream = client
         .stream_logs(StreamLogsRequest {
             namespace_id: namespace_id.to_string(),
@@ -152,7 +153,7 @@ pub async fn stream_events(
     namespace_id: &str,
     workload_ids: &[String],
     service_ids: &[String],
-) -> anyhow::Result<Streaming<NamespaceEvent>> {
+) -> Result<Streaming<NamespaceEvent>, ApiError> {
     let stream = client
         .stream_events(StreamEventsRequest {
             namespace_id: namespace_id.to_string(),
@@ -169,7 +170,7 @@ pub async fn stream_events(
 pub async fn get_status(
     client: &mut Client,
     namespace_id: &str,
-) -> anyhow::Result<NamespaceStatusReport> {
+) -> Result<NamespaceStatusReport, ApiError> {
     let resp = client
         .get_namespace_status(GetNamespaceStatusRequest {
             namespace_id: namespace_id.to_string(),
@@ -179,7 +180,7 @@ pub async fn get_status(
 
     resp.into_inner()
         .status
-        .ok_or_else(|| anyhow::anyhow!("server returned empty status"))
+        .ok_or(ApiError::EmptyResponse)
 }
 
 /// Subscribe to events then fetch status, ensuring no events are missed.
@@ -187,7 +188,7 @@ pub async fn get_status(
 pub async fn watch_status(
     client: &mut Client,
     namespace_id: &str,
-) -> anyhow::Result<(NamespaceStatusReport, Streaming<NamespaceEvent>)> {
+) -> Result<(NamespaceStatusReport, Streaming<NamespaceEvent>), ApiError> {
     // Subscribe to events *before* fetching status to avoid missing events
     let event_stream = stream_events(client, namespace_id, &[], &[]).await?;
     let report = get_status(client, namespace_id).await?;

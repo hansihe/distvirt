@@ -1,9 +1,9 @@
 use std::net::Ipv4Addr;
 
-use anyhow::{Context, bail};
 use distvirt_client_protocol::*;
 
-use crate::types::*;
+use crate::errors::SpecError;
+use super::types::*;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -100,12 +100,22 @@ pub(crate) fn convert_expose(expose: &Option<Vec<SpecExpose>>) -> Vec<ExposeSpec
         .unwrap_or_default()
 }
 
-pub(crate) fn parse_cidr(cidr: &str) -> anyhow::Result<(Ipv4Addr, u8)> {
+pub(crate) fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), SpecError> {
     let (ip_str, prefix_str) = cidr
         .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("invalid CIDR: {}", cidr))?;
-    let ip: Ipv4Addr = ip_str.parse().context("invalid IP in CIDR")?;
-    let prefix: u8 = prefix_str.parse().context("invalid prefix in CIDR")?;
+        .ok_or_else(|| SpecError::Validation {
+            message: format!("invalid CIDR: {}", cidr),
+        })?;
+    let ip: Ipv4Addr = ip_str
+        .parse()
+        .map_err(|e| SpecError::Validation {
+            message: format!("invalid IP in CIDR: {e}"),
+        })?;
+    let prefix: u8 = prefix_str
+        .parse()
+        .map_err(|e| SpecError::Validation {
+            message: format!("invalid prefix in CIDR: {e}"),
+        })?;
     Ok((ip, prefix))
 }
 
@@ -129,19 +139,28 @@ pub(crate) fn ip_to_mac(ip: &str) -> String {
 
 /// Parse a human-readable duration string into milliseconds.
 /// Supports: "30s", "5m", "1h", "500ms"
-pub(crate) fn parse_duration_ms(s: &str) -> anyhow::Result<u64> {
+pub(crate) fn parse_duration_ms(s: &str) -> Result<u64, SpecError> {
     let s = s.trim();
+    let parse_val = |val: &str| -> Result<u64, SpecError> {
+        val.trim()
+            .parse::<u64>()
+            .map_err(|e| SpecError::Validation {
+                message: format!("invalid duration value: {e}"),
+            })
+    };
     if let Some(val) = s.strip_suffix("ms") {
-        return Ok(val.trim().parse::<u64>()?);
+        return Ok(parse_val(val)?);
     }
     if let Some(val) = s.strip_suffix('s') {
-        return Ok(val.trim().parse::<u64>()? * 1_000);
+        return Ok(parse_val(val)? * 1_000);
     }
     if let Some(val) = s.strip_suffix('m') {
-        return Ok(val.trim().parse::<u64>()? * 60_000);
+        return Ok(parse_val(val)? * 60_000);
     }
     if let Some(val) = s.strip_suffix('h') {
-        return Ok(val.trim().parse::<u64>()? * 3_600_000);
+        return Ok(parse_val(val)? * 3_600_000);
     }
-    bail!("unsupported duration format: '{}' (use ms/s/m/h suffix)", s);
+    Err(SpecError::Validation {
+        message: format!("unsupported duration format: '{}' (use ms/s/m/h suffix)", s),
+    })
 }

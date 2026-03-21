@@ -1,10 +1,13 @@
 use std::env;
 use std::time::Duration;
 
+use snafu::ResultExt;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 
 use distvirt_client_protocol::DistvirtClientClient;
+
+use crate::errors::*;
 
 pub struct ConnectionParams {
     pub server: String,
@@ -25,7 +28,7 @@ pub struct ConnectionOverrides {
 /// 2. Env vars (DV_SERVER, DV_TOKEN)
 /// 3. Active context from credentials file
 /// 4. Default (http://[::1]:9090)
-pub fn resolve(overrides: ConnectionOverrides) -> anyhow::Result<ConnectionParams> {
+pub fn resolve(overrides: ConnectionOverrides) -> Result<ConnectionParams, ConnectionError> {
     let creds = crate::config::load()?;
 
     let context_name = overrides
@@ -64,7 +67,7 @@ impl tonic::service::Interceptor for AuthInterceptor {
     fn call(
         &mut self,
         mut request: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
+    ) -> std::result::Result<tonic::Request<()>, tonic::Status> {
         if let Some(ref token) = self.token {
             let value = format!("Bearer {}", token)
                 .parse()
@@ -79,7 +82,7 @@ pub type AuthChannel = InterceptedService<Channel, AuthInterceptor>;
 
 pub type Client = DistvirtClientClient<AuthChannel>;
 
-pub async fn connect(params: &ConnectionParams) -> anyhow::Result<Client> {
+pub async fn connect(params: &ConnectionParams) -> Result<Client, ConnectionError> {
     let endpoint = if params.server.starts_with("http://") || params.server.starts_with("https://")
     {
         params.server.clone()
@@ -88,10 +91,14 @@ pub async fn connect(params: &ConnectionParams) -> anyhow::Result<Client> {
     };
 
     log::debug!("connecting to {}", endpoint);
-    let channel = Channel::from_shared(endpoint)?
+    let channel = Channel::from_shared(endpoint)
+        .map_err(|e| ConnectionError::InvalidEndpoint {
+            message: format!("invalid endpoint: {e}"),
+        })?
         .connect_timeout(Duration::from_secs(5))
         .connect()
-        .await?;
+        .await
+        .context(TransportSnafu)?;
 
     let interceptor = AuthInterceptor {
         token: params.token.clone(),
@@ -103,22 +110,23 @@ pub async fn connect(params: &ConnectionParams) -> anyhow::Result<Client> {
     )))
 }
 
-pub fn handle_grpc_error(status: tonic::Status) -> anyhow::Error {
-    match status.code() {
-        tonic::Code::NotFound => anyhow::anyhow!("not found: {}", status.message()),
-        tonic::Code::AlreadyExists => anyhow::anyhow!("already exists: {}", status.message()),
+pub fn handle_grpc_error(status: tonic::Status) -> ApiError {
+    let message = match status.code() {
+        tonic::Code::NotFound => format!("not found: {}", status.message()),
+        tonic::Code::AlreadyExists => format!("already exists: {}", status.message()),
         tonic::Code::InvalidArgument => {
-            anyhow::anyhow!("invalid argument: {}", status.message())
+            format!("invalid argument: {}", status.message())
         }
         tonic::Code::PermissionDenied => {
-            anyhow::anyhow!("permission denied: {}", status.message())
+            format!("permission denied: {}", status.message())
         }
         tonic::Code::Unauthenticated => {
-            anyhow::anyhow!("unauthenticated: {}", status.message())
+            format!("unauthenticated: {}", status.message())
         }
         tonic::Code::Unavailable => {
-            anyhow::anyhow!("server unavailable: {}", status.message())
+            format!("server unavailable: {}", status.message())
         }
-        _ => anyhow::anyhow!("gRPC error ({}): {}", status.code(), status.message()),
-    }
+        _ => format!("gRPC error ({}): {}", status.code(), status.message()),
+    };
+    ApiError::Status { message }
 }

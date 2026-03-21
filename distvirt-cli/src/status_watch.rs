@@ -1,117 +1,152 @@
-use std::collections::VecDeque;
 use std::io::{self, Write};
 
 use crossterm::{
     cursor,
     event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
+    style::{Attribute, Color, SetAttribute, SetForegroundColor, ResetColor},
+    terminal::{self, Clear, ClearType},
+    QueueableCommand,
 };
 use futures::StreamExt;
 
-use distvirt_client::format::render_event_line;
-use distvirt_client::model::NamespaceModel;
+use distvirt_client::format;
+use distvirt_client::model::{NamespaceModel, NamespaceState, ServiceState, WorkloadState};
 use distvirt_client::watcher::NamespaceWatcher;
+use distvirt_client_protocol::NamespaceEvent;
 
-const SEPARATOR: &str = "── Recent Events ";
+const SEPARATOR: &str = "── Status ";
 
-struct WatchState {
-    events: VecDeque<String>,
-    max_events: usize,
+/// A block of lines at the bottom of the terminal that get redrawn in-place.
+/// Lines printed before calling `update` scroll up naturally into terminal history.
+struct LiveBlock {
+    /// Number of lines we printed last time (that we need to overwrite).
+    last_line_count: usize,
 }
 
-impl WatchState {
+impl LiveBlock {
     fn new() -> Self {
-        Self {
-            events: VecDeque::new(),
-            max_events: 15,
-        }
+        Self { last_line_count: 0 }
     }
 
-    fn push_event(&mut self, line: String) {
-        self.events.push_back(line);
-        while self.events.len() > self.max_events {
-            self.events.pop_front();
-        }
-    }
+    /// Rewrite the live block with new content.
+    /// Moves cursor up over previously printed lines, clears them, and prints new ones.
+    fn update(&mut self, lines: &[String]) -> io::Result<()> {
+        let mut stdout = io::stdout();
 
-    fn update_max_events(&mut self, terminal_height: u16, status_lines: usize) {
-        // Reserve: status lines + separator line + 1 line bottom margin
-        let reserved = status_lines + 2;
-        self.max_events = (terminal_height as usize).saturating_sub(reserved).max(3);
-        while self.events.len() > self.max_events {
-            self.events.pop_front();
+        // Move cursor up to the start of the previous live block
+        if self.last_line_count > 0 {
+            stdout.queue(cursor::MoveUp(self.last_line_count as u16))?;
+            stdout.queue(cursor::MoveToColumn(0))?;
         }
+
+        // Print new lines, clearing each line first
+        for line in lines {
+            stdout.queue(Clear(ClearType::CurrentLine))?;
+            stdout.write_all(line.as_bytes())?;
+            stdout.write_all(b"\r\n")?;
+        }
+
+        // If we now have fewer lines than before, clear the leftover lines
+        for _ in lines.len()..self.last_line_count {
+            stdout.queue(Clear(ClearType::CurrentLine))?;
+            stdout.write_all(b"\r\n")?;
+        }
+
+        // If we shrank, move cursor back up past the blank lines we just wrote
+        let extra = self.last_line_count.saturating_sub(lines.len());
+        if extra > 0 {
+            stdout.queue(cursor::MoveUp(extra as u16))?;
+        }
+
+        stdout.flush()?;
+        self.last_line_count = lines.len();
+        Ok(())
     }
 }
 
-/// Render the full screen into a buffer string.
-fn render(model: &NamespaceModel, watch: &WatchState, width: u16, height: u16) -> String {
-    let mut buf = String::new();
+// ---------------------------------------------------------------------------
+// Color helpers
+// ---------------------------------------------------------------------------
 
-    // Status section
-    let status_text = render_model_overview(model);
-
-    let status_lines: Vec<&str> = status_text.lines().collect();
-    let n_status = status_lines.len();
-
-    for line in &status_lines {
-        buf.push_str(line);
-        buf.push_str("\x1b[K");
-        buf.push('\n');
+fn workload_state_color(state: &WorkloadState) -> Color {
+    match state {
+        WorkloadState::Running { .. } => Color::Green,
+        WorkloadState::Launching { .. } | WorkloadState::Suspending { .. } => Color::Yellow,
+        WorkloadState::Failed { .. } => Color::Red,
+        WorkloadState::RetryBackoff => Color::Red,
+        WorkloadState::Completed { .. } => Color::Cyan,
+        WorkloadState::Dormant | WorkloadState::Suspended => Color::DarkGrey,
+        WorkloadState::WaitingForSpec => Color::Yellow,
     }
-
-    // Separator
-    let sep_pad = (width as usize).saturating_sub(SEPARATOR.len());
-    buf.push_str(SEPARATOR);
-    for _ in 0..sep_pad {
-        buf.push('─');
-    }
-    buf.push('\n');
-
-    // Events section — fill remaining lines
-    let used = n_status + 1;
-    let event_rows = (height as usize).saturating_sub(used);
-
-    let start = watch.events.len().saturating_sub(event_rows);
-    let mut printed = 0;
-    for line in watch.events.iter().skip(start) {
-        if printed >= event_rows {
-            break;
-        }
-        buf.push_str(line);
-        buf.push_str("\x1b[K");
-        buf.push('\n');
-        printed += 1;
-    }
-
-    // Clear remaining rows
-    for _ in printed..event_rows {
-        buf.push_str("\x1b[K");
-        buf.push('\n');
-    }
-
-    buf
 }
 
-/// Render a namespace overview from the model.
-fn render_model_overview(model: &NamespaceModel) -> String {
-    use std::fmt::Write;
-    let mut buf = String::new();
+fn service_state_color(state: &ServiceState) -> Color {
+    match state {
+        ServiceState::Active { .. } => Color::Green,
+        ServiceState::Pending | ServiceState::NeedBackend => Color::Yellow,
+        ServiceState::Idle => Color::DarkGrey,
+    }
+}
 
-    writeln!(
-        &mut buf,
+fn namespace_state_color(state: &NamespaceState) -> Color {
+    match state {
+        NamespaceState::Active => Color::Green,
+        NamespaceState::Creating => Color::Yellow,
+        NamespaceState::Destroying => Color::Red,
+    }
+}
+
+/// Format a colored string (embeds ANSI codes).
+fn colored(text: &str, color: Color) -> String {
+    format!(
+        "{}{}{}",
+        SetForegroundColor(color),
+        text,
+        ResetColor,
+    )
+}
+
+fn dim(text: &str) -> String {
+    format!(
+        "{}{}{}",
+        SetAttribute(Attribute::Dim),
+        text,
+        SetAttribute(Attribute::Reset),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Status block rendering
+// ---------------------------------------------------------------------------
+
+/// Build the status lines for the live block (with ANSI colors).
+fn build_status_lines(model: &NamespaceModel, cols: u16) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    // Blank line for spacing between events and status
+    lines.push(String::new());
+
+    // Separator line
+    let sep_pad = (cols as usize).saturating_sub(SEPARATOR.len());
+    let mut sep = dim(SEPARATOR);
+    sep.push_str(&dim(&"─".repeat(sep_pad)));
+    lines.push(sep);
+
+    // Namespace header
+    let ns_state = model.state.label();
+    let ns_color = namespace_state_color(&model.state);
+    lines.push(format!(
         "Namespace: {}  State: {}",
         model.namespace_id,
-        model.state.label()
-    )
-    .unwrap();
-    writeln!(&mut buf).unwrap();
+        colored(ns_state, ns_color),
+    ));
 
     if model.workloads.is_empty() && model.services.is_empty() {
-        writeln!(&mut buf, "  (no workloads)").unwrap();
-        return buf;
+        lines.push(dim("  (no workloads)"));
+        return lines;
     }
+
+    lines.push(String::new());
 
     let mut sorted_workloads: Vec<_> = model.workloads.iter().collect();
     sorted_workloads.sort_by_key(|(id, _)| id.as_str());
@@ -119,78 +154,166 @@ fn render_model_overview(model: &NamespaceModel) -> String {
     sorted_services.sort_by_key(|(id, _)| id.as_str());
 
     for (workload_id, workload) in &sorted_workloads {
-        let state = workload.state.label();
-        let spliced = if workload.spliced { " [spliced]" } else { "" };
-        let ip = workload.ip.as_deref().unwrap_or("");
-        if ip.is_empty() {
-            writeln!(&mut buf, "  workload/{:<20} {}{}", workload_id, state, spliced).unwrap();
+        let state_label = workload.state.label();
+        let state_color = workload_state_color(&workload.state);
+        let spliced = if workload.spliced {
+            format!("  {}", dim("[spliced]"))
         } else {
-            writeln!(
-                &mut buf,
-                "  workload/{:<20} {}  {}{}",
-                workload_id, state, ip, spliced
-            )
-            .unwrap();
-        }
+            String::new()
+        };
+        let ip = workload.ip.as_deref().unwrap_or("");
+        let ip_part = if ip.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", dim(ip))
+        };
+
+        lines.push(format!(
+            "  workload/{:<20} {}{}{}",
+            workload_id,
+            colored(&format!("{:<14}", state_label), state_color),
+            ip_part,
+            spliced,
+        ));
 
         for (svc_id, svc) in &sorted_services {
             if svc.workload_id.as_str() == workload_id.as_str() {
-                let svc_state = svc.state.label();
+                let svc_state_label = svc.state.label();
+                let svc_color = service_state_color(&svc.state);
                 let activation = if svc.activation_enabled {
-                    " (activation)"
+                    format!("  {}", dim("(activation)"))
                 } else {
-                    ""
+                    String::new()
                 };
-                writeln!(
-                    &mut buf,
+                lines.push(format!(
                     "    service/{:<18} {}{}",
-                    svc_id, svc_state, activation
-                )
-                .unwrap();
+                    svc_id,
+                    colored(&format!("{:<14}", svc_state_label), svc_color),
+                    activation,
+                ));
             }
         }
     }
 
-    buf
+    lines
 }
 
-/// Guard that restores terminal state on drop.
-struct TerminalGuard;
+// ---------------------------------------------------------------------------
+// Event rendering (with colors)
+// ---------------------------------------------------------------------------
 
-impl TerminalGuard {
+fn render_colored_event(event: &NamespaceEvent) -> String {
+    let ts = dim(&format::format_timestamp(event.timestamp_unix_ms));
+    match &event.event {
+        Some(distvirt_client_protocol::namespace_event::Event::Workload(we)) => {
+            let desc = format::workload_event_description(we);
+            format!("{}  workload/{}  {}", ts, we.workload_id, desc)
+        }
+        Some(distvirt_client_protocol::namespace_event::Event::Pod(pe)) => {
+            let desc = format::pod_event_description(pe);
+            format!(
+                "{}  pod/{} {}  {}",
+                ts,
+                pe.pod_id,
+                dim(&format!("(workload/{})", pe.workload_id)),
+                desc,
+            )
+        }
+        Some(distvirt_client_protocol::namespace_event::Event::Endpoint(ee)) => {
+            let desc = format::endpoint_event_description(ee);
+            let owner = if let Some(ref svc) = ee.service_id {
+                format!("service/{}", svc)
+            } else if let Some(ref wl) = ee.workload_id {
+                format!("workload/{}", wl)
+            } else {
+                "unknown".to_string()
+            };
+            format!(
+                "{}  endpoint/{} {}  {}",
+                ts,
+                ee.endpoint_id,
+                dim(&format!("({})", owner)),
+                desc,
+            )
+        }
+        None => {
+            format!("{}  {}", ts, dim("(unknown event)"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event printing
+// ---------------------------------------------------------------------------
+
+/// Print an event line above the live block (it scrolls into terminal history).
+fn print_event(live: &mut LiveBlock, event_line: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+
+    // Move up to top of live block
+    if live.last_line_count > 0 {
+        stdout.queue(cursor::MoveUp(live.last_line_count as u16))?;
+        stdout.queue(cursor::MoveToColumn(0))?;
+    }
+
+    // Clear all old live block lines to avoid leftover text
+    for _ in 0..live.last_line_count {
+        stdout.queue(Clear(ClearType::CurrentLine))?;
+        stdout.write_all(b"\r\n")?;
+    }
+
+    // Move back up
+    if live.last_line_count > 0 {
+        stdout.queue(cursor::MoveUp(live.last_line_count as u16))?;
+    }
+
+    // Print the event line (this becomes part of scrollback)
+    stdout.write_all(event_line.as_bytes())?;
+    stdout.write_all(b"\r\n")?;
+    stdout.flush()?;
+
+    // We've cleared the old content, so reset last_line_count to 0
+    // so the next `update` call prints fresh without trying to move up.
+    live.last_line_count = 0;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Terminal guard
+// ---------------------------------------------------------------------------
+
+/// Guard that enables raw mode for key event detection and restores on drop.
+struct RawModeGuard;
+
+impl RawModeGuard {
     fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        io::stdout().execute(EnterAlternateScreen)?;
-        io::stdout().execute(cursor::Hide)?;
         Ok(Self)
     }
 }
 
-impl Drop for TerminalGuard {
+impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = io::stdout().execute(cursor::Show);
-        let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
 }
 
-pub async fn run(
-    watcher: NamespaceWatcher,
-) -> anyhow::Result<()> {
-    let _guard = TerminalGuard::enter()?;
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
 
-    // Split watcher into model + stream so we can use them independently
-    // in the select loop.
+pub async fn run(watcher: NamespaceWatcher) -> anyhow::Result<()> {
+    let _guard = RawModeGuard::enter()?;
+
     let (mut model, mut event_stream) = watcher.into_parts();
 
-    let mut watch = WatchState::new();
+    let mut live = LiveBlock::new();
     let mut term_events = EventStream::new();
 
     // Initial render
-    let (mut cols, mut rows) = terminal::size()?;
-    let status_text = render_model_overview(&model);
-    watch.update_max_events(rows, status_text.lines().count());
-    redraw(&model, &watch, cols, rows)?;
+    let (cols, _) = terminal::size()?;
+    let status_lines = build_status_lines(&model, cols);
+    live.update(&status_lines)?;
 
     loop {
         tokio::select! {
@@ -198,19 +321,19 @@ pub async fn run(
             msg = event_stream.message() => {
                 match msg {
                     Ok(Some(event)) => {
-                        let line = render_event_line(&event);
-                        watch.push_event(line);
+                        let line = render_colored_event(&event);
+                        print_event(&mut live, &line)?;
 
-                        // Apply event to model
                         model.apply_event(&event);
-
-                        let status_lines = render_model_overview(&model).lines().count();
-                        watch.update_max_events(rows, status_lines);
-                        redraw(&model, &watch, cols, rows)?;
+                        let (cols, _) = terminal::size()?;
+                        let status_lines = build_status_lines(&model, cols);
+                        live.update(&status_lines)?;
                     }
                     Ok(None) => {
-                        watch.push_event("(event stream ended)".to_string());
-                        redraw(&model, &watch, cols, rows)?;
+                        print_event(&mut live, &dim("(event stream ended)"))?;
+                        let (cols, _) = terminal::size()?;
+                        let status_lines = build_status_lines(&model, cols);
+                        live.update(&status_lines)?;
                         // Wait for user to quit
                         loop {
                             if let Some(Ok(Event::Key(key))) = term_events.next().await {
@@ -221,25 +344,18 @@ pub async fn run(
                         }
                     }
                     Err(status) => {
-                        return Err(distvirt_client::connection::handle_grpc_error(status));
+                        return Err(distvirt_client::connection::handle_grpc_error(status).into());
                     }
                 }
             }
 
-            // Terminal events (key presses, resize)
+            // Terminal events (key presses)
             ev = term_events.next() => {
                 match ev {
                     Some(Ok(Event::Key(key))) => {
                         if should_quit(&key) {
                             return Ok(());
                         }
-                    }
-                    Some(Ok(Event::Resize(new_cols, new_rows))) => {
-                        cols = new_cols;
-                        rows = new_rows;
-                        let status_lines = render_model_overview(&model).lines().count();
-                        watch.update_max_events(rows, status_lines);
-                        redraw(&model, &watch, cols, rows)?;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
@@ -252,15 +368,6 @@ pub async fn run(
             }
         }
     }
-}
-
-fn redraw(model: &NamespaceModel, watch: &WatchState, cols: u16, rows: u16) -> io::Result<()> {
-    let buf = render(model, watch, cols, rows);
-    let mut stdout = io::stdout();
-    stdout.execute(cursor::MoveTo(0, 0))?;
-    stdout.write_all(buf.as_bytes())?;
-    stdout.flush()?;
-    Ok(())
 }
 
 fn should_quit(key: &KeyEvent) -> bool {

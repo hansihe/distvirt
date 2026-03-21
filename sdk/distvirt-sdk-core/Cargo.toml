@@ -8,7 +8,9 @@ name = "distvirt_sdk_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-anyhow = "1"
 distvirt-client = { path = "../../distvirt-client" }
+distvirt-client-protocol = { path = "../../distvirt-client-protocol" }
 prost = "0.13"
 pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

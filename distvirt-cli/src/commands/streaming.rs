@@ -22,7 +22,7 @@ pub async fn logs(
             match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
                 Ok(Ok(Some(chunk))) => format::print_log_chunk(&chunk),
                 Ok(Ok(None)) | Err(_) => break,
-                Ok(Err(e)) => return Err(handle_grpc_error(e)),
+                Ok(Err(e)) => return Err(handle_grpc_error(e).into()),
             }
         }
     }
@@ -50,7 +50,7 @@ pub async fn events(
             match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
                 Ok(Ok(Some(event))) => format::print_event_line(&event),
                 Ok(Ok(None)) | Err(_) => break,
-                Ok(Err(e)) => return Err(handle_grpc_error(e)),
+                Ok(Err(e)) => return Err(handle_grpc_error(e).into()),
             }
         }
     }

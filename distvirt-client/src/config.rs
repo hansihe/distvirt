@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
+
+use crate::errors::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialsFile {
@@ -39,22 +42,27 @@ pub fn credentials_path() -> PathBuf {
         .join("credentials.toml")
 }
 
-pub fn load() -> anyhow::Result<CredentialsFile> {
+pub fn load() -> Result<CredentialsFile, ConfigError> {
     let path = credentials_path();
     if !path.exists() {
         return Ok(CredentialsFile::default());
     }
-    let contents = std::fs::read_to_string(&path)?;
-    let creds: CredentialsFile = toml::from_str(&contents)?;
+    let contents = std::fs::read_to_string(&path)
+        .context(ReadFileSnafu { path: path.display().to_string() })?;
+    let creds: CredentialsFile = toml::from_str(&contents)
+        .context(ParseCredentialsSnafu)?;
     Ok(creds)
 }
 
-pub fn save(creds: &CredentialsFile) -> anyhow::Result<()> {
+pub fn save(creds: &CredentialsFile) -> Result<(), ConfigError> {
     let path = credentials_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .context(CreateDirSnafu { path: parent.display().to_string() })?;
     }
-    let contents = toml::to_string_pretty(creds)?;
-    std::fs::write(&path, contents)?;
+    let contents = toml::to_string_pretty(creds)
+        .context(SerializeCredentialsSnafu)?;
+    std::fs::write(&path, contents)
+        .context(WriteFileSnafu { path: path.display().to_string() })?;
     Ok(())
 }

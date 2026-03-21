@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 import grpclib.client
 
+from distvirt._core import PyClient, resolve_connection
 from distvirt._proto.distvirt.client.v1 import (
-    CreateNamespaceRequest,
-    DeleteNamespaceRequest,
     DistvirtClientStub,
-    GetNamespaceStatusRequest,
-    ListNamespacesRequest,
     NamespaceSpec,
     NamespaceStatusReport,
     StreamEventsRequest,
-    UpdateNamespaceRequest,
+    GetNamespaceStatusRequest,
 )
+from distvirt.errors import handle_grpc_error, ApiError, StreamEndedError
 from distvirt.namespace import Namespace
 
 
@@ -33,10 +32,17 @@ class Client:
             await ns.workload("api").wait_for(distvirt.running)
     """
 
-    def __init__(self, channel: grpclib.client.Channel, token: str | None = None):
-        self._channel = channel
+    def __init__(
+        self,
+        inner: PyClient,
+        grpc_channel: grpclib.client.Channel,
+        token: str | None = None,
+    ):
+        self._inner = inner
+        # grpclib channel kept temporarily for streaming (Phase 2 will remove)
+        self._channel = grpc_channel
         self._token = token
-        self._stub = DistvirtClientStub(channel)
+        self._stub = DistvirtClientStub(grpc_channel)
 
     async def __aenter__(self) -> Client:
         return self
@@ -46,6 +52,7 @@ class Client:
 
     async def close(self) -> None:
         """Close the gRPC channel and all associated namespace streams."""
+        self._inner.close()
         self._channel.close()
 
     async def apply(
@@ -79,44 +86,20 @@ class Client:
         if file is not None:
             spec_bytes = _parse_spec_file(file, values)
 
-        spec = NamespaceSpec().parse(spec_bytes)
-
-        try:
-            await self._stub.create_namespace(
-                CreateNamespaceRequest(namespace_id=namespace_id, spec=spec)
-            )
-        except grpclib.GRPCError as e:
-            if e.status == grpclib.const.Status.ALREADY_EXISTS:
-                await self._stub.update_namespace(
-                    UpdateNamespaceRequest(namespace_id=namespace_id, spec=spec)
-                )
-            else:
-                raise
+        await self._inner.apply(namespace_id, spec_bytes)
 
         ns = await self._open_namespace(namespace_id)
         return ns
 
     async def delete(self, namespace_id: str) -> None:
-        """Delete a namespace.
-
-        Args:
-            namespace_id: Namespace to delete.
-        """
-        await self._stub.delete_namespace(
-            DeleteNamespaceRequest(namespace_id=namespace_id)
-        )
+        """Delete a namespace."""
+        await self._inner.down(namespace_id)
 
     async def namespace(self, namespace_id: str) -> Namespace:
         """Get a live handle to an existing namespace.
 
         Opens an event stream and bootstraps the object model from
         current status.
-
-        Args:
-            namespace_id: Namespace to connect to.
-
-        Returns:
-            A Namespace handle with a live event stream attached.
         """
         return await self._open_namespace(namespace_id)
 
@@ -125,24 +108,25 @@ class Client:
 
         Opens the event stream *before* fetching status, so any events
         that occur between the two calls are buffered and not lost.
-        Events that duplicate the status snapshot are harmless — applying
-        a state the model is already in is a no-op.
+
+        Note: Still uses grpclib for streaming (temporary, removed in Phase 2).
         """
-        # 1. Open event stream first — starts buffering immediately
+        from distvirt._core import NamespaceModel
+
+        # 1. Open event stream first — starts buffering immediately (grpclib)
         request = StreamEventsRequest(namespace_id=namespace_id)
         event_stream = self._stub.stream_events(request)
+
+        # 2. Fetch current status via Rust client and bootstrap model
+        status_bytes = await self._inner.get_status(namespace_id)
+        model = NamespaceModel.from_status_bytes(status_bytes)
 
         ns = Namespace(
             namespace_id=namespace_id,
             stub=self._stub,
+            model=model,
             event_stream=event_stream,
         )
-
-        # 2. Bootstrap model from current status snapshot
-        resp = await self._stub.get_namespace_status(
-            GetNamespaceStatusRequest(namespace_id=namespace_id)
-        )
-        ns._model.apply_status(resp.status)
 
         # 3. Start consuming buffered + future events
         ns._start_event_loop()
@@ -150,13 +134,13 @@ class Client:
         return ns
 
     async def namespaces(self) -> list[NamespaceStatusReport]:
-        """List all namespaces with their current status.
-
-        Returns:
-            List of namespace status reports.
-        """
-        resp = await self._stub.list_namespaces(ListNamespacesRequest())
-        return list(resp.namespaces)
+        """List all namespaces with their current status."""
+        raw = await self._inner.list_namespaces()
+        result = []
+        for _ns_id, proto_bytes in raw:
+            report = NamespaceStatusReport().parse(proto_bytes)
+            result.append(report)
+        return result
 
 
 def _parse_spec_file(path: str, values: dict[str, str] | None) -> bytes:
@@ -172,27 +156,58 @@ def _parse_spec_file(path: str, values: dict[str, str] | None) -> bytes:
     return spec_bytes
 
 
-async def connect(addr: str, *, token: str | None = None) -> Client:
+def _parse_server_url(server: str) -> tuple[str, int]:
+    """Parse a server URL into (host, port) for grpclib.
+
+    Handles formats: "host:port", "http://host:port", "http://[::1]:9090".
+    """
+    if "://" not in server:
+        server = f"http://{server}"
+
+    parsed = urlparse(server)
+    host = parsed.hostname or "::1"
+    port = parsed.port or 9090
+    return host, port
+
+
+async def connect(
+    addr: str | None = None,
+    *,
+    token: str | None = None,
+    context: str | None = None,
+) -> Client:
     """Connect to a distvirt orchestrator.
 
+    Connection parameters are resolved with the same precedence as the CLI:
+    explicit args > env vars (DV_SERVER, DV_TOKEN) > credentials file > defaults.
+
     Args:
-        addr: Orchestrator address ("host:port").
-        token: Optional API key for authentication.
+        addr: Orchestrator address ("host:port" or URL). If None, resolved
+              from env/credentials.
+        token: Optional API key. If None, resolved from env/credentials.
+        context: Credentials file context name override.
 
     Returns:
         An async context manager yielding a Client.
 
     Usage::
 
+        # Explicit address
         async with distvirt.connect("localhost:9090") as dv:
             ...
-    """
-    host, _, port_str = addr.rpartition(":")
-    if not host:
-        host = addr
-        port = 9090
-    else:
-        port = int(port_str)
 
+        # Auto-resolve from credentials/env
+        async with distvirt.connect() as dv:
+            ...
+    """
+    # Create Rust client (handles resolve + connect internally)
+    inner = await PyClient.connect(server=addr, token=token, context=context)
+
+    # Also create grpclib channel for streaming (temporary, removed in Phase 2)
+    server, resolved_token = resolve_connection(
+        server=addr, token=token, context=context
+    )
+    host, port = _parse_server_url(server)
     channel = grpclib.client.Channel(host=host, port=port)
-    return Client(channel, token=token)
+
+    return Client(inner, channel, token=resolved_token)

@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::bail;
 use std::fs;
 
-use crate::errors::{SourceId, SpecErrors};
-use crate::path::YamlPath;
-use crate::types::{SpecFile, SpecIncludeOverrides};
+use crate::errors::{SourceId, SpecError, SpecErrors};
+use super::path::YamlPath;
+use super::types::{SpecFile, SpecIncludeOverrides};
 
 // ---------------------------------------------------------------------------
 // Fragment include resolution
@@ -14,7 +13,7 @@ use crate::types::{SpecFile, SpecIncludeOverrides};
 
 /// Resolve `include` entries in a namespace spec, loading and merging fragments.
 /// `spec_path` is the path to the namespace spec file (used for relative path resolution).
-pub fn resolve_includes(parsed: &mut crate::parse::ParsedSpec, spec_path: &Path) -> anyhow::Result<()> {
+pub fn resolve_includes(parsed: &mut super::parse::ParsedSpec, spec_path: &Path) -> Result<(), SpecError> {
     let spec = &mut parsed.spec;
     let includes = match spec.include.take() {
         Some(inc) if !inc.is_empty() => inc,
@@ -55,7 +54,7 @@ pub fn resolve_includes(parsed: &mut crate::parse::ParsedSpec, spec_path: &Path)
         let mut fragment: SpecFile = match serde_saphyr::from_str(&substituted) {
             Ok(f) => f,
             Err(e) => {
-                errs.error(label.clone(), format!("YAML parse error:\n{}", crate::parse::render_yaml_error(e)));
+                errs.error(label.clone(), format!("YAML parse error:\n{}", super::parse::render_yaml_error(e)));
                 continue;
             }
         };
@@ -116,7 +115,7 @@ fn substitute_variables(
     yaml: &str,
     values: &HashMap<String, String>,
     path_label: &YamlPath,
-) -> anyhow::Result<String> {
+) -> Result<String, SpecError> {
     let mut result = String::with_capacity(yaml.len());
     let mut chars = yaml.char_indices();
 
@@ -138,11 +137,23 @@ fn substitute_variables(
                     var_name.push(c);
                 }
                 if !found_close {
-                    bail!("{} — unclosed variable reference starting at position {}", path_label, start);
+                    return Err(SpecError::Validation {
+                        message: format!(
+                            "{} — unclosed variable reference starting at position {}",
+                            path_label, start
+                        ),
+                    });
                 }
                 match values.get(&var_name) {
                     Some(val) => result.push_str(val),
-                    None => bail!("{} — undefined variable '{}'", path_label, var_name),
+                    None => {
+                        return Err(SpecError::Validation {
+                            message: format!(
+                                "{} — undefined variable '{}'",
+                                path_label, var_name
+                            ),
+                        });
+                    }
                 }
             } else {
                 result.push(ch);

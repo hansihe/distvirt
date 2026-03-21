@@ -5,16 +5,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any, TYPE_CHECKING
 
+from distvirt.errors import TimeoutError as DistvirtTimeoutError
+from distvirt.events import WorkloadModel
+
 if TYPE_CHECKING:
     from distvirt.namespace import Namespace
-    from distvirt.events import WorkloadModel
     from distvirt.states import WorkloadStateMatcher
 
 
 class Workload:
     """Handle to a workload within a namespace.
 
-    State queries read from the namespace's live object model.
+    State queries read from the namespace's Rust-backed model.
     wait_for() registers a waiter that resolves when the model
     reaches the target state.
 
@@ -38,7 +40,18 @@ class Workload:
 
         Returns None if the workload is not (yet) present in the model.
         """
-        return self._namespace._model.workloads.get(self._workload_id)
+        info = self._namespace._model.workload_info(self._workload_id)
+        if info is None:
+            return None
+        return WorkloadModel(
+            workload_id=info["workload_id"],
+            state=info["state"],
+            pod_id=info["pod_id"],
+            worker_id=info["worker_id"],
+            spliced=info["spliced"],
+            ip=info["ip"],
+            demanding_services=info["demanding_services"],
+        )
 
     async def wait_for(
         self,
@@ -50,7 +63,7 @@ class Workload:
 
         Checks the current model state first. If already matching,
         returns immediately. Otherwise, registers a waiter on the
-        namespace model that resolves when the state matches.
+        namespace that resolves when the state matches.
 
         Args:
             state: State matcher (e.g. distvirt.running, distvirt.completed).
@@ -60,67 +73,56 @@ class Workload:
             The WorkloadModel at the time the state matched.
 
         Raises:
-            asyncio.TimeoutError: If timeout expires before state is reached.
+            distvirt.errors.TimeoutError: If timeout expires before state is reached.
+            distvirt.errors.StreamEndedError: If the event stream ends before state is reached.
+            distvirt.errors.ApiError: If a gRPC error occurs on the event stream.
         """
         model = self._namespace._model
 
         # Check current state
-        wl = model.workloads.get(self._workload_id)
-        if wl is not None and state.matches(wl):
-            return wl
+        current = model.workload_state(self._workload_id)
+        if current is not None and current == state.state:
+            return self.status()
 
         # Register waiter
         loop = asyncio.get_running_loop()
         future: asyncio.Future[None] = loop.create_future()
 
         def predicate(m: Any) -> bool:
-            wl = m.workloads.get(self._workload_id)
-            return wl is not None and state.matches(wl)
+            s = m.workload_state(self._workload_id)
+            return s is not None and s == state.state
 
-        model._waiters.append((predicate, future))
+        self._namespace._waiters.append((predicate, future))
 
         try:
             await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             # Clean up the waiter
-            model._waiters = [
-                (p, f) for p, f in model._waiters if f is not future
+            self._namespace._waiters = [
+                (p, f) for p, f in self._namespace._waiters if f is not future
             ]
-            raise
+            raise DistvirtTimeoutError(
+                entity_type="workload",
+                entity_id=self._workload_id,
+                target_state=state.state,
+                timeout=timeout,
+            ) from None
 
-        return model.workloads[self._workload_id]
+        return self.status()
 
     async def deactivate(self) -> tuple[bool, str]:
-        """Explicitly deactivate this workload's pod.
-
-        Returns:
-            Tuple of (deactivated, reason). If deactivated is False,
-            reason explains why (e.g. already dormant).
-        """
+        """Explicitly deactivate this workload's pod."""
         # TODO: call DeactivateWorkload RPC
         raise NotImplementedError
 
     async def attach(self) -> AttachSession:
-        """Attach to the workload's entrypoint stdin/stdout/stderr.
-
-        Returns an async context manager for the bidirectional stream.
-
-        Usage::
-
-            async with wl.attach() as session:
-                await session.send(b"ls\\n")
-                async for output in session:
-                    print(output.data.decode(), end="")
-        """
+        """Attach to the workload's entrypoint stdin/stdout/stderr."""
         # TODO: open AttachWorkload bidirectional stream
         raise NotImplementedError
 
 
 class AttachSession:
-    """Bidirectional attach session to a workload's entrypoint.
-
-    Wraps the AttachWorkload bidirectional gRPC stream.
-    """
+    """Bidirectional attach session to a workload's entrypoint."""
 
     def __init__(self, stream: Any, tty: bool):
         self._stream = stream
@@ -128,7 +130,6 @@ class AttachSession:
 
     @property
     def tty(self) -> bool:
-        """Whether the entrypoint is running with a PTY."""
         return self._tty
 
     async def __aenter__(self) -> AttachSession:
@@ -138,24 +139,16 @@ class AttachSession:
         await self.close()
 
     async def close(self) -> None:
-        """Cancel the attach stream. Does not kill the entrypoint."""
-        # TODO: cancel gRPC stream
         pass
 
     async def send(self, data: bytes) -> None:
-        """Send stdin data to the entrypoint."""
-        # TODO: send AttachStdin message
         raise NotImplementedError
 
     async def resize(self, cols: int, rows: int) -> None:
-        """Send terminal resize event (only meaningful if tty=True)."""
-        # TODO: send AttachResize message
         raise NotImplementedError
 
     def __aiter__(self) -> AttachSession:
         return self
 
     async def __anext__(self) -> Any:
-        """Receive next stdout/stderr/exited message."""
-        # TODO: read from gRPC stream
         raise NotImplementedError

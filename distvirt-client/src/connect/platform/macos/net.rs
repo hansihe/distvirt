@@ -13,7 +13,7 @@ pub fn configure_interface(
     )
 }
 
-/// Convert a prefix length (0–32) to a dotted-decimal netmask string.
+/// Convert a prefix length (0-32) to a dotted-decimal netmask string.
 fn prefix_len_to_netmask_str(prefix_len: u8) -> String {
     let mask: u32 = if prefix_len == 0 {
         0

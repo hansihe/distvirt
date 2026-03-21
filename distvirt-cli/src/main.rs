@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 mod commands;
 mod connection;
 mod format;
-mod platform;
 mod status_watch;
 
 use commands::OutputFormat;

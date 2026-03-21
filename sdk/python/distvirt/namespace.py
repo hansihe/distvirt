@@ -1,18 +1,19 @@
-"""Namespace handle with live object model."""
+"""Namespace handle with live object model backed by Rust."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
+
+import grpclib
 
 from distvirt._proto.distvirt.client.v1 import (
     DistvirtClientStub,
     StreamEventsRequest,
 )
-from distvirt.events import EventStream, NamespaceModel, WorkloadModel, ServiceModel
-from distvirt.workload import Workload
-from distvirt.service import Service
+from distvirt.errors import StreamEndedError, handle_grpc_error
+from distvirt.events import EventStream
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +21,12 @@ logger = logging.getLogger(__name__)
 class Namespace:
     """Live handle to a distvirt namespace.
 
-    Maintains an internal object model kept up-to-date by a background
-    event stream. State queries (status, workload state) read from the
-    local model — no RPC needed.
+    Maintains an internal object model (backed by the Rust distvirt-client
+    model) kept up-to-date by a background event stream. State queries
+    read from the local model — no RPC needed.
 
     The event stream is opened eagerly on construction. This eliminates
-    races between apply() and wait_for() — the stream captures all
-    transitions from the moment the handle is created.
+    races between apply() and wait_for().
 
     Usage::
 
@@ -39,25 +39,22 @@ class Namespace:
         self,
         namespace_id: str,
         stub: DistvirtClientStub,
-        model: NamespaceModel | None = None,
+        model: Any,  # _core.NamespaceModel
         event_stream: Any = None,
     ):
         self._namespace_id = namespace_id
         self._stub = stub
-        self._model = model or NamespaceModel(namespace_id=namespace_id)
+        self._model = model
         self._event_stream = event_stream
         self._event_task: asyncio.Task | None = None
+        self._waiters: list[tuple[Callable, asyncio.Future]] = []
 
     @property
     def namespace_id(self) -> str:
         return self._namespace_id
 
     def _start_event_loop(self) -> None:
-        """Start the background event consumption task.
-
-        Consumes from the event stream (which must already be open)
-        and applies events to the internal model.
-        """
+        """Start the background event consumption task."""
         assert self._event_stream is not None, "event stream not set"
         self._event_task = asyncio.create_task(
             self._run_event_loop(),
@@ -68,14 +65,49 @@ class Namespace:
         """Consume events from the already-open StreamEvents RPC."""
         try:
             async for event in self._event_stream:
-                self._model.apply_event(event)
+                proto_bytes = bytes(event)
+                changed = self._model.apply_event_bytes(proto_bytes)
+                if changed:
+                    self._notify_waiters()
+            # Stream ended normally — fail waiters so they don't hang
+            self._fail_waiters(
+                StreamEndedError("event stream ended unexpectedly")
+            )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except grpclib.GRPCError as e:
+            err = handle_grpc_error(e)
+            logger.error(
+                "Event loop for namespace %s failed: %s",
+                self._namespace_id,
+                err,
+            )
+            self._fail_waiters(err)
+        except Exception as e:
             logger.exception(
                 "Event loop for namespace %s terminated with error",
                 self._namespace_id,
             )
+            self._fail_waiters(e)
+
+    def _notify_waiters(self) -> None:
+        """Check all waiters against current model state, resolve matches."""
+        remaining = []
+        for predicate, future in self._waiters:
+            if future.done():
+                continue
+            if predicate(self._model):
+                future.set_result(None)
+            else:
+                remaining.append((predicate, future))
+        self._waiters = remaining
+
+    def _fail_waiters(self, exc: BaseException) -> None:
+        """Fail all pending waiters with the given exception."""
+        for _predicate, future in self._waiters:
+            if not future.done():
+                future.set_exception(exc)
+        self._waiters = []
 
     async def close(self) -> None:
         """Stop the background event loop and release resources."""
@@ -87,41 +119,25 @@ class Namespace:
                 pass
             self._event_task = None
 
-    def status(self) -> NamespaceModel:
-        """Return current namespace state from the live model.
+    def status(self) -> Any:
+        """Return the Rust-backed namespace model.
 
         This is a synchronous read — no RPC. The model is kept
         current by the background event stream.
         """
         return self._model
 
-    def workload(self, workload_id: str) -> Workload:
-        """Get a handle to a workload in this namespace.
+    def workload(self, workload_id: str) -> "Workload":
+        """Get a handle to a workload in this namespace."""
+        from distvirt.workload import Workload
 
-        Args:
-            workload_id: The workload to reference.
+        return Workload(namespace=self, workload_id=workload_id)
 
-        Returns:
-            A Workload handle bound to this namespace's live model.
-        """
-        return Workload(
-            namespace=self,
-            workload_id=workload_id,
-        )
+    def service(self, service_id: str) -> "Service":
+        """Get a handle to a service in this namespace."""
+        from distvirt.service import Service
 
-    def service(self, service_id: str) -> Service:
-        """Get a handle to a service in this namespace.
-
-        Args:
-            service_id: The service to reference.
-
-        Returns:
-            A Service handle bound to this namespace's live model.
-        """
-        return Service(
-            namespace=self,
-            service_id=service_id,
-        )
+        return Service(namespace=self, service_id=service_id)
 
     def events(
         self,
@@ -132,14 +148,7 @@ class Namespace:
         """Stream namespace events as an async iterator.
 
         Opens a separate StreamEvents RPC (independent of the internal
-        model stream). Useful for logging/debugging.
-
-        Args:
-            workloads: Filter to these workload IDs. None = all.
-            services: Filter to these service IDs. None = all.
-
-        Returns:
-            Async iterator of event objects.
+        model stream).
         """
         request = StreamEventsRequest(
             namespace_id=self._namespace_id,
@@ -154,13 +163,6 @@ class Namespace:
         *,
         workload: str | None = None,
     ) -> AsyncIterator[Any]:
-        """Stream logs as an async iterator.
-
-        Args:
-            workload: Filter to this workload ID. None = all.
-
-        Returns:
-            Async iterator of log chunks.
-        """
+        """Stream logs as an async iterator."""
         # TODO: open StreamLogs RPC, return async iterator
         raise NotImplementedError

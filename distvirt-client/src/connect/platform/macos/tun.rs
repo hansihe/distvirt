@@ -161,7 +161,7 @@ impl TunDevice {
                 Ok(result) => {
                     let n = result?;
                     if n <= 4 {
-                        // No payload after the header — skip.
+                        // No payload after the header -- skip.
                         continue;
                     }
                     let payload_len = n - 4;

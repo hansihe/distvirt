@@ -1,6 +1,6 @@
 use saphyr::{LoadableYamlNode, MarkedYaml};
 
-use crate::path::{PathSegment, YamlPath};
+use super::path::{PathSegment, YamlPath};
 
 // ---------------------------------------------------------------------------
 // Span resolution: walk a MarkedYaml tree following a YamlPath
@@ -55,7 +55,7 @@ pub(crate) fn resolve_span(source: &str, path: &YamlPath) -> Option<ResolvedSpan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::path::YamlPath;
+    use crate::spec::path::YamlPath;
 
     #[test]
     fn resolve_simple_key() {

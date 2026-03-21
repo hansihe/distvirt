@@ -137,10 +137,9 @@ What needs to happen before this is production-ready:
 - [x] **Implement `Namespace` event loop** — Background task consuming `StreamEvents`, updating the `NamespaceModel`, notifying waiters.
 - [x] **Implement `NamespaceModel.apply_event()`** — Map each proto event type to model state mutations. Requires documenting the event lifecycle guarantees in the proto.
 - [x] **Implement `NamespaceModel.apply_status()`** — Bootstrap model from `GetNamespaceStatus` response.
-- [ ] **Implement `WatchNamespaceStatus`** (server-side) — Currently stubbed in the orchestrator. Needed for clean initial-state bootstrap without races. First message should be a full snapshot.
-- [ ] **Add `exit_code` to `WorkloadCompleted` proto message** — Currently empty; exit code is only in the `WorkloadPodStopped` event.
-- [ ] **Document event lifecycle guarantees in proto** — Completeness (are events ever dropped?), ordering (per-entity strict order?), terminal states, valid state transitions. The SDK's object model correctness depends on these guarantees.
+- [x] **Add `exit_code` to `WorkloadCompleted` proto message** — Added to proto.
+- [x] **Document event lifecycle guarantees in proto** — Delivery guarantees, state transitions, and client tracking documented in proto comments.
 - [ ] **Implement remaining RPCs** — `logs()`, `attach()`, `deactivate()`.
-- [ ] **Error handling** — Map gRPC status codes to typed Python exceptions.
+- [x] **Error handling** — Typed exception hierarchy (`DistvirtError` → `SpecError`, `ConnectionError`, `ApiError`, `StreamEndedError`, `TimeoutError`). gRPC status codes mapped to `ApiError`. Event loop failures propagated to waiters. Contextual timeout messages.
 - [ ] **Tests** — Unit tests for the waiter/model system, integration tests against a running orchestrator.
 - [ ] **Package and publish** — CI pipeline for building the maturin wheel (manylinux + macOS).

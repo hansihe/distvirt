@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
-use anyhow::bail;
-
-use crate::helpers::{ip_to_u32, parse_cidr, u32_to_ip};
+use crate::errors::SpecError;
+use super::helpers::{ip_to_u32, parse_cidr, u32_to_ip};
 
 // ---------------------------------------------------------------------------
 // IpAllocator — stable, hash-based IP assignment
@@ -22,16 +21,20 @@ pub struct IpAllocator {
 impl IpAllocator {
     /// Create an allocator for the given CIDR subnet.
     /// Reserves .0 (network) and .1 (gateway) automatically.
-    pub fn new(cidr: &str) -> anyhow::Result<Self> {
+    pub fn new(cidr: &str) -> Result<Self, SpecError> {
         let (base_ip, prefix) = parse_cidr(cidr)?;
         let base = ip_to_u32(base_ip);
         let host_bits = 32 - prefix as u32;
         let total_addrs = 1u32
             .checked_shl(host_bits)
-            .ok_or_else(|| anyhow::anyhow!("invalid prefix length: {}", prefix))?;
+            .ok_or_else(|| SpecError::Validation {
+                message: format!("invalid prefix length: {}", prefix),
+            })?;
         let num_hosts = total_addrs.saturating_sub(2);
         if num_hosts == 0 {
-            bail!("subnet {} has no usable host addresses", cidr);
+            return Err(SpecError::Validation {
+                message: format!("subnet {} has no usable host addresses", cidr),
+            });
         }
         Ok(Self {
             base,
@@ -41,23 +44,29 @@ impl IpAllocator {
     }
 
     /// Reserve an explicit IP address.
-    pub fn reserve(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
+    pub fn reserve(&mut self, ip: Ipv4Addr) -> Result<(), SpecError> {
         let ip_u32 = ip_to_u32(ip);
         let first_host = self.base + 2;
         if ip_u32 < first_host || ip_u32 >= first_host + self.num_hosts {
-            bail!("IP {} is outside the allocatable range of the subnet", ip);
+            return Err(SpecError::Validation {
+                message: format!("IP {} is outside the allocatable range of the subnet", ip),
+            });
         }
         let offset = ip_u32 - first_host;
         if !self.occupied.insert(offset) {
-            bail!("IP {} is already allocated", ip);
+            return Err(SpecError::Validation {
+                message: format!("IP {} is already allocated", ip),
+            });
         }
         Ok(())
     }
 
     /// Auto-assign an IP for the given name using deterministic hashing.
-    pub fn assign(&mut self, name: &str) -> anyhow::Result<Ipv4Addr> {
+    pub fn assign(&mut self, name: &str) -> Result<Ipv4Addr, SpecError> {
         if self.occupied.len() as u32 >= self.num_hosts {
-            bail!("no more IPs available in subnet");
+            return Err(SpecError::Validation {
+                message: "no more IPs available in subnet".into(),
+            });
         }
         let hash = fnv1a_hash(name);
         let start = hash % self.num_hosts;
@@ -69,7 +78,9 @@ impl IpAllocator {
                 return Ok(ip);
             }
         }
-        bail!("no more IPs available in subnet")
+        Err(SpecError::Validation {
+            message: "no more IPs available in subnet".into(),
+        })
     }
 }
 

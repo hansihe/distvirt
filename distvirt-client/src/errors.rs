@@ -1,9 +1,87 @@
 use std::fmt;
 
 use annotate_snippets::{Level, Renderer, Snippet};
+use snafu::prelude::*;
 
-use crate::path::YamlPath;
-use crate::snippet::resolve_span;
+use crate::spec::path::YamlPath;
+use crate::spec::snippet::resolve_span;
+
+// ---------------------------------------------------------------------------
+// ConfigError
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum ConfigError {
+    #[snafu(display("failed to read {path}"))]
+    ReadFile { path: String, source: std::io::Error },
+
+    #[snafu(display("failed to write {path}"))]
+    WriteFile { path: String, source: std::io::Error },
+
+    #[snafu(display("failed to create directory {path}"))]
+    CreateDir { path: String, source: std::io::Error },
+
+    #[snafu(display("failed to parse credentials"))]
+    ParseCredentials { source: toml::de::Error },
+
+    #[snafu(display("failed to serialize credentials"))]
+    SerializeCredentials { source: toml::ser::Error },
+}
+
+// ---------------------------------------------------------------------------
+// SpecError
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum SpecError {
+    #[snafu(display("failed to read {path}"))]
+    ReadSpec { path: String, source: std::io::Error },
+
+    #[snafu(display("{message}"))]
+    YamlParse { message: String },
+
+    #[snafu(display("{message}"))]
+    Validation { message: String },
+
+    #[snafu(display("{message}"))]
+    Resolution { message: String },
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionError
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum ConnectionError {
+    #[snafu(transparent)]
+    Config { source: ConfigError },
+
+    #[snafu(display("connection failed: {source}"))]
+    Transport { source: tonic::transport::Error },
+
+    #[snafu(display("{message}"))]
+    InvalidEndpoint { message: String },
+}
+
+// ---------------------------------------------------------------------------
+// ApiError
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum ApiError {
+    #[snafu(display("{message}"))]
+    Status { message: String },
+
+    #[snafu(display("server returned empty response"))]
+    EmptyResponse,
+
+    #[snafu(display("event stream ended unexpectedly"))]
+    StreamEnded,
+}
 
 // ---------------------------------------------------------------------------
 // SpecErrors — multi-error collector with source-aware rendering
@@ -15,7 +93,7 @@ pub(crate) struct SourceId(usize);
 
 /// A single validation error with a structured path indicating where in the spec it occurred.
 #[derive(Debug)]
-struct SpecError {
+struct SpecErrorEntry {
     path: YamlPath,
     message: String,
     source_id: SourceId,
@@ -31,8 +109,8 @@ struct Source {
 /// validation, they are all reported together with source snippets.
 pub(crate) struct SpecErrors {
     sources: Vec<Source>,
-    errors: Vec<SpecError>,
-    warnings: Vec<SpecError>,
+    errors: Vec<SpecErrorEntry>,
+    warnings: Vec<SpecErrorEntry>,
     default_source: SourceId,
 }
 
@@ -68,7 +146,7 @@ impl SpecErrors {
     }
 
     pub(crate) fn error_in(&mut self, source_id: SourceId, path: YamlPath, msg: impl Into<String>) {
-        self.errors.push(SpecError {
+        self.errors.push(SpecErrorEntry {
             path,
             message: msg.into(),
             source_id,
@@ -76,7 +154,7 @@ impl SpecErrors {
     }
 
     pub(crate) fn warn_in(&mut self, source_id: SourceId, path: YamlPath, msg: impl Into<String>) {
-        self.warnings.push(SpecError {
+        self.warnings.push(SpecErrorEntry {
             path,
             message: msg.into(),
             source_id,
@@ -87,8 +165,8 @@ impl SpecErrors {
         !self.errors.is_empty()
     }
 
-    /// Format all errors/warnings into a single anyhow::Error, or Ok(()) if none.
-    pub(crate) fn into_result(self) -> anyhow::Result<()> {
+    /// Format all errors/warnings into a SpecError, or Ok(()) if none.
+    pub(crate) fn into_result(self) -> Result<(), SpecError> {
         if self.errors.is_empty() && self.warnings.is_empty() {
             return Ok(());
         }
@@ -99,11 +177,13 @@ impl SpecErrors {
             }
             return Ok(());
         }
-        Err(anyhow::anyhow!("{}", self))
+        Err(SpecError::Validation {
+            message: format!("{}", self),
+        })
     }
 
     /// Render a single error/warning as an annotate-snippets message.
-    fn render_entry(&self, entry: &SpecError, level: Level) -> String {
+    fn render_entry(&self, entry: &SpecErrorEntry, level: Level) -> String {
         let source = self.sources.get(entry.source_id.0);
         let resolved = source.and_then(|src| resolve_span(&src.content, &entry.path));
 
