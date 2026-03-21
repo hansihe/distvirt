@@ -12,6 +12,7 @@ from distvirt.errors import (
 from distvirt.namespace import Namespace
 from distvirt.workload import Workload
 from distvirt.service import Service
+from distvirt.network import Network, TcpConnection, UdpConnection
 from distvirt.states import (
     dormant,
     launching,
@@ -31,6 +32,10 @@ __all__ = [
     "Namespace",
     "Workload",
     "Service",
+    # Network
+    "Network",
+    "TcpConnection",
+    "UdpConnection",
     # Errors
     "DistvirtError",
     "SpecError",

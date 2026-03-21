@@ -28,18 +28,7 @@ def parse_spec(
     path: str,
     values: dict[str, str] | None = None,
 ) -> tuple[str | None, bytes]:
-    """Parse a distvirt spec file into (namespace_id, protobuf bytes).
-
-    Args:
-        path: Path to a distvirt.yaml or docker-compose.yml file.
-        values: Variable substitutions for ${VAR} in fragment includes.
-
-    Returns:
-        Tuple of (namespace_id from metadata.name or None, serialized NamespaceSpec proto bytes).
-
-    Raises:
-        SpecError: If the spec file has parse or validation errors.
-    """
+    """Parse a distvirt spec file into (namespace_id, protobuf bytes)."""
     ...
 
 def resolve_connection(
@@ -47,11 +36,7 @@ def resolve_connection(
     token: str | None = None,
     context: str | None = None,
 ) -> tuple[str, str | None]:
-    """Resolve connection parameters using CLI precedence.
-
-    Raises:
-        ConnectionError: If credentials file cannot be read or parsed.
-    """
+    """Resolve connection parameters using CLI precedence."""
     ...
 
 # ---------------------------------------------------------------------------
@@ -66,73 +51,30 @@ class PyClient:
         server: str | None = None,
         token: str | None = None,
         context: str | None = None,
-    ) -> PyClient:
-        """Connect to a distvirt orchestrator.
+    ) -> PyClient: ...
 
-        Raises:
-            ConnectionError: If connection resolution or transport fails.
-        """
-        ...
+    async def apply(self, namespace_id: str, spec_bytes: bytes) -> str: ...
+    async def sync_ns(self, namespace_id: str, spec_bytes: bytes) -> str: ...
+    async def down(self, namespace_id: str) -> None: ...
+    async def clone_namespace(self, source: str, target: str) -> None: ...
+    async def deactivate(self, namespace_id: str, workload_id: str) -> tuple[bool, str]: ...
+    async def get_status(self, namespace_id: str) -> bytes: ...
+    async def list_namespaces(self) -> list[tuple[str, bytes]]: ...
 
-    async def apply(self, namespace_id: str, spec_bytes: bytes) -> str:
-        """Apply a namespace spec. Returns "created" or "patched".
+    async def start_watcher(self, namespace_id: str) -> NamespaceWatcher: ...
+    async def stream_events(
+        self,
+        namespace_id: str,
+        workload_ids: list[str] = ...,
+        service_ids: list[str] = ...,
+    ) -> EventStream: ...
+    async def stream_logs(
+        self,
+        namespace_id: str,
+        workload_id: str | None = None,
+    ) -> LogStream: ...
 
-        Raises:
-            ApiError: On gRPC or decode errors.
-        """
-        ...
-
-    async def sync_ns(self, namespace_id: str, spec_bytes: bytes) -> str:
-        """Sync a namespace spec. Returns "created" or "synced".
-
-        Raises:
-            ApiError: On gRPC or decode errors.
-        """
-        ...
-
-    async def down(self, namespace_id: str) -> None:
-        """Delete a namespace.
-
-        Raises:
-            ApiError: On gRPC errors.
-        """
-        ...
-
-    async def clone_namespace(self, source: str, target: str) -> None:
-        """Clone a namespace from source to target.
-
-        Raises:
-            ApiError: On gRPC errors.
-        """
-        ...
-
-    async def deactivate(self, namespace_id: str, workload_id: str) -> tuple[bool, str]:
-        """Deactivate a workload. Returns (deactivated, reason).
-
-        Raises:
-            ApiError: On gRPC errors.
-        """
-        ...
-
-    async def get_status(self, namespace_id: str) -> bytes:
-        """Get namespace status as serialized protobuf bytes.
-
-        Raises:
-            ApiError: On gRPC errors.
-        """
-        ...
-
-    async def list_namespaces(self) -> list[tuple[str, bytes]]:
-        """List all namespaces. Returns list of (namespace_id, status_proto_bytes).
-
-        Raises:
-            ApiError: On gRPC errors.
-        """
-        ...
-
-    def close(self) -> None:
-        """Close the client, dropping the inner gRPC connection."""
-        ...
+    def close(self) -> None: ...
 
 # ---------------------------------------------------------------------------
 # NamespaceModel
@@ -142,21 +84,9 @@ class NamespaceModel:
     """Live namespace state model backed by Rust."""
 
     @staticmethod
-    def from_status_bytes(proto_bytes: bytes) -> NamespaceModel:
-        """Create from serialized NamespaceStatusReport.
+    def from_status_bytes(proto_bytes: bytes) -> NamespaceModel: ...
 
-        Raises:
-            ApiError: If protobuf bytes cannot be decoded.
-        """
-        ...
-
-    def apply_event_bytes(self, proto_bytes: bytes) -> bool:
-        """Apply a serialized NamespaceEvent. Returns True if model changed.
-
-        Raises:
-            ApiError: If protobuf bytes cannot be decoded.
-        """
-        ...
+    def apply_event_bytes(self, proto_bytes: bytes) -> bool: ...
 
     @property
     def namespace_id(self) -> str: ...
@@ -168,3 +98,73 @@ class NamespaceModel:
     def workload_info(self, workload_id: str) -> dict[str, object] | None: ...
     def service_state(self, service_id: str) -> str | None: ...
     def service_info(self, service_id: str) -> dict[str, object] | None: ...
+
+# ---------------------------------------------------------------------------
+# NamespaceWatcher
+# ---------------------------------------------------------------------------
+
+class NamespaceWatcher:
+    """Rust-backed namespace watcher with live model."""
+
+    async def next(self) -> dict[str, object] | None: ...
+    async def wait_for_workload_state(self, workload_id: str, state: str) -> None: ...
+    async def wait_for_service_state(self, service_id: str, state: str) -> None: ...
+    def model(self) -> NamespaceModel: ...
+    async def close(self) -> None: ...
+
+# ---------------------------------------------------------------------------
+# EventStream / LogStream
+# ---------------------------------------------------------------------------
+
+class EventStream:
+    """Async iterator over raw namespace event bytes."""
+
+    def __aiter__(self) -> EventStream: ...
+    async def __anext__(self) -> bytes: ...
+
+class LogStream:
+    """Async iterator over log chunk dicts."""
+
+    def __aiter__(self) -> LogStream: ...
+    async def __anext__(self) -> dict[str, object]: ...
+
+# ---------------------------------------------------------------------------
+# Fabric: UserspaceNetwork / TcpStream / UdpSocket
+# ---------------------------------------------------------------------------
+
+class UserspaceNetwork:
+    """Userspace WireGuard tunnel."""
+
+    @staticmethod
+    async def connect(client: PyClient, namespace_id: str) -> UserspaceNetwork: ...
+    async def connect_tcp(self, host: str, port: int) -> TcpStream: ...
+    async def bind_udp(self, port: int = 0) -> UdpSocket: ...
+    async def disconnect(self, client: PyClient) -> None: ...
+    def close(self) -> None: ...
+
+    @property
+    def client_ip(self) -> str: ...
+    @property
+    def subnet(self) -> str: ...
+
+class TcpStream:
+    """TCP stream over userspace tunnel."""
+
+    async def read(self, n: int = 4096) -> bytes: ...
+    async def write(self, data: bytes) -> int: ...
+    async def write_all(self, data: bytes) -> None: ...
+    async def shutdown(self) -> None: ...
+    def close(self) -> None: ...
+
+    @property
+    def peer_addr(self) -> str: ...
+
+class UdpSocket:
+    """UDP socket over userspace tunnel."""
+
+    async def send_to(self, data: bytes, host: str, port: int) -> int: ...
+    async def recv_from(self, bufsize: int = 65536) -> tuple[bytes, str]: ...
+    def close(self) -> None: ...
+
+    @property
+    def local_port(self) -> int: ...

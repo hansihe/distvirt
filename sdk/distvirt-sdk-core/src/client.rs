@@ -3,8 +3,11 @@ use pyo3::prelude::*;
 
 use distvirt_client::connection::{self, Client, ConnectionOverrides};
 use distvirt_client::operations;
+use distvirt_client::watcher::NamespaceWatcher;
 use distvirt_client_protocol::NamespaceSpec;
 
+use crate::stream::{PyEventStream, PyLogStream};
+use crate::watcher::PyNamespaceWatcher;
 use crate::{ApiError, ConnectionError};
 
 fn map_conn_err(e: distvirt_client::ConnectionError) -> PyErr {
@@ -171,6 +174,58 @@ impl PyClient {
         })
     }
 
+    /// Start a namespace watcher (subscribe + bootstrap model).
+    fn start_watcher<'py>(
+        &self,
+        py: Python<'py>,
+        namespace_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut client = self.take_client_ref()?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let watcher = NamespaceWatcher::start(&mut client, &namespace_id)
+                .await
+                .map_err(map_api_err)?;
+            Ok(PyNamespaceWatcher::new(watcher))
+        })
+    }
+
+    /// Stream namespace events as an async iterator.
+    #[pyo3(signature = (namespace_id, workload_ids=vec![], service_ids=vec![]))]
+    fn stream_events<'py>(
+        &self,
+        py: Python<'py>,
+        namespace_id: String,
+        workload_ids: Vec<String>,
+        service_ids: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut client = self.take_client_ref()?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream =
+                operations::stream_events(&mut client, &namespace_id, &workload_ids, &service_ids)
+                    .await
+                    .map_err(map_api_err)?;
+            Ok(PyEventStream::new(stream))
+        })
+    }
+
+    /// Stream logs from a namespace (optionally filtered to a workload).
+    #[pyo3(signature = (namespace_id, workload_id=None))]
+    fn stream_logs<'py>(
+        &self,
+        py: Python<'py>,
+        namespace_id: String,
+        workload_id: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut client = self.take_client_ref()?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream =
+                operations::stream_logs(&mut client, &namespace_id, workload_id.as_deref())
+                    .await
+                    .map_err(map_api_err)?;
+            Ok(PyLogStream::new(stream))
+        })
+    }
+
     /// Close the client, dropping the inner gRPC connection.
     fn close(&mut self) {
         self.client = None;
@@ -178,7 +233,7 @@ impl PyClient {
 }
 
 impl PyClient {
-    fn take_client_ref(&self) -> PyResult<Client> {
+    pub(crate) fn take_client_ref(&self) -> PyResult<Client> {
         self.client
             .as_ref()
             .ok_or_else(|| ApiError::new_err("client is closed"))

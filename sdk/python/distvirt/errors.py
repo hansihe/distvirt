@@ -14,8 +14,6 @@ from distvirt._core import (
     ApiError,
 )
 
-import grpclib.const
-
 
 class StreamEndedError(ApiError):
     """The event stream ended unexpectedly."""
@@ -48,39 +46,6 @@ class TimeoutError(DistvirtError):
         )
 
 
-# -------------------------------------------------------------------------
-# gRPC error mapping (mirrors distvirt-client handle_grpc_error)
-# -------------------------------------------------------------------------
-
-_STATUS_MESSAGES = {
-    grpclib.const.Status.NOT_FOUND: "not found",
-    grpclib.const.Status.ALREADY_EXISTS: "already exists",
-    grpclib.const.Status.INVALID_ARGUMENT: "invalid argument",
-    grpclib.const.Status.PERMISSION_DENIED: "permission denied",
-    grpclib.const.Status.UNAUTHENTICATED: "unauthenticated",
-    grpclib.const.Status.UNAVAILABLE: "server unavailable",
-}
-
-
-def handle_grpc_error(exc: grpclib.GRPCError) -> ApiError:
-    """Convert a grpclib.GRPCError into a typed ApiError.
-
-    Use in except blocks::
-
-        try:
-            await stub.some_rpc(request)
-        except grpclib.GRPCError as e:
-            raise handle_grpc_error(e) from e
-    """
-    prefix = _STATUS_MESSAGES.get(exc.status)
-    detail = exc.message or ""
-    if prefix:
-        message = f"{prefix}: {detail}" if detail else prefix
-    else:
-        message = f"gRPC error ({exc.status.name}): {detail}"
-    return ApiError(message)
-
-
 __all__ = [
     "DistvirtError",
     "SpecError",
@@ -88,5 +53,4 @@ __all__ = [
     "ApiError",
     "StreamEndedError",
     "TimeoutError",
-    "handle_grpc_error",
 ]

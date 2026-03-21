@@ -1,11 +1,11 @@
-"""Event stream wrapper and public model dataclasses."""
+"""Event and log stream wrappers, plus public model dataclasses."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-from distvirt._proto.distvirt.client.v1 import NamespaceEvent
+from distvirt._core import EventStream as _CoreEventStream, LogStream as _CoreLogStream
 
 
 @dataclass
@@ -34,19 +34,32 @@ class ServiceModel:
 
 
 class EventStream:
-    """Async iterator over namespace events from StreamEvents RPC.
+    """Async iterator over namespace events from the Rust-backed stream.
 
-    This is the raw event stream exposed to users via `ns.events()`.
+    Each item is the raw protobuf bytes of a NamespaceEvent.
     """
 
-    def __init__(self, grpc_stream: Any):
-        self._stream = grpc_stream
+    def __init__(self, inner: _CoreEventStream):
+        self._inner = inner
 
     def __aiter__(self) -> AsyncIterator:
         return self
 
-    async def __anext__(self) -> NamespaceEvent:
-        try:
-            return await self._stream.__anext__()
-        except StopAsyncIteration:
-            raise
+    async def __anext__(self) -> bytes:
+        return await self._inner.__anext__()
+
+
+class LogStream:
+    """Async iterator over log chunks from the Rust-backed stream.
+
+    Each item is a dict with keys: workload_id, data, timestamp_ms, container_id.
+    """
+
+    def __init__(self, inner: _CoreLogStream):
+        self._inner = inner
+
+    def __aiter__(self) -> AsyncIterator:
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        return await self._inner.__anext__()

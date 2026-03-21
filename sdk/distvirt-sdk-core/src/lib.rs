@@ -9,6 +9,9 @@ use distvirt_client::model;
 use distvirt_client_protocol as proto;
 
 mod client;
+mod network;
+pub(crate) mod stream;
+pub(crate) mod watcher;
 
 // ---------------------------------------------------------------------------
 // Python exception hierarchy (mirrors distvirt-client error types)
@@ -96,8 +99,8 @@ fn resolve_connection(
 /// Bootstrap from a serialized NamespaceStatusReport, then apply serialized
 /// NamespaceEvent messages to keep it up to date.
 #[pyclass(name = "NamespaceModel")]
-struct PyNamespaceModel {
-    inner: model::NamespaceModel,
+pub(crate) struct PyNamespaceModel {
+    pub(crate) inner: model::NamespaceModel,
 }
 
 #[pymethods]
@@ -209,7 +212,7 @@ impl PyNamespaceModel {
 }
 
 /// Map Rust WorkloadState to the simplified SDK state names used by Python matchers.
-fn sdk_workload_state_name(state: &model::WorkloadState) -> String {
+pub(crate) fn sdk_workload_state_name(state: &model::WorkloadState) -> String {
     match state {
         model::WorkloadState::Dormant | model::WorkloadState::WaitingForSpec => "dormant".into(),
         model::WorkloadState::Launching { .. } => "launching".into(),
@@ -224,7 +227,7 @@ fn sdk_workload_state_name(state: &model::WorkloadState) -> String {
 }
 
 /// Map Rust ServiceState to the simplified SDK state names used by Python matchers.
-fn sdk_service_state_name(state: &model::ServiceState) -> String {
+pub(crate) fn sdk_service_state_name(state: &model::ServiceState) -> String {
     match state {
         model::ServiceState::Pending | model::ServiceState::Idle => "idle".into(),
         model::ServiceState::NeedBackend | model::ServiceState::Active { .. } => "active".into(),
@@ -241,6 +244,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolve_connection, m)?)?;
     m.add_class::<PyNamespaceModel>()?;
     m.add_class::<client::PyClient>()?;
+    m.add_class::<watcher::PyNamespaceWatcher>()?;
+    m.add_class::<stream::PyEventStream>()?;
+    m.add_class::<stream::PyLogStream>()?;
+    m.add_class::<network::PyUserspaceNetwork>()?;
+    m.add_class::<network::PyTcpStream>()?;
+    m.add_class::<network::PyUdpSocket>()?;
 
     // Exception hierarchy
     m.add("DistvirtError", m.py().get_type::<DistvirtError>())?;

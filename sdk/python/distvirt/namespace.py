@@ -4,16 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Callable
+from typing import Any, Callable
 
-import grpclib
-
-from distvirt._proto.distvirt.client.v1 import (
-    DistvirtClientStub,
-    StreamEventsRequest,
-)
-from distvirt.errors import StreamEndedError, handle_grpc_error
-from distvirt.events import EventStream
+from distvirt._core import PyClient, NamespaceWatcher
+from distvirt.errors import StreamEndedError
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +17,7 @@ class Namespace:
 
     Maintains an internal object model (backed by the Rust distvirt-client
     model) kept up-to-date by a background event stream. State queries
-    read from the local model — no RPC needed.
-
-    The event stream is opened eagerly on construction. This eliminates
-    races between apply() and wait_for().
+    read from the local model -- no RPC needed.
 
     Usage::
 
@@ -38,14 +29,14 @@ class Namespace:
     def __init__(
         self,
         namespace_id: str,
-        stub: DistvirtClientStub,
+        client_inner: PyClient,
+        watcher: NamespaceWatcher,
         model: Any,  # _core.NamespaceModel
-        event_stream: Any = None,
     ):
         self._namespace_id = namespace_id
-        self._stub = stub
+        self._client_inner = client_inner
+        self._watcher = watcher
         self._model = model
-        self._event_stream = event_stream
         self._event_task: asyncio.Task | None = None
         self._waiters: list[tuple[Callable, asyncio.Future]] = []
 
@@ -55,34 +46,26 @@ class Namespace:
 
     def _start_event_loop(self) -> None:
         """Start the background event consumption task."""
-        assert self._event_stream is not None, "event stream not set"
         self._event_task = asyncio.create_task(
             self._run_event_loop(),
             name=f"distvirt-events-{self._namespace_id}",
         )
 
     async def _run_event_loop(self) -> None:
-        """Consume events from the already-open StreamEvents RPC."""
+        """Consume events from the Rust NamespaceWatcher."""
         try:
-            async for event in self._event_stream:
-                proto_bytes = bytes(event)
-                changed = self._model.apply_event_bytes(proto_bytes)
-                if changed:
-                    self._notify_waiters()
-            # Stream ended normally — fail waiters so they don't hang
-            self._fail_waiters(
-                StreamEndedError("event stream ended unexpectedly")
-            )
+            while True:
+                change = await self._watcher.next()
+                if change is None:
+                    self._fail_waiters(
+                        StreamEndedError("event stream ended unexpectedly")
+                    )
+                    break
+                # Refresh model from watcher after each event
+                self._model = self._watcher.model()
+                self._notify_waiters()
         except asyncio.CancelledError:
             raise
-        except grpclib.GRPCError as e:
-            err = handle_grpc_error(e)
-            logger.error(
-                "Event loop for namespace %s failed: %s",
-                self._namespace_id,
-                err,
-            )
-            self._fail_waiters(err)
         except Exception as e:
             logger.exception(
                 "Event loop for namespace %s terminated with error",
@@ -118,13 +101,10 @@ class Namespace:
             except asyncio.CancelledError:
                 pass
             self._event_task = None
+        await self._watcher.close()
 
     def status(self) -> Any:
-        """Return the Rust-backed namespace model.
-
-        This is a synchronous read — no RPC. The model is kept
-        current by the background event stream.
-        """
+        """Return the Rust-backed namespace model."""
         return self._model
 
     def workload(self, workload_id: str) -> "Workload":
@@ -144,25 +124,48 @@ class Namespace:
         *,
         workloads: list[str] | None = None,
         services: list[str] | None = None,
-    ) -> EventStream:
+    ) -> "EventStream":
         """Stream namespace events as an async iterator.
 
-        Opens a separate StreamEvents RPC (independent of the internal
-        model stream).
+        Opens a separate event stream (independent of the internal model stream).
         """
-        request = StreamEventsRequest(
-            namespace_id=self._namespace_id,
-            workload_ids=workloads or [],
-            service_ids=services or [],
-        )
-        stream = self._stub.stream_events(request)
-        return EventStream(stream)
+        from distvirt.events import EventStream
+
+        async def _open():
+            inner = await self._client_inner.stream_events(
+                self._namespace_id,
+                workloads or [],
+                services or [],
+            )
+            return EventStream(inner)
+
+        # Return a coroutine-wrapping helper so callers do `async for ev in await ns.events()`
+        # Actually, return an awaitable that yields the EventStream
+        import asyncio
+        return asyncio.ensure_future(_open())
 
     def logs(
         self,
         *,
         workload: str | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> Any:
         """Stream logs as an async iterator."""
-        # TODO: open StreamLogs RPC, return async iterator
-        raise NotImplementedError
+        from distvirt.events import LogStream
+
+        async def _open():
+            inner = await self._client_inner.stream_logs(
+                self._namespace_id,
+                workload,
+            )
+            return LogStream(inner)
+
+        import asyncio
+        return asyncio.ensure_future(_open())
+
+    async def connect(self) -> "Network":
+        """Open a userspace WireGuard tunnel to this namespace."""
+        from distvirt.network import Network
+        from distvirt._core import UserspaceNetwork
+
+        inner = await UserspaceNetwork.connect(self._client_inner, self._namespace_id)
+        return Network(inner, self._client_inner)

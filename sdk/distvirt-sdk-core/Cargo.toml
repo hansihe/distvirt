@@ -14,3 +14,6 @@ prost = "0.13"
 pyo3 = { version = "0.28", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tonic = "0.12"
+anyhow = "1"
+log = "0.4"

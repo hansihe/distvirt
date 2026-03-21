@@ -1318,12 +1318,15 @@ dependencies = [
 name = "distvirt-sdk-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "distvirt-client",
  "distvirt-client-protocol",
+ "log",
  "prost",
  "pyo3",
  "pyo3-async-runtimes",
  "tokio",
+ "tonic",
 ]
 
 [[package]]
