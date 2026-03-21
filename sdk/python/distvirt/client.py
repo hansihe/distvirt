@@ -14,6 +14,7 @@ from distvirt._proto.distvirt.client.v1 import (
     ListNamespacesRequest,
     NamespaceSpec,
     NamespaceStatusReport,
+    StreamEventsRequest,
     UpdateNamespaceRequest,
 )
 from distvirt.namespace import Namespace
@@ -120,17 +121,31 @@ class Client:
         return await self._open_namespace(namespace_id)
 
     async def _open_namespace(self, namespace_id: str) -> Namespace:
-        """Create a Namespace handle with bootstrapped model and event stream."""
-        ns = Namespace(namespace_id=namespace_id, stub=self._stub)
+        """Create a Namespace handle with bootstrapped model and event stream.
 
-        # Bootstrap model from current status
+        Opens the event stream *before* fetching status, so any events
+        that occur between the two calls are buffered and not lost.
+        Events that duplicate the status snapshot are harmless — applying
+        a state the model is already in is a no-op.
+        """
+        # 1. Open event stream first — starts buffering immediately
+        request = StreamEventsRequest(namespace_id=namespace_id)
+        event_stream = self._stub.stream_events(request)
+
+        ns = Namespace(
+            namespace_id=namespace_id,
+            stub=self._stub,
+            event_stream=event_stream,
+        )
+
+        # 2. Bootstrap model from current status snapshot
         resp = await self._stub.get_namespace_status(
             GetNamespaceStatusRequest(namespace_id=namespace_id)
         )
         ns._model.apply_status(resp.status)
 
-        # Start background event consumption
-        await ns._start_event_loop()
+        # 3. Start consuming buffered + future events
+        ns._start_event_loop()
 
         return ns
 

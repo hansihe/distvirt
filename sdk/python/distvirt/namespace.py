@@ -40,32 +40,34 @@ class Namespace:
         namespace_id: str,
         stub: DistvirtClientStub,
         model: NamespaceModel | None = None,
+        event_stream: Any = None,
     ):
         self._namespace_id = namespace_id
         self._stub = stub
         self._model = model or NamespaceModel(namespace_id=namespace_id)
+        self._event_stream = event_stream
         self._event_task: asyncio.Task | None = None
 
     @property
     def namespace_id(self) -> str:
         return self._namespace_id
 
-    async def _start_event_loop(self) -> None:
+    def _start_event_loop(self) -> None:
         """Start the background event consumption task.
 
-        Opens a StreamEvents RPC and continuously applies events to the
-        internal model in a background asyncio task.
+        Consumes from the event stream (which must already be open)
+        and applies events to the internal model.
         """
+        assert self._event_stream is not None, "event stream not set"
         self._event_task = asyncio.create_task(
             self._run_event_loop(),
             name=f"distvirt-events-{self._namespace_id}",
         )
 
     async def _run_event_loop(self) -> None:
-        """Consume events from the StreamEvents RPC and apply to the model."""
+        """Consume events from the already-open StreamEvents RPC."""
         try:
-            request = StreamEventsRequest(namespace_id=self._namespace_id)
-            async for event in self._stub.stream_events(request):
+            async for event in self._event_stream:
                 self._model.apply_event(event)
         except asyncio.CancelledError:
             raise
