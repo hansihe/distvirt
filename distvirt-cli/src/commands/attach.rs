@@ -3,12 +3,11 @@ use std::io::Write;
 use anyhow::{bail, Context};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
+use distvirt_client::connection::{handle_grpc_error, Client};
 use distvirt_client_protocol::*;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-
-use crate::client::{self, Client};
 
 const DEFAULT_DETACH_KEYS: (KeyEvent, KeyEvent) = (
     KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
@@ -36,14 +35,14 @@ pub async fn attach(
     let response = client
         .attach_workload(ReceiverStream::new(input_rx))
         .await
-        .map_err(client::handle_grpc_error)?;
+        .map_err(handle_grpc_error)?;
     let mut output_stream = response.into_inner();
 
     // Wait for AttachStarted to know if this is a TTY session.
     let first_msg = output_stream
         .message()
         .await
-        .map_err(client::handle_grpc_error)?
+        .map_err(handle_grpc_error)?
         .context("stream closed before AttachStarted")?;
 
     let is_tty = match first_msg.output {
@@ -147,7 +146,7 @@ async fn run_attach_loop(
 
             // Server output.
             msg = output_stream.message() => {
-                let msg = msg.map_err(client::handle_grpc_error)?;
+                let msg = msg.map_err(handle_grpc_error)?;
                 let Some(msg) = msg else { break };
 
                 match msg.output {

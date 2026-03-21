@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use distvirt_client_protocol::*;
+use distvirt_client::connection::{handle_grpc_error, Client};
 
-use crate::client::{self, Client};
 use crate::format;
 
 pub async fn logs(
@@ -11,18 +10,11 @@ pub async fn logs(
     workload: Option<&str>,
     follow: bool,
 ) -> anyhow::Result<()> {
-    let mut stream = client
-        .stream_logs(StreamLogsRequest {
-            namespace_id: namespace_id.to_string(),
-            workload_id: workload.map(|w| w.to_string()),
-            container_ids: vec![],
-        })
-        .await
-        .map_err(client::handle_grpc_error)?
-        .into_inner();
+    let mut stream =
+        distvirt_client::operations::stream_logs(&mut client, namespace_id, workload).await?;
 
     if follow {
-        while let Some(chunk) = stream.message().await.map_err(client::handle_grpc_error)? {
+        while let Some(chunk) = stream.message().await.map_err(handle_grpc_error)? {
             format::print_log_chunk(&chunk);
         }
     } else {
@@ -30,7 +22,7 @@ pub async fn logs(
             match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
                 Ok(Ok(Some(chunk))) => format::print_log_chunk(&chunk),
                 Ok(Ok(None)) | Err(_) => break,
-                Ok(Err(e)) => return Err(client::handle_grpc_error(e)),
+                Ok(Err(e)) => return Err(handle_grpc_error(e)),
             }
         }
     }
@@ -45,18 +37,12 @@ pub async fn events(
     services: &[String],
     follow: bool,
 ) -> anyhow::Result<()> {
-    let mut stream = client
-        .stream_events(StreamEventsRequest {
-            namespace_id: namespace_id.to_string(),
-            workload_ids: workloads.to_vec(),
-            service_ids: services.to_vec(),
-        })
-        .await
-        .map_err(client::handle_grpc_error)?
-        .into_inner();
+    let mut stream =
+        distvirt_client::operations::stream_events(&mut client, namespace_id, workloads, services)
+            .await?;
 
     if follow {
-        while let Some(event) = stream.message().await.map_err(client::handle_grpc_error)? {
+        while let Some(event) = stream.message().await.map_err(handle_grpc_error)? {
             format::print_event_line(&event);
         }
     } else {
@@ -64,7 +50,7 @@ pub async fn events(
             match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
                 Ok(Ok(Some(event))) => format::print_event_line(&event),
                 Ok(Ok(None)) | Err(_) => break,
-                Ok(Err(e)) => return Err(client::handle_grpc_error(e)),
+                Ok(Err(e)) => return Err(handle_grpc_error(e)),
             }
         }
     }

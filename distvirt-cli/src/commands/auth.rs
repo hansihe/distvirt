@@ -1,6 +1,10 @@
-use crate::config;
+use distvirt_client::config;
 
-pub fn login(server: Option<&str>, token: Option<&str>, context: Option<&str>) -> anyhow::Result<()> {
+pub fn login(
+    server: Option<&str>,
+    token: Option<&str>,
+    context: Option<&str>,
+) -> anyhow::Result<()> {
     let server = server.ok_or_else(|| anyhow::anyhow!("--server is required for login"))?;
     let token = token.ok_or_else(|| anyhow::anyhow!("--token is required for login"))?;
 

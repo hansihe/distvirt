@@ -2,7 +2,7 @@
 title: "Code Quality Review"
 ---
 
-Reviewed all crates except `distvirt-compose`. March 2026.
+Reviewed all crates. March 2026.
 
 ---
 

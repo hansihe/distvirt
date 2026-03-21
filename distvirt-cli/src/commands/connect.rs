@@ -13,8 +13,7 @@ use tokio::sync::Mutex;
 
 use rand::rngs::OsRng;
 
-use crate::client::{self, Client};
-use crate::connection::ConnectionParams;
+use distvirt_client::connection::{handle_grpc_error, Client, ConnectionParams};
 use crate::platform::{TunDevice, add_route, configure_interface, remove_route};
 
 const MAX_PACKET_SIZE: usize = 65536;
@@ -118,7 +117,7 @@ pub async fn connect(
                 client_public_key: public_key.as_bytes().to_vec(),
             })
             .await
-            .map_err(client::handle_grpc_error)?
+            .map_err(handle_grpc_error)?
             .into_inner();
 
         let server_public_key_bytes: [u8; 32] = resp
@@ -166,7 +165,7 @@ pub async fn connect(
             client_public_key: public_key.as_bytes().to_vec(),
         })
         .await
-        .map_err(client::handle_grpc_error)?
+        .map_err(handle_grpc_error)?
         .into_inner();
 
     let server_public_key_bytes: [u8; 32] = resp
@@ -275,7 +274,7 @@ pub async fn disconnect(mut client: Client, namespace_id: &str) -> anyhow::Resul
             client_public_key: pubkey_bytes,
         })
         .await
-        .map_err(client::handle_grpc_error)?;
+        .map_err(handle_grpc_error)?;
 
     // Send SIGTERM to the connect process (if still running).
     let pid = state.pid as i32;

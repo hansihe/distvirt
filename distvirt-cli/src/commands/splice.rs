@@ -1,6 +1,5 @@
+use distvirt_client::connection::{handle_grpc_error, Client};
 use distvirt_client_protocol::*;
-
-use crate::client::{self, Client};
 
 pub async fn splice(
     mut client: Client,
@@ -15,7 +14,7 @@ pub async fn splice(
             local_worker_id: worker_id.to_string(),
         })
         .await
-        .map_err(client::handle_grpc_error)?;
+        .map_err(handle_grpc_error)?;
 
     eprintln!(
         "spliced {}/{} to worker {}",
@@ -33,7 +32,7 @@ pub async fn splice(
             workload_id: workload_id.to_string(),
         })
         .await
-        .map_err(client::handle_grpc_error)?;
+        .map_err(handle_grpc_error)?;
 
     eprintln!("unspliced");
     Ok(())

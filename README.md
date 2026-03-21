@@ -102,7 +102,6 @@ The `dv` CLI has two layers:
 | `distvirt-worker-protocol` | Orchestrator-worker protocol (Cap'n Proto over yamux) |
 | `distvirt-client-protocol` | Client-orchestrator gRPC protocol (tonic/prost, `.proto` definitions) |
 | `distvirt-guest-protocol` | Host-guest vsock protocol types |
-| `distvirt-compose` | Docker Compose parsing and deployment planning |
 | `distvirt-activator` | Protocol activator runtime (WASM component support) |
 | `guest-image/guest-init` | Guest agent (PID 1 in the VM, static musl binary) |
 

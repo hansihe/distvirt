@@ -7,19 +7,15 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use distvirt_client_protocol::*;
 use futures::StreamExt;
-use tokio::time::{self, Duration};
-use tonic::Streaming;
 
-use crate::client::{self, Client};
-use crate::format;
+use distvirt_client::format::render_event_line;
+use distvirt_client::model::NamespaceModel;
+use distvirt_client::watcher::NamespaceWatcher;
 
-const DEBOUNCE_MS: u64 = 100;
 const SEPARATOR: &str = "── Recent Events ";
 
 struct WatchState {
-    report: Option<NamespaceStatusReport>,
     events: VecDeque<String>,
     max_events: usize,
 }
@@ -27,7 +23,6 @@ struct WatchState {
 impl WatchState {
     fn new() -> Self {
         Self {
-            report: None,
             events: VecDeque::new(),
             max_events: 15,
         }
@@ -51,21 +46,17 @@ impl WatchState {
 }
 
 /// Render the full screen into a buffer string.
-fn render(state: &WatchState, width: u16, height: u16) -> String {
+fn render(model: &NamespaceModel, watch: &WatchState, width: u16, height: u16) -> String {
     let mut buf = String::new();
 
     // Status section
-    let status_text = match &state.report {
-        Some(report) => format::render_namespace_overview(report),
-        None => "Loading...\n".to_string(),
-    };
+    let status_text = render_model_overview(model);
 
     let status_lines: Vec<&str> = status_text.lines().collect();
     let n_status = status_lines.len();
 
     for line in &status_lines {
         buf.push_str(line);
-        // Clear to end of line
         buf.push_str("\x1b[K");
         buf.push('\n');
     }
@@ -79,13 +70,12 @@ fn render(state: &WatchState, width: u16, height: u16) -> String {
     buf.push('\n');
 
     // Events section — fill remaining lines
-    let used = n_status + 1; // status + separator
+    let used = n_status + 1;
     let event_rows = (height as usize).saturating_sub(used);
 
-    // Show most recent events that fit
-    let start = state.events.len().saturating_sub(event_rows);
+    let start = watch.events.len().saturating_sub(event_rows);
     let mut printed = 0;
-    for line in state.events.iter().skip(start) {
+    for line in watch.events.iter().skip(start) {
         if printed >= event_rows {
             break;
         }
@@ -99,6 +89,66 @@ fn render(state: &WatchState, width: u16, height: u16) -> String {
     for _ in printed..event_rows {
         buf.push_str("\x1b[K");
         buf.push('\n');
+    }
+
+    buf
+}
+
+/// Render a namespace overview from the model.
+fn render_model_overview(model: &NamespaceModel) -> String {
+    use std::fmt::Write;
+    let mut buf = String::new();
+
+    writeln!(
+        &mut buf,
+        "Namespace: {}  State: {}",
+        model.namespace_id,
+        model.state.label()
+    )
+    .unwrap();
+    writeln!(&mut buf).unwrap();
+
+    if model.workloads.is_empty() && model.services.is_empty() {
+        writeln!(&mut buf, "  (no workloads)").unwrap();
+        return buf;
+    }
+
+    let mut sorted_workloads: Vec<_> = model.workloads.iter().collect();
+    sorted_workloads.sort_by_key(|(id, _)| id.as_str());
+    let mut sorted_services: Vec<_> = model.services.iter().collect();
+    sorted_services.sort_by_key(|(id, _)| id.as_str());
+
+    for (workload_id, workload) in &sorted_workloads {
+        let state = workload.state.label();
+        let spliced = if workload.spliced { " [spliced]" } else { "" };
+        let ip = workload.ip.as_deref().unwrap_or("");
+        if ip.is_empty() {
+            writeln!(&mut buf, "  workload/{:<20} {}{}", workload_id, state, spliced).unwrap();
+        } else {
+            writeln!(
+                &mut buf,
+                "  workload/{:<20} {}  {}{}",
+                workload_id, state, ip, spliced
+            )
+            .unwrap();
+        }
+
+        for (svc_id, svc) in &sorted_services {
+            if svc.workload_id.as_str() == workload_id.as_str() {
+                let svc_state = svc.state.label();
+                let activation = if svc.activation_enabled {
+                    " (activation)"
+                } else {
+                    ""
+                };
+                writeln!(
+                    &mut buf,
+                    "    service/{:<18} {}{}",
+                    svc_id, svc_state, activation
+                )
+                .unwrap();
+            }
+        }
     }
 
     buf
@@ -125,71 +175,42 @@ impl Drop for TerminalGuard {
 }
 
 pub async fn run(
-    mut client: Client,
-    namespace_id: &str,
-    mut event_stream: Streaming<NamespaceEvent>,
+    watcher: NamespaceWatcher,
 ) -> anyhow::Result<()> {
     let _guard = TerminalGuard::enter()?;
 
-    let mut state = WatchState::new();
-    let mut term_events = EventStream::new();
+    // Split watcher into model + stream so we can use them independently
+    // in the select loop.
+    let (mut model, mut event_stream) = watcher.into_parts();
 
-    // Initial status fetch
-    let resp = client
-        .get_namespace_status(GetNamespaceStatusRequest {
-            namespace_id: namespace_id.to_string(),
-        })
-        .await
-        .map_err(client::handle_grpc_error)?;
-    state.report = resp.into_inner().status;
+    let mut watch = WatchState::new();
+    let mut term_events = EventStream::new();
 
     // Initial render
     let (mut cols, mut rows) = terminal::size()?;
-    state.update_max_events(
-        rows,
-        state
-            .report
-            .as_ref()
-            .map(|r| format::render_namespace_overview(r).lines().count())
-            .unwrap_or(1),
-    );
-    redraw(&state, cols, rows)?;
-
-    // Debounce state
-    let mut refetch_pending = false;
-    let mut debounce_deadline: Option<time::Instant> = None;
+    let status_text = render_model_overview(&model);
+    watch.update_max_events(rows, status_text.lines().count());
+    redraw(&model, &watch, cols, rows)?;
 
     loop {
-        // Compute sleep future for debounce
-        let debounce_sleep = match debounce_deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline),
-            None => {
-                // Sleep forever (won't fire)
-                tokio::time::sleep(Duration::from_secs(86400))
-            }
-        };
-        let debounce_active = debounce_deadline.is_some();
-
         tokio::select! {
             // gRPC event stream
             msg = event_stream.message() => {
                 match msg {
                     Ok(Some(event)) => {
-                        let line = format::render_event_line(&event);
-                        state.push_event(line);
+                        let line = render_event_line(&event);
+                        watch.push_event(line);
 
-                        // Start debounce if not already pending
-                        if !refetch_pending {
-                            refetch_pending = true;
-                            debounce_deadline = Some(time::Instant::now() + Duration::from_millis(DEBOUNCE_MS));
-                        }
+                        // Apply event to model
+                        model.apply_event(&event);
 
-                        redraw(&state, cols, rows)?;
+                        let status_lines = render_model_overview(&model).lines().count();
+                        watch.update_max_events(rows, status_lines);
+                        redraw(&model, &watch, cols, rows)?;
                     }
                     Ok(None) => {
-                        // Stream ended
-                        state.push_event("(event stream ended)".to_string());
-                        redraw(&state, cols, rows)?;
+                        watch.push_event("(event stream ended)".to_string());
+                        redraw(&model, &watch, cols, rows)?;
                         // Wait for user to quit
                         loop {
                             if let Some(Ok(Event::Key(key))) = term_events.next().await {
@@ -200,35 +221,7 @@ pub async fn run(
                         }
                     }
                     Err(status) => {
-                        return Err(client::handle_grpc_error(status));
-                    }
-                }
-            }
-
-            // Debounce timer fired — re-fetch status
-            _ = debounce_sleep, if debounce_active => {
-                refetch_pending = false;
-                debounce_deadline = None;
-
-                match client
-                    .get_namespace_status(GetNamespaceStatusRequest {
-                        namespace_id: namespace_id.to_string(),
-                    })
-                    .await
-                {
-                    Ok(resp) => {
-                        state.report = resp.into_inner().status;
-                        let status_lines = state
-                            .report
-                            .as_ref()
-                            .map(|r| format::render_namespace_overview(r).lines().count())
-                            .unwrap_or(1);
-                        state.update_max_events(rows, status_lines);
-                        redraw(&state, cols, rows)?;
-                    }
-                    Err(status) => {
-                        state.push_event(format!("(status fetch error: {})", status.message()));
-                        redraw(&state, cols, rows)?;
+                        return Err(distvirt_client::connection::handle_grpc_error(status));
                     }
                 }
             }
@@ -244,13 +237,9 @@ pub async fn run(
                     Some(Ok(Event::Resize(new_cols, new_rows))) => {
                         cols = new_cols;
                         rows = new_rows;
-                        let status_lines = state
-                            .report
-                            .as_ref()
-                            .map(|r| format::render_namespace_overview(r).lines().count())
-                            .unwrap_or(1);
-                        state.update_max_events(rows, status_lines);
-                        redraw(&state, cols, rows)?;
+                        let status_lines = render_model_overview(&model).lines().count();
+                        watch.update_max_events(rows, status_lines);
+                        redraw(&model, &watch, cols, rows)?;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
@@ -265,10 +254,9 @@ pub async fn run(
     }
 }
 
-fn redraw(state: &WatchState, cols: u16, rows: u16) -> io::Result<()> {
-    let buf = render(state, cols, rows);
+fn redraw(model: &NamespaceModel, watch: &WatchState, cols: u16, rows: u16) -> io::Result<()> {
+    let buf = render(model, watch, cols, rows);
     let mut stdout = io::stdout();
-    // Move cursor to top-left and write the whole buffer at once
     stdout.execute(cursor::MoveTo(0, 0))?;
     stdout.write_all(buf.as_bytes())?;
     stdout.flush()?;

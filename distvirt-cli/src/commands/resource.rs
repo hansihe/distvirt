@@ -1,6 +1,6 @@
+use distvirt_client::connection::{handle_grpc_error, Client};
 use distvirt_client_protocol::*;
 
-use crate::client::{self, Client};
 use crate::commands::OutputFormat;
 use crate::format;
 
@@ -15,7 +15,7 @@ pub async fn get(
             let resp = client
                 .list_namespaces(ListNamespacesRequest {})
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let namespaces = &resp.into_inner().namespaces;
             match output {
                 OutputFormat::Text => format::print_namespace_table(namespaces),
@@ -31,7 +31,7 @@ pub async fn get(
             let resp = client
                 .list_workers(ListWorkersRequest {})
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let workers = &resp.into_inner().workers;
             match output {
                 OutputFormat::Text => format::print_worker_table(workers),
@@ -51,7 +51,7 @@ pub async fn get(
                     namespace_id: ns.to_string(),
                 })
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let pods = &resp.into_inner().pods;
             match output {
                 OutputFormat::Text => format::print_pod_table(pods),
@@ -71,7 +71,7 @@ pub async fn get(
                     namespace_id: ns.to_string(),
                 })
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let report = resp
                 .into_inner()
                 .status
@@ -81,7 +81,9 @@ pub async fn get(
                 OutputFormat::Json => {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&format::workloads_to_json(&report.workloads))?
+                        serde_json::to_string_pretty(&format::workloads_to_json(
+                            &report.workloads
+                        ))?
                     );
                 }
             }
@@ -94,7 +96,7 @@ pub async fn get(
                     namespace_id: ns.to_string(),
                 })
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let report = resp
                 .into_inner()
                 .status
@@ -132,7 +134,7 @@ pub async fn describe(
                     namespace_id: name.to_string(),
                 })
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let report = resp
                 .into_inner()
                 .status
@@ -153,7 +155,7 @@ pub async fn describe(
                     worker_id: name.to_string(),
                 })
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             let worker = resp
                 .into_inner()
                 .worker
@@ -186,7 +188,7 @@ pub async fn delete(mut client: Client, resource: &str, name: &str) -> anyhow::R
                     namespace_id: name.to_string(),
                 })
                 .await
-                .map_err(client::handle_grpc_error)?;
+                .map_err(handle_grpc_error)?;
             eprintln!("namespace '{}' deleted", name);
         }
         other => {

@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-mod client;
 mod commands;
-mod config;
 mod connection;
 mod format;
 mod platform;
@@ -332,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.token.as_deref(),
                 cli.context.as_deref(),
             )?;
-            let client = client::connect(&params).await?;
+            let client = distvirt_client::connection::connect(&params).await?;
 
             match cmd {
                 Commands::Task(TaskCommands::Spec {

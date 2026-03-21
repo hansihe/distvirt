@@ -20,7 +20,6 @@ Workspace members (from `Cargo.toml`):
 | `distvirt-orchestrator` | Orchestrator state machine + async shell + gRPC server |
 | `distvirt-client-protocol` | Client↔orchestrator gRPC protocol (tonic + prost, `.proto` definitions) |
 | `distvirt-cli` | CLI binary (`dv` commands — compose-up, status, etc.) |
-| `distvirt-compose` | Docker Compose parsing, deployment planning |
 | `distvirt-activator` | Protocol activator runtime (WASM component support) |
 | `distvirt-tests` | Orchestrator scenario tests (harness + 12 scenario modules) |
 | `guest-image/guest-init` | Guest agent (PID 1 in the VM, static musl binary) |
