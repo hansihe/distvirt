@@ -524,7 +524,7 @@ fn workload_self_destructs_on_spec_removal() {
     // Pod lost its owner edge → terminal + no owner → self-destruct.
     // The pod may need a worker status update to reach terminal first.
     // Send a Failed status to trigger the reaping rule.
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     assert!(router.get_pod(&pod_id).is_none());
@@ -604,8 +604,8 @@ fn full_teardown_cascade() {
     assert!(router.get_workload(&W2).is_none());
 
     // Pods lost owners — send terminal status to trigger reaping.
-    router.send_notify_pod_status(worker, pod1, PodStatus::Failed);
-    router.send_notify_pod_status(worker, pod2, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod1, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
+    router.send_notify_pod_status(worker, pod2, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     assert!(router.get_pod(&pod1).is_none());
@@ -662,7 +662,7 @@ fn teardown_during_suspend() {
     assert!(router.get_service(&S1).is_none());
 
     // Pod lost owner — send terminal status to trigger reaping.
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     assert!(router.get_pod(&pod_id).is_none());

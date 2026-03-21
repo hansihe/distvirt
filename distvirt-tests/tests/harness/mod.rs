@@ -467,8 +467,8 @@ impl TestCluster {
     #[allow(dead_code)]
     pub async fn assert_workload_failed(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_status(ns_id, wl_id).await;
-        assert_eq!(
-            state, WorkloadStatus::Failed,
+        assert!(
+            matches!(state, WorkloadStatus::Failed { .. }),
             "workload '{}/{}': expected failed, got {}",
             ns_id, wl_id, state
         );

@@ -129,7 +129,7 @@ fn pod_disappears_stop() {
 
     // Make pod fail → pod is retained for inspectability (no Stop yet).
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);

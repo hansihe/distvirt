@@ -44,6 +44,11 @@ service DistvirtClient {
 
 // --- Spec Types ---
 
+enum RunPolicy {
+    RUN_POLICY_SERVICE = 0;      // long-lived, restart on any exit (default)
+    RUN_POLICY_JOB = 1;          // run-to-completion, exit 0 = done, non-zero = retry with backoff
+}
+
 message NamespaceSpec {
     NetworkConfig network = 1;
     map<string, WorkloadSpec> workloads = 2;
@@ -60,6 +65,9 @@ message WorkloadSpec {
     // If false (default), the workload is always-on.
     bool respects_demand = 6;
     repeated VolumeSpec volumes = 7;
+    // Whether this workload runs as a long-lived service or a run-to-completion job.
+    // Defaults to SERVICE if unset.
+    RunPolicy run_policy = 8;
 }
 
 message ResourceValues {
@@ -275,8 +283,13 @@ message WorkloadSuspending {
 
 message WorkloadSuspended {}
 message WorkloadRetryBackoff {}
-message WorkloadFailed {}
-message WorkloadCompleted {}
+message WorkloadFailed {
+    optional int32 exit_code = 1;
+    string reason = 2;
+}
+message WorkloadCompleted {
+    int32 exit_code = 1;
+}
 
 message ServiceStatusReport {
     string workload_id = 1;
@@ -440,6 +453,9 @@ enum PodState {
     POD_STATE_SUSPENDING = 3;
     POD_STATE_SUSPENDED = 4;
     POD_STATE_RESUMING = 5;
+    POD_STATE_FINISHED = 6;
+    POD_STATE_FAILED = 7;
+    POD_STATE_DISPLACED = 8;
 }
 
 // --- Events ---

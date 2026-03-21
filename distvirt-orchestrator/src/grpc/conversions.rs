@@ -62,6 +62,8 @@ fn parse_network_config(subnet_str: &str) -> Result<NetworkConfig, Status> {
 }
 
 fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, Status> {
+    let run_policy = convert_proto_run_policy(wl.run_policy());
+
     let network = wl
         .network
         .ok_or_else(|| Status::invalid_argument("workload missing network config"))?;
@@ -157,10 +159,17 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         suspend_on_idle: wl.suspend_on_idle,
         resources,
         activation,
-        run_policy: Default::default(),
+        run_policy,
         respects_demand: wl.respects_demand,
         volumes,
     })
+}
+
+fn convert_proto_run_policy(policy: proto::RunPolicy) -> RunPolicy {
+    match policy {
+        proto::RunPolicy::Service => RunPolicy::Service,
+        proto::RunPolicy::Job => RunPolicy::Job,
+    }
 }
 
 fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec, Status> {
@@ -347,13 +356,20 @@ pub(super) fn convert_pod_status_report(pod: PodStatusReport) -> proto::PodInfo 
         worker_id: pod.worker_id.0.to_string(),
         ip: pod.ip,
         mac: String::new(),
-        state: match pod.state {
-            PodStatus::Launching => proto::PodState::Launching as i32,
-            PodStatus::Running => proto::PodState::Running as i32,
-            PodStatus::Suspending => proto::PodState::Suspending as i32,
-            PodStatus::Suspended => proto::PodState::Suspended as i32,
-            PodStatus::Resuming => proto::PodState::Resuming as i32,
-        },
+        state: convert_pod_state(&pod.state),
+    }
+}
+
+fn convert_pod_state(state: &PodStatus) -> i32 {
+    match state {
+        PodStatus::Launching => proto::PodState::Launching as i32,
+        PodStatus::Running => proto::PodState::Running as i32,
+        PodStatus::Suspending => proto::PodState::Suspending as i32,
+        PodStatus::Suspended => proto::PodState::Suspended as i32,
+        PodStatus::Resuming => proto::PodState::Resuming as i32,
+        PodStatus::Finished { .. } => proto::PodState::Finished as i32,
+        PodStatus::Failed { .. } => proto::PodState::Failed as i32,
+        PodStatus::Displaced => proto::PodState::Displaced as i32,
     }
 }
 
@@ -438,13 +454,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
                 workload_id: pod.workload_id.0.clone(),
                 worker_id: pod.worker_id.0.to_string(),
                 ip: pod.ip.clone(),
-                state: match pod.state {
-                    PodStatus::Launching => proto::PodState::Launching as i32,
-                    PodStatus::Running => proto::PodState::Running as i32,
-                    PodStatus::Suspending => proto::PodState::Suspending as i32,
-                    PodStatus::Suspended => proto::PodState::Suspended as i32,
-                    PodStatus::Resuming => proto::PodState::Resuming as i32,
-                },
+                state: convert_pod_state(&pod.state),
             },
         );
     }
@@ -489,9 +499,17 @@ fn convert_workload_state(
         WorkloadStatus::RetryBackoff => {
             proto::workload_state::State::RetryBackoff(proto::WorkloadRetryBackoff {})
         }
-        WorkloadStatus::Failed => proto::workload_state::State::Failed(proto::WorkloadFailed {}),
-        WorkloadStatus::Completed => {
-            proto::workload_state::State::Completed(proto::WorkloadCompleted {})
+        WorkloadStatus::Failed {
+            exit_code,
+            reason,
+        } => proto::workload_state::State::Failed(proto::WorkloadFailed {
+            exit_code: *exit_code,
+            reason: reason.clone(),
+        }),
+        WorkloadStatus::Completed { exit_code } => {
+            proto::workload_state::State::Completed(proto::WorkloadCompleted {
+                exit_code: *exit_code,
+            })
         }
     };
     proto::WorkloadState { state: Some(state) }
@@ -634,14 +652,16 @@ fn convert_pod_status_transition(
                 snapshot_id: String::new(),
             }))
         }
-        (_, sm::PodStatus::Finished) => {
+        (_, sm::PodStatus::Finished { exit_code }) => {
             Some(proto::pod_event::Event::Stopped(proto::PodStopped {
-                exit_code: 0,
+                exit_code: *exit_code,
             }))
         }
-        (_, sm::PodStatus::Failed) => Some(proto::pod_event::Event::Failed(proto::PodFailed {
-            reason: "pod failed".to_string(),
-        })),
+        (_, sm::PodStatus::Failed { reason, .. }) => {
+            Some(proto::pod_event::Event::Failed(proto::PodFailed {
+                reason: reason.clone(),
+            }))
+        }
         (_, sm::PodStatus::Displaced) => {
             Some(proto::pod_event::Event::Displaced(proto::PodDisplaced {}))
         }

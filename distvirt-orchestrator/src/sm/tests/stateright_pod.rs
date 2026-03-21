@@ -312,10 +312,10 @@ impl Model for PodNewModel {
                 apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Running))
             }
             PodNewAction::NotifyFailed => {
-                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Failed))
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() }))
             }
             PodNewAction::NotifyFinished => {
-                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Finished))
+                apply_pod_input(state, PodInput::NotifyPodStatus(PodStatus::Finished { exit_code: 0 }))
             }
             PodNewAction::NotifySuspended => {
                 apply_pod_input(state, PodInput::NotifyPodSuspended(ArtifactPortId(1)))
@@ -353,8 +353,8 @@ impl Model for PodNewModel {
                     matches!(
                         state.sm.status,
                         PodStatus::Suspended { .. }
-                            | PodStatus::Failed
-                            | PodStatus::Finished
+                            | PodStatus::Failed { .. }
+                            | PodStatus::Finished { .. }
                             | PodStatus::Displaced
                     )
                 } else {
@@ -455,11 +455,20 @@ impl Representative for PodNewModelState {
             s.sm.workload_id = Some(WorkloadId(0));
         }
 
-        // Normalize artifact_id in Suspended status and resume_artifact.
+        // Normalize data in terminal status variants.
         if let PodStatus::Suspended { .. } = s.sm.status {
             s.sm.status = PodStatus::Suspended {
                 artifact_id: ArtifactPortId(0),
             };
+        }
+        if let PodStatus::Failed { .. } = s.sm.status {
+            s.sm.status = PodStatus::Failed {
+                exit_code: None,
+                reason: String::new(),
+            };
+        }
+        if let PodStatus::Finished { .. } = s.sm.status {
+            s.sm.status = PodStatus::Finished { exit_code: 0 };
         }
         if let Some(_) = s.sm.resume_artifact {
             s.sm.resume_artifact = Some(ArtifactPortId(0));

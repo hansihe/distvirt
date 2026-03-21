@@ -98,6 +98,7 @@ pub enum WorkerNamespaceEventKind {
     },
     PodFailed {
         pod_id: distvirt_worker_protocol::PodId,
+        error: String,
     },
     PodSuspended {
         pod_id: distvirt_worker_protocol::PodId,

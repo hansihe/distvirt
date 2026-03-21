@@ -455,7 +455,7 @@ impl Model for WlNewModel {
             WlNewAction::PodFailed => {
                 let mut s = apply_input(
                     state,
-                    WorkloadInput::PodStatusInput(vec![PodStatus::Failed]),
+                    WorkloadInput::PodStatusInput(vec![PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() }]),
                 );
                 // If SM retained the pod for inspectability, mark env as terminal.
                 if s.sm.pod_id.is_some() {
@@ -471,7 +471,7 @@ impl Model for WlNewModel {
             ),
             WlNewAction::PodFinished => apply_input(
                 state,
-                WorkloadInput::PodStatusInput(vec![PodStatus::Finished]),
+                WorkloadInput::PodStatusInput(vec![PodStatus::Finished { exit_code: 0 }]),
             ),
             WlNewAction::PodSuspended => {
                 // Use a synthetic artifact port ID.
@@ -919,6 +919,11 @@ impl Representative for WlNewModelState {
         // pod_ip: only used to construct ReadyInfo. The actual IP value doesn't
         // affect SM decision-making.
         s.sm.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
+
+        // last_exit_code / last_failure_reason: only used to populate
+        // WlStatus variants. Normalize to avoid state space explosion.
+        s.sm.last_exit_code = None;
+        s.sm.last_failure_reason = None;
 
         s
     }

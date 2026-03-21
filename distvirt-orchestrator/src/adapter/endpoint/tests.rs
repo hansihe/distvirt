@@ -128,7 +128,7 @@ fn service_leaves_active_remove() {
     let _ = adapter.reconcile(&mut router).0;
 
     // Pod fails → service goes to NeedBackend.
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);

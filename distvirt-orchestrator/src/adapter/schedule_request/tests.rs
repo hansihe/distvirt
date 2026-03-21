@@ -104,7 +104,7 @@ fn pod_removed_drop_delta() {
     router.propagate();
 
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (deltas, _) = adapter.reconcile(&mut router);

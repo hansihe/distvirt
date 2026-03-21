@@ -196,13 +196,6 @@ pub async fn delete(mut client: Client, resource: &str, name: &str) -> anyhow::R
     Ok(())
 }
 
-pub async fn create(_client: Client, resource: &str) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "create not yet implemented for '{}'. Use 'dv up' for namespace creation.",
-        resource
-    );
-}
-
 /// Normalize resource type strings to canonical plural form
 fn normalize_resource(r: &str) -> &str {
     match r {

@@ -136,8 +136,9 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
 
                 if worker.is_none() && !self.status.is_terminal() {
                     // Worker lost — pod displaced by infrastructure.
-                    self.status = PodStatus::Displaced;
-                    ctx.set_status(PodStatus::Displaced);
+                    let status = PodStatus::Displaced;
+                    self.status = status.clone();
+                    ctx.set_status(status);
                     self.update_timer_signal(ctx);
                     self.maybe_reap(ctx);
                 }
@@ -170,8 +171,12 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                 // (In a real system this would go through a shutdown sequence
                 // with worker interaction; simplified to immediate here.)
                 if had_owner && self.workload_id.is_none() && !self.status.is_terminal() {
-                    self.status = PodStatus::Failed;
-                    ctx.set_status(PodStatus::Failed);
+                    let status = PodStatus::Failed {
+                        exit_code: None,
+                        reason: "owner lost".to_string(),
+                    };
+                    self.status = status.clone();
+                    ctx.set_status(status);
                     self.update_timer_signal(ctx);
                 }
 
@@ -189,7 +194,7 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
                         PodStatus::Running => matches!(self.status, PodStatus::Pending),
                         // Worker reports failure or graceful exit. Valid from any
                         // non-terminal state.
-                        PodStatus::Failed | PodStatus::Finished => true,
+                        PodStatus::Failed { .. } | PodStatus::Finished { .. } => true,
                         // All other statuses are SM-internal or use dedicated
                         // inputs (NotifyPodSuspended).
                         _ => false,
@@ -235,16 +240,24 @@ impl<C: PodCtx> SmHandler<C> for PodSm {
             PodInput::PodTimerFired(key) => match key {
                 PodTimerKey::LaunchTimeout => {
                     if matches!(self.status, PodStatus::Pending) {
-                        self.status = PodStatus::Failed;
-                        ctx.set_status(PodStatus::Failed);
+                        let status = PodStatus::Failed {
+                            exit_code: None,
+                            reason: "launch timeout".to_string(),
+                        };
+                        self.status = status.clone();
+                        ctx.set_status(status);
                         self.update_timer_signal(ctx);
                         self.maybe_reap(ctx);
                     }
                 }
                 PodTimerKey::SuspendTimeout => {
                     if matches!(self.status, PodStatus::Suspending) {
-                        self.status = PodStatus::Failed;
-                        ctx.set_status(PodStatus::Failed);
+                        let status = PodStatus::Failed {
+                            exit_code: None,
+                            reason: "suspend timeout".to_string(),
+                        };
+                        self.status = status.clone();
+                        ctx.set_status(status);
                         self.update_timer_signal(ctx);
                         self.maybe_reap(ctx);
                     }

@@ -176,9 +176,14 @@ impl TestHarness {
         let is_failed =
             wl.consecutive_failures >= wl.max_retries && (wl.has_demand || wl.committed_to_boot);
         if wl.completed {
-            WlStatus::Completed
+            WlStatus::Completed {
+                exit_code: wl.last_exit_code.unwrap_or(0),
+            }
         } else if is_failed {
-            WlStatus::Failed
+            WlStatus::Failed {
+                exit_code: wl.last_exit_code,
+                reason: wl.last_failure_reason.clone().unwrap_or_default(),
+            }
         } else if wl.in_backoff {
             WlStatus::RetryBackoff
         } else if wl.awaiting_suspend {

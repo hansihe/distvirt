@@ -97,7 +97,7 @@ impl TestHarness {
     pub fn assert_workload_failed(&self, ns_id: &str, wl_id: &str) {
         let status = self.workload_status(ns_id, wl_id);
         assert!(
-            matches!(status, WlStatus::Failed),
+            matches!(status, WlStatus::Failed { .. }),
             "workload '{}/{}': expected Failed, got {:?}",
             ns_id,
             wl_id,

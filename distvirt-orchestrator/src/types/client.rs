@@ -127,6 +127,9 @@ pub enum PodStatus {
     Suspending,
     Suspended,
     Resuming,
+    Finished { exit_code: i32 },
+    Failed { exit_code: Option<i32>, reason: String },
+    Displaced,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,8 +141,13 @@ pub enum WorkloadStatus {
     Suspending,
     Suspended,
     RetryBackoff,
-    Failed,
-    Completed,
+    Failed {
+        exit_code: Option<i32>,
+        reason: String,
+    },
+    Completed {
+        exit_code: i32,
+    },
 }
 
 impl std::fmt::Display for WorkloadStatus {
@@ -152,8 +160,8 @@ impl std::fmt::Display for WorkloadStatus {
             WorkloadStatus::Suspending => write!(f, "suspending"),
             WorkloadStatus::Suspended => write!(f, "suspended"),
             WorkloadStatus::RetryBackoff => write!(f, "retry_backoff"),
-            WorkloadStatus::Failed => write!(f, "failed"),
-            WorkloadStatus::Completed => write!(f, "completed"),
+            WorkloadStatus::Failed { .. } => write!(f, "failed"),
+            WorkloadStatus::Completed { .. } => write!(f, "completed"),
         }
     }
 }

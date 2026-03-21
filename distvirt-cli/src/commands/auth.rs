@@ -1,12 +1,12 @@
 use crate::config;
 
-pub fn login(server: Option<&str>, token: Option<&str>) -> anyhow::Result<()> {
+pub fn login(server: Option<&str>, token: Option<&str>, context: Option<&str>) -> anyhow::Result<()> {
     let server = server.ok_or_else(|| anyhow::anyhow!("--server is required for login"))?;
     let token = token.ok_or_else(|| anyhow::anyhow!("--token is required for login"))?;
 
     let mut creds = config::load()?;
 
-    let context_name = &creds.current_context.clone();
+    let context_name = context.unwrap_or(&creds.current_context).to_string();
 
     creds.contexts.insert(
         context_name.clone(),

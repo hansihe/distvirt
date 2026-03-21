@@ -68,11 +68,11 @@ pub fn render(file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn up(
-    mut client: Client,
+/// Resolve namespace ID from CLI arg or spec file, and parse the spec.
+fn resolve_spec(
     namespace_id: Option<&str>,
     file: Option<&Path>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(String, NamespaceSpec)> {
     let file = match file {
         Some(f) => f.to_path_buf(),
         None => find_default_file()?,
@@ -80,7 +80,6 @@ pub async fn up(
 
     let (spec_ns_id, spec) = parse_spec_file(&file)?;
 
-    // Determine namespace ID: CLI arg > spec metadata.name
     let namespace_id = match namespace_id {
         Some(id) => id.to_string(),
         None => spec_ns_id.ok_or_else(|| {
@@ -90,10 +89,58 @@ pub async fn up(
         })?,
     };
 
-    // Try create first; if it already exists, update instead
+    Ok((namespace_id, spec))
+}
+
+/// Apply a spec: create the namespace if new, patch (upsert) workloads/services if it exists.
+pub async fn apply(
+    mut client: Client,
+    namespace_id: Option<&str>,
+    file: Option<&Path>,
+) -> anyhow::Result<()> {
+    let (namespace_id, spec) = resolve_spec(namespace_id, file)?;
+
     let result = client
         .create_namespace(CreateNamespaceRequest {
-            namespace_id: namespace_id.to_string(),
+            namespace_id: namespace_id.clone(),
+            spec: Some(spec.clone()),
+        })
+        .await;
+
+    match result {
+        Ok(_) => {
+            eprintln!("namespace '{}' created", namespace_id);
+        }
+        Err(status) if status.code() == tonic::Code::AlreadyExists => {
+            client
+                .patch_namespace(PatchNamespaceRequest {
+                    namespace_id: namespace_id.clone(),
+                    workloads: spec.workloads,
+                    services: spec.services,
+                    remove_workloads: vec![],
+                    remove_services: vec![],
+                })
+                .await
+                .map_err(client::handle_grpc_error)?;
+            eprintln!("namespace '{}' patched", namespace_id);
+        }
+        Err(status) => return Err(client::handle_grpc_error(status)),
+    }
+
+    Ok(())
+}
+
+/// Sync a spec: create the namespace if new, fully replace the spec if it exists.
+pub async fn sync(
+    mut client: Client,
+    namespace_id: Option<&str>,
+    file: Option<&Path>,
+) -> anyhow::Result<()> {
+    let (namespace_id, spec) = resolve_spec(namespace_id, file)?;
+
+    let result = client
+        .create_namespace(CreateNamespaceRequest {
+            namespace_id: namespace_id.clone(),
             spec: Some(spec.clone()),
         })
         .await;
@@ -105,12 +152,12 @@ pub async fn up(
         Err(status) if status.code() == tonic::Code::AlreadyExists => {
             client
                 .update_namespace(UpdateNamespaceRequest {
-                    namespace_id: namespace_id.to_string(),
+                    namespace_id: namespace_id.clone(),
                     spec: Some(spec),
                 })
                 .await
                 .map_err(client::handle_grpc_error)?;
-            eprintln!("namespace '{}' updated", namespace_id);
+            eprintln!("namespace '{}' synced", namespace_id);
         }
         Err(status) => return Err(client::handle_grpc_error(status)),
     }
@@ -187,12 +234,15 @@ pub async fn status(mut client: Client, target: &str, watch: bool) -> anyhow::Re
         let state = workload
             .state
             .as_ref()
-            .map(|s| format!("{:?}", s.state))
+            .map(|s| format::workload_state_detail(s))
             .unwrap_or_else(|| "unknown".to_string());
         let spliced = if workload.spliced { " [spliced]" } else { "" };
 
         println!("Workload: {}/{}", namespace_id, wid);
         println!("State:    {}{}", state, spliced);
+        if !workload.ip.is_empty() {
+            println!("IP:       {}", workload.ip);
+        }
         println!();
 
         // Show services for this workload

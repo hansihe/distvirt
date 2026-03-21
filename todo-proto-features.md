@@ -2,15 +2,11 @@
 
 ## Protocol gaps
 
-### 1. Restart policy on WorkloadSpec
-**Priority: critical**
+### ~~1. Restart policy on WorkloadSpec~~ ✓
+**Done** — Added `RunPolicy` enum (`SERVICE = 0`, `JOB = 1`) and `run_policy` field on `WorkloadSpec` in the client proto. Conversion wired through to the existing orchestrator SM which already handles job completion/retry logic.
 
-No field on `WorkloadSpec` to distinguish run-to-completion workloads (DB migrations, seed jobs) from long-running services. The proto has `completed`/`failed` states, but nothing tells the orchestrator "don't restart this when it exits." Without this, migration jobs either restart in a loop or require implicit one-shot behavior.
-
-### 2. Exit code / reason on WorkloadCompleted / WorkloadFailed
-**Priority: high**
-
-Both `WorkloadCompleted` and `WorkloadFailed` messages are empty. `PodStopped` has `exit_code` and `PodFailed` has `reason`, but this info isn't propagated to the workload level. The deploy script needs to know if a migration exited 0 vs crashed.
+### ~~2. Exit code / reason on WorkloadCompleted / WorkloadFailed~~ ✓
+**Done** — `WorkloadCompleted` now carries `int32 exit_code` and `WorkloadFailed` carries `optional int32 exit_code` + `string reason`. Exit codes and failure reasons propagate from pod-level events through the orchestrator SM to the client proto.
 
 ### 3. Readiness signal
 **Priority: medium**
@@ -29,10 +25,8 @@ The migration applies infra first, then incrementally adds app fragments. `apply
 
 The deploy script calls `bootstrap_databases("postgres:5432", ...)` and `create_kafka_topics("tansu:9092", ...)` which need network access to the namespace fabric. `ConnectNetwork`/`DisconnectNetwork` exist in the proto but aren't in the SDK. Without this the script has to shell out to `dv connect`.
 
-### 6. Exit code on WorkloadModel
-**Priority: high**
-
-`PodStopped` carries `exit_code` but `WorkloadModel` discards it. Migration jobs need to check success/failure after `wait_for(completed)`.
+### ~~6. Exit code on WorkloadModel~~ ✓
+**Done** — Resolved by item 2. Exit codes now flow through `PodStatus::Finished`/`Failed` → `WlStatus::Completed`/`Failed` → proto `WorkloadCompleted`/`WorkloadFailed`.
 
 ## Quality-of-life improvements
 

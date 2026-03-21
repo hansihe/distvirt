@@ -59,11 +59,11 @@ pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> Classif
         WorkerEvent::PodFailed {
             namespace_id,
             pod_id,
-            ..
+            error,
         } => ns_event(
             &namespace_id,
             worker_id,
-            WorkerNamespaceEventKind::PodFailed { pod_id },
+            WorkerNamespaceEventKind::PodFailed { pod_id, error },
         ),
         WorkerEvent::PodSuspended {
             namespace_id,

@@ -13,7 +13,7 @@ fn pod_failure_backoff_and_retry() {
 
     // Pod fails via worker notification (application failure).
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -63,7 +63,7 @@ fn consecutive_failures_increment() {
 
     // First failure.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -112,7 +112,7 @@ fn max_retries_enters_failed() {
 
     // First failure.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -156,7 +156,7 @@ fn failed_recovery_via_spec_change() {
 
     // One failure → hits max_retries (1) → terminal.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -188,7 +188,7 @@ fn failed_recovery_via_restart() {
 
     // One failure → terminal.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -252,7 +252,7 @@ fn failed_recovery_via_demand_cycle() {
     make_pod_running(&mut router, worker, pod_id);
 
     // Fail → terminal (max_retries=1).
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -283,7 +283,7 @@ fn failed_ignores_new_demand() {
 
     // Fail → terminal.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -355,7 +355,7 @@ fn backoff_cleared_on_demand_drop() {
     make_pod_running(&mut router, worker, pod_id);
 
     // Fail → enters backoff.
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -393,7 +393,7 @@ fn backoff_cleared_on_spec_change() {
 
     // Fail → enters backoff.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -436,7 +436,7 @@ fn scavenge_during_backoff() {
 
     // Fail → enters backoff.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -509,7 +509,7 @@ fn scavenge_during_failed() {
     make_pod_running(&mut router, worker, pod_id);
 
     // Fail → terminal (max_retries=1).
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -537,7 +537,7 @@ fn success_resets_failure_counter() {
 
     // First failure.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -567,7 +567,7 @@ fn success_resets_failure_counter() {
     assert!(wl.pod_running);
 
     // Fail again — counter should be 1, not 2.
-    router.send_notify_pod_status(worker, pod2, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod2, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();

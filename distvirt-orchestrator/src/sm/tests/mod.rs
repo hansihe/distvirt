@@ -167,7 +167,14 @@ fn make_pod_running(router: &mut Router, worker: WorkerId, pod_id: PodId) -> Sch
 fn make_pod_failed(router: &mut Router, worker: WorkerId, pod_id: PodId) -> ScheduleLeaseId {
     let lease = schedule_pod(router, worker, pod_id);
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(
+        worker,
+        pod_id,
+        PodStatus::Failed {
+            exit_code: Some(1),
+            reason: "test failure".to_string(),
+        },
+    );
     router.propagate();
     lease
 }

@@ -435,19 +435,28 @@ impl Namespace {
                 let pod_id = router_pod_id(&pod_id);
                 if self.router.get_pod(&pod_id).is_some() {
                     let status = if exit_code == 0 {
-                        PodStatus::Finished
+                        PodStatus::Finished { exit_code }
                     } else {
-                        PodStatus::Failed
+                        PodStatus::Failed {
+                            exit_code: Some(exit_code),
+                            reason: format!("process exited with code {}", exit_code),
+                        }
                     };
                     self.router
                         .send_notify_pod_status(worker_id, pod_id, status);
                 }
             }
-            WorkerNamespaceEventKind::PodFailed { pod_id } => {
+            WorkerNamespaceEventKind::PodFailed { pod_id, error } => {
                 let pod_id = router_pod_id(&pod_id);
                 if self.router.get_pod(&pod_id).is_some() {
-                    self.router
-                        .send_notify_pod_status(worker_id, pod_id, PodStatus::Failed);
+                    self.router.send_notify_pod_status(
+                        worker_id,
+                        pod_id,
+                        PodStatus::Failed {
+                            exit_code: None,
+                            reason: error,
+                        },
+                    );
                 }
             }
             WorkerNamespaceEventKind::PodSuspended {
@@ -471,8 +480,14 @@ impl Namespace {
             WorkerNamespaceEventKind::PodSuspendFailed { pod_id } => {
                 let pod_id = router_pod_id(&pod_id);
                 if self.router.get_pod(&pod_id).is_some() {
-                    self.router
-                        .send_notify_pod_status(worker_id, pod_id, PodStatus::Failed);
+                    self.router.send_notify_pod_status(
+                        worker_id,
+                        pod_id,
+                        PodStatus::Failed {
+                            exit_code: None,
+                            reason: "suspend failed".to_string(),
+                        },
+                    );
                 }
             }
             WorkerNamespaceEventKind::EndpointDemand {
@@ -1213,8 +1228,16 @@ fn sm_wl_status_to_client(status: &WlStatus) -> crate::types::WorkloadStatus {
         WlStatus::Suspending => crate::types::WorkloadStatus::Suspending,
         WlStatus::Suspended => crate::types::WorkloadStatus::Suspended,
         WlStatus::RetryBackoff => crate::types::WorkloadStatus::RetryBackoff,
-        WlStatus::Failed => crate::types::WorkloadStatus::Failed,
-        WlStatus::Completed => crate::types::WorkloadStatus::Completed,
+        WlStatus::Failed {
+            exit_code,
+            reason,
+        } => crate::types::WorkloadStatus::Failed {
+            exit_code: *exit_code,
+            reason: reason.clone(),
+        },
+        WlStatus::Completed { exit_code } => {
+            crate::types::WorkloadStatus::Completed { exit_code: *exit_code }
+        }
     }
 }
 
@@ -1232,8 +1255,8 @@ fn sm_pod_status_to_client(status: &PodStatus) -> crate::types::PodStatus {
         PodStatus::Running => crate::types::PodStatus::Running,
         PodStatus::Suspending => crate::types::PodStatus::Suspending,
         PodStatus::Suspended { .. } => crate::types::PodStatus::Suspended,
-        PodStatus::Finished | PodStatus::Failed | PodStatus::Displaced => {
-            crate::types::PodStatus::Launching // terminal pods are filtered out
-        }
+        PodStatus::Finished { exit_code } => crate::types::PodStatus::Finished { exit_code: *exit_code },
+        PodStatus::Failed { exit_code, reason } => crate::types::PodStatus::Failed { exit_code: *exit_code, reason: reason.clone() },
+        PodStatus::Displaced => crate::types::PodStatus::Displaced,
     }
 }

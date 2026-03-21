@@ -70,6 +70,10 @@ pub struct WorkloadSm {
     pub run_policy: RunPolicy,
     /// True when a Job has finished successfully (exit code 0).
     pub completed: bool,
+    /// Exit code from the last completed or failed pod.
+    pub last_exit_code: Option<i32>,
+    /// Reason string from the last failed pod.
+    pub last_failure_reason: Option<String>,
     /// If true, the workload respects demand signals and starts dormant.
     /// If false, the workload is always-on regardless of demand.
     pub respects_demand: bool,
@@ -106,6 +110,8 @@ impl WorkloadSm {
             endpoint_id: None,
             run_policy: RunPolicy::Service,
             completed: false,
+            last_exit_code: None,
+            last_failure_reason: None,
             respects_demand: false,
         }
     }
@@ -286,9 +292,13 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
             WorkloadInput::PodStatusInput(statuses) => {
                 let was_running = self.pod_running;
                 self.pod_running = statuses.iter().any(|s| *s == PodStatus::Running);
-                let has_failed = statuses.iter().any(|s| *s == PodStatus::Failed);
+                let has_failed = statuses
+                    .iter()
+                    .any(|s| matches!(s, PodStatus::Failed { .. }));
                 let has_displaced = statuses.iter().any(|s| *s == PodStatus::Displaced);
-                let has_finished = statuses.iter().any(|s| *s == PodStatus::Finished);
+                let has_finished = statuses
+                    .iter()
+                    .any(|s| matches!(s, PodStatus::Finished { .. }));
 
                 // Pod reached Suspended terminal state — save artifact and reap.
                 let suspended_artifact = statuses.iter().find_map(|s| match s {
@@ -340,11 +350,27 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                     // to decide what to do. This replaces PendingIntent.
                     self.on_pod_running(ctx);
                 } else if has_failed && self.pod_id.is_some() {
-                    self.on_pod_failed(ctx);
+                    let (exit_code, reason) = statuses
+                        .iter()
+                        .find_map(|s| match s {
+                            PodStatus::Failed { exit_code, reason } => {
+                                Some((*exit_code, reason.clone()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or((None, String::new()));
+                    self.on_pod_failed(ctx, exit_code, reason);
                 } else if has_displaced && self.pod_id.is_some() {
                     self.on_pod_displaced(ctx);
                 } else if has_finished && self.pod_id.is_some() {
-                    self.on_pod_finished(ctx);
+                    let exit_code = statuses
+                        .iter()
+                        .find_map(|s| match s {
+                            PodStatus::Finished { exit_code } => Some(*exit_code),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    self.on_pod_finished(ctx, exit_code);
                 } else if !self.pod_running && was_running {
                     // Pod lost running status.
                     ctx.set_readiness(None);
@@ -492,7 +518,7 @@ impl WorkloadSm {
 
     /// Called when a pod reports Finished status (graceful exit, exit code 0).
     /// Not counted as a failure. Cleans up and reconciles.
-    pub(crate) fn on_pod_finished(&mut self, ctx: &mut impl WorkloadCtx) {
+    pub(crate) fn on_pod_finished(&mut self, ctx: &mut impl WorkloadCtx, exit_code: i32) {
         // pod_running is already false — set by PodStatusInput handler at
         // the top (Finished is not Running).
         self.awaiting_suspend = false;
@@ -506,6 +532,8 @@ impl WorkloadSm {
         ctx.set_pod_intent(PodIntent::None);
         self.pod_id = None;
         // pod_worker_id will be cleared by PodWorkerInput signal propagation.
+
+        self.last_exit_code = Some(exit_code);
 
         if self.run_policy == RunPolicy::Job {
             // Job finished successfully — mark completed, don't relaunch.
@@ -527,13 +555,21 @@ impl WorkloadSm {
     /// inspectability during backoff and terminal failure. The pod is reaped
     /// when transitioning out: retry attempt, demand drop, admin command, or
     /// spec change.
-    pub(crate) fn on_pod_failed(&mut self, ctx: &mut impl WorkloadCtx) {
+    pub(crate) fn on_pod_failed(
+        &mut self,
+        ctx: &mut impl WorkloadCtx,
+        exit_code: Option<i32>,
+        reason: String,
+    ) {
         // pod_running is already false — set by PodStatusInput handler at
         // the top (Failed is not Running).
         self.awaiting_suspend = false;
         self.clear_artifact_ref(ctx);
         ctx.set_readiness(None);
         ctx.set_placement(None);
+
+        self.last_exit_code = exit_code;
+        self.last_failure_reason = Some(reason);
 
         // Keep the ownership edge — the pod is terminal (Failed) but we
         // retain it for inspectability. It will be reaped on transition out
@@ -651,9 +687,17 @@ impl WorkloadSm {
         let demand = self.effective_demand() || self.committed_to_boot;
         let is_failed = self.consecutive_failures >= self.max_retries && demand;
         let status = if self.completed {
-            WlStatus::Completed
+            WlStatus::Completed {
+                exit_code: self.last_exit_code.unwrap_or(0),
+            }
         } else if is_failed {
-            WlStatus::Failed
+            WlStatus::Failed {
+                exit_code: self.last_exit_code,
+                reason: self
+                    .last_failure_reason
+                    .clone()
+                    .unwrap_or_default(),
+            }
         } else if self.in_backoff {
             WlStatus::RetryBackoff
         } else if self.awaiting_suspend {

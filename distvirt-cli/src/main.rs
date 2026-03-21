@@ -13,7 +13,6 @@ mod status_watch;
 use commands::OutputFormat;
 
 const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
-  up            Apply a namespace spec (create or update)
   down          Delete a namespace
   status        Show namespace/workload status
   logs          Stream logs from a namespace
@@ -26,13 +25,14 @@ const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   splice        Splice a workload to a local worker
 
 \x1b[1;4mSpec commands:\x1b[0m
+  spec apply    Apply a spec (create namespace or patch existing)
+  spec sync     Sync a spec (create namespace or replace existing)
   spec validate Validate a spec file
   spec render   Render a spec file to resolved proto JSON
 
 \x1b[1;4mResource commands:\x1b[0m
   get           List resources
   describe      Describe a resource in detail
-  create        Create a resource
   delete        Delete a resource
 
 \x1b[1;4mAuth & config:\x1b[0m
@@ -84,16 +84,7 @@ enum Commands {
 /// Layer 1 — task-oriented commands
 #[derive(Subcommand)]
 enum TaskCommands {
-    /// Apply a namespace spec (create or update)
-    #[command(hide = true)]
-    Up {
-        /// Namespace ID (optional if spec file has metadata.name)
-        namespace_id: Option<String>,
-        /// Path to spec file (distvirt.yaml or docker-compose.yml)
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-    },
-    /// Spec file operations (validate, render)
+    /// Spec file operations (apply, sync, validate, render)
     #[command(hide = true)]
     Spec {
         #[command(subcommand)]
@@ -216,12 +207,6 @@ enum ResourceCommands {
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
     },
-    /// Create a resource
-    #[command(hide = true)]
-    Create {
-        /// Resource type
-        resource: String,
-    },
     /// Delete a resource
     #[command(hide = true)]
     Delete {
@@ -255,6 +240,22 @@ enum AuthCommands {
 
 #[derive(Subcommand)]
 enum SpecCommands {
+    /// Apply a spec: create namespace if new, patch (upsert) workloads/services if existing
+    Apply {
+        /// Namespace ID (optional if spec file has metadata.name)
+        namespace_id: Option<String>,
+        /// Path to spec file (distvirt.yaml)
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Sync a spec: create namespace if new, fully replace spec if existing
+    Sync {
+        /// Namespace ID (optional if spec file has metadata.name)
+        namespace_id: Option<String>,
+        /// Path to spec file (distvirt.yaml)
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
     /// Validate a spec file (parse, resolve includes, check for errors)
     Validate {
         /// Path to spec file
@@ -303,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         // Auth commands — no gRPC needed
         Commands::Auth(AuthCommands::Login { server, token }) => {
-            commands::auth::login(server.as_deref(), token.as_deref())?;
+            commands::auth::login(server.as_deref(), token.as_deref(), cli.context.as_deref())?;
         }
         Commands::Auth(AuthCommands::Context { command }) => match command {
             None => commands::auth::context_show()?,
@@ -312,15 +313,17 @@ async fn main() -> anyhow::Result<()> {
             Some(ContextCommands::Delete { name }) => commands::auth::context_delete(&name)?,
         },
 
-        // Spec commands run locally, no gRPC needed
-        Commands::Task(TaskCommands::Spec { command }) => match command {
-            SpecCommands::Validate { file } => {
-                commands::namespace::validate(file.as_deref())?;
-            }
-            SpecCommands::Render { file } => {
-                commands::namespace::render(&file)?;
-            }
-        },
+        // Spec commands that run locally, no gRPC needed
+        Commands::Task(TaskCommands::Spec {
+            command: SpecCommands::Validate { file },
+        }) => {
+            commands::namespace::validate(file.as_deref())?;
+        }
+        Commands::Task(TaskCommands::Spec {
+            command: SpecCommands::Render { file },
+        }) => {
+            commands::namespace::render(&file)?;
+        }
 
         // All other commands connect to the orchestrator
         cmd => {
@@ -332,8 +335,16 @@ async fn main() -> anyhow::Result<()> {
             let client = client::connect(&params).await?;
 
             match cmd {
-                Commands::Task(TaskCommands::Up { namespace_id, file }) => {
-                    commands::namespace::up(client, namespace_id.as_deref(), file.as_deref())
+                Commands::Task(TaskCommands::Spec {
+                    command: SpecCommands::Apply { namespace_id, file },
+                }) => {
+                    commands::namespace::apply(client, namespace_id.as_deref(), file.as_deref())
+                        .await?;
+                }
+                Commands::Task(TaskCommands::Spec {
+                    command: SpecCommands::Sync { namespace_id, file },
+                }) => {
+                    commands::namespace::sync(client, namespace_id.as_deref(), file.as_deref())
                         .await?;
                 }
                 Commands::Task(TaskCommands::Down { namespace_id }) => {
@@ -381,12 +392,16 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Resource(ResourceCommands::Get {
                     resource,
-                    name: _,
+                    name,
                     namespace,
                     output,
                 }) => {
-                    commands::resource::get(client, &resource, namespace.as_deref(), &output)
-                        .await?;
+                    if let Some(ref n) = name {
+                        commands::resource::describe(client, &resource, n, &output).await?;
+                    } else {
+                        commands::resource::get(client, &resource, namespace.as_deref(), &output)
+                            .await?;
+                    }
                 }
                 Commands::Resource(ResourceCommands::Describe {
                     resource,
@@ -394,9 +409,6 @@ async fn main() -> anyhow::Result<()> {
                     output,
                 }) => {
                     commands::resource::describe(client, &resource, &name, &output).await?;
-                }
-                Commands::Resource(ResourceCommands::Create { resource }) => {
-                    commands::resource::create(client, &resource).await?;
                 }
                 Commands::Resource(ResourceCommands::Delete { resource, name }) => {
                     commands::resource::delete(client, &resource, &name).await?;
@@ -412,7 +424,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Auth(AuthCommands::Login { .. })
                 | Commands::Auth(AuthCommands::Context { .. })
-                | Commands::Task(TaskCommands::Spec { .. }) => unreachable!(),
+                | Commands::Task(TaskCommands::Spec {
+                    command: SpecCommands::Validate { .. } | SpecCommands::Render { .. },
+                }) => unreachable!(),
             }
         }
     }

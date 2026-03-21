@@ -103,7 +103,7 @@ fn new_timer_produces_start() {
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);
@@ -149,7 +149,7 @@ fn timer_removed_produces_cancel() {
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);
@@ -202,7 +202,7 @@ fn same_generation_no_action() {
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);
@@ -389,7 +389,7 @@ fn multiple_sm_kinds_in_one_cycle() {
     let _ = adapter.reconcile(&mut router).0;
 
     // Idle timer already running from traffic event. Also make pod fail → workload retry timer.
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let (actions, _) = adapter.reconcile(&mut router);
@@ -476,7 +476,7 @@ fn fire_dispatches_workload_timer() {
     router.set_schedule_lease_lease(lease, crate::sm::LeaseInfo { worker_id: worker });
     router.propagate();
     router.set_worker_assignment_edges(worker, vec![pod_id]);
-    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, crate::sm::PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     // Workload should be in backoff.

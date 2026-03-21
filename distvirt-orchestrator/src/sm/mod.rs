@@ -58,9 +58,12 @@ pub enum PodStatus {
         artifact_id: ArtifactPortId,
     },
     /// Terminal: pod exited gracefully (exit code 0). Not counted as failure.
-    Finished,
+    Finished { exit_code: i32 },
     /// Terminal: pod failed (non-zero exit, error, timeout, abandoned).
-    Failed,
+    Failed {
+        exit_code: Option<i32>,
+        reason: String,
+    },
     /// Terminal: pod displaced by infrastructure — worker disconnect or lease revocation.
     Displaced,
 }
@@ -70,8 +73,8 @@ impl PodStatus {
         matches!(
             self,
             PodStatus::Suspended { .. }
-                | PodStatus::Failed
-                | PodStatus::Finished
+                | PodStatus::Failed { .. }
+                | PodStatus::Finished { .. }
                 | PodStatus::Displaced
         )
     }
@@ -319,9 +322,12 @@ pub enum WlStatus {
     /// Pod failed, waiting for retry backoff timer.
     RetryBackoff,
     /// Max retries exhausted, terminal failure.
-    Failed,
+    Failed {
+        exit_code: Option<i32>,
+        reason: String,
+    },
     /// Job finished successfully, not relaunching.
-    Completed,
+    Completed { exit_code: i32 },
 }
 
 /// Timer key enum for workload-specific timers.

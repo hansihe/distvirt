@@ -757,6 +757,7 @@ fn build_namespace_spec(
                     activation: wl_activation,
                     respects_demand: wl.respects_demand,
                     volumes,
+                    run_policy: 0, // SERVICE (default)
                 },
             );
 

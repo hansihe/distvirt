@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use distvirt_client_protocol::*;
 
 use crate::client::{self, Client};
@@ -7,7 +9,7 @@ pub async fn logs(
     mut client: Client,
     namespace_id: &str,
     workload: Option<&str>,
-    _follow: bool,
+    follow: bool,
 ) -> anyhow::Result<()> {
     let mut stream = client
         .stream_logs(StreamLogsRequest {
@@ -19,8 +21,18 @@ pub async fn logs(
         .map_err(client::handle_grpc_error)?
         .into_inner();
 
-    while let Some(chunk) = stream.message().await.map_err(client::handle_grpc_error)? {
-        format::print_log_chunk(&chunk);
+    if follow {
+        while let Some(chunk) = stream.message().await.map_err(client::handle_grpc_error)? {
+            format::print_log_chunk(&chunk);
+        }
+    } else {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
+                Ok(Ok(Some(chunk))) => format::print_log_chunk(&chunk),
+                Ok(Ok(None)) | Err(_) => break,
+                Ok(Err(e)) => return Err(client::handle_grpc_error(e)),
+            }
+        }
     }
 
     Ok(())
@@ -31,7 +43,7 @@ pub async fn events(
     namespace_id: &str,
     workloads: &[String],
     services: &[String],
-    _follow: bool,
+    follow: bool,
 ) -> anyhow::Result<()> {
     let mut stream = client
         .stream_events(StreamEventsRequest {
@@ -43,8 +55,18 @@ pub async fn events(
         .map_err(client::handle_grpc_error)?
         .into_inner();
 
-    while let Some(event) = stream.message().await.map_err(client::handle_grpc_error)? {
-        format::print_event_line(&event);
+    if follow {
+        while let Some(event) = stream.message().await.map_err(client::handle_grpc_error)? {
+            format::print_event_line(&event);
+        }
+    } else {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
+                Ok(Ok(Some(event))) => format::print_event_line(&event),
+                Ok(Ok(None)) | Err(_) => break,
+                Ok(Err(e)) => return Err(client::handle_grpc_error(e)),
+            }
+        }
     }
 
     Ok(())

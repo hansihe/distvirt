@@ -17,7 +17,7 @@ fn graceful_exit_no_failure_count() {
     let pod_id = wl.pod_id.unwrap();
 
     // Pod exits gracefully.
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Finished);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Finished { exit_code: 0 });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -42,7 +42,7 @@ fn graceful_exit_after_failures_preserves_count() {
 
     // First failure via application failure.
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -63,7 +63,7 @@ fn graceful_exit_after_failures_preserves_count() {
     assert_eq!(wl.consecutive_failures, 0); // reset on Running
 
     // Pod finishes gracefully.
-    router.send_notify_pod_status(worker, pod2, PodStatus::Finished);
+    router.send_notify_pod_status(worker, pod2, PodStatus::Finished { exit_code: 0 });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -81,7 +81,7 @@ fn finished_vs_failed_backoff_behavior() {
     let (_mgmt, worker) = setup_running_workload(&mut router, 5);
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Finished);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Finished { exit_code: 0 });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -94,7 +94,7 @@ fn finished_vs_failed_backoff_behavior() {
     let (_mgmt, worker) = setup_running_workload(&mut router, 5);
     let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
@@ -122,7 +122,7 @@ fn finished_pod_self_destructs() {
     assert_eq!(router.get_pod(&pod_id).unwrap().status, PodStatus::Running);
 
     // Pod finishes gracefully — terminal + no owner → self-destruct.
-    router.send_notify_pod_status(worker, pod_id, PodStatus::Finished);
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Finished { exit_code: 0 });
     router.propagate();
 
     assert!(router.get_pod(&pod_id).is_none());
@@ -199,7 +199,7 @@ fn worker_identity_updates_on_new_worker() {
 
     // Pod fails via application failure → backoff.
     let pod_id = wl.pod_id.unwrap();
-    router.send_notify_pod_status(worker1, pod_id, PodStatus::Failed);
+    router.send_notify_pod_status(worker1, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();

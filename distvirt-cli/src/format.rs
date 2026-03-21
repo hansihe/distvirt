@@ -16,18 +16,27 @@ pub fn print_namespace_overview(report: &NamespaceStatusReport) {
         return;
     }
 
-    // Group services by workload_id
-    for (workload_id, workload) in &report.workloads {
+    // Group services by workload_id (sorted for stable display)
+    let mut sorted_workloads: Vec<_> = report.workloads.iter().collect();
+    sorted_workloads.sort_by_key(|(id, _)| id.as_str());
+    let mut sorted_services: Vec<_> = report.services.iter().collect();
+    sorted_services.sort_by_key(|(id, _)| id.as_str());
+    for (workload_id, workload) in &sorted_workloads {
         let state = workload
             .state
             .as_ref()
             .map(|s| workload_state_label(s))
-            .unwrap_or("unknown");
+            .unwrap_or_else(|| "unknown".into());
         let spliced = if workload.spliced { " [spliced]" } else { "" };
-        println!("  workload/{:<20} {}{}", workload_id, state, spliced);
+        let ip = if workload.ip.is_empty() { "" } else { &workload.ip };
+        if ip.is_empty() {
+            println!("  workload/{:<20} {}{}", workload_id, state, spliced);
+        } else {
+            println!("  workload/{:<20} {}  {}{}", workload_id, state, ip, spliced);
+        }
 
-        for (svc_id, svc) in &report.services {
-            if svc.workload_id == *workload_id {
+        for (svc_id, svc) in &sorted_services {
+            if svc.workload_id.as_str() == workload_id.as_str() {
                 let svc_state = svc
                     .state
                     .as_ref()
@@ -136,7 +145,7 @@ struct WorkloadRow {
     #[tabled(rename = "WORKLOAD")]
     workload: String,
     #[tabled(rename = "STATE")]
-    state: &'static str,
+    state: String,
     #[tabled(rename = "IP")]
     ip: String,
     #[tabled(rename = "SPLICED")]
@@ -153,7 +162,7 @@ pub fn print_workload_table(workloads: &std::collections::HashMap<String, Worklo
                 .state
                 .as_ref()
                 .map(|s| workload_state_label(s))
-                .unwrap_or("unknown");
+                .unwrap_or_else(|| "unknown".into());
             WorkloadRow {
                 workload: wl_id.clone(),
                 state,
@@ -243,7 +252,7 @@ pub fn workloads_to_json(
                     .state
                     .as_ref()
                     .map(|s| workload_state_label(s))
-                    .unwrap_or("unknown");
+                    .unwrap_or_else(|| "unknown".into());
                 serde_json::json!({
                     "workload_id": id,
                     "state": state,
@@ -307,18 +316,62 @@ fn namespace_state_label(state: NamespaceState) -> &'static str {
     }
 }
 
-fn workload_state_label(state: &WorkloadState) -> &'static str {
+fn workload_state_label(state: &WorkloadState) -> String {
     match &state.state {
-        Some(workload_state::State::Dormant(_)) => "dormant",
-        Some(workload_state::State::WaitingForSpec(_)) => "waiting",
-        Some(workload_state::State::Launching(_)) => "launching",
-        Some(workload_state::State::Running(_)) => "running",
-        Some(workload_state::State::Suspending(_)) => "suspending",
-        Some(workload_state::State::Suspended(_)) => "suspended",
-        Some(workload_state::State::RetryBackoff(_)) => "retry-backoff",
-        Some(workload_state::State::Failed(_)) => "failed",
-        Some(workload_state::State::Completed(_)) => "completed",
-        None => "unknown",
+        Some(workload_state::State::Dormant(_)) => "dormant".into(),
+        Some(workload_state::State::WaitingForSpec(_)) => "waiting".into(),
+        Some(workload_state::State::Launching(_)) => "launching".into(),
+        Some(workload_state::State::Running(_)) => "running".into(),
+        Some(workload_state::State::Suspending(_)) => "suspending".into(),
+        Some(workload_state::State::Suspended(_)) => "suspended".into(),
+        Some(workload_state::State::RetryBackoff(_)) => "retry-backoff".into(),
+        Some(workload_state::State::Failed(f)) => {
+            let mut s = "failed".to_string();
+            if let Some(code) = f.exit_code {
+                s.push_str(&format!(" (exit {})", code));
+            }
+            if !f.reason.is_empty() {
+                s.push_str(&format!(": {}", f.reason));
+            }
+            s
+        }
+        Some(workload_state::State::Completed(c)) => {
+            format!("completed (exit {})", c.exit_code)
+        }
+        None => "unknown".into(),
+    }
+}
+
+/// Verbose workload state for the single-workload detail view.
+pub fn workload_state_detail(state: &WorkloadState) -> String {
+    match &state.state {
+        Some(workload_state::State::Dormant(_)) => "dormant".into(),
+        Some(workload_state::State::WaitingForSpec(_)) => "waiting for spec".into(),
+        Some(workload_state::State::Launching(l)) => {
+            format!("launching (pod {} on worker {})", l.pod_id, l.worker_id)
+        }
+        Some(workload_state::State::Running(r)) => {
+            format!("running (pod {} on worker {})", r.pod_id, r.worker_id)
+        }
+        Some(workload_state::State::Suspending(s)) => {
+            format!("suspending (pod {} on worker {})", s.pod_id, s.worker_id)
+        }
+        Some(workload_state::State::Suspended(_)) => "suspended".into(),
+        Some(workload_state::State::RetryBackoff(_)) => "retry backoff".into(),
+        Some(workload_state::State::Failed(f)) => {
+            let mut s = "failed".to_string();
+            if let Some(code) = f.exit_code {
+                s.push_str(&format!(" (exit code {})", code));
+            }
+            if !f.reason.is_empty() {
+                s.push_str(&format!(": {}", f.reason));
+            }
+            s
+        }
+        Some(workload_state::State::Completed(c)) => {
+            format!("completed (exit code {})", c.exit_code)
+        }
+        None => "unknown".into(),
     }
 }
 
@@ -340,6 +393,9 @@ fn pod_state_label(state: PodState) -> &'static str {
         PodState::Suspending => "suspending",
         PodState::Suspended => "suspended",
         PodState::Resuming => "resuming",
+        PodState::Finished => "finished",
+        PodState::Failed => "failed",
+        PodState::Displaced => "displaced",
     }
 }
 
@@ -459,17 +515,26 @@ pub fn render_namespace_overview(report: &NamespaceStatusReport) -> String {
         return buf;
     }
 
-    for (workload_id, workload) in &report.workloads {
+    let mut sorted_workloads: Vec<_> = report.workloads.iter().collect();
+    sorted_workloads.sort_by_key(|(id, _)| id.as_str());
+    let mut sorted_services: Vec<_> = report.services.iter().collect();
+    sorted_services.sort_by_key(|(id, _)| id.as_str());
+    for (workload_id, workload) in &sorted_workloads {
         let state = workload
             .state
             .as_ref()
             .map(|s| workload_state_label(s))
-            .unwrap_or("unknown");
+            .unwrap_or_else(|| "unknown".into());
         let spliced = if workload.spliced { " [spliced]" } else { "" };
-        writeln!(&mut buf, "  workload/{:<20} {}{}", workload_id, state, spliced).unwrap();
+        let ip = if workload.ip.is_empty() { "" } else { &workload.ip };
+        if ip.is_empty() {
+            writeln!(&mut buf, "  workload/{:<20} {}{}", workload_id, state, spliced).unwrap();
+        } else {
+            writeln!(&mut buf, "  workload/{:<20} {}  {}{}", workload_id, state, ip, spliced).unwrap();
+        }
 
-        for (svc_id, svc) in &report.services {
-            if svc.workload_id == *workload_id {
+        for (svc_id, svc) in &sorted_services {
+            if svc.workload_id.as_str() == workload_id.as_str() {
                 let svc_state = svc
                     .state
                     .as_ref()
@@ -595,7 +660,7 @@ pub fn namespace_status_to_json(report: &NamespaceStatusReport) -> serde_json::V
         "namespace_id": report.namespace_id,
         "state": namespace_state_label(report.state()),
         "workloads": report.workloads.iter().map(|(id, w)| {
-            let state = w.state.as_ref().map(|s| workload_state_label(s)).unwrap_or("unknown");
+            let state: String = w.state.as_ref().map(|s| workload_state_label(s)).unwrap_or_else(|| "unknown".into());
             serde_json::json!({
                 "workload_id": id,
                 "state": state,
