@@ -27,7 +27,7 @@ fn default_container_spec() -> ContainerSpec {
 
 #[tokio::test]
 async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup().await?;
+    let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
@@ -109,7 +109,7 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::ExitImmediately(42)).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
@@ -172,7 +172,7 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
@@ -248,7 +248,7 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
@@ -315,7 +315,7 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
@@ -400,7 +400,7 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup().await?;
+    let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 
@@ -461,7 +461,7 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     // Create two namespaces with different subnets
@@ -516,7 +516,7 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -560,7 +560,7 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -603,7 +603,7 @@ async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_double_stop() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, _pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -639,7 +639,7 @@ async fn test_sim_double_stop() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_commands_after_shutdown() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup().await?;
+    let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
 

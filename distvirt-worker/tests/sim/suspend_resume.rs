@@ -1,11 +1,11 @@
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
-use distvirt_worker_protocol::{ArtifactId, PodId, PoolId, WorkerCommand, WorkerEvent, WorkerId};
+use distvirt_worker_protocol::{ArtifactId, PodId, WorkerCommand, WorkerEvent, WorkerId};
 
 use super::common::*;
 
 #[tokio::test]
 async fn test_sim_suspend_resume() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -18,7 +18,7 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
         namespace_id: "ns-sim".into(),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-1"),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -48,7 +48,7 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-1"),
         network: pod_net.clone(),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -81,7 +81,7 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_suspend_then_destroy_namespace() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -94,7 +94,7 @@ async fn test_sim_suspend_then_destroy_namespace() -> anyhow::Result<()> {
         namespace_id: "ns-sim".into(),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-2"),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -122,7 +122,7 @@ async fn test_sim_suspend_then_destroy_namespace() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_resume_unknown_artifact() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -136,7 +136,7 @@ async fn test_sim_resume_unknown_artifact() -> anyhow::Result<()> {
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("nonexistent-snap"),
         network: pod_net,
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -159,7 +159,7 @@ async fn test_sim_resume_unknown_artifact() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) =
+    let (mut conn, worker_handle, pool_id) =
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -172,7 +172,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
         namespace_id: "ns-sim".into(),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-a"),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -187,7 +187,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-a"),
         network: pod_net.clone(),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -203,7 +203,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
         namespace_id: "ns-sim".into(),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-b"),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 
@@ -220,7 +220,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-b"),
         network: pod_net.clone(),
-        pool_id: PoolId::from("local-default"),
+        pool_id: pool_id.clone(),
     })
     .await?;
 

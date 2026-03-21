@@ -605,7 +605,7 @@ fn wg_peer_local_creates_local_adapter_endpoint() {
 
 #[test]
 fn wg_peer_remote_creates_remote_segment() {
-    use distvirt_worker_protocol::{EndpointPlacement, WorkerId};
+    use distvirt_worker_protocol::EndpointPlacement;
 
     let mut table = EndpointTable::new();
     table.apply_endpoint_sync(

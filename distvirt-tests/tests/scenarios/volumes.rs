@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ConfigDataFile, VolumeMountSpec, VolumeSpec, VolumeType};
+use distvirt_worker_protocol::{ConfigDataFile, VolumeSpec, VolumeType};
 
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::{
-    activation_with_volumes_spec, config_data_spec, container_spec, container_spec_with_mounts,
-    empty_dir_spec, mixed_volumes_spec,
+    activation_with_volumes_spec, config_data_spec, container_spec, empty_dir_spec,
+    mixed_volumes_spec,
 };
 
 /// Workload with an empty_dir volume starts and runs normally.

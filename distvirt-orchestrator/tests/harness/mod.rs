@@ -1,5 +1,8 @@
+#[allow(dead_code)]
 pub mod assertions;
+#[allow(dead_code)]
 pub mod spec_builders;
+#[allow(dead_code)]
 pub mod test_harness;
 
 pub use distvirt_orchestrator::types::NamespacePatch;

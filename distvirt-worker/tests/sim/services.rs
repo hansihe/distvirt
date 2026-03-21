@@ -9,7 +9,7 @@ use super::common::*;
 
 #[tokio::test]
 async fn test_sim_registry_sync() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup().await?;
+    let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: "ns-sim".into(),
@@ -38,7 +38,7 @@ async fn test_sim_registry_sync() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
-    let (mut conn, worker_handle) = setup().await?;
+    let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
         namespace_id: "ns-sim".into(),
@@ -90,7 +90,7 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
 async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
     use distvirt_worker_protocol::EndpointPodBackend;
 
-    let (mut conn, worker_handle) = setup().await?;
+    let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     let ns_id = "ns-svc-ready";
     create_namespace(&mut conn, ns_id, test_network_config()).await?;

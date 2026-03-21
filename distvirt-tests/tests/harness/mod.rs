@@ -10,6 +10,7 @@
 //! yield to let workers and shell run, then check if the activity counter stopped
 //! incrementing.
 
+#[allow(dead_code)]
 pub mod spec_builders;
 
 use std::collections::BTreeMap;
@@ -463,6 +464,7 @@ impl TestCluster {
         );
     }
 
+    #[allow(dead_code)]
     pub async fn assert_workload_failed(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_status(ns_id, wl_id).await;
         assert_eq!(
@@ -493,6 +495,7 @@ impl TestCluster {
         );
     }
 
+    #[allow(dead_code)]
     pub async fn assert_workload_not_running(&self, ns_id: &str, wl_id: &str) {
         let state = self.workload_status(ns_id, wl_id).await;
         assert_ne!(
@@ -520,6 +523,7 @@ impl TestCluster {
         );
     }
 
+    #[allow(dead_code)]
     pub async fn assert_service_need_backend(&self, ns_id: &str, svc_id: &str) {
         let state = self.service_status(ns_id, svc_id).await;
         assert_eq!(

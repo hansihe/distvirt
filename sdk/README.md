@@ -131,16 +131,16 @@ What needs to happen before this is production-ready:
 - [x] **Extract `distvirt-spec` crate** — Spec parsing now lives in `distvirt-spec`, shared by the CLI and SDK.
 - [x] **Implement PyO3 `parse_spec`** — `parse_spec(path)` works end-to-end: parse → resolve includes → validate → serialize to proto bytes.
 - [ ] **`parse_spec` `values` parameter** — The `values` parameter is accepted but ignored. Needs an API addition to `distvirt-spec` to accept caller-provided variable substitutions (currently values are only read from the YAML `include` entries).
-- [ ] **Proto codegen for Python** — Generate Python gRPC stubs from `client.proto`. Decide on build-time vs checked-in generation.
-- [ ] **Implement `connect()`** — gRPC channel creation with optional TLS and auth token interceptor.
-- [ ] **Implement `apply()`** — Create-or-update logic (try `CreateNamespace`, fall back to `UpdateNamespace` on `ALREADY_EXISTS`).
-- [ ] **Implement `Namespace` event loop** — Background task consuming `StreamEvents`, updating the `NamespaceModel`, notifying waiters.
-- [ ] **Implement `NamespaceModel.apply_event()`** — Map each proto event type to model state mutations. Requires documenting the event lifecycle guarantees in the proto.
-- [ ] **Implement `NamespaceModel.apply_status()`** — Bootstrap model from `GetNamespaceStatus` response.
+- [x] **Proto codegen for Python** — Generate Python gRPC stubs from `client.proto`. Decide on build-time vs checked-in generation.
+- [x] **Implement `connect()`** — gRPC channel creation with optional TLS and auth token interceptor.
+- [x] **Implement `apply()`** — Create-or-update logic (try `CreateNamespace`, fall back to `UpdateNamespace` on `ALREADY_EXISTS`).
+- [x] **Implement `Namespace` event loop** — Background task consuming `StreamEvents`, updating the `NamespaceModel`, notifying waiters.
+- [x] **Implement `NamespaceModel.apply_event()`** — Map each proto event type to model state mutations. Requires documenting the event lifecycle guarantees in the proto.
+- [x] **Implement `NamespaceModel.apply_status()`** — Bootstrap model from `GetNamespaceStatus` response.
 - [ ] **Implement `WatchNamespaceStatus`** (server-side) — Currently stubbed in the orchestrator. Needed for clean initial-state bootstrap without races. First message should be a full snapshot.
 - [ ] **Add `exit_code` to `WorkloadCompleted` proto message** — Currently empty; exit code is only in the `WorkloadPodStopped` event.
 - [ ] **Document event lifecycle guarantees in proto** — Completeness (are events ever dropped?), ordering (per-entity strict order?), terminal states, valid state transitions. The SDK's object model correctness depends on these guarantees.
-- [ ] **Implement remaining RPCs** — `delete()`, `namespaces()`, `events()`, `logs()`, `attach()`, `deactivate()`.
+- [ ] **Implement remaining RPCs** — `logs()`, `attach()`, `deactivate()`.
 - [ ] **Error handling** — Map gRPC status codes to typed Python exceptions.
 - [ ] **Tests** — Unit tests for the waiter/model system, integration tests against a running orchestrator.
 - [ ] **Package and publish** — CI pipeline for building the maturin wheel (manylinux + macOS).

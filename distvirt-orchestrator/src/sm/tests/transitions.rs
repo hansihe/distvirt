@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn demand_drop_during_launch_committed_to_boot() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
+    let (_mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Verify committed state.
     let wl = router.get_workload(&W1).unwrap();
@@ -36,7 +36,7 @@ fn demand_drop_during_launch_committed_to_boot() {
 #[test]
 fn demand_fluctuation_during_launch() {
     let mut router = Router::new(16);
-    let (mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
+    let (_mgmt, worker, pod_id, demand_port) = setup_workload_with_pending_pod(&mut router);
 
     // Demand drops.
     router.set_endpoint_demand_active(demand_port, false);

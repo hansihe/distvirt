@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
-use distvirt_orchestrator::types::*;
 
 /// Basic drain: set draining condition, verify it's visible, undrain clears it.
 #[test]

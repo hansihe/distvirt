@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::TestVmm;
 
 use crate::harness::TestCluster;

@@ -1045,6 +1045,7 @@ impl Namespace {
     }
 
     /// Get the namespace ID.
+    #[allow(dead_code)]
     pub(crate) fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
     }

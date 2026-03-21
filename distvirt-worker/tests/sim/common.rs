@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use distvirt_worker_protocol::{
     ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig,
-    OrchestratorConnection, PodId, PodNetworkConfig, WorkerAccepted, WorkerCommand,
+    OrchestratorConnection, PodId, PodNetworkConfig, PoolId, WorkerAccepted, WorkerCommand,
     WorkerConnection, WorkerEvent, WorkerId,
 };
 
@@ -18,6 +18,7 @@ pub const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 pub async fn setup() -> anyhow::Result<(
     OrchestratorConnection,
     tokio::task::JoinHandle<anyhow::Result<()>>,
+    PoolId,
 )> {
     setup_with_behavior(ContainerBehavior::ExitImmediately(0)).await
 }
@@ -27,6 +28,7 @@ pub async fn setup_with_behavior(
 ) -> anyhow::Result<(
     OrchestratorConnection,
     tokio::task::JoinHandle<anyhow::Result<()>>,
+    PoolId,
 )> {
     let _ = env_logger::try_init();
 
@@ -53,7 +55,8 @@ pub async fn setup_with_behavior(
 
     let mut conn = OrchestratorConnection::connect(orch_half).await?;
 
-    let _hello = conn.recv_hello().await?;
+    let hello = conn.recv_hello().await?;
+    let pool_id = hello.capabilities.pools[0].pool_id.clone();
     conn.send_accepted(&WorkerAccepted {
         worker_id: WorkerId(1),
         adapters: vec![],
@@ -63,7 +66,7 @@ pub async fn setup_with_behavior(
     .await?;
     let _ready = conn.recv_ready().await?;
 
-    Ok((conn, worker_handle))
+    Ok((conn, worker_handle, pool_id))
 }
 
 pub async fn recv_event_timeout(
@@ -220,6 +223,7 @@ pub async fn setup_with_crash_handles(
 ) -> anyhow::Result<(
     OrchestratorConnection,
     tokio::task::JoinHandle<anyhow::Result<()>>,
+    PoolId,
     mpsc::UnboundedReceiver<CrashHandle>,
 )> {
     let _ = env_logger::try_init();
@@ -247,7 +251,8 @@ pub async fn setup_with_crash_handles(
 
     let mut conn = OrchestratorConnection::connect(orch_half).await?;
 
-    let _hello = conn.recv_hello().await?;
+    let hello = conn.recv_hello().await?;
+    let pool_id = hello.capabilities.pools[0].pool_id.clone();
     conn.send_accepted(&WorkerAccepted {
         worker_id: WorkerId(1),
         adapters: vec![],
@@ -257,7 +262,7 @@ pub async fn setup_with_crash_handles(
     .await?;
     let _ready = conn.recv_ready().await?;
 
-    Ok((conn, worker_handle, crash_handle_rx))
+    Ok((conn, worker_handle, pool_id, crash_handle_rx))
 }
 
 pub async fn register_pod_endpoint(

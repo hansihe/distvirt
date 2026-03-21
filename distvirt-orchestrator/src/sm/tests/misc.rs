@@ -10,7 +10,7 @@ use super::super::endpoint::EndpointState;
 #[test]
 fn graceful_exit_no_failure_count() {
     let mut router = Router::new(16);
-    let (mgmt, worker) = setup_running_workload(&mut router, 5);
+    let (_mgmt, worker) = setup_running_workload(&mut router, 5);
 
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);

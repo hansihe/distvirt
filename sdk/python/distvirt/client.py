@@ -92,8 +92,8 @@ class Client:
             else:
                 raise
 
-        # TODO: open event stream and bootstrap model via GetNamespaceStatus
-        return Namespace(namespace_id=namespace_id, stub=self._stub)
+        ns = await self._open_namespace(namespace_id)
+        return ns
 
     async def delete(self, namespace_id: str) -> None:
         """Delete a namespace.
@@ -117,8 +117,22 @@ class Client:
         Returns:
             A Namespace handle with a live event stream attached.
         """
-        # TODO: GetNamespaceStatus to bootstrap, then open StreamEvents
-        return Namespace(namespace_id=namespace_id, stub=self._stub)
+        return await self._open_namespace(namespace_id)
+
+    async def _open_namespace(self, namespace_id: str) -> Namespace:
+        """Create a Namespace handle with bootstrapped model and event stream."""
+        ns = Namespace(namespace_id=namespace_id, stub=self._stub)
+
+        # Bootstrap model from current status
+        resp = await self._stub.get_namespace_status(
+            GetNamespaceStatusRequest(namespace_id=namespace_id)
+        )
+        ns._model.apply_status(resp.status)
+
+        # Start background event consumption
+        await ns._start_event_loop()
+
+        return ns
 
     async def namespaces(self) -> list[NamespaceStatusReport]:
         """List all namespaces with their current status.

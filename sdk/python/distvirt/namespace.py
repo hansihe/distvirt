@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, AsyncIterator
 
-from distvirt._proto.distvirt.client.v1 import DistvirtClientStub
+from distvirt._proto.distvirt.client.v1 import (
+    DistvirtClientStub,
+    StreamEventsRequest,
+)
 from distvirt.events import EventStream, NamespaceModel, WorkloadModel, ServiceModel
 from distvirt.workload import Workload
 from distvirt.service import Service
+
+logger = logging.getLogger(__name__)
 
 
 class Namespace:
@@ -45,15 +51,29 @@ class Namespace:
         return self._namespace_id
 
     async def _start_event_loop(self) -> None:
-        """Start the background event consumption loop.
+        """Start the background event consumption task.
 
         Opens a StreamEvents RPC and continuously applies events to the
-        internal model. Runs as an asyncio task for the lifetime of
-        the Namespace handle.
+        internal model in a background asyncio task.
         """
-        # TODO: open StreamEvents RPC, loop applying events to self._model
-        # On each event: self._model.apply_event(event); self._model._notify_waiters()
-        pass
+        self._event_task = asyncio.create_task(
+            self._run_event_loop(),
+            name=f"distvirt-events-{self._namespace_id}",
+        )
+
+    async def _run_event_loop(self) -> None:
+        """Consume events from the StreamEvents RPC and apply to the model."""
+        try:
+            request = StreamEventsRequest(namespace_id=self._namespace_id)
+            async for event in self._stub.stream_events(request):
+                self._model.apply_event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Event loop for namespace %s terminated with error",
+                self._namespace_id,
+            )
 
     async def close(self) -> None:
         """Stop the background event loop and release resources."""
@@ -106,7 +126,7 @@ class Namespace:
         *,
         workloads: list[str] | None = None,
         services: list[str] | None = None,
-    ) -> AsyncIterator[Any]:
+    ) -> EventStream:
         """Stream namespace events as an async iterator.
 
         Opens a separate StreamEvents RPC (independent of the internal
@@ -119,8 +139,13 @@ class Namespace:
         Returns:
             Async iterator of event objects.
         """
-        # TODO: open StreamEvents RPC with filters, return EventStream
-        raise NotImplementedError
+        request = StreamEventsRequest(
+            namespace_id=self._namespace_id,
+            workload_ids=workloads or [],
+            service_ids=services or [],
+        )
+        stream = self._stub.stream_events(request)
+        return EventStream(stream)
 
     def logs(
         self,

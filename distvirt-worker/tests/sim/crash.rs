@@ -5,7 +5,7 @@ use super::common::*;
 
 #[tokio::test]
 async fn test_sim_vm_crash() -> anyhow::Result<()> {
-    let (mut conn, worker_handle, mut crash_rx) =
+    let (mut conn, worker_handle, _pool_id, mut crash_rx) =
         setup_with_crash_handles(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
@@ -39,7 +39,7 @@ async fn test_sim_vm_crash() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
-    let (mut conn, worker_handle, mut crash_rx) =
+    let (mut conn, worker_handle, _pool_id, mut crash_rx) =
         setup_with_crash_handles(ContainerBehavior::RunUntilSignaled).await?;
 
     create_namespace(&mut conn, "ns-sim", test_network_config()).await?;
