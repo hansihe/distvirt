@@ -213,6 +213,13 @@ class NamespaceModel:
             wl.worker_id = value.worker_id
         elif variant == "unspliced":
             wl.spliced = False
+        elif variant == "state_changed":
+            new_state = value.new_state
+            wl.state = _workload_state_name(new_state)
+            # Extract pod/worker from states that carry them
+            _, state_value = betterproto.which_one_of(new_state, "state")
+            wl.pod_id = getattr(state_value, "pod_id", None) or None
+            wl.worker_id = getattr(state_value, "worker_id", None) or wl.worker_id
         # demand_changed is informational, doesn't affect model state
 
     def _apply_endpoint_event(self, endpoint: Any) -> None:

@@ -701,28 +701,59 @@ fn convert_workload_status_transition(
     old: &sm::WlStatus,
     new: &sm::WlStatus,
 ) -> Option<proto::workload_event::Event> {
-    // Map workload status transitions to demand-change events.
-    // The WlStatus carries the high-level lifecycle state.
-    match (old, new) {
-        // Demand appeared: dormant → anything active.
-        (sm::WlStatus::Dormant, sm::WlStatus::Launching)
-        | (sm::WlStatus::Dormant, sm::WlStatus::WaitingForSpec) => {
-            Some(proto::workload_event::Event::DemandChanged(
-                proto::WorkloadDemandChanged {
-                    demanding_services: 1,
-                },
-            ))
+    Some(proto::workload_event::Event::StateChanged(
+        proto::WorkloadStateChanged {
+            old_state: Some(convert_wl_status_to_proto(old)),
+            new_state: Some(convert_wl_status_to_proto(new)),
+        },
+    ))
+}
+
+fn convert_wl_status_to_proto(status: &sm::WlStatus) -> proto::WorkloadState {
+    let state = match status {
+        sm::WlStatus::Dormant => {
+            proto::workload_state::State::Dormant(proto::WorkloadDormant {})
         }
-        // Demand gone: active → dormant.
-        (_, sm::WlStatus::Dormant) if *old != sm::WlStatus::Dormant => {
-            Some(proto::workload_event::Event::DemandChanged(
-                proto::WorkloadDemandChanged {
-                    demanding_services: 0,
-                },
-            ))
+        sm::WlStatus::WaitingForSpec => {
+            proto::workload_state::State::WaitingForSpec(proto::WorkloadWaitingForSpec {})
         }
-        _ => None,
-    }
+        sm::WlStatus::Launching => {
+            proto::workload_state::State::Launching(proto::WorkloadLaunching {
+                pod_id: String::new(),
+                worker_id: String::new(),
+            })
+        }
+        sm::WlStatus::Running => {
+            proto::workload_state::State::Running(proto::WorkloadRunning {
+                pod_id: String::new(),
+                worker_id: String::new(),
+            })
+        }
+        sm::WlStatus::Suspending => {
+            proto::workload_state::State::Suspending(proto::WorkloadSuspending {
+                pod_id: String::new(),
+                worker_id: String::new(),
+            })
+        }
+        sm::WlStatus::Suspended => {
+            proto::workload_state::State::Suspended(proto::WorkloadSuspended {})
+        }
+        sm::WlStatus::RetryBackoff => {
+            proto::workload_state::State::RetryBackoff(proto::WorkloadRetryBackoff {})
+        }
+        sm::WlStatus::Failed { exit_code, reason } => {
+            proto::workload_state::State::Failed(proto::WorkloadFailed {
+                exit_code: *exit_code,
+                reason: reason.clone(),
+            })
+        }
+        sm::WlStatus::Completed { exit_code } => {
+            proto::workload_state::State::Completed(proto::WorkloadCompleted {
+                exit_code: *exit_code,
+            })
+        }
+    };
+    proto::WorkloadState { state: Some(state) }
 }
 
 fn convert_endpoint_obs_event(

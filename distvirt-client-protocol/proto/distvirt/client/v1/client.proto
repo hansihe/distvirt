@@ -459,6 +459,73 @@ enum PodState {
 }
 
 // --- Events ---
+//
+// Event Lifecycle Contract
+//
+// == Delivery guarantees ==
+//
+// Events are generated from state machine signal changes at the end of each
+// reconciliation cycle. The following guarantees hold:
+//
+// 1. EVENTUAL CONSISTENCY: Every state that persists across a reconciliation
+//    boundary will produce an event. The event stream, combined with an
+//    initial GetNamespaceStatus snapshot, is sufficient to maintain a
+//    consistent local model.
+//
+// 2. STATES MAY BE SKIPPED: Intermediate states that exist for less than one
+//    reconciliation cycle may not produce events. For example, a workload may
+//    transition directly from Dormant to Running without a Launching event,
+//    or a pod may go from Launching to Failed without a Running event.
+//    Clients MUST handle any valid state appearing after any other state.
+//
+// 3. MONOTONIC TIMESTAMPS: Events within a single entity type are ordered.
+//    Events across entity types (pod vs workload vs endpoint) from the same
+//    reconciliation cycle have no ordering guarantee.
+//
+// 4. NO DUPLICATES: A state change event is emitted at most once per
+//    actual transition.
+//
+// == Pod state transitions ==
+//
+// Valid terminal states: Finished, Failed, Displaced
+// Non-terminal states: Launching, Running, Suspending, Suspended, Resuming
+//
+// Any non-terminal state may transition to any terminal state.
+// Normal forward flow: Launching -> Running -> [Suspending -> Suspended | Finished]
+// Resume flow: Resuming -> Running
+// Any non-terminal -> Failed (timeout, worker lost, owner lost)
+// Any non-terminal -> Displaced (lease revoked)
+// Launching -> Failed (launch timeout)
+//
+// Pod lifecycle: PodCreated -> state changes -> PodReaped
+//
+// == Workload state transitions ==
+//
+// Valid terminal states: Failed, Completed
+// Non-terminal states: Dormant, WaitingForSpec, Launching, Running,
+//                      Suspending, Suspended, RetryBackoff
+//
+// Any non-terminal state may transition to any other non-terminal state
+// or to a terminal state. The workload state is DERIVED from internal
+// control fields, not an explicit state machine, so arbitrary transitions
+// are possible. Clients MUST NOT assume a fixed transition order.
+//
+// Common flows:
+//   Dormant -> [WaitingForSpec ->] Launching -> Running -> Dormant (service)
+//   Dormant -> Launching -> Running -> Completed (job)
+//   Running -> Suspending -> Suspended -> Launching -> Running (suspend cycle)
+//   Running -> RetryBackoff -> Launching -> Running (retry cycle)
+//   Running -> RetryBackoff -> Failed (max retries)
+//
+// == Client state tracking ==
+//
+// To maintain a local state model:
+// 1. Call GetNamespaceStatus to get initial snapshot
+// 2. Subscribe to StreamEvents (with historical buffer overlap)
+// 3. Apply each WorkloadStateChanged event by replacing the workload's
+//    current state with the event's new_state
+// 4. Apply each Pod event by updating the pod's state accordingly
+// 5. For wait_for() predicates, check after each state update
 
 message StreamEventsRequest {
     string namespace_id = 1;
@@ -481,6 +548,7 @@ message WorkloadEvent {
         WorkloadDemandChanged demand_changed = 2;
         WorkloadSpliced spliced = 3;
         WorkloadUnspliced unspliced = 4;
+        WorkloadStateChanged state_changed = 5;
     }
 }
 
@@ -493,6 +561,11 @@ message WorkloadSpliced {
 }
 
 message WorkloadUnspliced {}
+
+message WorkloadStateChanged {
+    WorkloadState old_state = 1;
+    WorkloadState new_state = 2;
+}
 
 message PodEvent {
     string pod_id = 1;

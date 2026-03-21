@@ -166,6 +166,11 @@ impl NamespaceModel {
             proto::workload_event::Event::DemandChanged(_) => {
                 // Demand info — doesn't change model state directly.
             }
+            proto::workload_event::Event::StateChanged(sc) => {
+                if let Some(w) = workload {
+                    w.state = convert_workload_state(sc.new_state.as_ref());
+                }
+            }
         }
     }
 

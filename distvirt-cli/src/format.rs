@@ -408,6 +408,11 @@ fn workload_event_description(we: &WorkloadEvent) -> String {
         }
         Some(workload_event::Event::Spliced(s)) => format!("spliced to {}", s.worker_id),
         Some(workload_event::Event::Unspliced(_)) => "unspliced".to_string(),
+        Some(workload_event::Event::StateChanged(sc)) => {
+            let old = sc.old_state.as_ref().map(|s| workload_state_label(s)).unwrap_or_else(|| "unknown".into());
+            let new = sc.new_state.as_ref().map(|s| workload_state_label(s)).unwrap_or_else(|| "unknown".into());
+            format!("{} -> {}", old, new)
+        }
         None => "unknown event".to_string(),
     }
 }
