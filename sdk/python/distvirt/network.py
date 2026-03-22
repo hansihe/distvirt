@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import logging
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from distvirt._core import (
     UserspaceNetwork as _CoreUserspaceNetwork,
@@ -43,8 +46,8 @@ class _TcpTransport(asyncio.Transport):
                 if not data:
                     keep_open = self._protocol.eof_received()
                     if not keep_open:
-                        break
-                    continue
+                        self.close()
+                    return
                 self._protocol.data_received(data)
         except Exception as exc:
             self._force_close(exc)
@@ -101,6 +104,8 @@ class _TcpTransport(asyncio.Transport):
         if self._closing:
             return
         self._closing = True
+        if self._read_task is not None:
+            self._read_task.cancel()
         asyncio.get_running_loop().create_task(self._close_async())
 
     def is_closing(self) -> bool:
@@ -112,8 +117,10 @@ class _TcpTransport(asyncio.Transport):
                 await self._drain_write_buf()
             await self._stream.shutdown()
         except Exception:
-            pass
+            logger.debug("error during transport shutdown", exc_info=True)
         finally:
+            if self._write_task is not None:
+                self._write_task.cancel()
             self._stream.close()
             self._protocol.connection_lost(None)
             if self._closed_fut and not self._closed_fut.done():
@@ -123,6 +130,10 @@ class _TcpTransport(asyncio.Transport):
         if self._closing:
             return
         self._closing = True
+        if self._read_task is not None:
+            self._read_task.cancel()
+        if self._write_task is not None:
+            self._write_task.cancel()
         self._stream.close()
         self._protocol.connection_lost(exc)
         if self._closed_fut and not self._closed_fut.done():
@@ -149,12 +160,18 @@ class Network:
     Usage::
 
         async with await ns.connect() as net:
-            reader, writer = await net.connect_tcp("10.0.0.2", 8080)
+            # High-level streams (like asyncio.open_connection)
+            reader, writer = await net.open_connection("10.0.0.2", 8080)
             writer.write(b"GET / HTTP/1.0\\r\\n\\r\\n")
             await writer.drain()
             data = await reader.read(4096)
             writer.close()
             await writer.wait_closed()
+
+            # Low-level transport (like loop.create_connection)
+            transport, protocol = await net.create_connection(
+                MyProtocol, "10.0.0.2", 8080
+            )
     """
 
     def __init__(self, inner: _CoreUserspaceNetwork, client_inner: PyClient):
@@ -167,24 +184,45 @@ class Network:
     async def __aexit__(self, *exc: Any) -> None:
         await self.disconnect()
 
-    async def connect_tcp(
+    async def create_connection(
+        self,
+        protocol_factory: Callable[[], asyncio.Protocol],
+        host: str,
+        port: int,
+    ) -> tuple[_TcpTransport, asyncio.Protocol]:
+        """Open a TCP connection with a custom protocol.
+
+        Drop-in replacement for :meth:`asyncio.loop.create_connection` over
+        the userspace tunnel. Libraries like asyncpg that manage their own
+        protocol can use this directly.
+
+        Returns:
+            A ``(transport, protocol)`` pair.
+        """
+        stream = await self._inner.connect_tcp(host, port)
+        protocol = protocol_factory()
+        transport = _TcpTransport(stream, protocol)
+        protocol.connection_made(transport)
+        transport._start()
+        return transport, protocol
+
+    async def open_connection(
         self, host: str, port: int
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Open a TCP connection returning standard asyncio streams.
 
+        Drop-in replacement for :func:`asyncio.open_connection` over the
+        userspace tunnel.
+
         Returns:
-            A ``(reader, writer)`` pair, just like :func:`asyncio.open_connection`.
+            A ``(reader, writer)`` pair.
         """
-        stream = await self._inner.connect_tcp(host, port)
-        loop = asyncio.get_running_loop()
-
         reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
-        transport = _TcpTransport(stream, protocol)
-        protocol.connection_made(transport)
-        transport._start()
-        writer = asyncio.StreamWriter(transport, protocol, reader, loop)
-
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await self.create_connection(lambda: protocol, host, port)
+        writer = asyncio.StreamWriter(
+            transport, protocol, reader, asyncio.get_running_loop()
+        )
         return reader, writer
 
     async def bind_udp(self, port: int = 0) -> UdpConnection:

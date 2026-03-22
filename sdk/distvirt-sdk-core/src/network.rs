@@ -133,11 +133,18 @@ impl PyUserspaceNetwork {
     /// Drop the network without gRPC disconnect.
     fn close(&self) {
         let network = Arc::clone(&self.network);
-        let rt = pyo3_async_runtimes::tokio::get_runtime();
-        rt.block_on(async {
-            let mut guard = network.lock().await;
-            guard.take();
-        });
+        match network.try_lock() {
+            Ok(mut guard) => {
+                guard.take();
+            }
+            Err(_) => {
+                let rt = pyo3_async_runtimes::tokio::get_runtime();
+                rt.spawn(async move {
+                    let mut guard = network.lock().await;
+                    guard.take();
+                });
+            }
+        }
     }
 
     #[getter]
@@ -235,11 +242,18 @@ impl PyTcpStream {
     /// Close the stream.
     fn close(&self) {
         let stream = Arc::clone(&self.stream);
-        let rt = pyo3_async_runtimes::tokio::get_runtime();
-        rt.block_on(async {
-            let mut guard = stream.lock().await;
-            guard.take();
-        });
+        match stream.try_lock() {
+            Ok(mut guard) => {
+                guard.take();
+            }
+            Err(_) => {
+                let rt = pyo3_async_runtimes::tokio::get_runtime();
+                rt.spawn(async move {
+                    let mut guard = stream.lock().await;
+                    guard.take();
+                });
+            }
+        }
     }
 
     #[getter]
@@ -310,11 +324,18 @@ impl PyUdpSocket {
     /// Close the socket.
     fn close(&self) {
         let socket = Arc::clone(&self.socket);
-        let rt = pyo3_async_runtimes::tokio::get_runtime();
-        rt.block_on(async {
-            let mut guard = socket.lock().await;
-            guard.take();
-        });
+        match socket.try_lock() {
+            Ok(mut guard) => {
+                guard.take();
+            }
+            Err(_) => {
+                let rt = pyo3_async_runtimes::tokio::get_runtime();
+                rt.spawn(async move {
+                    let mut guard = socket.lock().await;
+                    guard.take();
+                });
+            }
+        }
     }
 
     #[getter]
