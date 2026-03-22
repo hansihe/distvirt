@@ -44,7 +44,9 @@ impl Drop for PreparedImage {
         if let Err(e) = crate::linux::mount::umount_detach(&self.rootfs_path) {
             log::warn!("PreparedImage drop: umount {:?}: {}", self.rootfs_path, e);
         }
-        let _ = std::fs::remove_dir(&self.rootfs_path);
+        if let Err(e) = std::fs::remove_dir(&self.rootfs_path) {
+            log::warn!("PreparedImage drop: remove_dir {:?}: {}", self.rootfs_path, e);
+        }
 
         // Remove the snapshot view (fire-and-forget, best-effort cleanup).
         let channel = self.channel.clone();
@@ -54,9 +56,11 @@ impl Drop for PreparedImage {
             let mut snapshots = SnapshotsClient::new(channel);
             let req = RemoveSnapshotRequest {
                 snapshotter: "overlayfs".to_string(),
-                key: snapshot_key,
+                key: snapshot_key.clone(),
             };
-            let _ = snapshots.remove(with_namespace!(req, &namespace)).await;
+            if let Err(e) = snapshots.remove(with_namespace!(req, &namespace)).await {
+                log::warn!("PreparedImage drop: snapshot remove {:?}: {}", snapshot_key, e);
+            }
         });
     }
 }
@@ -102,9 +106,14 @@ async fn pull_image(
     let req = GetImageRequest {
         name: image_ref.to_string(),
     };
-    if images.get(with_namespace!(req, namespace)).await.is_ok() {
-        log::info!("image {} already exists locally, skipping pull", image_ref);
-        return Ok(());
+    match images.get(with_namespace!(req, namespace)).await {
+        Ok(_) => {
+            log::info!("image {} already exists locally, skipping pull", image_ref);
+            return Ok(());
+        }
+        Err(e) => {
+            log::debug!("image {} not found locally ({}), will pull", image_ref, e);
+        }
     }
 
     let arch = match consts::ARCH {
@@ -204,21 +213,35 @@ async fn setup_auth_stream(
     tokio::spawn(async move {
         use containerd_client::types::transfer::AuthRequest;
 
-        while let Ok(Some(any)) = inbound.message().await {
-            // Check if this is an AuthRequest.
-            if any.type_url == AuthRequest::full_name()
-                || any.type_url == format!("/{}", AuthRequest::full_name())
-                || any.type_url.ends_with("AuthRequest")
-            {
-                log::debug!("received auth callback, responding with credentials");
-                let response = AuthResponse {
-                    auth_type: AuthType::Credentials as i32,
-                    username: cred.username.clone(),
-                    secret: cred.password.clone(),
-                    expire_at: None,
-                };
-                if tx.send(to_any(&response)).await.is_err() {
-                    log::warn!("auth stream sender closed");
+        loop {
+            match inbound.message().await {
+                Ok(Some(any)) => {
+                    // Check if this is an AuthRequest.
+                    if any.type_url == AuthRequest::full_name()
+                        || any.type_url == format!("/{}", AuthRequest::full_name())
+                        || any.type_url.ends_with("AuthRequest")
+                    {
+                        log::debug!("received auth callback, responding with credentials");
+                        let response = AuthResponse {
+                            auth_type: AuthType::Credentials as i32,
+                            username: cred.username.clone(),
+                            secret: cred.password.clone(),
+                            expire_at: None,
+                        };
+                        if tx.send(to_any(&response)).await.is_err() {
+                            log::warn!("auth stream sender closed");
+                            break;
+                        }
+                    } else {
+                        log::debug!("auth stream: ignoring message type {}", any.type_url);
+                    }
+                }
+                Ok(None) => {
+                    log::debug!("auth stream closed by containerd");
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("auth stream error: {}", e);
                     break;
                 }
             }
