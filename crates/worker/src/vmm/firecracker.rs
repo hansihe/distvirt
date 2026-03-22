@@ -83,20 +83,24 @@ impl Vmm for Firecracker {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
         // Copy rootfs and container images into tmpdir (writable copies).
+        log::info!("firecracker: copying rootfs image to tmpdir");
         copy_file_writable(
             &config.rootfs_image_path,
             &tmpdir.path().join("rootfs.ext4"),
         )
         .await?;
+        log::info!("firecracker: copying container image to tmpdir");
         copy_file_writable(
             &config.container_image_path,
             &tmpdir.path().join("container.ext4"),
         )
         .await?;
+        log::info!("firecracker: images copied, spawning firecracker");
 
         // Spawn Firecracker and wait for API socket.
         let spawned =
             spawn_firecracker(&self.firecracker_bin, tmpdir.path(), config.serial_console).await?;
+        log::info!("firecracker: process spawned, configuring VM");
         let SpawnedFirecracker {
             child,
             serial_stdout,
@@ -286,6 +290,7 @@ impl Vmm for Firecracker {
             None
         };
 
+        log::info!("firecracker: starting instance");
         api_request(
             "PUT",
             &api_socket,
@@ -296,6 +301,7 @@ impl Vmm for Firecracker {
         )
         .await
         .context("start instance")?;
+        log::info!("firecracker: instance started");
 
         // Open AF_PACKET socket on the TAP and wrap as FabricPort.
         let fabric_port = if let Some(tap) = tap {

@@ -281,6 +281,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         .next()
         .context("pod must have at least one container")?;
 
+    log::info!("pod '{}': preparing image {}", pod_id, container.image_ref);
     let artifact = tokio::select! {
         result = image_provider.prepare(&container.image_ref) => {
             result.context("preparing image")?
@@ -289,6 +290,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
             anyhow::bail!("cancelled during image prepare");
         }
     };
+    log::info!("pod '{}': image prepared", pod_id);
 
     let container_id = container.container_id.clone();
     let container_volume_mounts = container.config.volume_mounts.clone();
@@ -330,10 +332,12 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     });
 
     // Prepare volume images in a temp directory.
+    log::info!("pod '{}': preparing {} volume(s)", pod_id, volumes.len());
     let vol_tmpdir = tempfile::tempdir().context("create tmpdir for volumes")?;
     let prepared_volumes = crate::volume::prepare_volumes(&volumes, vol_tmpdir.path())
         .await
         .context("prepare volumes")?;
+    log::info!("pod '{}': volumes prepared", pod_id);
 
     let additional_drives: Vec<crate::vmm::AdditionalDrive> = prepared_volumes
         .iter()
@@ -358,6 +362,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         additional_drives,
     };
 
+    log::info!("pod '{}': launching VM", pod_id);
     let instance = tokio::select! {
         result = vmm.launch(&vm_config) => {
             result.context("launch VM")?
@@ -366,9 +371,11 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
             anyhow::bail!("cancelled during VM launch");
         }
     };
-    log::info!("worker: pod '{}' VM launched", pod_id);
+    log::info!("pod '{}': VM launched", pod_id);
 
+    log::info!("pod '{}': setting up instance (fabric + vsock connect)", pod_id);
     let (mut vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
+    log::info!("pod '{}': instance setup complete", pod_id);
 
     // Take exit signal again for the setup phase below (setup_instance consumed
     // the first one for the connect phase).
@@ -377,6 +384,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
 
     let io_session = tokio::select! {
         result = async {
+            log::info!("pod '{}': configuring guest network", pod_id);
             vm.configure_network("eth0", &net_config).await?;
 
             // Mount pod-scoped volumes before adding containers.
@@ -385,6 +393,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
             let vol_device_offset: u8 = 2 + if vm_config.initial_commands.is_empty() { 0 } else { 1 };
             for (i, pv) in prepared_volumes.iter().enumerate() {
                 let device = format!("/dev/vd{}", (b'a' + vol_device_offset + i as u8) as char);
+                log::info!("pod '{}': mounting volume '{}' at {}", pod_id, pv.name, device);
                 vm.mount_volume(&pv.name, &device, pv.read_only).await?;
             }
 
@@ -399,13 +408,16 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                 })
                 .collect();
 
+            log::info!("pod '{}': adding container '{}'", pod_id, container_id);
             vm.add_container(&container_id, "/dev/vdb", &dns_servers, volume_mounts)
                 .await?;
 
+            log::info!("pod '{}': starting container '{}'", pod_id, container_id);
             vm.start_container(&container_id, &config).await?;
 
             // Set up log streaming via yamux log streams.
             let io_session = if config.capture_output {
+                log::info!("pod '{}': accepting output stream", pod_id);
                 match vm.accept_output_stream().await {
                     Ok((_cid, session)) => {
                         let header = LogStreamHeader {
