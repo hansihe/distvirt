@@ -11,7 +11,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 use distvirt_client_protocol::*;
-use rand::rngs::OsRng;
 use tokio::net::UdpSocket;
 
 use crate::connection::{Client, handle_grpc_error};
@@ -45,7 +44,7 @@ impl ProvisionedTunnel {
         client: &mut Client,
         namespace_id: &str,
     ) -> anyhow::Result<Self> {
-        let private_key = StaticSecret::random_from_rng(OsRng);
+        let private_key = StaticSecret::from(rand::random::<[u8; 32]>());
         let public_key = PublicKey::from(&private_key);
 
         let resp = client
@@ -118,7 +117,7 @@ pub async fn wg_quick_config(
     client: &mut Client,
     namespace_id: &str,
 ) -> anyhow::Result<String> {
-    let private_key = StaticSecret::random_from_rng(OsRng);
+    let private_key = StaticSecret::from(rand::random::<[u8; 32]>());
     let public_key = PublicKey::from(&private_key);
 
     let resp = client

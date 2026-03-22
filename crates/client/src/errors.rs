@@ -1,6 +1,6 @@
 use std::fmt;
 
-use annotate_snippets::{Level, Renderer, Snippet};
+use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use snafu::prelude::*;
 
 use crate::spec::path::YamlPath;
@@ -192,23 +192,25 @@ impl SpecErrors {
 
         match (source, resolved) {
             (Some(src), Some(span)) => {
-                let message = level
-                    .title(&title)
-                    .snippet(
+                let report: &[Group] = &[level
+                    .primary_title(&title)
+                    .element(
                         Snippet::source(&src.content)
-                            .origin(&src.name)
+                            .path(&src.name)
                             .fold(true)
-                            .annotation(level.span(span.start..span.end)),
-                    );
+                            .annotation(AnnotationKind::Primary.span(span.start..span.end)),
+                    )];
                 let renderer = Renderer::plain();
-                format!("{}", renderer.render(message))
+                format!("{}", renderer.render(report))
             }
             _ => {
                 // No source or span — fall back to plain text
-                let label = match level {
-                    Level::Error => "error",
-                    Level::Warning => "warning",
-                    _ => "note",
+                let label = if level == Level::ERROR {
+                    "error"
+                } else if level == Level::WARNING {
+                    "warning"
+                } else {
+                    "note"
                 };
                 format!("  {}: {}", label, title)
             }
@@ -237,13 +239,13 @@ impl fmt::Display for SpecErrors {
             )?,
         }
         for e in &self.errors {
-            writeln!(f, "{}", self.render_entry(e, Level::Error))?;
+            writeln!(f, "{}", self.render_entry(e, Level::ERROR))?;
         }
         if !self.warnings.is_empty() && !self.errors.is_empty() {
             writeln!(f)?;
         }
         for w in &self.warnings {
-            writeln!(f, "{}", self.render_entry(w, Level::Warning))?;
+            writeln!(f, "{}", self.render_entry(w, Level::WARNING))?;
         }
         Ok(())
     }

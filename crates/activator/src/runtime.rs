@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use wasmtime::error::Context;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 

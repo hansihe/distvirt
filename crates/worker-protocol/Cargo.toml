@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 capnp = "0.25"
-log = "0.4"
-serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "macros"] }
-yamux = "0.13.9"
-tokio-util = { version = "0.7.18", features = ["compat"] }
-futures-lite = "2.6.1"
+log.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "macros"] }
+yamux.workspace = true
+tokio-util.workspace = true
+futures-lite.workspace = true
 
 [build-dependencies]
 capnpc = "0.25"

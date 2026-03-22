@@ -4,25 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-log = "0.4"
+serde.workspace = true
+log.workspace = true
 distvirt-common = { path = "../common" }
 distvirt-worker-protocol = { path = "../worker-protocol" }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread", "test-util"] }
-anyhow = "1"
-tonic = "0.12"
-prost = "0.13"
-tokio-stream = "0.1"
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "net", "rt-multi-thread", "test-util"] }
+anyhow.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio-stream.workspace = true
 distvirt-client-protocol = { path = "../client-protocol" }
 distvirt-sm-router = { path = "../sm-router" }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-rand = "0.8"
+rand.workspace = true
 subtle = "2"
-futures-lite = "2.6.1"
-yamux = "0.13.9"
-toml = "0.8"
-env_logger = "0.11"
-clap = { version = "4", features = ["derive"] }
+futures-lite.workspace = true
+yamux.workspace = true
+toml.workspace = true
+env_logger.workspace = true
+clap.workspace = true
 
 [features]
 test-trace = []

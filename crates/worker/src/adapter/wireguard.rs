@@ -69,7 +69,7 @@ impl WireGuardAdapter {
     /// Generates a fresh X25519 keypair. The public key can be retrieved
     /// via [`Self::public_key()`].
     pub async fn new(listen_port: u16) -> anyhow::Result<Self> {
-        let private_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let private_key = StaticSecret::from(rand::random::<[u8; 32]>());
         let public_key = PublicKey::from(&private_key);
         let rate_limiter = Arc::new(RateLimiter::new(&public_key, 100));
 

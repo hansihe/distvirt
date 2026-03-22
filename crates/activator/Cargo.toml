@@ -5,15 +5,13 @@ edition = "2024"
 
 [dependencies]
 activator-types = { path = "../../activators/activator-types" }
-anyhow = "1"
-etherparse = "0.16"
-log = "0.4"
-smoltcp = { version = "0.12", default-features = false, features = [
-    "medium-ip", "proto-ipv4", "socket-tcp", "alloc", "log"
-] }
-wasmtime = { version = "29", features = ["component-model"] }
-wasmtime-wasi = "29"
+anyhow.workspace = true
+etherparse.workspace = true
+log.workspace = true
+smoltcp.workspace = true
+wasmtime = { version = "43", features = ["component-model"] }
+wasmtime-wasi = "43"
 
 [dev-dependencies]
 activator-types = { path = "../../activators/activator-types", features = ["test-helpers"] }
-tempfile = "3"
+tempfile.workspace = true

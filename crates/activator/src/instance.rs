@@ -1,9 +1,10 @@
 //! ActivatorInstance: per-service WASM instance with event queue.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wasmtime::Store;
 use wasmtime::component::{Component, Linker};
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime::error::Context;
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings;
 use crate::types::{self, Action, BackendNeed, Event};
@@ -18,11 +19,11 @@ struct HostState {
 }
 
 impl WasiView for HostState {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
-    }
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -48,7 +49,7 @@ impl ActivatorInstance {
             .context("setting initial fuel")?;
 
         let mut linker = Linker::new(engine);
-        wasmtime_wasi::add_to_linker_sync(&mut linker).context("adding WASI to linker")?;
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).context("adding WASI to linker")?;
         let bindings = bindings::Activator::instantiate(&mut store, component, &linker)
             .context("instantiating activator component")?;
 

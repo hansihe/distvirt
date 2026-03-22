@@ -10,10 +10,10 @@ crate-type = ["cdylib"]
 [dependencies]
 distvirt-client = { path = "../../distvirt-client" }
 distvirt-client-protocol = { path = "../../distvirt-client-protocol" }
-prost = "0.13"
+prost = "0.14"
 pyo3 = { version = "0.28", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
-tonic = "0.12"
+tonic = "0.14"
 anyhow = "1"
 log = "0.4"

@@ -4,24 +4,24 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-snafu = "0.8"
-anyhow = "1"
+snafu = "0.9"
+anyhow.workspace = true
 distvirt-client-protocol = { path = "../client-protocol" }
-dirs = "6"
-log = "0.4"
-serde = { version = "1", features = ["derive"] }
+dirs.workspace = true
+log.workspace = true
+serde.workspace = true
 serde-saphyr = "0.0.22"
 saphyr = "0.0.6"
-annotate-snippets = "0.11"
-toml = "0.8"
-tonic = "0.12"
-boringtun = "0.7"
-base64 = "0.22"
-libc = "0.2"
-nix = { version = "0.29", features = ["ioctl"] }
-tokio = { version = "1", features = ["net", "time", "io-util", "sync"] }
-rand = "0.8"
-smoltcp = { version = "0.12", default-features = false, features = ["medium-ip", "proto-ipv4", "socket-udp", "socket-tcp", "alloc", "log"] }
+annotate-snippets = "0.12"
+toml.workspace = true
+tonic.workspace = true
+boringtun.workspace = true
+base64.workspace = true
+libc.workspace = true
+nix = { version = "0.31", features = ["ioctl"] }
+tokio = { workspace = true, features = ["net", "time", "io-util", "sync"] }
+rand.workspace = true
+smoltcp = { workspace = true, features = ["socket-udp"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

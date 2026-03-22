@@ -8,32 +8,32 @@ name = "distvirt-worker"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-env_logger = "0.11"
-anyhow = "1"
-base64 = "0.22"
-prost = "0.13"
-prost-types = "0.13"
-tokio-stream = "0.1"
-containerd-client = "0.8"
+clap.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+prost.workspace = true
+prost-types = "0.14"
+tokio-stream.workspace = true
+containerd-client = { git = "https://github.com/containerd/rust-extensions.git", rev = "8cf0ee65b9def500e978d48f88954530aa14c835" }
 distvirt-common = { path = "../common" }
 distvirt-guest-protocol = { path = "../guest-protocol" }
 distvirt-activator = { path = "../activator" }
 distvirt-worker-protocol = { path = "../worker-protocol" }
-libc = "0.2"
-log = "0.4"
-oci-spec = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tempfile = "3"
-smoltcp = { version = "0.12", default-features = false, features = ["medium-ip", "proto-ipv4", "socket-udp", "socket-tcp", "alloc", "log"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util", "time", "process", "sync", "fs"] }
-tonic = "0.12"
-yamux = "0.13.9"
-tokio-util = { version = "0.7.18", features = ["compat", "io-util"] }
-futures-lite = "2.6.1"
-boringtun = "0.7"
-rand = "0.8"
+libc.workspace = true
+log.workspace = true
+oci-spec = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+smoltcp = { workspace = true, features = ["socket-udp"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "io-util", "time", "process", "sync", "fs"] }
+tonic.workspace = true
+yamux.workspace = true
+tokio-util = { workspace = true, features = ["io-util"] }
+futures-lite.workspace = true
+boringtun.workspace = true
+rand.workspace = true
 sha2 = "0.10"
 hickory-resolver = "0.25"
 zerocopy = { version = "0.8", features = ["derive"] }
@@ -43,7 +43,6 @@ tar = "0.4"
 uuid = { version = "1.22.0", features = ["v4"] }
 
 [dev-dependencies]
-env_logger = "0.11"
-etherparse = "0.16"
-futures-lite = "2.6.1"
-tokio = { version = "1", features = ["signal"] }
+env_logger.workspace = true
+etherparse.workspace = true
+tokio = { workspace = true, features = ["signal"] }
