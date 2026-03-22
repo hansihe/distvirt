@@ -29,7 +29,7 @@
         version = "0.1.0";
         src = pkgs.lib.cleanSource root;
         cargoLock.lockFile = root + "/Cargo.lock";
-        buildAndTestSubdir = "guest-image/guest-init";
+        buildAndTestSubdir = "crates/guest-init";
         cargoBuildProfileFlag = "--profile guest";
       };
 

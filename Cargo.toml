@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["distvirt-common", "distvirt-worker", "distvirt-worker-protocol", "distvirt-guest-protocol", "distvirt-cli", "distvirt-activator", "guest-image/guest-init", "guest-image/test-containers", "distvirt-orchestrator", "distvirt-client-protocol", "distvirt-tests", "distvirt-sm-router", "distvirt-sm-router-macros", "untyped-vec", "distvirt-client"]
-exclude = ["activators/test-echo", "activators/tcp", "activators/spin", "activators/http2", "activators/postgres", "activators/activator-types", "sdk/distvirt-sdk-core"]
+members = ["crates/common", "crates/worker", "crates/worker-protocol", "crates/guest-protocol", "crates/cli", "crates/activator", "crates/guest-init", "crates/orchestrator", "crates/client-protocol", "crates/tests", "crates/sm-router", "crates/sm-router-macros", "crates/untyped-vec", "crates/client"]
+exclude = ["activators/test-echo", "activators/tcp", "activators/spin", "activators/http2", "activators/postgres", "activators/activator-types", "sdk/distvirt-sdk-core", "guest-image/test-containers"]
 
 [profile.guest]
 inherits = "release"

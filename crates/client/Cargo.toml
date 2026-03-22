@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 snafu = "0.8"
 anyhow = "1"
-distvirt-client-protocol = { path = "../distvirt-client-protocol" }
+distvirt-client-protocol = { path = "../client-protocol" }
 dirs = "6"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }

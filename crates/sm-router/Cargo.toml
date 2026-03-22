@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-distvirt-sm-router-macros = { path = "../distvirt-sm-router-macros" }
+distvirt-sm-router-macros = { path = "../sm-router-macros" }
 untyped-vec = { path = "../untyped-vec" }
 
 [dev-dependencies]

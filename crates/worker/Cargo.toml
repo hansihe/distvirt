@@ -16,10 +16,10 @@ prost = "0.13"
 prost-types = "0.13"
 tokio-stream = "0.1"
 containerd-client = "0.8"
-distvirt-common = { path = "../distvirt-common" }
-distvirt-guest-protocol = { path = "../distvirt-guest-protocol" }
-distvirt-activator = { path = "../distvirt-activator" }
-distvirt-worker-protocol = { path = "../distvirt-worker-protocol" }
+distvirt-common = { path = "../common" }
+distvirt-guest-protocol = { path = "../guest-protocol" }
+distvirt-activator = { path = "../activator" }
+distvirt-worker-protocol = { path = "../worker-protocol" }
 libc = "0.2"
 log = "0.4"
 oci-spec = "0.8"

@@ -22,7 +22,12 @@ fn is_permission_denied(err: &anyhow::Error) -> bool {
 
 /// Re-execute the current process with `sudo`, passing connection params explicitly
 /// so that the root shell doesn't lose the user's context/config.
+///
+/// Uses `exec()` to fully replace the current process, avoiding any interference
+/// from the tokio runtime or open file descriptors with sudo's terminal I/O.
 fn reexec_with_sudo(params: &ConnectionParams) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+
     let exe = std::env::current_exe().context("cannot determine own executable path")?;
     let args: Vec<String> = std::env::args().collect();
 
@@ -61,11 +66,10 @@ fn reexec_with_sudo(params: &ConnectionParams) -> anyhow::Result<()> {
         cmd.arg(arg);
     }
 
-    let status = cmd
-        .status()
-        .context("failed to exec sudo (is it installed?)")?;
-
-    std::process::exit(status.code().unwrap_or(1));
+    // Replace the current process entirely. This ensures sudo gets clean
+    // access to the terminal without the tokio runtime running in the background.
+    let err = cmd.exec();
+    bail!("failed to exec sudo: {}", err);
 }
 
 /// State file for tracking active connections.
@@ -100,11 +104,15 @@ pub async fn connect(
     }
 
     let provisioned = ProvisionedTunnel::connect(&mut client, namespace_id).await?;
+    let public_key = *provisioned.public_key();
 
     // Materialize as kernel TUN tunnel (requires root).
     let tunnel = match provisioned.into_kernel().await {
         Ok(t) => t,
         Err(e) if is_permission_denied(&e) => {
+            // Clean up the provisioned tunnel before re-exec'ing with sudo.
+            // The sudo'd process will provision its own tunnel with new keys.
+            distvirt_client::connect::disconnect(&mut client, namespace_id, &public_key).await?;
             return reexec_with_sudo(params);
         }
         Err(e) => return Err(e),
