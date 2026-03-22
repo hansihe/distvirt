@@ -1272,8 +1272,6 @@ dependencies = [
  "dirs",
  "distvirt-client",
  "distvirt-client-protocol",
- "distvirt-worker",
- "distvirt-worker-protocol",
  "env_logger",
  "futures",
  "libc",

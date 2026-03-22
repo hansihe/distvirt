@@ -10,8 +10,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-distvirt-worker = { path = "../worker" }
-distvirt-worker-protocol = { path = "../worker-protocol" }
 distvirt-client-protocol = { path = "../client-protocol" }
 distvirt-client = { path = "../client" }
 env_logger.workspace = true
