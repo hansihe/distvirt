@@ -556,7 +556,8 @@ pub(super) fn convert_log_chunk(chunk: crate::log_bus::LogChunk) -> proto::LogCh
         now_ms - elapsed.as_millis() as i64
     };
     proto::LogChunk {
-        workload_id: chunk.pod_id.0.to_string(),
+        workload_name: chunk.workload_name.unwrap_or_default(),
+        pod_id: chunk.pod_id.0.to_string(),
         container_id: chunk.container_id,
         data: chunk.data,
         timestamp_unix_ms,

@@ -180,7 +180,12 @@ pub async fn describe(
     Ok(())
 }
 
-pub async fn delete(mut client: Client, resource: &str, name: &str) -> anyhow::Result<()> {
+pub async fn delete(
+    mut client: Client,
+    resource: &str,
+    name: &str,
+    namespace: Option<&str>,
+) -> anyhow::Result<()> {
     match normalize_resource(resource) {
         "namespaces" => {
             client
@@ -191,8 +196,37 @@ pub async fn delete(mut client: Client, resource: &str, name: &str) -> anyhow::R
                 .map_err(handle_grpc_error)?;
             eprintln!("namespace '{}' deleted", name);
         }
+        "workloads" => {
+            let ns = namespace
+                .ok_or_else(|| anyhow::anyhow!("--namespace is required for deleting workloads"))?;
+            client
+                .patch_namespace(PatchNamespaceRequest {
+                    namespace_id: ns.to_string(),
+                    remove_workloads: vec![name.to_string()],
+                    ..Default::default()
+                })
+                .await
+                .map_err(handle_grpc_error)?;
+            eprintln!("workload '{}' deleted from namespace '{}'", name, ns);
+        }
+        "services" => {
+            let ns = namespace
+                .ok_or_else(|| anyhow::anyhow!("--namespace is required for deleting services"))?;
+            client
+                .patch_namespace(PatchNamespaceRequest {
+                    namespace_id: ns.to_string(),
+                    remove_services: vec![name.to_string()],
+                    ..Default::default()
+                })
+                .await
+                .map_err(handle_grpc_error)?;
+            eprintln!("service '{}' deleted from namespace '{}'", name, ns);
+        }
         other => {
-            anyhow::bail!("delete not supported for '{}'. Try: namespaces", other);
+            anyhow::bail!(
+                "delete not supported for '{}'. Try: namespaces, workloads, services",
+                other
+            );
         }
     }
     Ok(())

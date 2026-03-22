@@ -133,13 +133,14 @@ pub async fn deactivate(
 pub async fn stream_logs(
     client: &mut Client,
     namespace_id: &str,
-    workload_id: Option<&str>,
-) -> Result<Streaming<LogChunk>, ApiError> {
+    workload_name: Option<&str>,
+) -> Result<Streaming<StreamLogsResponse>, ApiError> {
     let stream = client
         .stream_logs(StreamLogsRequest {
             namespace_id: namespace_id.to_string(),
-            workload_id: workload_id.map(|w| w.to_string()),
+            workload_name: workload_name.map(|w| w.to_string()),
             container_ids: vec![],
+            pod_ids: vec![],
         })
         .await
         .map_err(handle_grpc_error)?

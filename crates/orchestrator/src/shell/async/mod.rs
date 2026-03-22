@@ -369,6 +369,7 @@ struct Shell {
     activity: Arc<ActivityTracker>,
     log_bus: LogBusHandle,
     event_bus: EventBusHandle,
+    id_registry_map: crate::id_registry::IdRegistryMap,
 }
 
 impl Shell {
@@ -487,6 +488,8 @@ impl Shell {
                     self.namespaces.remove(&namespace_id);
                     let (result, output) = self.orchestrator.destroy_namespace(&namespace_id);
                     self.route_orchestrator_output(output).await;
+                    self.log_bus.remove_namespace(&namespace_id);
+                    self.event_bus.remove_namespace(&namespace_id);
                     let _ = response.send(result);
                 }
                 ShellCommand::UpdateNamespace {
@@ -729,7 +732,7 @@ impl Shell {
         };
 
         let (reader, writer, log_rx, driver) = conn.into_split();
-        spawn_log_ingest(log_rx, self.log_bus.clone());
+        spawn_log_ingest(log_rx, self.log_bus.clone(), self.id_registry_map.clone());
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<distvirt_worker_protocol::WorkerCommand>(256);
         let writer_handle = tokio::spawn(worker_writer::run(cmd_rx, writer));
@@ -904,6 +907,7 @@ impl Shell {
 fn spawn_log_ingest(
     mut log_rx: mpsc::UnboundedReceiver<::yamux::Stream>,
     log_bus: LogBusHandle,
+    id_registry_map: crate::id_registry::IdRegistryMap,
 ) {
     tokio::spawn(async move {
         while let Some(mut stream) = log_rx.recv().await {
@@ -916,6 +920,14 @@ fn spawn_log_ingest(
                     }
                 };
             let bus = log_bus.clone();
+
+            // Resolve workload name once per stream.
+            // Convert protocol PodId to router PodId for registry lookup.
+            let router_pod_id = crate::sm::PodId(header.pod_id.0);
+            let workload_name = id_registry_map
+                .get(&header.namespace_id)
+                .and_then(|reg| reg.pod_workload_name(&router_pod_id));
+
             tokio::spawn(async move {
                 use futures_lite::io::AsyncReadExt;
                 let mut buf = [0u8; 8192];
@@ -923,13 +935,17 @@ fn spawn_log_ingest(
                     match stream.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
-                            bus.publish(crate::log_bus::LogChunk {
-                                namespace_id: header.namespace_id.clone(),
-                                pod_id: header.pod_id.clone(),
-                                container_id: header.container_id.clone(),
-                                data: buf[..n].to_vec(),
-                                timestamp: std::time::Instant::now(),
-                            });
+                            bus.publish(
+                                crate::log_bus::LogChunk {
+                                    namespace_id: header.namespace_id.clone(),
+                                    pod_id: header.pod_id.clone(),
+                                    container_id: header.container_id.clone(),
+                                    workload_name: workload_name.clone(),
+                                    data: buf[..n].to_vec(),
+                                    timestamp: std::time::Instant::now(),
+                                },
+                                workload_name.clone(),
+                            );
                         }
                         Err(e) => {
                             log::debug!("log stream read error: {}", e);
@@ -937,6 +953,12 @@ fn spawn_log_ingest(
                         }
                     }
                 }
+                // Stream closed — mark topic as retired.
+                bus.retire_topic(
+                    &header.namespace_id,
+                    &header.pod_id,
+                    &header.container_id,
+                );
             });
         }
     });
@@ -976,6 +998,7 @@ pub fn spawn(
         activity: activity.clone(),
         log_bus: log_bus.clone(),
         event_bus: event_bus.clone(),
+        id_registry_map: id_registry_map.clone(),
     };
 
     let handle = tokio::spawn(shell.run());

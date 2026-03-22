@@ -211,6 +211,9 @@ enum ResourceCommands {
         resource: String,
         /// Resource name
         name: String,
+        /// Namespace (required for workloads and services)
+        #[arg(short, long)]
+        namespace: Option<String>,
     },
 }
 
@@ -407,8 +410,8 @@ async fn main() -> anyhow::Result<()> {
                 }) => {
                     commands::resource::describe(client, &resource, &name, &output).await?;
                 }
-                Commands::Resource(ResourceCommands::Delete { resource, name }) => {
-                    commands::resource::delete(client, &resource, &name).await?;
+                Commands::Resource(ResourceCommands::Delete { resource, name, namespace }) => {
+                    commands::resource::delete(client, &resource, &name, namespace.as_deref()).await?;
                 }
                 Commands::Task(TaskCommands::Connect {
                     namespace_id,

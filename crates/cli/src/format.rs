@@ -185,11 +185,16 @@ pub fn print_event_line(event: &NamespaceEvent) {
 
 pub fn print_log_chunk(chunk: &LogChunk) {
     let text = String::from_utf8_lossy(&chunk.data);
+    let label = if !chunk.workload_name.is_empty() {
+        format!("{}/{}", chunk.workload_name, chunk.pod_id)
+    } else {
+        chunk.pod_id.clone()
+    };
     for line in text.lines() {
         if chunk.container_id.is_empty() {
-            println!("[{}] {}", chunk.workload_id, line);
+            println!("[{}] {}", label, line);
         } else {
-            println!("[{}/{}] {}", chunk.workload_id, chunk.container_id, line);
+            println!("[{}/{}] {}", label, chunk.container_id, line);
         }
     }
 }

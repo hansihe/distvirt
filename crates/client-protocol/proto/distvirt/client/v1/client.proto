@@ -38,7 +38,7 @@ service DistvirtClient {
 
     // Streaming subscriptions
     rpc WatchNamespaceStatus(WatchNamespaceStatusRequest) returns (stream NamespaceStatusEvent);
-    rpc StreamLogs(StreamLogsRequest) returns (stream LogChunk);
+    rpc StreamLogs(StreamLogsRequest) returns (stream StreamLogsResponse);
     rpc StreamEvents(StreamEventsRequest) returns (stream NamespaceEvent);
 }
 
@@ -727,8 +727,9 @@ message AttachExited {
 
 message StreamLogsRequest {
     string namespace_id = 1;
-    optional string workload_id = 2;
+    optional string workload_name = 2;
     repeated string container_ids = 3;
+    repeated string pod_ids = 4;
 }
 
 message WatchNamespaceStatusRequest {
@@ -739,9 +740,19 @@ message NamespaceStatusEvent {
     NamespaceStatusReport status = 1;
 }
 
+message StreamLogsResponse {
+    oneof message {
+        LogChunk log_chunk = 1;
+        HistoricalComplete historical_complete = 2;
+    }
+}
+
+message HistoricalComplete {}
+
 message LogChunk {
-    string workload_id = 1;
+    string workload_name = 1;
     bytes data = 2;
     int64 timestamp_unix_ms = 3;
     string container_id = 4;
+    string pod_id = 5;
 }

@@ -6,6 +6,8 @@ use tonic::{Request, Response, Status};
 use distvirt_client_protocol::proto;
 use distvirt_client_protocol::proto::distvirt_client_server::DistvirtClient;
 
+use distvirt_worker_protocol::PodId;
+
 use crate::core::ClientError;
 use crate::event_bus::EventBusHandle;
 use crate::id_registry::IdRegistryMap;
@@ -82,8 +84,13 @@ impl DistvirtClient for DistvirtClientService {
             gateway: spec.network.gateway,
             prefix_len: spec.network.prefix_len,
         };
+        let namespace_id = NamespaceId(req.namespace_id);
         self.handle
-            .create_namespace(NamespaceId(req.namespace_id), network)
+            .create_namespace(namespace_id.clone(), network)
+            .await
+            .map_err(client_error_to_status)?;
+        self.handle
+            .update_namespace(namespace_id, spec)
             .await
             .map_err(client_error_to_status)?;
         Ok(Response::new(proto::CreateNamespaceResponse {}))
@@ -256,7 +263,7 @@ impl DistvirtClient for DistvirtClientService {
         ))
     }
 
-    type StreamLogsStream = ReceiverStream<Result<proto::LogChunk, Status>>;
+    type StreamLogsStream = ReceiverStream<Result<proto::StreamLogsResponse, Status>>;
 
     async fn stream_logs(
         &self,
@@ -265,34 +272,28 @@ impl DistvirtClient for DistvirtClientService {
         let req = request.into_inner();
         let namespace_id = NamespaceId(req.namespace_id);
 
-        // Resolve workload_id → pod_id(s) if a filter was provided.
-        let pod_filter = if let Some(ref workload_id) = req.workload_id {
-            let pods = self
-                .handle
-                .list_pods(namespace_id.clone())
-                .await
-                .map_err(client_error_to_status)?;
-            let pod_ids: Vec<distvirt_worker_protocol::PodId> = pods
-                .into_iter()
-                .filter(|p| p.workload_id.0 == *workload_id)
-                .map(|p| p.pod_id)
-                .collect();
-            Some(pod_ids)
-        } else {
-            None
-        };
-
         let container_filter = if req.container_ids.is_empty() {
             None
         } else {
             Some(req.container_ids)
         };
 
-        let (historical, mut live_rx) = self.log_bus.subscribe(
-            &namespace_id,
-            pod_filter.as_deref(),
-            container_filter.as_deref(),
-        );
+        let pod_filter: Option<Vec<PodId>> = if req.pod_ids.is_empty() {
+            None
+        } else {
+            Some(req.pod_ids.iter().map(|id| PodId(id.parse::<u64>().unwrap_or(0))).collect())
+        };
+
+        let (historical, mut live_rx) = if let Some(ref workload_name) = req.workload_name {
+            self.log_bus.subscribe_by_workload(
+                &namespace_id,
+                workload_name,
+                container_filter.as_deref(),
+            )
+        } else {
+            self.log_bus
+                .subscribe(&namespace_id, pod_filter.as_deref(), container_filter.as_deref())
+        };
 
         let (tx, rx) = tokio::sync::mpsc::channel(256);
 
@@ -300,14 +301,29 @@ impl DistvirtClient for DistvirtClientService {
             // Send historical chunks first.
             for chunk in historical {
                 let proto_chunk = conversions::convert_log_chunk(chunk);
-                if tx.send(Ok(proto_chunk)).await.is_err() {
+                let resp = proto::StreamLogsResponse {
+                    message: Some(proto::stream_logs_response::Message::LogChunk(proto_chunk)),
+                };
+                if tx.send(Ok(resp)).await.is_err() {
                     return;
                 }
+            }
+            // Send historical-complete marker.
+            let marker = proto::StreamLogsResponse {
+                message: Some(proto::stream_logs_response::Message::HistoricalComplete(
+                    proto::HistoricalComplete {},
+                )),
+            };
+            if tx.send(Ok(marker)).await.is_err() {
+                return;
             }
             // Then stream live chunks.
             while let Some(chunk) = live_rx.recv().await {
                 let proto_chunk = conversions::convert_log_chunk(chunk);
-                if tx.send(Ok(proto_chunk)).await.is_err() {
+                let resp = proto::StreamLogsResponse {
+                    message: Some(proto::stream_logs_response::Message::LogChunk(proto_chunk)),
+                };
+                if tx.send(Ok(resp)).await.is_err() {
                     return;
                 }
             }

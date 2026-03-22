@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use distvirt_client::connection::{handle_grpc_error, Client};
+use distvirt_client_protocol::stream_logs_response::Message;
 
 use crate::format;
 
@@ -13,17 +14,15 @@ pub async fn logs(
     let mut stream =
         distvirt_client::operations::stream_logs(&mut client, namespace_id, workload).await?;
 
-    if follow {
-        while let Some(chunk) = stream.message().await.map_err(handle_grpc_error)? {
-            format::print_log_chunk(&chunk);
-        }
-    } else {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
-                Ok(Ok(Some(chunk))) => format::print_log_chunk(&chunk),
-                Ok(Ok(None)) | Err(_) => break,
-                Ok(Err(e)) => return Err(handle_grpc_error(e).into()),
+    while let Some(resp) = stream.message().await.map_err(handle_grpc_error)? {
+        match resp.message {
+            Some(Message::LogChunk(chunk)) => format::print_log_chunk(&chunk),
+            Some(Message::HistoricalComplete(_)) => {
+                if !follow {
+                    break;
+                }
             }
+            None => {}
         }
     }
 
