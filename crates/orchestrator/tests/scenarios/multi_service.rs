@@ -160,12 +160,11 @@ fn test_add_service_to_running_workload() {
         ServiceSpec {
             workload_id: WorkloadName("echo".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     h.update_namespace("ns", new_spec);
@@ -231,18 +230,15 @@ fn test_add_service_to_suspended_workload() {
         ServiceSpec {
             workload_id: WorkloadName("web".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: true,
-                    max_flows: 100,
-                }),
-            },
-            activation: Some(ActivationSpec {
-                idle_timeout: timeout,
-            }),
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout: timeout,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     h.update_namespace("ns", new_spec);

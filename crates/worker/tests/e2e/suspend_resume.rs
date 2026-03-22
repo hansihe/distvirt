@@ -2,7 +2,8 @@ use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
     ActivatorConfig, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
-    EndpointSpec, PodId, ServiceId, ServicePolicy, WorkerCommand, WorkerEvent, WorkerId,
+    EndpointSpec, PodId, PortConfig, ServiceId, ServicePolicy, WorkerCommand, WorkerEvent,
+    WorkerId,
 };
 
 use super::common::*;
@@ -249,9 +250,9 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![],
                     buffer_frames: 64,
                     timeout_ms: 5000,
-                    activator: None,
                 },
                 backend: None,
             },
@@ -316,9 +317,9 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![],
                     buffer_frames: 64,
                     timeout_ms: 5000,
-                    activator: None,
                 },
                 backend: Some(EndpointPodBackend {
                     pod_ip: Ipv4Addr::new(10, 0, 0, 2),
@@ -478,9 +479,9 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![],
                     buffer_frames: 64,
                     timeout_ms: 5000,
-                    activator: None,
                 },
                 backend: Some(EndpointPodBackend {
                     pod_ip: Ipv4Addr::new(10, 0, 0, 2),
@@ -627,13 +628,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![PortConfig {
+                        port: 80,
+                        target_port: 80,
+                        activator: Some(ActivatorConfig::Tcp { max_flows: 1024 }),
+                    }],
                     buffer_frames: 64,
                     timeout_ms: 10000,
-                    activator: Some(ActivatorConfig::Tcp {
-                        ports: None,
-                        tcp_only: true,
-                        max_flows: 1024,
-                    }),
                 },
                 backend: None,
             },
@@ -698,13 +699,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![PortConfig {
+                        port: 80,
+                        target_port: 80,
+                        activator: Some(ActivatorConfig::Tcp { max_flows: 1024 }),
+                    }],
                     buffer_frames: 64,
                     timeout_ms: 10000,
-                    activator: Some(ActivatorConfig::Tcp {
-                        ports: None,
-                        tcp_only: true,
-                        max_flows: 1024,
-                    }),
                 },
                 backend: Some(EndpointPodBackend {
                     pod_ip: Ipv4Addr::new(10, 0, 0, 2),
@@ -839,13 +840,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![PortConfig {
+                        port: 80,
+                        target_port: 80,
+                        activator: Some(ActivatorConfig::Tcp { max_flows: 1024 }),
+                    }],
                     buffer_frames: 64,
                     timeout_ms: 10000,
-                    activator: Some(ActivatorConfig::Tcp {
-                        ports: None,
-                        tcp_only: true,
-                        max_flows: 1024,
-                    }),
                 },
                 backend: None,
             },
@@ -946,13 +947,13 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![PortConfig {
+                        port: 80,
+                        target_port: 80,
+                        activator: Some(ActivatorConfig::Tcp { max_flows: 1024 }),
+                    }],
                     buffer_frames: 64,
                     timeout_ms: 10000,
-                    activator: Some(ActivatorConfig::Tcp {
-                        ports: None,
-                        tcp_only: true,
-                        max_flows: 1024,
-                    }),
                 },
                 backend: Some(EndpointPodBackend {
                     pod_ip: Ipv4Addr::new(10, 0, 0, 2),

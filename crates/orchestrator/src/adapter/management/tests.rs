@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use crate::id_registry::IdRegistry;
 use crate::sm::{AdminCmd, DRouter, SCHEDULE_REQUEST, TIMER};
-use crate::types::{ActivationSpec, NamespaceSpec, ServiceSpec, WorkloadSpec};
+use crate::types::{NamespaceSpec, ServiceSpec, WorkloadSpec};
 
 use super::ManagementAdapter;
 
@@ -50,12 +50,11 @@ fn simple_service_spec(workload_name: &str) -> ServiceSpec {
     ServiceSpec {
         workload_id: crate::types::WorkloadName(workload_name.into()),
         ip: Ipv4Addr::new(10, 0, 1, 1),
-        policy: distvirt_worker_protocol::ServicePolicy {
-            buffer_frames: 0,
-            timeout_ms: 0,
-            activator: None,
-        },
-        activation: None,
+        ports: vec![],
+        has_activation: false,
+        idle_timeout: std::time::Duration::ZERO,
+        buffer_frames: 0,
+        buffer_timeout_ms: 0,
     }
 }
 
@@ -225,9 +224,8 @@ fn activate_service_command() {
     let mut adapter = ManagementAdapter::new(IdRegistry::new());
 
     let mut svc_spec = simple_service_spec("web");
-    svc_spec.activation = Some(ActivationSpec {
-        idle_timeout: std::time::Duration::from_secs(60),
-    });
+    svc_spec.has_activation = true;
+    svc_spec.idle_timeout = std::time::Duration::from_secs(60);
 
     let spec = make_namespace_spec(
         vec![("web", simple_workload_spec())],

@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::harness::mock_worker::MockWorkerConfig;
 use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ActivatorConfig, ServicePolicy, WorkerEvent};
+use distvirt_worker_protocol::WorkerEvent;
 
 /// Namespace with two activation-based workloads: "wl-a" (service "svc-a") and "wl-b" (service "svc-b").
 /// Both have suspend_on_idle=true and activation.
@@ -41,25 +41,21 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
         },
     );
 
-    let activation = Some(ActivationSpec { idle_timeout });
-    let policy = ServicePolicy {
-        buffer_frames: 100,
-        timeout_ms: 5000,
-        activator: Some(ActivatorConfig::Tcp {
-            ports: None,
-            tcp_only: true,
-            max_flows: 100,
-        }),
-    };
-
     let mut services = BTreeMap::new();
     services.insert(
         "svc-a".to_string(),
         ServiceSpec {
             workload_id: wl_a,
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: policy.clone(),
-            activation: activation.clone(),
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     services.insert(
@@ -67,8 +63,15 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: policy,
-            activation: activation,
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 

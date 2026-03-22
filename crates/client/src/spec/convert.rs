@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use distvirt_client_protocol::*;
 
 use crate::errors::{SpecError, SpecErrors};
-use super::helpers::{convert_expose, ip_to_mac, parse_cidr, parse_duration_ms, resolve_activation, resolve_resources};
+use super::helpers::{convert_buffer, convert_ports, ip_to_mac, parse_cidr, parse_duration_ms, resolve_resources};
 use super::ip_alloc::IpAllocator;
 use super::path::YamlPath;
 use super::types::*;
@@ -242,10 +242,13 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                 // Warn if inline services have activation but workload is always-on
                 if !wl.respects_demand {
                     for (sid, svc) in inline_services {
-                        if svc.activation.is_some() {
+                        let has_activators = svc.ports.as_ref().map_or(false, |ports| {
+                            ports.iter().any(|p| p.activator.is_some())
+                        });
+                        if has_activators {
                             errs.warn(
-                                wl_path.key("services").key(sid).key("activation"),
-                                "service activation is configured but the workload has \
+                                wl_path.key("services").key(sid).key("ports"),
+                                "port activators are configured but the workload has \
                                  respects_demand: false; activation will have no effect \
                                  on an always-on workload",
                             );
@@ -269,14 +272,17 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
             }
 
             // Warn if service has activation but target workload is always-on
-            if svc.activation.is_some() {
+            let has_activators = svc.ports.as_ref().map_or(false, |ports| {
+                ports.iter().any(|p| p.activator.is_some())
+            });
+            if has_activators {
                 if let Some(ref spec_workloads) = spec.workloads {
                     if let Some(target_wl) = spec_workloads.get(&svc.workload) {
                         if !target_wl.respects_demand {
                             errs.warn(
-                                svc_path.key("activation"),
+                                svc_path.key("ports"),
                                 format!(
-                                    "service activation is configured but workload '{}' has \
+                                    "port activators are configured but workload '{}' has \
                                      respects_demand: false; activation will have no effect \
                                      on an always-on workload",
                                     svc.workload
@@ -417,103 +423,88 @@ fn validate_activation(spec: &SpecFile, errs: &mut SpecErrors) {
         for (wid, wl) in spec_workloads {
             if let Some(ref activation) = wl.activation {
                 let path = YamlPath::root().key("workloads").key(wid).key("activation");
-                if activation.passthrough.is_none() {
-                    errs.error(
-                        path.clone(),
-                        "only passthrough activator is valid on workloads",
-                    );
-                } else if let Some(ref pt) = activation.passthrough {
-                    validate_duration(
-                        &pt.idle_timeout,
-                        path.key("passthrough").key("idle_timeout"),
+                if let Some(ref idle_timeout) = activation.idle_timeout {
+                    validate_duration(idle_timeout, path.key("idle_timeout"), errs);
+                }
+            }
+
+            // Inline service ports
+            if let Some(ref inline_services) = wl.services {
+                for (sid, svc) in inline_services {
+                    validate_service_ports(
+                        &svc.ports,
+                        &svc.idle_timeout,
+                        &svc.buffer,
+                        YamlPath::root()
+                            .key("workloads")
+                            .key(wid)
+                            .key("services")
+                            .key(sid),
                         errs,
                     );
                 }
             }
-
-            // Inline service activations
-            if let Some(ref inline_services) = wl.services {
-                for (sid, svc) in inline_services {
-                    if let Some(ref act) = svc.activation {
-                        validate_service_activation(
-                            act,
-                            YamlPath::root()
-                                .key("workloads")
-                                .key(wid)
-                                .key("services")
-                                .key(sid)
-                                .key("activation"),
-                            errs,
-                        );
-                    }
-                }
-            }
         }
     }
 
-    // Top-level service activations
+    // Top-level service ports
     if let Some(ref top_services) = spec.services {
         for (sid, svc) in top_services {
-            if let Some(ref act) = svc.activation {
-                validate_service_activation(
-                    act,
-                    YamlPath::root().key("services").key(sid).key("activation"),
-                    errs,
-                );
-            }
-        }
-    }
-
-    // Default activation
-    if let Some(ref defaults) = spec.defaults {
-        if let Some(ref act) = defaults.activation {
-            validate_service_activation(act, YamlPath::root().key("defaults").key("activation"), errs);
+            validate_service_ports(
+                &svc.ports,
+                &svc.idle_timeout,
+                &svc.buffer,
+                YamlPath::root().key("services").key(sid),
+                errs,
+            );
         }
     }
 }
 
-fn validate_service_activation(act: &SpecActivation, path: YamlPath, errs: &mut SpecErrors) {
-    if act.postgres.is_some() {
-        errs.warn(
-            path.clone(),
-            "postgres activator is not yet supported; will be ignored",
-        );
+fn validate_service_ports(
+    ports: &Option<Vec<SpecPort>>,
+    idle_timeout: &Option<String>,
+    buffer: &Option<SpecBuffer>,
+    path: YamlPath,
+    errs: &mut SpecErrors,
+) {
+    if let Some(idle_timeout) = idle_timeout {
+        validate_duration(idle_timeout, path.key("idle_timeout"), errs);
     }
 
-    if let Some(ref pt) = act.passthrough {
-        validate_duration(
-            &pt.idle_timeout,
-            path.key("passthrough").key("idle_timeout"),
-            errs,
-        );
+    if let Some(buf) = buffer {
+        if let Some(ref timeout) = buf.timeout {
+            validate_duration(timeout, path.key("buffer").key("timeout"), errs);
+        }
     }
 
-    if let Some(ref tcp) = act.tcp {
-        if let Some(ref idle_timeout) = tcp.idle_timeout {
-            validate_duration(
-                idle_timeout,
-                path.key("tcp").key("idle_timeout"),
-                errs,
+    if let Some(ports) = ports {
+        let has_any_activator = ports.iter().any(|p| p.activator.is_some());
+        let all_have_activator = ports.iter().all(|p| p.activator.is_some());
+
+        if has_any_activator && !all_have_activator {
+            errs.error(
+                path.key("ports"),
+                "mixed activated/passthrough ports are not allowed; \
+                 all ports must have activators or none",
             );
         }
-        if let Some(ref ports) = tcp.ports {
-            for (i, &port) in ports.iter().enumerate() {
-                if port == 0 || port > 65535 {
+
+        for (i, port) in ports.iter().enumerate() {
+            if port.port == 0 || port.port > 65535 {
+                errs.error(
+                    path.key("ports").index(i).key("port"),
+                    format!("invalid port number {} (must be 1-65535)", port.port),
+                );
+            }
+            if let Some(target) = port.target {
+                if target == 0 || target > 65535 {
                     errs.error(
-                        path.key("tcp").key("ports").index(i),
-                        format!("invalid port number {} (must be 1-65535)", port),
+                        path.key("ports").index(i).key("target"),
+                        format!("invalid target port {} (must be 1-65535)", target),
                     );
                 }
             }
-        }
-    }
-
-    if let Some(ref buf) = act.buffer {
-        if buf.frames.is_some() || buf.timeout.is_some() {
-            errs.warn(
-                path.key("buffer"),
-                "buffer fields are not yet supported; will be ignored",
-            );
         }
     }
 }
@@ -738,19 +729,13 @@ fn build_namespace_spec(
                 })
                 .unwrap_or_default();
 
-            let wl_activation = wl.activation.as_ref().and_then(|a| {
-                a.passthrough.as_ref().map(|passthrough| {
-                    let idle_timeout_ms = parse_duration_ms(&passthrough.idle_timeout)
-                        .expect("validated earlier");
-                    ActivationSpec {
-                        activator: Some(ActivatorConfig {
-                            activator: Some(activator_config::Activator::Passthrough(
-                                PassthroughActivator { idle_timeout_ms },
-                            )),
-                        }),
-                        buffer_policy: None,
-                    }
-                })
+            let wl_activation = wl.activation.as_ref().map(|a| {
+                let idle_timeout_ms = a
+                    .idle_timeout
+                    .as_ref()
+                    .map(|s| parse_duration_ms(s).expect("validated earlier"))
+                    .unwrap_or(30_000); // default 30s
+                ActivationSpec { idle_timeout_ms }
             });
 
             workloads.insert(
@@ -782,8 +767,14 @@ fn build_namespace_spec(
                     };
                     let svc_mac = ip_to_mac(&svc_ip);
 
-                    let activation = resolve_activation(&svc.activation, &spec.defaults);
-                    let expose = convert_expose(&svc.expose);
+                    let ports = convert_ports(&svc.ports);
+                    let idle_timeout_ms = svc
+                        .idle_timeout
+                        .as_ref()
+                        .map(|s| parse_duration_ms(s).expect("validated earlier"))
+                        .unwrap_or(0);
+                    let (buffer_frames, buffer_timeout_ms) =
+                        convert_buffer(&svc.buffer);
 
                     services.insert(
                         sid.clone(),
@@ -793,8 +784,10 @@ fn build_namespace_spec(
                                 ip: svc_ip,
                                 mac: svc_mac,
                             }),
-                            activation,
-                            expose,
+                            ports,
+                            idle_timeout_ms,
+                            buffer_frames,
+                            buffer_timeout_ms,
                         },
                     );
                 }
@@ -814,8 +807,14 @@ fn build_namespace_spec(
             };
             let svc_mac = ip_to_mac(&svc_ip);
 
-            let activation = resolve_activation(&svc.activation, &spec.defaults);
-            let expose = convert_expose(&svc.expose);
+            let ports = convert_ports(&svc.ports);
+            let idle_timeout_ms = svc
+                .idle_timeout
+                .as_ref()
+                .map(|s| parse_duration_ms(s).expect("validated earlier"))
+                .unwrap_or(0);
+            let (buffer_frames, buffer_timeout_ms) =
+                convert_buffer(&svc.buffer);
 
             services.insert(
                 sid.clone(),
@@ -825,8 +824,10 @@ fn build_namespace_spec(
                         ip: svc_ip,
                         mac: svc_mac,
                     }),
-                    activation,
-                    expose,
+                    ports,
+                    idle_timeout_ms,
+                    buffer_frames,
+                    buffer_timeout_ms,
                 },
             );
         }

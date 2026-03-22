@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use crate::harness::*;
 use distvirt_orchestrator::types::*;
-use distvirt_worker_protocol::{ServicePolicy, WorkerCommand};
+use distvirt_worker_protocol::WorkerCommand;
 
 /// Patch: add a new workload and service to an existing namespace.
 #[test]
@@ -35,12 +36,11 @@ fn test_patch_add_workload() {
         ServiceSpec {
             workload_id: WorkloadName("echo-b".to_string()),
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     h.patch_namespace(

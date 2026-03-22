@@ -1,7 +1,7 @@
 use super::*;
 use crate::packet::with_fabric_header;
 use distvirt_worker_protocol::{
-    EndpointKind, EndpointPodBackend, EndpointSpec, ServiceId, ServicePolicy,
+    EndpointKind, EndpointPodBackend, EndpointSpec, PortConfig, ServiceId, ServicePolicy,
 };
 
 const SVC_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 0, 2);
@@ -12,15 +12,15 @@ const OTHER_WORKER: WorkerId = WorkerId(12);
 
 fn default_policy() -> ServicePolicy {
     ServicePolicy {
+        ports: vec![],
         buffer_frames: 64,
         timeout_ms: 30000,
-        activator: None,
     }
 }
 
 /// Default make_processor that returns Passthrough for all services.
 fn passthrough_processor(_: ServiceId, _: &ServicePolicy, _: Ipv4Addr) -> ServiceProcessor {
-    ServiceProcessor::Passthrough
+    ServiceProcessor::passthrough()
 }
 
 /// Create a service endpoint with no backend (Buffering state) via apply_endpoint_sync.
@@ -267,9 +267,9 @@ fn activation_debounced() {
 #[test]
 fn buffer_capacity_drops_excess() {
     let policy = ServicePolicy {
+        ports: vec![],
         buffer_frames: 2,
         timeout_ms: 30000,
-        activator: None,
     };
     let mut table = EndpointTable::new();
     sync_create_service(
@@ -367,13 +367,15 @@ fn make_tcp_frame_for_service(
 
 fn l4_tcp_policy() -> ServicePolicy {
     ServicePolicy {
+        ports: vec![PortConfig {
+            port: 80,
+            target_port: 80,
+            activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
+                max_flows: 1024,
+            }),
+        }],
         buffer_frames: 64,
         timeout_ms: 30000,
-        activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-            ports: None,
-            tcp_only: false,
-            max_flows: 1024,
-        }),
     }
 }
 
@@ -395,9 +397,16 @@ fn l4_mark_ready_processes_backend_available() {
         let mut instance_opt = Some(instance);
         let mut sm_opt = Some(sm);
         move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
-            ServiceProcessor::L4 {
-                activator: Some(instance_opt.take().unwrap()),
-                stream_manager: sm_opt.take().unwrap(),
+            let _act = instance_opt.take().unwrap();
+            ServiceProcessor {
+                port_routes: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(80, super::service_processor::PortMode::L4);
+                    m
+                },
+                default_mode: super::service_processor::DefaultPortMode::Drop,
+                stream_manager: Some(sm_opt.take().unwrap()),
+                flow_tracker: distvirt_activator::FlowTracker::new(),
             }
         }
     };
@@ -457,9 +466,15 @@ fn handle_timeout_for_ip_returns_l4_result() {
     let mut make_l4 = {
         let mut sm_opt = Some(sm);
         move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
-            ServiceProcessor::L4 {
-                activator: None,
-                stream_manager: sm_opt.take().unwrap(),
+            ServiceProcessor {
+                port_routes: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(80, super::service_processor::PortMode::L4);
+                    m
+                },
+                default_mode: super::service_processor::DefaultPortMode::Drop,
+                stream_manager: Some(sm_opt.take().unwrap()),
+                flow_tracker: distvirt_activator::FlowTracker::new(),
             }
         }
     };
@@ -512,8 +527,15 @@ fn activator_mark_ready_returns_replay_actions() {
     let mut make_l3 = {
         let mut instance_opt = Some(instance);
         move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
-            ServiceProcessor::L3 {
-                activator: instance_opt.take().unwrap(),
+            let act = instance_opt.take().unwrap();
+            ServiceProcessor {
+                port_routes: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(80, super::service_processor::PortMode::L3 { activator: act });
+                    m
+                },
+                default_mode: super::service_processor::DefaultPortMode::Drop,
+                stream_manager: None,
                 flow_tracker: distvirt_activator::FlowTracker::new(),
             }
         }
@@ -1184,9 +1206,9 @@ fn service_created_with_ready_backend_emits_service_ready() {
 #[test]
 fn buffer_timeout_drops_frames_after_expiry() {
     let policy = ServicePolicy {
+        ports: vec![],
         buffer_frames: 64,
         timeout_ms: 1,
-        activator: None,
     };
     let mut table = EndpointTable::new();
     sync_create_service(

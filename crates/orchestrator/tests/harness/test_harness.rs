@@ -364,11 +364,12 @@ impl TestHarness {
                 svc_id, ns_id
             )
         });
-        let timeout = svc_spec
-            .activation
-            .as_ref()
-            .unwrap_or_else(|| panic!("service '{}/{}' has no activation spec", ns_id, svc_id))
-            .idle_timeout;
+        assert!(
+            svc_spec.has_activation,
+            "service '{}/{}' has no activation",
+            ns_id, svc_id
+        );
+        let timeout = svc_spec.idle_timeout;
         self.advance_time(timeout + Duration::from_secs(1));
     }
 

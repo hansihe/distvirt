@@ -13,7 +13,7 @@ use distvirt_activator::{ActivatorInstance, ActivatorRuntime};
 
 fn components_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("../activators/target/components")
+    manifest.join("../../activators/target/components")
 }
 
 fn require_components() -> ActivatorRuntime {

@@ -22,7 +22,7 @@ mod states;
 // --- Re-exports from protocol ---
 
 pub use distvirt_worker_protocol::{
-    ActivatorConfig, ArtifactId, ConfigDataFile, ContainerConfig, ContainerSpec, EndpointKind,
+    ArtifactId, ConfigDataFile, ContainerConfig, ContainerSpec, EndpointKind,
     EndpointPlacement, EndpointPodBackend, EndpointSpec, NamespaceId, NetworkConfig, PodId,
     PodNetworkConfig, PoolId, PoolInfo, PsiMetrics, RegistryEntry, ServiceBackend,
     ServicePolicy, VolumeSpec, VolumeType, VolumeMountSpec, WorkerCommand, WorkerId,

@@ -182,46 +182,31 @@ struct ServicePolicy {
   # Maximum number of frames to buffer while waiting for readiness.
   timeoutMs @1 :UInt32;
   # How long to buffer before giving up, in milliseconds.
-  hasActivator @2 :Bool;
-  activator @3 :ActivatorConfig;
-  # Optional protocol activator. When hasActivator=false, the service uses default
-  # passthrough behavior (buffer all frames, activate on first frame).
-  # When hasActivator=true, the specified WASM activator handles traffic with
-  # protocol-specific logic.
+  ports @2 :List(PortConfig);
+  # Per-port configuration. Empty list = pure passthrough service.
 }
 
-# Protocol activator configuration for a service entity.
-#
-# Protocol activators replace the default "buffer everything, activate on any
-# frame" behavior with protocol-specific logic. They are implemented as WASM
-# components running on the fabric.
-#
-# When ServicePolicy.hasActivator is false, the service uses the default
-# passthrough behavior (buffer all frames, activate on first frame).
+# Per-port configuration within a service.
+struct PortConfig {
+  port @0 :UInt16;
+  # Exposed port number.
+  targetPort @1 :UInt16;
+  # Backend port the container listens on.
+  hasActivator @2 :Bool;
+  activator @3 :ActivatorConfig;
+  # Optional per-port activator. When hasActivator=false, this port is
+  # passthrough.
+}
+
+# Protocol activator configuration for a port.
 struct ActivatorConfig {
   union {
     tcp :group {
-      # TCP SYN-based activation.
-      #
-      # An L3 (packet-level) activator that detects new TCP connections by
-      # inspecting SYN flags. Only SYN packets trigger activation -- RSTs and
-      # stale keepalives are filtered. Buffered SYN packets are replayed to
-      # the backend once it becomes available, letting the client's TCP stack
-      # complete the handshake normally.
-      #
-      # Signals BackendNeed.traffic on new SYN arrivals. The fabric applies a
-      # timeout policy to determine when to release the backend.
-      hasPorts @0 :Bool;
-      ports @1 :List(UInt16);
-      # TCP destination ports to apply activation to. hasPorts=false means all ports.
-      tcpOnly @2 :Bool;
-      # If true, non-TCP frames are silently dropped. If false, they are
-      # buffered alongside TCP traffic.
-      maxFlows @3 :UInt32;
+      maxFlows @0 :UInt32;
       # Maximum number of tracked flows (source IP + port combinations).
       # Default: 1024.
     }
-    http2 @4 :Void;
+    http2 @1 :Void;
     # HTTP/2 stream-aware activation (future).
     #
     # An L4 (stream-level) activator that acts as a full H2 proxy. It

@@ -370,26 +370,11 @@ pub fn write_activator_config(
     val: &ActivatorConfig,
 ) {
     match val {
-        ActivatorConfig::Tcp {
-            ports,
-            tcp_only,
-            max_flows,
-        } => {
+        ActivatorConfig::Tcp { max_flows } => {
             let mut tcp = builder.init_tcp();
-            match ports {
-                Some(p) => {
-                    tcp.set_has_ports(true);
-                    let mut ports_builder = tcp.reborrow().init_ports(p.len() as u32);
-                    for (i, port) in p.iter().enumerate() {
-                        ports_builder.set(i as u32, *port);
-                    }
-                }
-                None => tcp.set_has_ports(false),
-            }
-            tcp.set_tcp_only(*tcp_only);
             tcp.set_max_flows(*max_flows);
         }
-        ActivatorConfig::Http2 {} => {
+        ActivatorConfig::Http2 => {
             builder.set_http2(());
         }
     }
@@ -399,33 +384,19 @@ pub fn read_activator_config(
     reader: schema::activator_config::Reader<'_>,
 ) -> capnp::Result<ActivatorConfig> {
     match reader.which()? {
-        schema::activator_config::Tcp(tcp) => {
-            let ports = if tcp.get_has_ports() {
-                let p = tcp.get_ports()?;
-                let mut v = Vec::with_capacity(p.len() as usize);
-                for i in 0..p.len() {
-                    v.push(p.get(i));
-                }
-                Some(v)
-            } else {
-                None
-            };
-            Ok(ActivatorConfig::Tcp {
-                ports,
-                tcp_only: tcp.get_tcp_only(),
-                max_flows: tcp.get_max_flows(),
-            })
-        }
-        schema::activator_config::Http2(()) => Ok(ActivatorConfig::Http2 {}),
+        schema::activator_config::Tcp(tcp) => Ok(ActivatorConfig::Tcp {
+            max_flows: tcp.get_max_flows(),
+        }),
+        schema::activator_config::Http2(()) => Ok(ActivatorConfig::Http2),
     }
 }
 
-pub fn write_service_policy(
-    builder: &mut schema::service_policy::Builder<'_>,
-    val: &ServicePolicy,
+pub fn write_port_config(
+    builder: &mut schema::port_config::Builder<'_>,
+    val: &PortConfig,
 ) {
-    builder.set_buffer_frames(val.buffer_frames);
-    builder.set_timeout_ms(val.timeout_ms);
+    builder.set_port(val.port);
+    builder.set_target_port(val.target_port);
     match &val.activator {
         Some(ac) => {
             builder.set_has_activator(true);
@@ -435,18 +406,46 @@ pub fn write_service_policy(
     }
 }
 
-pub fn read_service_policy(
-    reader: schema::service_policy::Reader<'_>,
-) -> capnp::Result<ServicePolicy> {
+pub fn read_port_config(
+    reader: schema::port_config::Reader<'_>,
+) -> capnp::Result<PortConfig> {
     let activator = if reader.get_has_activator() {
         Some(read_activator_config(reader.get_activator()?)?)
     } else {
         None
     };
+    Ok(PortConfig {
+        port: reader.get_port(),
+        target_port: reader.get_target_port(),
+        activator,
+    })
+}
+
+pub fn write_service_policy(
+    builder: &mut schema::service_policy::Builder<'_>,
+    val: &ServicePolicy,
+) {
+    builder.set_buffer_frames(val.buffer_frames);
+    builder.set_timeout_ms(val.timeout_ms);
+    let mut ports_builder = builder.reborrow().init_ports(val.ports.len() as u32);
+    for (i, port) in val.ports.iter().enumerate() {
+        let mut port_builder = ports_builder.reborrow().get(i as u32);
+        write_port_config(&mut port_builder, port);
+    }
+}
+
+pub fn read_service_policy(
+    reader: schema::service_policy::Reader<'_>,
+) -> capnp::Result<ServicePolicy> {
+    let ports_reader = reader.get_ports()?;
+    let mut ports = Vec::with_capacity(ports_reader.len() as usize);
+    for i in 0..ports_reader.len() {
+        ports.push(read_port_config(ports_reader.get(i))?);
+    }
     Ok(ServicePolicy {
+        ports,
         buffer_frames: reader.get_buffer_frames(),
         timeout_ms: reader.get_timeout_ms(),
-        activator,
     })
 }
 

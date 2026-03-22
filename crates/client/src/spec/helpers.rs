@@ -28,76 +28,49 @@ pub(crate) fn resolve_resources(
     (requests, limits)
 }
 
-pub(crate) fn resolve_activation(
-    svc_activation: &Option<SpecActivation>,
-    defaults: &Option<SpecDefaults>,
-) -> Option<ActivationSpec> {
-    let activation = svc_activation
-        .as_ref()
-        .or_else(|| defaults.as_ref().and_then(|d| d.activation.as_ref()));
-
-    let activation = match activation {
-        Some(a) => a,
-        None => return None,
-    };
-
-    // postgres warning and duration errors are already reported by validation;
-    // here we just skip unsupported activators and trust durations are valid.
-
-    let activator = if let Some(ref passthrough) = activation.passthrough {
-        let idle_timeout_ms =
-            parse_duration_ms(&passthrough.idle_timeout).expect("validated earlier");
-        Some(ActivatorConfig {
-            activator: Some(activator_config::Activator::Passthrough(
-                PassthroughActivator { idle_timeout_ms },
-            )),
-        })
-    } else if activation.http2.is_some() {
-        Some(ActivatorConfig {
-            activator: Some(activator_config::Activator::Http2(Http2Activator {})),
-        })
-    } else if let Some(ref tcp) = activation.tcp {
-        let idle_timeout_ms = tcp
-            .idle_timeout
-            .as_ref()
-            .map(|s| parse_duration_ms(s).expect("validated earlier"))
-            .unwrap_or(0);
-        Some(ActivatorConfig {
-            activator: Some(activator_config::Activator::Tcp(TcpActivator {
-                ports: tcp.ports.clone().unwrap_or_default(),
-                idle_timeout_ms,
-            })),
-        })
-    } else {
-        None
-    };
-
-    Some(ActivationSpec {
-        activator,
-        buffer_policy: None,
-    })
-}
-
-pub(crate) fn convert_expose(expose: &Option<Vec<SpecExpose>>) -> Vec<ExposeSpec> {
-    expose
+pub(crate) fn convert_ports(ports: &Option<Vec<SpecPort>>) -> Vec<PortSpec> {
+    ports
         .as_ref()
         .map(|specs| {
             specs
                 .iter()
-                .map(|e| {
-                    let protocol = match e.protocol.as_deref() {
-                        Some("udp") | Some("UDP") => ExposeProtocol::Udp.into(),
-                        _ => ExposeProtocol::Tcp.into(),
-                    };
-                    ExposeSpec {
-                        container_port: e.container_port,
-                        host_port: e.host_port,
-                        protocol,
+                .map(|p| {
+                    let activator = p.activator.as_ref().map(|a| match a {
+                        SpecPortActivator::Tcp { max_flows } => {
+                            port_spec::Activator::Tcp(TcpPortActivator {
+                                max_flows: max_flows.unwrap_or(0),
+                            })
+                        }
+                        SpecPortActivator::Http2 => {
+                            port_spec::Activator::Http2(Http2PortActivator {})
+                        }
+                    });
+                    PortSpec {
+                        port: p.port,
+                        target_port: p.target.unwrap_or(0),
+                        activator,
                     }
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Convert optional buffer spec to (buffer_frames, buffer_timeout_ms).
+/// Returns (0, 0) if unset — server applies defaults.
+pub(crate) fn convert_buffer(buffer: &Option<SpecBuffer>) -> (u32, u32) {
+    match buffer {
+        Some(buf) => {
+            let frames = buf.frames.unwrap_or(0);
+            let timeout_ms = buf
+                .timeout
+                .as_ref()
+                .map(|s| parse_duration_ms(s).expect("validated earlier") as u32)
+                .unwrap_or(0);
+            (frames, timeout_ms)
+        }
+        None => (0, 0),
+    }
 }
 
 pub(crate) fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), SpecError> {

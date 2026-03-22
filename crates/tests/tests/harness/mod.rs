@@ -424,11 +424,11 @@ impl TestCluster {
                 svc_id, ns_id
             )
         });
-        let idle_timeout = svc_spec
-            .activation
-            .as_ref()
-            .map(|a| a.idle_timeout)
-            .unwrap_or(Duration::from_secs(30));
+        let idle_timeout = if svc_spec.has_activation && svc_spec.idle_timeout > Duration::ZERO {
+            svc_spec.idle_timeout
+        } else {
+            Duration::from_secs(30)
+        };
         self.advance_time(idle_timeout + Duration::from_secs(1))
             .await;
     }

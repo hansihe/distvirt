@@ -94,33 +94,33 @@ message PodNetworkConfig {
 message ServiceSpec {
     string workload_id = 1;
     ServiceNetworkConfig network = 2;
-    ActivationSpec activation = 3;
-    repeated ExposeSpec expose = 4;
+    // Fields 3, 4 reserved (old activation/expose).
+    repeated PortSpec ports = 5;
+    uint64 idle_timeout_ms = 6;       // service-level idle timeout; 0 = default (30s if activated)
+    uint32 buffer_frames = 7;         // 0 = use default (64)
+    uint32 buffer_timeout_ms = 8;     // 0 = use default (5000)
 }
 
-message ActivationSpec {
-    ActivatorConfig activator = 1;
-    ServicePolicy buffer_policy = 2;
-}
-
-message ActivatorConfig {
+message PortSpec {
+    uint32 port = 1;
+    uint32 target_port = 2;           // 0 = same as port
     oneof activator {
-        TcpActivator tcp = 1;
-        Http2Activator http2 = 2;
-        PassthroughActivator passthrough = 3;
+        TcpPortActivator tcp = 3;
+        Http2PortActivator http2 = 4;
     }
+    // absent activator = passthrough port
 }
 
-message PassthroughActivator {
+message TcpPortActivator {
+    uint32 max_flows = 1;             // 0 = use default (1024)
+}
+
+message Http2PortActivator {}
+
+// Workload-level activation config (controls idle timeout for demand-based workloads).
+message ActivationSpec {
     uint64 idle_timeout_ms = 1;
 }
-
-message TcpActivator {
-    repeated uint32 ports = 1;
-    uint64 idle_timeout_ms = 2;
-}
-
-message Http2Activator {}
 
 message ContainerConfig {
     repeated string entrypoint = 1;
@@ -172,21 +172,6 @@ message NetworkConfig {
     string subnet = 1;
 }
 
-message ExposeSpec {
-    uint32 container_port = 1;
-    uint32 host_port = 2;
-    ExposeProtocol protocol = 3;
-}
-
-enum ExposeProtocol {
-    EXPOSE_PROTOCOL_UNSPECIFIED = 0;
-    EXPOSE_PROTOCOL_TCP = 1;
-    EXPOSE_PROTOCOL_UDP = 2;
-}
-
-message ServicePolicy {
-    // Buffer policy configuration for activation.
-}
 
 // --- Namespace Lifecycle ---
 

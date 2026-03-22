@@ -570,51 +570,71 @@ impl NamespaceState {
         ip: std::net::Ipv4Addr,
         activator_runtime: Option<&ActivatorRuntime>,
     ) -> ServiceProcessor {
-        let activator = if policy.activator.is_some() {
-            if let Some(runtime) = activator_runtime {
-                let component_name = match &policy.activator {
-                    Some(ActivatorConfig::Tcp { .. }) => "tcp",
-                    Some(ActivatorConfig::Http2 { .. }) => "http2",
-                    None => unreachable!(),
-                };
-                match runtime.get_component(component_name) {
-                    Some(component) => match ActivatorInstance::new(runtime.engine(), component) {
-                        Ok(instance) => Some(instance),
-                        Err(e) => {
-                            log::error!("failed to instantiate activator: {:#}", e);
-                            None
-                        }
-                    },
-                    None => {
-                        log::warn!("activator component '{}' not found", component_name);
-                        None
+        use crate::fabric::endpoint::service_processor::{DefaultPortMode, PortMode};
+        use std::collections::HashMap;
+
+        if policy.ports.is_empty() {
+            return ServiceProcessor::passthrough();
+        }
+
+        let has_any_activator = policy.ports.iter().any(|p| p.activator.is_some());
+        let mut port_routes = HashMap::new();
+        let mut l4_ports = Vec::new();
+
+        for port_cfg in &policy.ports {
+            let mode = match &port_cfg.activator {
+                None => PortMode::Passthrough,
+                Some(ActivatorConfig::Http2) => {
+                    l4_ports.push(port_cfg.port);
+                    PortMode::L4
+                }
+                Some(ActivatorConfig::Tcp { .. }) => {
+                    // Try to instantiate a TCP activator for this port
+                    let activator = activator_runtime.and_then(|runtime| {
+                        runtime.get_component("tcp").and_then(|component| {
+                            match ActivatorInstance::new(runtime.engine(), component) {
+                                Ok(instance) => Some(instance),
+                                Err(e) => {
+                                    log::error!(
+                                        "failed to instantiate TCP activator for port {}: {:#}",
+                                        port_cfg.port,
+                                        e
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                    });
+                    match activator {
+                        Some(act) => PortMode::L3 { activator: act },
+                        None => PortMode::Passthrough,
                     }
                 }
-            } else {
-                log::warn!("activator requested but runtime not available");
-                None
-            }
+            };
+            port_routes.insert(port_cfg.port, mode);
+        }
+
+        let stream_manager = if !l4_ports.is_empty() {
+            Some(StreamManager::new(StreamManagerConfig {
+                service_ip: ip,
+                listen_ports: l4_ports.iter().map(|&p| p as u16).collect(),
+                ..StreamManagerConfig::default()
+            }))
         } else {
             None
         };
 
-        match (&policy.activator, activator) {
-            (Some(ActivatorConfig::Http2 { .. }), act) => {
-                let sm = StreamManager::new(StreamManagerConfig {
-                    service_ip: ip,
-                    listen_ports: vec![80],
-                    ..StreamManagerConfig::default()
-                });
-                ServiceProcessor::L4 {
-                    activator: act,
-                    stream_manager: sm,
-                }
-            }
-            (_, Some(act)) => ServiceProcessor::L3 {
-                activator: act,
-                flow_tracker: FlowTracker::new(),
-            },
-            _ => ServiceProcessor::Passthrough,
+        let default_mode = if has_any_activator {
+            DefaultPortMode::Drop
+        } else {
+            DefaultPortMode::Passthrough
+        };
+
+        ServiceProcessor {
+            port_routes,
+            default_mode,
+            stream_manager,
+            flow_tracker: FlowTracker::new(),
         }
     }
 }

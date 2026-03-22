@@ -344,7 +344,7 @@ impl EndpointTable {
                         } = ep.backend
                         {
                             *existing_id == service_id
-                                && existing_policy.activator == policy.activator
+                                && existing_policy.ports == policy.ports
                         } else {
                             false
                         }
@@ -416,7 +416,7 @@ impl EndpointTable {
                     // Passthrough services get a FlowTracker immediately.
                     // This is safe because active() only counts
                     // Established/HalfClosed flows, not Opening (SYN-only).
-                    let flow_tracker = if matches!(processor, ServiceProcessor::Passthrough) {
+                    let flow_tracker = if processor.is_passthrough() {
                         Some(FlowTracker::new())
                     } else {
                         None

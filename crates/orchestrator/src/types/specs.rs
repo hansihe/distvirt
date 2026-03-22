@@ -67,8 +67,24 @@ pub struct WorkloadSpec {
 pub struct ServiceSpec {
     pub workload_id: WorkloadName,
     pub ip: Ipv4Addr,
-    pub policy: ServicePolicy,
-    pub activation: Option<ActivationSpec>,
+    pub ports: Vec<PortConfig>,
+    pub has_activation: bool,
+    pub idle_timeout: Duration,
+    pub buffer_frames: u32,
+    pub buffer_timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PortConfig {
+    pub port: u16,
+    pub target_port: u16,
+    pub activator: Option<ActivatorKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActivatorKind {
+    Tcp { max_flows: u32 },
+    Http2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

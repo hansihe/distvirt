@@ -104,12 +104,11 @@ fn test_add_workload_to_existing_namespace() {
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: distvirt_worker_protocol::ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     h.update_namespace("ns", new_spec);

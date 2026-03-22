@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use distvirt_orchestrator::types::*;
 use distvirt_worker_protocol::{
-    ActivatorConfig, ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig, ServicePolicy,
+    ContainerConfig, ContainerSpec, NetworkConfig, PodNetworkConfig,
 };
 
 static POD_OCTET: AtomicU8 = AtomicU8::new(10);
@@ -103,12 +103,11 @@ pub fn always_on_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 
@@ -145,16 +144,15 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: Some(ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: true,
-                    max_flows: 100,
-                }),
-            },
-            activation: Some(ActivationSpec { idle_timeout }),
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 
@@ -191,16 +189,15 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: Some(ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: true,
-                    max_flows: 100,
-                }),
-            },
-            activation: Some(ActivationSpec { idle_timeout }),
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 
@@ -236,18 +233,15 @@ pub fn multi_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id.clone(),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: Some(ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: true,
-                    max_flows: 100,
-                }),
-            },
-            activation: Some(ActivationSpec {
-                idle_timeout: Duration::from_secs(30),
-            }),
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout: Duration::from_secs(30),
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     services.insert(
@@ -255,18 +249,15 @@ pub fn multi_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: Some(ActivatorConfig::Tcp {
-                    ports: None,
-                    tcp_only: true,
-                    max_flows: 100,
-                }),
-            },
-            activation: Some(ActivationSpec {
-                idle_timeout: Duration::from_secs(30),
-            }),
+            ports: vec![PortConfig {
+                port: 80,
+                target_port: 80,
+                activator: Some(ActivatorKind::Tcp { max_flows: 100 }),
+            }],
+            has_activation: true,
+            idle_timeout: Duration::from_secs(30),
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 
@@ -326,12 +317,11 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id.clone(),
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     services.insert(
@@ -339,12 +329,11 @@ pub fn always_on_multi_service_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 
@@ -394,12 +383,11 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_a,
             ip: Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
     services.insert(
@@ -407,12 +395,11 @@ pub fn always_on_two_workloads_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_b,
             ip: Ipv4Addr::new(172, 16, 0, 101),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 

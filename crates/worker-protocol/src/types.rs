@@ -139,11 +139,9 @@ pub struct BufferPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActivatorConfig {
     Tcp {
-        ports: Option<Vec<u16>>,
-        tcp_only: bool,
         max_flows: u32,
     },
-    Http2 {},
+    Http2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -160,8 +158,15 @@ pub struct ResourceRequirements {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServicePolicy {
+    pub ports: Vec<PortConfig>,
     pub buffer_frames: u32,
     pub timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PortConfig {
+    pub port: u16,
+    pub target_port: u16,
     pub activator: Option<ActivatorConfig>,
 }
 

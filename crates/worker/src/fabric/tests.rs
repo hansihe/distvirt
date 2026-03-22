@@ -3,8 +3,8 @@ use super::endpoint::EndpointTable;
 use super::*;
 use crate::packet::{FABRIC_HDR_SZ, FabricPacket, with_fabric_header};
 use distvirt_worker_protocol::{
-    EndpointKind, EndpointPlacement, EndpointPodBackend, EndpointSpec, ServiceId, ServicePolicy,
-    WorkerId,
+    EndpointKind, EndpointPlacement, EndpointPodBackend, EndpointSpec, PortConfig, ServiceId,
+    ServicePolicy, WorkerId,
 };
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -98,7 +98,7 @@ fn create_local_pod_endpoint(fabric: &Fabric<TestPort>, ip: Ipv4Addr) {
     use crate::fabric::ServiceProcessor;
     let tables = fabric.tables();
     let mut et = tables.endpoint_table.lock().unwrap();
-    let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+    let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::passthrough();
     et.apply_endpoint_update(
         vec![EndpointSpec {
             ip,
@@ -338,7 +338,7 @@ async fn placeholder_route_buffers_instead_of_flooding() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::passthrough();
         et.apply_endpoint_sync(
             vec![EndpointSpec {
                 ip: pod_ip,
@@ -416,7 +416,7 @@ async fn buffered_frames_flushed_to_new_port() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::passthrough();
         et.apply_endpoint_sync(
             vec![EndpointSpec {
                 ip: pod_ip,
@@ -472,7 +472,7 @@ async fn route_miss_debounced_on_rapid_frames() {
     {
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::passthrough();
         et.apply_endpoint_sync(
             vec![EndpointSpec {
                 ip: pod_ip,
@@ -525,26 +525,28 @@ const OWN_WORKER: WorkerId = WorkerId(20);
 
 /// Default make_processor that returns Passthrough for all services.
 fn passthrough_processor(_: ServiceId, _: &ServicePolicy, _: Ipv4Addr) -> ServiceProcessor {
-    ServiceProcessor::Passthrough
+    ServiceProcessor::passthrough()
 }
 
 fn default_service_policy() -> ServicePolicy {
     ServicePolicy {
+        ports: vec![],
         buffer_frames: 64,
         timeout_ms: 30000,
-        activator: None,
     }
 }
 
 fn l4_tcp_policy() -> ServicePolicy {
     ServicePolicy {
+        ports: vec![PortConfig {
+            port: 80,
+            target_port: 80,
+            activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
+                max_flows: 1024,
+            }),
+        }],
         buffer_frames: 64,
         timeout_ms: 30000,
-        activator: Some(distvirt_worker_protocol::ActivatorConfig::Tcp {
-            ports: None,
-            tcp_only: false,
-            max_flows: 1024,
-        }),
     }
 }
 
@@ -618,8 +620,15 @@ async fn activator_tcp_syn_emits_backend_need() {
         let mut make_l3 = {
             let mut instance_opt = Some(instance);
             move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
-                ServiceProcessor::L3 {
-                    activator: instance_opt.take().unwrap(),
+                let act = instance_opt.take().unwrap();
+                ServiceProcessor {
+                    port_routes: {
+                        let mut m = std::collections::HashMap::new();
+                        m.insert(80, crate::fabric::endpoint::service_processor::PortMode::L3 { activator: act });
+                        m
+                    },
+                    default_mode: crate::fabric::endpoint::service_processor::DefaultPortMode::Drop,
+                    stream_manager: None,
                     flow_tracker: distvirt_activator::FlowTracker::new(),
                 }
             }
@@ -682,8 +691,15 @@ async fn activator_tcp_rst_dropped() {
         let mut make_l3 = {
             let mut instance_opt = Some(instance);
             move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
-                ServiceProcessor::L3 {
-                    activator: instance_opt.take().unwrap(),
+                let act = instance_opt.take().unwrap();
+                ServiceProcessor {
+                    port_routes: {
+                        let mut m = std::collections::HashMap::new();
+                        m.insert(80, crate::fabric::endpoint::service_processor::PortMode::L3 { activator: act });
+                        m
+                    },
+                    default_mode: crate::fabric::endpoint::service_processor::DefaultPortMode::Drop,
+                    stream_manager: None,
                     flow_tracker: distvirt_activator::FlowTracker::new(),
                 }
             }
@@ -742,8 +758,15 @@ async fn activator_forwards_when_ready() {
         let mut make_l3 = {
             let mut instance_opt = Some(instance);
             move |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| -> ServiceProcessor {
-                ServiceProcessor::L3 {
-                    activator: instance_opt.take().unwrap(),
+                let act = instance_opt.take().unwrap();
+                ServiceProcessor {
+                    port_routes: {
+                        let mut m = std::collections::HashMap::new();
+                        m.insert(80, crate::fabric::endpoint::service_processor::PortMode::L3 { activator: act });
+                        m
+                    },
+                    default_mode: crate::fabric::endpoint::service_processor::DefaultPortMode::Drop,
+                    stream_manager: None,
                     flow_tracker: distvirt_activator::FlowTracker::new(),
                 }
             }
@@ -1119,7 +1142,7 @@ async fn test_remote_worker_route_forwards_to_tunnel_port() {
         use crate::fabric::ServiceProcessor;
         let tables = fabric.tables();
         let mut et = tables.endpoint_table.lock().unwrap();
-        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::Passthrough;
+        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::passthrough();
         et.apply_endpoint_sync(
             vec![EndpointSpec {
                 ip: remote_pod_ip,
@@ -1505,9 +1528,9 @@ async fn service_buffer_capacity_drops_excess() {
     let fabric = make_test_fabric();
 
     let small_policy = ServicePolicy {
+        ports: vec![],
         buffer_frames: 2,
         timeout_ms: 30000,
-        activator: None,
     };
 
     // Create service with buffer_frames=2.
@@ -1586,9 +1609,9 @@ async fn service_buffer_timeout_clears() {
     let fabric = make_test_fabric();
 
     let short_timeout_policy = ServicePolicy {
+        ports: vec![],
         buffer_frames: 64,
         timeout_ms: 1, // 1ms timeout
-        activator: None,
     };
 
     {

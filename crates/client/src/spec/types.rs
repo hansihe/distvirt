@@ -78,11 +78,11 @@ pub struct SpecWorkload {
     pub services: Option<HashMap<String, SpecInlineService>>,
 }
 
-/// Workload-level activation. Only `passthrough` is valid here.
+/// Workload-level activation config.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpecWorkloadActivation {
-    pub passthrough: Option<SpecPassthroughActivator>,
+    pub idle_timeout: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,8 +154,9 @@ pub struct SpecResourceValues {
 #[serde(deny_unknown_fields)]
 pub struct SpecInlineService {
     pub ip: Option<String>,
-    pub activation: Option<SpecActivation>,
-    pub expose: Option<Vec<SpecExpose>>,
+    pub ports: Option<Vec<SpecPort>>,
+    pub idle_timeout: Option<String>,
+    pub buffer: Option<SpecBuffer>,
 }
 
 /// Top-level service
@@ -164,31 +165,26 @@ pub struct SpecInlineService {
 pub struct SpecService {
     pub workload: String,
     pub ip: Option<String>,
-    pub activation: Option<SpecActivation>,
-    pub expose: Option<Vec<SpecExpose>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SpecActivation {
-    pub passthrough: Option<SpecPassthroughActivator>,
-    pub tcp: Option<SpecTcpActivator>,
-    pub http2: Option<UnsupportedField>,
-    pub postgres: Option<UnsupportedField>,
+    pub ports: Option<Vec<SpecPort>>,
+    pub idle_timeout: Option<String>,
     pub buffer: Option<SpecBuffer>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpecPassthroughActivator {
-    pub idle_timeout: String,
+pub struct SpecPort {
+    pub port: u32,
+    pub target: Option<u32>,
+    pub activator: Option<SpecPortActivator>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SpecTcpActivator {
-    pub ports: Option<Vec<u32>>,
-    pub idle_timeout: Option<String>,
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
+pub enum SpecPortActivator {
+    Tcp {
+        max_flows: Option<u32>,
+    },
+    Http2,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,17 +196,8 @@ pub struct SpecBuffer {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpecExpose {
-    pub container_port: u32,
-    pub host_port: u32,
-    pub protocol: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SpecDefaults {
     pub suspend_on_idle: Option<bool>,
     pub resources: Option<SpecResources>,
-    pub activation: Option<SpecActivation>,
 }
 

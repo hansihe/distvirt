@@ -51,10 +51,11 @@ workloads:
         vcpus: 2
     services:
       api:
-        activation:
-          tcp:
-            ports: [8080]
-            idle_timeout: 5m
+        idle_timeout: 5m
+        ports:
+          - port: 8080
+            activator:
+              type: tcp
   database:
     containers:
       - name: main
@@ -62,9 +63,7 @@ workloads:
         env:
           POSTGRES_PASSWORD: "dev"
     services:
-      database:
-        activation:
-          postgres: {}
+      database: {}
   frontend:
     containers:
       - name: main
@@ -95,18 +94,16 @@ workloads:
         assert_eq!(limits.memory_mb, 512);
         assert_eq!(limits.vcpus, 2);
 
-        // Check activation on api service — idle_timeout is now inside the tcp activator
+        // Check ports on api service
         let api_svc = &proto.services["api"];
         assert_eq!(api_svc.workload_id, "api");
-        let act = api_svc.activation.as_ref().unwrap();
-        let activator = act.activator.as_ref().unwrap().activator.as_ref().unwrap();
-        match activator {
-            activator_config::Activator::Tcp(tcp) => {
-                assert_eq!(tcp.idle_timeout_ms, 300_000);
-                assert_eq!(tcp.ports, vec![8080]);
-            }
-            _ => panic!("expected TCP activator"),
-        }
+        assert_eq!(api_svc.idle_timeout_ms, 300_000);
+        assert_eq!(api_svc.ports.len(), 1);
+        assert_eq!(api_svc.ports[0].port, 8080);
+        assert!(matches!(
+            api_svc.ports[0].activator,
+            Some(port_spec::Activator::Tcp(_))
+        ));
     }
 
     // --- (b) IP stability on addition ---
@@ -280,63 +277,44 @@ workloads:
         );
     }
 
-    // --- (f) Defaults activation ---
+    // --- (f) Port spec with activation ---
 
     #[test]
-    fn defaults_activation_inherited_and_overridden() {
+    fn port_spec_with_activation() {
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
 network:
   subnet: 172.16.0.0/24
-defaults:
-  activation:
-    tcp:
-      ports: [80]
-      idle_timeout: 5m
 workloads:
   app:
     containers:
       - image: img
     services:
-      inherits: {}
-      overrides:
-        activation:
-          tcp:
-            ports: [9090]
-            idle_timeout: 30s
+      no_ports: {}
+      with_tcp:
+        idle_timeout: 30s
+        ports:
+          - port: 9090
+            activator:
+              type: tcp
 "#;
         let (_, proto) = convert(yaml);
 
-        // Service that inherits default activation — idle_timeout inside tcp activator
-        let inherits_act = proto.services["inherits"].activation.as_ref().unwrap();
-        let inherits_tcp = match inherits_act
-            .activator
-            .as_ref()
-            .unwrap()
-            .activator
-            .as_ref()
-            .unwrap()
-        {
-            activator_config::Activator::Tcp(tcp) => tcp,
-            _ => panic!("expected TCP activator"),
-        };
-        assert_eq!(inherits_tcp.idle_timeout_ms, 300_000);
+        // Service with no ports — passthrough
+        let no_ports = &proto.services["no_ports"];
+        assert!(no_ports.ports.is_empty());
+        assert_eq!(no_ports.idle_timeout_ms, 0);
 
-        // Service that overrides activation
-        let overrides_act = proto.services["overrides"].activation.as_ref().unwrap();
-        let overrides_tcp = match overrides_act
-            .activator
-            .as_ref()
-            .unwrap()
-            .activator
-            .as_ref()
-            .unwrap()
-        {
-            activator_config::Activator::Tcp(tcp) => tcp,
-            _ => panic!("expected TCP activator"),
-        };
-        assert_eq!(overrides_tcp.idle_timeout_ms, 30_000);
+        // Service with TCP activator port
+        let with_tcp = &proto.services["with_tcp"];
+        assert_eq!(with_tcp.idle_timeout_ms, 30_000);
+        assert_eq!(with_tcp.ports.len(), 1);
+        assert_eq!(with_tcp.ports[0].port, 9090);
+        assert!(matches!(
+            with_tcp.ports[0].activator,
+            Some(port_spec::Activator::Tcp(_))
+        ));
     }
 
     // --- (g) Duration parsing ---
@@ -527,29 +505,12 @@ kind: Namespace
 workloads:
   api:
     activation:
-      passthrough:
-        idle_timeout: 5x
+      idle_timeout: 5x
     containers:
       - image: img
 "#);
         assert!(err.contains("invalid duration '5x'"), "got: {}", err);
-        assert!(err.contains("workloads.api.activation.passthrough.idle_timeout"), "got: {}", err);
-    }
-
-    #[test]
-    fn validation_workload_non_passthrough_is_error() {
-        // SpecWorkloadActivation only has passthrough field, but if it's None
-        // (e.g. empty activation block), that should be an error.
-        let err = convert_err(r#"
-apiVersion: v1
-kind: Namespace
-workloads:
-  api:
-    activation: {}
-    containers:
-      - image: img
-"#);
-        assert!(err.contains("only passthrough activator is valid on workloads"), "got: {}", err);
+        assert!(err.contains("workloads.api.activation.idle_timeout"), "got: {}", err);
     }
 
     #[test]
@@ -565,8 +526,7 @@ workloads:
   db:
     ip: 10.0.0.1
     activation:
-      passthrough:
-        idle_timeout: bad
+      idle_timeout: bad
     containers:
       - image: img
 services:
@@ -582,7 +542,7 @@ services:
 
     #[test]
     fn validation_warnings_dont_block() {
-        // postgres activator and gateway are warnings, not errors
+        // gateway is a warning, not an error
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
@@ -594,9 +554,7 @@ workloads:
     containers:
       - image: img
     services:
-      db:
-        activation:
-          postgres: {}
+      db: {}
 "#;
         let parsed = parse_yaml(yaml);
         let result = spec_to_namespace_spec(&parsed);
@@ -606,7 +564,7 @@ workloads:
     }
 
     #[test]
-    fn validation_tcp_port_out_of_range() {
+    fn validation_port_out_of_range() {
         let err = convert_err(r#"
 apiVersion: v1
 kind: Namespace
@@ -616,9 +574,10 @@ workloads:
       - image: img
     services:
       web:
-        activation:
-          tcp:
-            ports: [0, 80, 99999]
+        ports:
+          - port: 0
+          - port: 80
+          - port: 99999
 "#);
         assert!(err.contains("invalid port number 0"), "got: {}", err);
         assert!(err.contains("invalid port number 99999"), "got: {}", err);
@@ -948,9 +907,10 @@ workloads:
 services:
   app-svc:
     workload: app
-    activation:
-      tcp:
-        ports: [8080]
+    ports:
+      - port: 8080
+        activator:
+          type: tcp
 "#);
         let (_, proto) = parse_with_includes(&dir, r#"
 apiVersion: v1

@@ -60,9 +60,9 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![],
                     buffer_frames: 0,
                     timeout_ms: 0,
-                    activator: None,
                 },
                 backend: None,
             },
@@ -107,9 +107,9 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![],
                     buffer_frames: 64,
                     timeout_ms: 30000,
-                    activator: None,
                 },
                 backend: None,
             },
@@ -128,9 +128,9 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
             kind: EndpointKind::Service {
                 service_id: ServiceId(1),
                 policy: ServicePolicy {
+                    ports: vec![],
                     buffer_frames: 64,
                     timeout_ms: 30000,
-                    activator: None,
                 },
                 backend: Some(EndpointPodBackend {
                     pod_ip: backend_ip,

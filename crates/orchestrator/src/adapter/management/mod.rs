@@ -118,7 +118,7 @@ impl ManagementAdapter {
                 self.next_service_id += 1;
 
                 let mgmt_id = router.create_management();
-                let _has_activation = spec.activation.is_some();
+                let _has_activation = spec.has_activation;
                 router.create_service(router_id, ServiceSm::new());
                 router.set_service_config_edges(mgmt_id, vec![router_id]);
                 router.set_management_svc_spec(mgmt_id, self.to_sm_service_spec(name_str, spec));
@@ -280,18 +280,41 @@ impl ManagementAdapter {
             .get(&spec.workload_id.0)
             .copied()
             .unwrap_or(WorkloadId(0));
+
+        // Build worker-protocol ServicePolicy from orchestrator port config.
+        let worker_ports = spec
+            .ports
+            .iter()
+            .map(|p| distvirt_worker_protocol::PortConfig {
+                port: p.port,
+                target_port: p.target_port,
+                activator: p.activator.as_ref().map(|a| match a {
+                    crate::types::ActivatorKind::Tcp { max_flows } => {
+                        distvirt_worker_protocol::ActivatorConfig::Tcp {
+                            max_flows: *max_flows,
+                        }
+                    }
+                    crate::types::ActivatorKind::Http2 => {
+                        distvirt_worker_protocol::ActivatorConfig::Http2
+                    }
+                }),
+            })
+            .collect();
+
+        let policy = distvirt_worker_protocol::ServicePolicy {
+            ports: worker_ports,
+            buffer_frames: spec.buffer_frames,
+            timeout_ms: spec.buffer_timeout_ms,
+        };
+
         SmServiceSpec {
             workload: workload_router_id,
-            has_activation: spec.activation.is_some(),
-            idle_timeout: spec
-                .activation
-                .as_ref()
-                .map(|a| a.idle_timeout)
-                .unwrap_or_default(),
+            has_activation: spec.has_activation,
+            idle_timeout: spec.idle_timeout,
             dns_name: Some(name.to_owned()),
             dns_ip: Some(spec.ip),
             ip: spec.ip,
-            policy: spec.policy.clone(),
+            policy,
         }
     }
 }

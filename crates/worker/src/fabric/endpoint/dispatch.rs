@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use super::{
     Endpoint, EndpointAction, EndpointBackend, EndpointState, EndpointTable, FlowStatusChange,
-    ServiceProcessor,
 };
 use crate::fabric::flow::FlowKey;
 use crate::packet::FabricPacket;
@@ -280,7 +279,7 @@ impl EndpointTable {
         };
 
         // Try L4/L3 activator path.
-        if !matches!(processor, ServiceProcessor::Passthrough) {
+        if !processor.is_passthrough() {
             if let Some(fp) = FabricPacket::new(frame) {
                 if let Some(result) = processor.process_frame(service_id, fp.ip_packet(), frame) {
                     return (result, false, None);

@@ -60,7 +60,6 @@ fn ns(name: &str) -> NamespaceId {
 /// Always-on spec: 1 workload "echo" + 1 always-on service "echo-svc".
 fn always_on_spec() -> NamespaceSpec {
     use crate::types::WorkloadName;
-    use distvirt_worker_protocol::ServicePolicy;
     use std::collections::BTreeMap;
 
     let wl_id = WorkloadName("echo".to_string());
@@ -87,12 +86,11 @@ fn always_on_spec() -> NamespaceSpec {
         ServiceSpec {
             workload_id: wl_id,
             ip: std::net::Ipv4Addr::new(172, 16, 0, 100),
-            policy: ServicePolicy {
-                buffer_frames: 100,
-                timeout_ms: 5000,
-                activator: None,
-            },
-            activation: None,
+            ports: vec![],
+            has_activation: false,
+            idle_timeout: Duration::ZERO,
+            buffer_frames: 100,
+            buffer_timeout_ms: 5000,
         },
     );
 

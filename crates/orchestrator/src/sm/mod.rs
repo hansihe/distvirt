@@ -275,9 +275,9 @@ impl Default for ServiceSpec {
             dns_ip: None,
             ip: std::net::Ipv4Addr::UNSPECIFIED,
             policy: distvirt_worker_protocol::ServicePolicy {
+                ports: Vec::new(),
                 buffer_frames: 0,
                 timeout_ms: 0,
-                activator: None,
             },
         }
     }

@@ -107,21 +107,9 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         }),
     });
 
-    // Workload-level activation: extract passthrough idle_timeout
-    let activation = wl.activation.and_then(|act| {
-        act.activator.and_then(|cfg| {
-            cfg.activator.and_then(|a| match a {
-                proto::activator_config::Activator::Passthrough(p) => {
-                    Some(ActivationSpec {
-                        idle_timeout: Duration::from_millis(p.idle_timeout_ms),
-                    })
-                }
-                _ => {
-                    log::warn!("only passthrough activator is valid on workloads; ignored");
-                    None
-                }
-            })
-        })
+    // Workload-level activation: extract idle_timeout
+    let activation = wl.activation.map(|act| ActivationSpec {
+        idle_timeout: Duration::from_millis(act.idle_timeout_ms),
     });
 
     let volumes = wl
@@ -245,71 +233,61 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
         .ip
         .parse()
         .map_err(|_| Status::invalid_argument(format!("invalid service IP: '{}'", network.ip)))?;
-    // Build the ServicePolicy from activation config.
-    let policy = if let Some(ref act) = svc.activation {
-        let activator = act.activator.as_ref().and_then(|a| {
-            a.activator.as_ref().map(|inner| match inner {
-                proto::activator_config::Activator::Tcp(tcp) => {
-                    let ports = if tcp.ports.is_empty() {
-                        None
-                    } else {
-                        Some(tcp.ports.iter().map(|p| *p as u16).collect())
-                    };
-                    ActivatorConfig::Tcp {
-                        ports,
-                        tcp_only: false,
-                        max_flows: 1024,
-                    }
+    // Convert per-port config.
+    let ports: Vec<crate::types::PortConfig> = svc
+        .ports
+        .into_iter()
+        .map(|p| {
+            let activator = match p.activator {
+                Some(proto::port_spec::Activator::Tcp(tcp)) => {
+                    let max_flows = if tcp.max_flows == 0 { 1024 } else { tcp.max_flows };
+                    Some(crate::types::ActivatorKind::Tcp { max_flows })
                 }
-                proto::activator_config::Activator::Http2(_) => ActivatorConfig::Http2 {},
-                proto::activator_config::Activator::Passthrough(_) => {
-                    // Passthrough on a service: no protocol-specific activator config.
-                    // The service will activate on any traffic.
-                    ActivatorConfig::Tcp {
-                        ports: None,
-                        tcp_only: false,
-                        max_flows: 1024,
-                    }
+                Some(proto::port_spec::Activator::Http2(_)) => {
+                    Some(crate::types::ActivatorKind::Http2)
                 }
-            })
-        });
-        ServicePolicy {
-            buffer_frames: 64,
-            timeout_ms: 5000,
-            activator,
+                None => None,
+            };
+            crate::types::PortConfig {
+                port: p.port as u16,
+                target_port: if p.target_port == 0 { p.port as u16 } else { p.target_port as u16 },
+                activator,
+            }
+        })
+        .collect();
+
+    let has_activation = ports.iter().any(|p| p.activator.is_some());
+
+    // Validate mutual exclusivity: if any port has an activator, all must.
+    if has_activation {
+        let all_have = ports.iter().all(|p| p.activator.is_some());
+        if !all_have {
+            return Err(Status::invalid_argument(
+                "mixed activated/passthrough ports on the same service are not allowed; \
+                 all ports must have activators or none",
+            ));
         }
+    }
+
+    let idle_timeout = if svc.idle_timeout_ms > 0 {
+        Duration::from_millis(svc.idle_timeout_ms)
+    } else if has_activation {
+        Duration::from_secs(30) // default when activation is present
     } else {
-        ServicePolicy {
-            buffer_frames: 0,
-            timeout_ms: 0,
-            activator: None,
-        }
+        Duration::ZERO
     };
 
-    let activation = svc.activation.and_then(|a| {
-        // Extract idle_timeout from inside the activator variant
-        let idle_timeout = a.activator.as_ref().and_then(|cfg| {
-            cfg.activator.as_ref().and_then(|act| match act {
-                proto::activator_config::Activator::Passthrough(p) => {
-                    Some(Duration::from_millis(p.idle_timeout_ms))
-                }
-                proto::activator_config::Activator::Tcp(tcp) if tcp.idle_timeout_ms > 0 => {
-                    Some(Duration::from_millis(tcp.idle_timeout_ms))
-                }
-                _ => None,
-            })
-        });
-        // Default to 30s if no idle_timeout was specified but activation is present
-        Some(ActivationSpec {
-            idle_timeout: idle_timeout.unwrap_or(Duration::from_secs(30)),
-        })
-    });
+    let buffer_frames = if svc.buffer_frames == 0 { 64 } else { svc.buffer_frames };
+    let buffer_timeout_ms = if svc.buffer_timeout_ms == 0 { 5000 } else { svc.buffer_timeout_ms };
 
     Ok(ServiceSpec {
         workload_id: WorkloadName(svc.workload_id),
         ip,
-        policy,
-        activation,
+        ports,
+        has_activation,
+        idle_timeout,
+        buffer_frames,
+        buffer_timeout_ms,
     })
 }
 

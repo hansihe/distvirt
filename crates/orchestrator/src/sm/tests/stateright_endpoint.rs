@@ -190,9 +190,9 @@ fn make_config(has_activation: bool) -> EndpointConfig {
         kind: EndpointKind::Service {
             service_id: ServiceId(1),
             policy: distvirt_worker_protocol::ServicePolicy {
+                ports: vec![],
                 buffer_frames: 0,
                 timeout_ms: 0,
-                activator: None,
             },
         },
         workload: WorkloadId(0),
