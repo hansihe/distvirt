@@ -8,8 +8,8 @@ name = "distvirt_sdk_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-distvirt-client = { path = "../../distvirt-client" }
-distvirt-client-protocol = { path = "../../distvirt-client-protocol" }
+distvirt-client = { path = "../../crates/client" }
+distvirt-client-protocol = { path = "../../crates/client-protocol" }
 prost = "0.14"
 pyo3 = { version = "0.28", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
