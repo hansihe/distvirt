@@ -133,17 +133,12 @@ impl PyUserspaceNetwork {
     /// Drop the network without gRPC disconnect.
     fn close(&self) {
         let network = Arc::clone(&self.network);
-        match network.try_lock() {
-            Ok(mut guard) => {
+        if network.try_lock().ok().as_mut().map(|g| g.take()).is_none() {
+            let rt = pyo3_async_runtimes::tokio::get_runtime();
+            rt.spawn(async move {
+                let mut guard = network.lock().await;
                 guard.take();
-            }
-            Err(_) => {
-                let rt = pyo3_async_runtimes::tokio::get_runtime();
-                rt.spawn(async move {
-                    let mut guard = network.lock().await;
-                    guard.take();
-                });
-            }
+            });
         }
     }
 
@@ -242,17 +237,12 @@ impl PyTcpStream {
     /// Close the stream.
     fn close(&self) {
         let stream = Arc::clone(&self.stream);
-        match stream.try_lock() {
-            Ok(mut guard) => {
+        if stream.try_lock().ok().as_mut().map(|g| g.take()).is_none() {
+            let rt = pyo3_async_runtimes::tokio::get_runtime();
+            rt.spawn(async move {
+                let mut guard = stream.lock().await;
                 guard.take();
-            }
-            Err(_) => {
-                let rt = pyo3_async_runtimes::tokio::get_runtime();
-                rt.spawn(async move {
-                    let mut guard = stream.lock().await;
-                    guard.take();
-                });
-            }
+            });
         }
     }
 
@@ -324,17 +314,12 @@ impl PyUdpSocket {
     /// Close the socket.
     fn close(&self) {
         let socket = Arc::clone(&self.socket);
-        match socket.try_lock() {
-            Ok(mut guard) => {
+        if socket.try_lock().ok().as_mut().map(|g| g.take()).is_none() {
+            let rt = pyo3_async_runtimes::tokio::get_runtime();
+            rt.spawn(async move {
+                let mut guard = socket.lock().await;
                 guard.take();
-            }
-            Err(_) => {
-                let rt = pyo3_async_runtimes::tokio::get_runtime();
-                rt.spawn(async move {
-                    let mut guard = socket.lock().await;
-                    guard.take();
-                });
-            }
+            });
         }
     }
 
