@@ -200,6 +200,7 @@ impl Vmm for Firecracker {
                 .context("additional drive has no filename")?
                 .to_str()
                 .context("additional drive filename is not valid UTF-8")?;
+            log::info!("firecracker: copying volume drive '{}' to tmpdir", drive.drive_id);
             copy_file_writable(&drive.image_path, &tmpdir.path().join(filename)).await?;
             api_request(
                 "PUT",
@@ -703,6 +704,9 @@ async fn api_request(
     path: &str,
     body: &serde_json::Value,
 ) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+    log::debug!("firecracker API: {} {}", method, path);
+
     let body_bytes = serde_json::to_vec(body)?;
 
     let request = format!(
@@ -767,8 +771,15 @@ async fn api_request(
 
     if let Some(status_line) = response_str.lines().next() {
         if !status_line.contains("204") && !status_line.contains("200") {
-            bail!("Firecracker API error on PUT {}:\n{}", path, response_str);
+            bail!("Firecracker API error on {} {}:\n{}", method, path, response_str);
         }
+    }
+
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > 500 {
+        log::warn!("firecracker API: {} {} took {:.1}s", method, path, elapsed.as_secs_f64());
+    } else {
+        log::debug!("firecracker API: {} {} completed in {:?}", method, path, elapsed);
     }
 
     Ok(())
