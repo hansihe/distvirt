@@ -63,11 +63,11 @@ impl PyEventStream {
 
 #[pyclass(name = "LogStream")]
 pub struct PyLogStream {
-    stream: Arc<Mutex<Option<Streaming<proto::LogChunk>>>>,
+    stream: Arc<Mutex<Option<Streaming<proto::StreamLogsResponse>>>>,
 }
 
 impl PyLogStream {
-    pub fn new(stream: Streaming<proto::LogChunk>) -> Self {
+    pub fn new(stream: Streaming<proto::StreamLogsResponse>) -> Self {
         PyLogStream {
             stream: Arc::new(Mutex::new(Some(stream))),
         }
@@ -77,10 +77,11 @@ impl PyLogStream {
 /// Carries LogChunk data across the async boundary, converted to Python dict
 /// via IntoPyObject.
 struct LogChunkData {
-    workload_id: String,
+    workload_name: String,
     data: Vec<u8>,
     timestamp_ms: i64,
     container_id: String,
+    pod_id: String,
 }
 
 impl<'py> IntoPyObject<'py> for LogChunkData {
@@ -90,10 +91,11 @@ impl<'py> IntoPyObject<'py> for LogChunkData {
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = PyDict::new(py);
-        dict.set_item("workload_id", &self.workload_id)?;
+        dict.set_item("workload_name", &self.workload_name)?;
         dict.set_item("data", &self.data[..])?;
         dict.set_item("timestamp_ms", self.timestamp_ms)?;
         dict.set_item("container_id", &self.container_id)?;
+        dict.set_item("pod_id", &self.pod_id)?;
         Ok(dict)
     }
 }
@@ -108,21 +110,32 @@ impl PyLogStream {
         let stream = Arc::clone(&self.stream);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = stream.lock().await;
-            let s: &mut Streaming<proto::LogChunk> = guard
+            let s: &mut Streaming<proto::StreamLogsResponse> = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::new_err("log stream is closed"))?;
 
-            match s.message().await {
-                Ok(Some(chunk)) => Ok(Some(LogChunkData {
-                    workload_id: chunk.workload_id,
-                    data: chunk.data,
-                    timestamp_ms: chunk.timestamp_unix_ms,
-                    container_id: chunk.container_id,
-                })),
-                Ok(None) => Err(pyo3::exceptions::PyStopAsyncIteration::new_err(())),
-                Err(status) => {
-                    let err = handle_grpc_error(status);
-                    Err(ApiError::new_err(format!("{err}")))
+            loop {
+                match s.message().await {
+                    Ok(Some(resp)) => {
+                        match resp.message {
+                            Some(proto::stream_logs_response::Message::LogChunk(chunk)) => {
+                                return Ok(Some(LogChunkData {
+                                    workload_name: chunk.workload_name,
+                                    data: chunk.data,
+                                    timestamp_ms: chunk.timestamp_unix_ms,
+                                    container_id: chunk.container_id,
+                                    pod_id: chunk.pod_id,
+                                }));
+                            }
+                            // Skip non-log-chunk messages (e.g. HistoricalComplete)
+                            _ => continue,
+                        }
+                    }
+                    Ok(None) => return Err(pyo3::exceptions::PyStopAsyncIteration::new_err(())),
+                    Err(status) => {
+                        let err = handle_grpc_error(status);
+                        return Err(ApiError::new_err(format!("{err}")));
+                    }
                 }
             }
         })

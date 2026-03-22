@@ -705,7 +705,7 @@ async fn api_request(
     body: &serde_json::Value,
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
-    log::debug!("firecracker API: {} {}", method, path);
+    log::info!("firecracker API: {} {}", method, path);
 
     let body_bytes = serde_json::to_vec(body)?;
 
@@ -779,7 +779,7 @@ async fn api_request(
     if elapsed.as_millis() > 500 {
         log::warn!("firecracker API: {} {} took {:.1}s", method, path, elapsed.as_secs_f64());
     } else {
-        log::debug!("firecracker API: {} {} completed in {:?}", method, path, elapsed);
+        log::info!("firecracker API: {} {} completed in {:?}", method, path, elapsed);
     }
 
     Ok(())
