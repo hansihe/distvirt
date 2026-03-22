@@ -29,6 +29,9 @@
         version = "0.1.0";
         src = pkgs.lib.cleanSource root;
         cargoLock.lockFile = root + "/Cargo.lock";
+        cargoLock.outputHashes = {
+          "containerd-client-0.8.0" = "sha256-b1qEaf35FQQNCxGKAv3AB5Mc8FGLoxCotVx0yFItYxk=";
+        };
         buildAndTestSubdir = "crates/guest-init";
         cargoBuildProfileFlag = "--profile guest";
       };
@@ -60,9 +63,8 @@
       testContainers = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
         pname = "test-containers";
         version = "0.1.0";
-        src = pkgs.lib.cleanSource root;
-        cargoLock.lockFile = root + "/Cargo.lock";
-        buildAndTestSubdir = "guest-image/test-containers";
+        src = pkgs.lib.cleanSource root + "/guest-image/test-containers";
+        cargoLock.lockFile = root + "/guest-image/test-containers/Cargo.lock";
         cargoBuildProfileFlag = "--profile guest";
       };
 
