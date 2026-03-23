@@ -55,7 +55,7 @@ fn parse_ifr_name(ifr_name: &[u8; libc::IFNAMSIZ]) -> anyhow::Result<String> {
 }
 
 /// Copy an interface name into an ifreq `ifr_name` field.
-fn write_ifr_name(ifr_name: &mut [i8; libc::IFNAMSIZ], name: &str) {
+fn write_ifr_name(ifr_name: &mut [libc::c_char; libc::IFNAMSIZ], name: &str) {
     let name_bytes = name.as_bytes();
     let copy_len = name_bytes.len().min(libc::IFNAMSIZ - 1);
     unsafe {
