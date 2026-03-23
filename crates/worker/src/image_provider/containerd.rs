@@ -2,6 +2,7 @@ use std::env::consts;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use base64::Engine as _;
 use containerd_client as client;
 use containerd_client::services::v1::snapshots::{
     RemoveSnapshotRequest, ViewSnapshotRequest, snapshots_client::SnapshotsClient,
@@ -244,27 +245,27 @@ async fn setup_auth_stream(
                             }
                         }
 
+                        // Use HEADER auth type to set the Authorization header
+                        // directly. CREDENTIALS type triggers the Docker token
+                        // exchange flow, which requires a 401 + WWW-Authenticate
+                        // challenge. ECR returns 403 for unauthenticated requests
+                        // instead of 401, so the exchange never happens.
+                        let basic_auth = base64::prelude::BASE64_STANDARD.encode(
+                            format!("{}:{}", cred.username, cred.password)
+                        );
+                        let header_value = format!("Basic {}", basic_auth);
                         log::debug!(
-                            "auth stream {}: responding with credentials (username={})",
+                            "auth stream {}: responding with HEADER auth (username={})",
                             stream_id_owned, cred.username
                         );
                         let response = AuthResponse {
-                            auth_type: AuthType::Credentials as i32,
-                            username: cred.username.clone(),
-                            secret: cred.password.clone(),
+                            auth_type: AuthType::Header as i32,
+                            secret: header_value,
+                            username: String::new(),
                             expire_at: None,
                         };
 
-                        // Mirror the type_url prefix from the incoming message so
-                        // containerd's typeurl registry can find the response type.
-                        let mut resp_any = to_any(&response);
-                        if let Some(prefix) = any.type_url.strip_suffix("AuthRequest") {
-                            resp_any.type_url = format!("{}AuthResponse", prefix);
-                            log::debug!(
-                                "auth stream {}: sending response with type_url={}",
-                                stream_id_owned, resp_any.type_url
-                            );
-                        }
+                        let resp_any = to_any(&response);
 
                         if tx.send(resp_any).await.is_err() {
                             log::warn!("auth stream {}: sender closed", stream_id_owned);
