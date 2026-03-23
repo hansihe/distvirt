@@ -13,7 +13,7 @@ distvirt-client-protocol = { path = "../../crates/client-protocol" }
 prost = "0.14"
 pyo3 = { version = "0.28", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util"] }
 tonic = "0.14"
 anyhow = "1"
 log = "0.4"

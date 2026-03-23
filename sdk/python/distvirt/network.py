@@ -126,6 +126,9 @@ class _TcpTransport(asyncio.Transport):
             if self._closed_fut and not self._closed_fut.done():
                 self._closed_fut.set_result(None)
 
+    def abort(self) -> None:
+        self._force_close(None)
+
     def _force_close(self, exc: Exception | None) -> None:
         if self._closing:
             return

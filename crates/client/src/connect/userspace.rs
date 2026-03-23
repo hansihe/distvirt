@@ -465,19 +465,14 @@ impl AsyncWrite for TcpStream {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, err.clone())));
         }
 
-        if !state.write_closed {
-            state.write_closed = true;
-            // Wake poll loop to initiate the TCP close.
-            drop(state);
-            self.inner.notify.notify_one();
-            return Poll::Pending;
-        }
+        state.write_closed = true;
 
-        // Already requested shutdown — wait for the TCP close to complete.
         if state.close_complete {
             Poll::Ready(Ok(()))
         } else {
             state.shutdown_waker = Some(cx.waker().clone());
+            drop(state);
+            self.inner.notify.notify_one();
             Poll::Pending
         }
     }

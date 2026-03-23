@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use distvirt_client::connect;
@@ -93,9 +93,11 @@ impl PyUserspaceNetwork {
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
 
             let peer = stream.peer_addr().to_string();
+            let (read_half, write_half) = io::split(stream);
 
             Ok(PyTcpStream {
-                stream: Arc::new(Mutex::new(Some(stream))),
+                reader: Arc::new(Mutex::new(Some(read_half))),
+                writer: Arc::new(Mutex::new(Some(write_half))),
                 peer_addr: peer,
             })
         })
@@ -173,7 +175,8 @@ impl PyUserspaceNetwork {
 
 #[pyclass(name = "TcpStream")]
 pub struct PyTcpStream {
-    stream: Arc<Mutex<Option<connect::userspace::TcpStream>>>,
+    reader: Arc<Mutex<Option<io::ReadHalf<connect::userspace::TcpStream>>>>,
+    writer: Arc<Mutex<Option<io::WriteHalf<connect::userspace::TcpStream>>>>,
     peer_addr: String,
 }
 
@@ -182,15 +185,15 @@ impl PyTcpStream {
     /// Read up to n bytes.
     #[pyo3(signature = (n=4096))]
     fn read<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyAny>> {
-        let stream = Arc::clone(&self.stream);
+        let reader = Arc::clone(&self.reader);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = stream.lock().await;
-            let s = guard
+            let mut guard = reader.lock().await;
+            let r = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::new_err("stream is closed"))?;
 
             let mut buf = vec![0u8; n];
-            let read = s
+            let read = r
                 .read(&mut buf)
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
@@ -201,14 +204,14 @@ impl PyTcpStream {
 
     /// Write data, returning bytes written.
     fn write<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
-        let stream = Arc::clone(&self.stream);
+        let writer = Arc::clone(&self.writer);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = stream.lock().await;
-            let s = guard
+            let mut guard = writer.lock().await;
+            let w = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::new_err("stream is closed"))?;
 
-            let written = s
+            let written = w
                 .write(&data)
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
@@ -218,14 +221,14 @@ impl PyTcpStream {
 
     /// Write all data.
     fn write_all<'py>(&self, py: Python<'py>, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
-        let stream = Arc::clone(&self.stream);
+        let writer = Arc::clone(&self.writer);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = stream.lock().await;
-            let s = guard
+            let mut guard = writer.lock().await;
+            let w = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::new_err("stream is closed"))?;
 
-            s.write_all(&data)
+            w.write_all(&data)
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
             Ok(())
@@ -234,14 +237,14 @@ impl PyTcpStream {
 
     /// Shut down the write half.
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let stream = Arc::clone(&self.stream);
+        let writer = Arc::clone(&self.writer);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = stream.lock().await;
-            let s = guard
+            let mut guard = writer.lock().await;
+            let w = guard
                 .as_mut()
                 .ok_or_else(|| ApiError::new_err("stream is closed"))?;
 
-            s.shutdown()
+            w.shutdown()
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
             Ok(())
@@ -250,11 +253,21 @@ impl PyTcpStream {
 
     /// Close the stream.
     fn close(&self) {
-        let stream = Arc::clone(&self.stream);
-        if stream.try_lock().ok().as_mut().map(|g| g.take()).is_none() {
+        // Drop the reader half.
+        let reader = Arc::clone(&self.reader);
+        if reader.try_lock().ok().as_mut().map(|g| g.take()).is_none() {
             let rt = pyo3_async_runtimes::tokio::get_runtime();
             rt.spawn(async move {
-                let mut guard = stream.lock().await;
+                let mut guard = reader.lock().await;
+                guard.take();
+            });
+        }
+        // Drop the writer half.
+        let writer = Arc::clone(&self.writer);
+        if writer.try_lock().ok().as_mut().map(|g| g.take()).is_none() {
+            let rt = pyo3_async_runtimes::tokio::get_runtime();
+            rt.spawn(async move {
+                let mut guard = writer.lock().await;
                 guard.take();
             });
         }
