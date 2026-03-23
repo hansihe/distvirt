@@ -2,7 +2,6 @@ use std::env::consts;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use base64::Engine as _;
 use containerd_client as client;
 use containerd_client::services::v1::snapshots::{
     RemoveSnapshotRequest, ViewSnapshotRequest, snapshots_client::SnapshotsClient,
@@ -245,23 +244,14 @@ async fn setup_auth_stream(
                             }
                         }
 
-                        // Use HEADER auth type to set the Authorization header
-                        // directly. CREDENTIALS type triggers the Docker token
-                        // exchange flow, which requires a 401 + WWW-Authenticate
-                        // challenge. ECR returns 403 for unauthenticated requests
-                        // instead of 401, so the exchange never happens.
-                        let basic_auth = base64::prelude::BASE64_STANDARD.encode(
-                            format!("{}:{}", cred.username, cred.password)
-                        );
-                        let header_value = format!("Basic {}", basic_auth);
                         log::debug!(
-                            "auth stream {}: responding with HEADER auth (username={})",
+                            "auth stream {}: responding with credentials (username={})",
                             stream_id_owned, cred.username
                         );
                         let response = AuthResponse {
-                            auth_type: AuthType::Header as i32,
-                            secret: header_value,
-                            username: String::new(),
+                            auth_type: AuthType::Credentials as i32,
+                            username: cred.username.clone(),
+                            secret: cred.password.clone(),
                             expire_at: None,
                         };
 
