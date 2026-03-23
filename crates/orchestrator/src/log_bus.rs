@@ -16,6 +16,11 @@ const DEFAULT_RETIRED_TTL: Duration = Duration::from_secs(5 * 60);
 /// Sweep retired topics when topic count exceeds this threshold.
 const SWEEP_THRESHOLD: usize = 64;
 
+/// Channel capacity for log subscriber channels.
+/// Sized to absorb bursts (e.g. final output from a dying pod)
+/// without dropping chunks.
+const SUBSCRIBER_CHANNEL_CAPACITY: usize = 4096;
+
 /// A chunk of log data from a container.
 #[derive(Clone, Debug)]
 pub struct LogChunk {
@@ -70,8 +75,16 @@ impl TopicState {
             }
         }
 
-        // Fan out to subscribers, removing dead senders.
-        self.subscribers.retain(|tx| tx.try_send(chunk.clone()).is_ok());
+        // Fan out to subscribers, removing only dead senders.
+        // On backpressure (Full), we drop the chunk but keep the subscriber
+        // so it continues receiving future messages.
+        self.subscribers.retain(|tx| {
+            match tx.try_send(chunk.clone()) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => true,
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        });
     }
 }
 
@@ -216,7 +229,7 @@ impl LogBusHandle {
         pod_filter: Option<&[PodId]>,
         container_filter: Option<&[String]>,
     ) -> (Vec<LogChunk>, mpsc::Receiver<LogChunk>) {
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_CHANNEL_CAPACITY);
         let mut inner = self.inner.lock().unwrap();
         let mut historical = Vec::new();
 
@@ -259,7 +272,7 @@ impl LogBusHandle {
         workload_name: &str,
         container_filter: Option<&[String]>,
     ) -> (Vec<LogChunk>, mpsc::Receiver<LogChunk>) {
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_CHANNEL_CAPACITY);
         let mut inner = self.inner.lock().unwrap();
         let mut historical = Vec::new();
 
@@ -373,20 +386,50 @@ mod tests {
         // Create topic.
         bus.publish(make_chunk("ns1", 1, "main", b"init"), None);
 
-        // Subscribe with bounded channel (256 capacity).
+        // Subscribe.
         let (_historical, rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
 
         // Publish more than the channel can hold — should not block.
-        for i in 0..300 {
+        let send_count = SUBSCRIBER_CHANNEL_CAPACITY + 100;
+        for i in 0..send_count {
             bus.publish(
                 make_chunk("ns1", 1, "main", format!("msg{}", i).as_bytes()),
                 None,
             );
         }
 
-        // The first 256 should be delivered, rest dropped.
-        // Just verify we didn't deadlock and some were received.
+        // Chunks that fit in the channel are delivered, excess are dropped,
+        // but the subscriber must NOT be evicted — it should still receive
+        // future messages after the burst.
         drop(rx);
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_survives_backpressure() {
+        let bus = LogBusHandle::new(1024 * 1024);
+
+        // Create topic.
+        bus.publish(make_chunk("ns1", 1, "main", b"init"), None);
+
+        // Subscribe.
+        let (_historical, mut rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+
+        // Fill the channel beyond capacity.
+        let send_count = SUBSCRIBER_CHANNEL_CAPACITY + 100;
+        for i in 0..send_count {
+            bus.publish(
+                make_chunk("ns1", 1, "main", format!("burst{}", i).as_bytes()),
+                None,
+            );
+        }
+
+        // Drain all buffered messages.
+        while rx.try_recv().is_ok() {}
+
+        // Publish another message — subscriber must still receive it.
+        bus.publish(make_chunk("ns1", 1, "main", b"after-burst"), None);
+        let chunk = rx.try_recv().unwrap();
+        assert_eq!(chunk.data, b"after-burst");
     }
 
     #[tokio::test]

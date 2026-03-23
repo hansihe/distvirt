@@ -295,7 +295,7 @@ impl DistvirtClient for DistvirtClientService {
                 .subscribe(&namespace_id, pod_filter.as_deref(), container_filter.as_deref())
         };
 
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let (tx, rx) = tokio::sync::mpsc::channel(4096);
 
         tokio::spawn(async move {
             // Send historical chunks first.
