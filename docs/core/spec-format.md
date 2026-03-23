@@ -47,7 +47,7 @@ workloads:
         entrypoint: ["/app/server"]
         args: ["--port", "8080"]
         env:
-          DATABASE_URL: "postgres://db:5432/myapp"
+          DATABASE_URL: "postgres://${services.database.ip}:5432/myapp"
           LOG_LEVEL: "info"
         working_dir: /app
         user: "1000:1000"
@@ -113,7 +113,7 @@ workloads:
         image: <oci-ref>       # Required. OCI image reference.
         entrypoint: [<args>]   # Override image entrypoint.
         args: [<args>]         # Override image CMD.
-        env: {<map>}           # KEY: VALUE environment variables.
+        env: {<map>}           # KEY: VALUE environment variables. Supports ${...} expressions.
         working_dir: <path>    # Working directory.
         user: "<uid>[:<gid>]"  # Run as user/group.
         hostname: <string>     # Container hostname.
@@ -574,6 +574,10 @@ services.<id>.ports[]             -> PortSpec                      Implemented
   .target                         -> PortSpec.target_port          Implemented
   .activator.type=tcp             -> TcpPortActivator              Implemented
   .activator.type=http2           -> Http2PortActivator            Implemented
+${self.ip}                        -> resolved to workload pod IP   Implemented
+${workloads.<id>.ip}              -> resolved to workload pod IP   Implemented
+${services.<id>.ip}               -> resolved to service VIP       Implemented
+${values.<key>}                   -> resolved from include values  Implemented
 ```
 
 ---
@@ -589,6 +593,7 @@ services.<id>.ports[]             -> PortSpec                      Implemented
 | Resources | Limits only (deploy.resources) | Requests (scheduling) + limits (VM size) |
 | Health checks | Basic (no readiness gating) | Planned (parsed but not yet functional) |
 | Network | Implicit/multi-network | Explicit single subnet |
+| Variable substitution | `${VAR}` env vars only | `${...}` expressions in any string field (IPs, values) |
 | Dependencies | `depends_on` ordering | Implicit via service activation |
 | Multi-container | N/A | Multiple containers per workload |
 | Volumes | Named volumes, bind mounts | Pod-scoped volumes (empty_dir, config_data, persistent_volume) |
@@ -639,6 +644,116 @@ These are infrastructure/runtime concerns, not application spec:
 
 ---
 
+## Expressions
+
+**[Implemented]**
+
+distvirt supports `${...}` expressions in string fields for referencing dynamic values like IPs. All expression types use the same `${...}` syntax.
+
+### Available expressions
+
+| Expression | Resolves to | Available in |
+|---|---|---|
+| `${self.ip}` | Pod IP of the current workload | Workload string fields |
+| `${workloads.<id>.ip}` | Pod IP of another workload | Any string field |
+| `${services.<id>.ip}` | Virtual IP of a service | Any string field |
+| `${values.<key>}` | Value from fragment `include.values` | Fragment files only |
+
+### Reference expressions
+
+Reference expressions resolve to IPs allocated from the namespace subnet. They can be used in any string field within a workload: `env` values, `image`, `args`, `entrypoint`, `working_dir`, `user`, `hostname`, and `config_data` file content.
+
+```yaml
+workloads:
+  api:
+    containers:
+      - image: docker.io/myorg/api:latest
+        env:
+          MY_IP: "${self.ip}"
+          DATABASE_URL: "postgres://${services.db.ip}:5432/myapp"
+          CACHE_HOST: "${workloads.cache.ip}"
+    volumes:
+      - name: config
+        config_data:
+          files:
+            - path: upstream.conf
+              content: "server ${workloads.backend.ip}:8080;"
+
+  cache:
+    containers:
+      - image: redis:7
+    services:
+      cache: {}
+
+  backend:
+    containers:
+      - image: myorg/backend:latest
+    services:
+      db:
+        ports:
+          - port: 5432
+```
+
+Expressions can be embedded in larger strings (`"postgres://${services.db.ip}:5432"`) or used as the entire value (`"${self.ip}"`).
+
+Since IPs are assigned deterministically (see IP Auto-Assignment), all expressions are resolved at spec render time -- no runtime templating is involved.
+
+### Fragment value expressions
+
+`${values.*}` expressions are used in workload fragments to accept parameters from the including namespace spec. They are resolved via text substitution before YAML parsing, which means they can appear in any YAML position -- including non-string fields like port numbers.
+
+```yaml
+# Fragment file
+apiVersion: v1
+kind: WorkloadFragment
+workloads:
+  app:
+    containers:
+      - image: ${values.IMAGE}
+        env:
+          LOG_LEVEL: ${values.LOG_LEVEL}
+```
+
+```yaml
+# Namespace spec
+include:
+  - path: app.yaml
+    values:
+      IMAGE: myorg/app:v1.2.3
+      LOG_LEVEL: info
+```
+
+See Multi-Repo Deployments (Fragments) for full details.
+
+### Combining values and references
+
+Fragment value expressions and reference expressions can be used together. Values are resolved first (during fragment loading), then references are resolved on the assembled spec:
+
+```yaml
+# Fragment file
+apiVersion: v1
+kind: WorkloadFragment
+workloads:
+  app:
+    containers:
+      - image: ${values.IMAGE}
+        env:
+          MY_IP: "${self.ip}"
+          DB_HOST: "${services.db.ip}"
+```
+
+### Expression resolution order
+
+1. **Fragment values** (`${values.*}`) -- resolved per-fragment during include loading, before YAML parsing.
+2. **References** (`${self.*}`, `${workloads.*}`, `${services.*}`) -- resolved after all fragments are merged and IPs are allocated.
+3. Any remaining `${...}` expressions after both phases produce an error.
+
+### Reserved top-level names
+
+The top-level namespace in expressions is reserved. Currently defined: `self`, `workloads`, `services`, `values`. Other top-level names are reserved for future use and will produce an error.
+
+---
+
 ## Multi-Repo Deployments (Fragments)
 
 **[Implemented]**
@@ -657,7 +772,7 @@ kind: WorkloadFragment
 workloads:
   api:
     containers:
-      - image: ${IMAGE}
+      - image: ${values.IMAGE}
         args: ["--port", "8080"]
         env:
           LOG_LEVEL: "info"
@@ -693,7 +808,7 @@ include:
       IMAGE: docker.io/myorg/api:v1.2.3
     overrides:
       env:
-        DATABASE_URL: "postgres://staging-db:5432/myapp"
+        DATABASE_URL: "postgres://${services.db.ip}:5432/myapp"
 
   - path: fragments/frontend.yaml
     values:
@@ -705,7 +820,7 @@ include:
 ```yaml
 include:
   - path: <relative-path>       # Required. Path to fragment file, relative to the namespace spec.
-    values:                      # Variable substitution. Replaces ${VAR} in the fragment YAML.
+    values:                      # Variable substitution. Replaces ${values.KEY} in the fragment YAML.
       <key>: <value>
     overrides:                   # Optional overrides applied to all containers in the fragment.
       env:                       # Environment variables merged into every container.
@@ -719,7 +834,8 @@ include:
 - Fragments cannot have `metadata`, `network`, `defaults`, or `include` (no recursive includes).
 - Top-level services in fragments must reference workloads within the same fragment.
 - Workload and service IDs must be unique across all fragments and the main spec.
-- Variable substitution (`${VAR}`) is performed before YAML parsing. All variables must be defined in `values`.
+- Fragment value substitution (`${values.KEY}`) is performed before YAML parsing. All referenced values must be defined in `include.values`.
+- Reference expressions (`${self.ip}`, `${workloads.X.ip}`, `${services.X.ip}`) are resolved after fragment merging and can reference workloads/services from other fragments or the main spec.
 
 ### CI workflow
 
