@@ -15,6 +15,7 @@ struct AuthEntry {
     auth: String,
 }
 
+#[derive(Clone)]
 pub struct RegistryCredential {
     pub username: String,
     pub password: String,

@@ -127,14 +127,19 @@ async fn pull_image(
         docker_config.and_then(|path| docker_config::lookup_credentials(path, image_ref));
 
     // Set up auth stream if we have credentials.
-    let resolver = if let Some(cred) = credential {
-        let stream_id = format!("distvirt-auth-{}", uuid_simple());
-        setup_auth_stream(channel, namespace, &stream_id, cred).await?;
+    let resolver = if let Some(cred) = &credential {
+        let stream_id = format!("distvirt-auth-{}", generate_id());
+        log::debug!(
+            "setting up auth stream {} for image {} (username={})",
+            stream_id, image_ref, cred.username
+        );
+        setup_auth_stream(channel, namespace, &stream_id, cred.clone()).await?;
         Some(RegistryResolver {
             auth_stream: stream_id,
             ..Default::default()
         })
     } else {
+        log::debug!("no credentials found for image {}", image_ref);
         None
     };
 
@@ -210,8 +215,10 @@ async fn setup_auth_stream(
     let mut inbound = resp.into_inner();
 
     // Spawn a task to handle auth callbacks.
+    let stream_id_owned = stream_id.to_string();
     tokio::spawn(async move {
         use containerd_client::types::transfer::AuthRequest;
+        use prost::Message as _;
 
         loop {
             match inbound.message().await {
@@ -221,27 +228,61 @@ async fn setup_auth_stream(
                         || any.type_url == format!("/{}", AuthRequest::full_name())
                         || any.type_url.ends_with("AuthRequest")
                     {
-                        log::debug!("received auth callback, responding with credentials");
+                        // Log the auth request details for debugging.
+                        match AuthRequest::decode(any.value.as_slice()) {
+                            Ok(req) => {
+                                log::debug!(
+                                    "auth stream {}: auth request host={}, ref={}, www_auth={:?}",
+                                    stream_id_owned, req.host, req.reference, req.wwwauthenticate
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "auth stream {}: failed to decode AuthRequest: {}",
+                                    stream_id_owned, e
+                                );
+                            }
+                        }
+
+                        log::debug!(
+                            "auth stream {}: responding with credentials (username={})",
+                            stream_id_owned, cred.username
+                        );
                         let response = AuthResponse {
                             auth_type: AuthType::Credentials as i32,
                             username: cred.username.clone(),
                             secret: cred.password.clone(),
                             expire_at: None,
                         };
-                        if tx.send(to_any(&response)).await.is_err() {
-                            log::warn!("auth stream sender closed");
+
+                        // Mirror the type_url prefix from the incoming message so
+                        // containerd's typeurl registry can find the response type.
+                        let mut resp_any = to_any(&response);
+                        if let Some(prefix) = any.type_url.strip_suffix("AuthRequest") {
+                            resp_any.type_url = format!("{}AuthResponse", prefix);
+                            log::debug!(
+                                "auth stream {}: sending response with type_url={}",
+                                stream_id_owned, resp_any.type_url
+                            );
+                        }
+
+                        if tx.send(resp_any).await.is_err() {
+                            log::warn!("auth stream {}: sender closed", stream_id_owned);
                             break;
                         }
                     } else {
-                        log::debug!("auth stream: ignoring message type {}", any.type_url);
+                        log::debug!(
+                            "auth stream {}: ignoring message type {}",
+                            stream_id_owned, any.type_url
+                        );
                     }
                 }
                 Ok(None) => {
-                    log::debug!("auth stream closed by containerd");
+                    log::debug!("auth stream {}: closed by containerd", stream_id_owned);
                     break;
                 }
                 Err(e) => {
-                    log::warn!("auth stream error: {}", e);
+                    log::warn!("auth stream {}: error: {}", stream_id_owned, e);
                     break;
                 }
             }
@@ -413,7 +454,7 @@ async fn mount_rootfs(
         .clone();
 
     // Create a view snapshot from the top layer.
-    let view_key = format!("distvirt-view-{}", uuid_simple());
+    let view_key = format!("distvirt-view-{}", generate_id());
     let req = ViewSnapshotRequest {
         snapshotter: "overlayfs".to_string(),
         key: view_key.clone(),
@@ -473,11 +514,6 @@ async fn mount_rootfs(
     Ok((mount_dir, view_key))
 }
 
-/// Generate a simple pseudo-unique ID (no uuid crate dependency).
-fn uuid_simple() -> String {
-    use std::time::SystemTime;
-    let d = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:x}{:x}", d.as_secs(), d.subsec_nanos())
+fn generate_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
