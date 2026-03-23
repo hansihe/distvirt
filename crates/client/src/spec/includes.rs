@@ -109,8 +109,11 @@ pub fn resolve_includes(parsed: &mut super::parse::ParsedSpec, spec_path: &Path)
     errs.into_result()
 }
 
-/// Replace `${VAR}` patterns in the YAML string with values from the map.
-/// Errors on undefined variables.
+/// Replace `${values.KEY}` patterns in the YAML string with values from the map.
+///
+/// Only `${values.*}` expressions are resolved here. Other `${...}` expressions
+/// (like `${self.ip}`, `${services.X.ip}`) are passed through unchanged — they
+/// are resolved later by `resolve::resolve_refs`.
 fn substitute_variables(
     yaml: &str,
     values: &HashMap<String, String>,
@@ -144,16 +147,24 @@ fn substitute_variables(
                         ),
                     });
                 }
-                match values.get(&var_name) {
-                    Some(val) => result.push_str(val),
-                    None => {
-                        return Err(SpecError::Validation {
-                            message: format!(
-                                "{} — undefined variable '{}'",
-                                path_label, var_name
-                            ),
-                        });
+                // Only resolve ${values.*} expressions; pass through everything else
+                if let Some(key) = var_name.strip_prefix("values.") {
+                    match values.get(key) {
+                        Some(val) => result.push_str(val),
+                        None => {
+                            return Err(SpecError::Validation {
+                                message: format!(
+                                    "{} — undefined variable '{}'",
+                                    path_label, var_name
+                                ),
+                            });
+                        }
                     }
+                } else {
+                    // Not a values.* expression — pass through unchanged
+                    result.push_str("${");
+                    result.push_str(&var_name);
+                    result.push('}');
                 }
             } else {
                 result.push(ch);

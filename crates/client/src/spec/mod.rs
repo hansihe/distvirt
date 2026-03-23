@@ -4,6 +4,7 @@ pub(crate) mod includes;
 pub(crate) mod ip_alloc;
 pub(crate) mod parse;
 pub(crate) mod path;
+pub(crate) mod resolve;
 pub(crate) mod snippet;
 pub(crate) mod types;
 
@@ -30,6 +31,7 @@ pub fn find_default_file() -> Result<std::path::PathBuf, SpecError> {
 pub fn parse_spec_file(file: &Path) -> Result<(Option<String>, NamespaceSpec), SpecError> {
     if let Some(mut native) = parse::try_parse(file)? {
         includes::resolve_includes(&mut native, file)?;
+        resolve::resolve_refs(&mut native)?;
         let (ns_id, proto_spec) = convert::spec_to_namespace_spec(&native)?;
         return Ok((ns_id, proto_spec));
     }

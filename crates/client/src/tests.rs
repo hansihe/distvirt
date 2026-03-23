@@ -3,6 +3,7 @@ use crate::spec::helpers::parse_duration_ms;
 use crate::spec::includes::resolve_includes;
 use crate::spec::ip_alloc::IpAllocator;
 use crate::spec::parse::{try_parse, ParsedSpec};
+use crate::spec::resolve::resolve_refs;
 
 use distvirt_client_protocol::*;
 
@@ -18,7 +19,8 @@ use tempfile::{NamedTempFile, TempDir};
     }
 
     fn convert(yaml: &str) -> (Option<String>, NamespaceSpec) {
-        let parsed = parse_yaml(yaml);
+        let mut parsed = parse_yaml(yaml);
+        resolve_refs(&mut parsed).unwrap();
         spec_to_namespace_spec(&parsed).unwrap()
     }
 
@@ -659,6 +661,7 @@ workloads:
         let spec_path = write_file(dir.path(), "distvirt.yaml", ns_yaml);
         let mut parsed = try_parse(&spec_path).unwrap().unwrap();
         resolve_includes(&mut parsed, &spec_path).unwrap();
+        resolve_refs(&mut parsed).unwrap();
         spec_to_namespace_spec(&parsed).unwrap()
     }
 
@@ -699,7 +702,7 @@ kind: WorkloadFragment
 workloads:
   app:
     containers:
-      - image: ${IMAGE}
+      - image: ${values.IMAGE}
 "#);
         let (_, proto) = parse_with_includes(&dir, r#"
 apiVersion: v1
@@ -724,7 +727,7 @@ kind: WorkloadFragment
 workloads:
   app:
     containers:
-      - image: ${FOO}
+      - image: ${values.FOO}
 "#);
         let spec_path = write_file(dir.path(), "distvirt.yaml", r#"
 apiVersion: v1
@@ -735,7 +738,7 @@ include:
         let mut parsed = try_parse(&spec_path).unwrap().unwrap();
         let err = resolve_includes(&mut parsed, &spec_path).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("undefined variable 'FOO'"), "got: {}", msg);
+        assert!(msg.contains("undefined variable 'values.FOO'"), "got: {}", msg);
     }
 
     #[test]
@@ -1023,4 +1026,203 @@ include:
   - path: fragments/app.yaml
 "#);
         assert!(proto.workloads.contains_key("app"));
+    }
+
+    // --- Expression resolution tests ---
+
+    #[test]
+    fn resolve_self_ip_in_env() {
+        let yaml = r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  api:
+    containers:
+      - image: img
+        env:
+          MY_IP: "${self.ip}"
+"#;
+        let (_, proto) = convert(yaml);
+        let api_ip = &proto.workloads["api"].network.as_ref().unwrap().ip;
+        let env = &proto.workloads["api"].containers[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .env;
+        assert_eq!(env.get("MY_IP").unwrap(), api_ip);
+    }
+
+    #[test]
+    fn resolve_workload_ip_in_env() {
+        let yaml = r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  api:
+    containers:
+      - image: img
+        env:
+          DB_HOST: "${workloads.database.ip}"
+  database:
+    containers:
+      - image: postgres:16
+"#;
+        let (_, proto) = convert(yaml);
+        let db_ip = &proto.workloads["database"].network.as_ref().unwrap().ip;
+        let env = &proto.workloads["api"].containers[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .env;
+        assert_eq!(env.get("DB_HOST").unwrap(), db_ip);
+    }
+
+    #[test]
+    fn resolve_service_ip_in_env() {
+        let yaml = r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  api:
+    containers:
+      - image: img
+        env:
+          DB_URL: "postgres://${services.db.ip}:5432/myapp"
+  database:
+    containers:
+      - image: postgres:16
+    services:
+      db: {}
+"#;
+        let (_, proto) = convert(yaml);
+        let db_svc_ip = &proto.services["db"].network.as_ref().unwrap().ip;
+        let env = &proto.workloads["api"].containers[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .env;
+        let expected = format!("postgres://{}:5432/myapp", db_svc_ip);
+        assert_eq!(env.get("DB_URL").unwrap(), &expected);
+    }
+
+    #[test]
+    fn resolve_in_config_data() {
+        let yaml = r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  proxy:
+    volumes:
+      - name: conf
+        config_data:
+          files:
+            - path: nginx.conf
+              content: "upstream backend { server ${workloads.api.ip}:8080; }"
+    containers:
+      - image: nginx
+        volume_mounts:
+          - name: conf
+            mount_path: /etc/nginx
+  api:
+    containers:
+      - image: img
+"#;
+        let (_, proto) = convert(yaml);
+        let api_ip = &proto.workloads["api"].network.as_ref().unwrap().ip;
+        let proxy = &proto.workloads["proxy"];
+        let config_content = &proxy.volumes[0]
+            .volume_type
+            .as_ref()
+            .unwrap();
+        match config_content {
+            distvirt_client_protocol::volume_spec::VolumeType::ConfigData(cd) => {
+                let expected = format!("upstream backend {{ server {}:8080; }}", api_ip);
+                assert_eq!(cd.files[0].content, expected);
+            }
+            _ => panic!("expected config_data volume"),
+        }
+    }
+
+    #[test]
+    fn resolve_unknown_expression_errors() {
+        let yaml = r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  api:
+    containers:
+      - image: img
+        env:
+          BAD: "${unknown.thing}"
+"#;
+        let mut parsed = parse_yaml(yaml);
+        let err = resolve_refs(&mut parsed).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown expression"), "got: {}", msg);
+    }
+
+    #[test]
+    fn resolve_nonexistent_workload_ref_errors() {
+        let yaml = r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  api:
+    containers:
+      - image: img
+        env:
+          HOST: "${workloads.nonexistent.ip}"
+"#;
+        let mut parsed = parse_yaml(yaml);
+        let err = resolve_refs(&mut parsed).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("does not exist"), "got: {}", msg);
+    }
+
+    #[test]
+    fn resolve_in_fragment_with_values_and_refs() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), "app.yaml", r#"
+apiVersion: v1
+kind: WorkloadFragment
+workloads:
+  app:
+    containers:
+      - image: ${values.IMAGE}
+        env:
+          DB_HOST: "${services.db.ip}"
+"#);
+        let (_, proto) = parse_with_includes(&dir, r#"
+apiVersion: v1
+kind: Namespace
+network:
+  subnet: 172.16.0.0/24
+workloads:
+  database:
+    containers:
+      - image: postgres:16
+    services:
+      db: {}
+include:
+  - path: app.yaml
+    values:
+      IMAGE: myorg/app:v2
+"#);
+        let app = &proto.workloads["app"];
+        assert_eq!(app.containers[0].image, "myorg/app:v2");
+        let db_svc_ip = &proto.services["db"].network.as_ref().unwrap().ip;
+        let env = &app.containers[0].config.as_ref().unwrap().env;
+        assert_eq!(env.get("DB_HOST").unwrap(), db_svc_ip);
     }
