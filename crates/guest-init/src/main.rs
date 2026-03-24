@@ -235,7 +235,8 @@ async fn shutdown_containers(
 /// The connection loop: accepts vsock connections, dispatches commands,
 /// reconnects on disconnect. Runs for the process lifetime.
 /// Workaround for Firecracker not re-enabling THRE interrupt after snapshot
-/// restore (firecracker#5730).
+/// restore (firecracker#5730). Only applies to x86_64 where the 8250 UART
+/// is used; arm64 uses PL011 which is not affected.
 ///
 /// Before suspend: `uart_suspend()` calls `tcflow(TCOOFF)` which makes the
 /// kernel's 8250 driver call `serial8250_stop_tx`, clearing the THRI bit in
@@ -244,6 +245,7 @@ async fn shutdown_containers(
 /// After resume: `uart_resume()` calls `tcflow(TCOON)` which triggers
 /// `serial8250_start_tx`, setting THRI in IER — a clean 0→1 transition that
 /// properly re-arms the THRE interrupt in Firecracker's emulated UART.
+#[cfg(target_arch = "x86_64")]
 fn uart_tty_flow(action: libc::c_int) {
     let path = std::ffi::CString::new("/dev/ttyS0").unwrap();
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
@@ -256,15 +258,23 @@ fn uart_tty_flow(action: libc::c_int) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn uart_suspend() {
     uart_tty_flow(libc::TCOOFF);
     log::info!("uart: suspended serial TX (TCOOFF)");
 }
 
+#[cfg(target_arch = "x86_64")]
 fn uart_resume() {
     uart_tty_flow(libc::TCOON);
     log::info!("uart: resumed serial TX (TCOON)");
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+fn uart_suspend() {}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn uart_resume() {}
 
 ///
 /// When a container is started, sends a `ContainerTaskRequest` through

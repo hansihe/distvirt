@@ -83,9 +83,9 @@ impl Vmm for Qemu {
         // Kernel direct boot.
         // root=/dev/vda is needed because QEMU doesn't have a separate API to
         // designate the root device (unlike Firecracker).
+        let console_dev = if cfg!(target_arch = "aarch64") { "ttyAMA0" } else { "ttyS0" };
         let mut boot_args =
-            "console=ttyS0 reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.transport=virtio-serial"
-                .to_string();
+            format!("console={console_dev} reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.transport=virtio-serial");
         if let Some(ref balloon) = config.balloon {
             boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
         }
