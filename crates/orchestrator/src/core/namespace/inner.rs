@@ -1099,12 +1099,15 @@ impl Namespace {
                 .map(|wl_spec| wl_spec.labels.clone())
                 .unwrap_or_default();
 
+            let restart_count = wl_sm.as_ref().map(|wl| wl.restart_count).unwrap_or(0);
+
             workloads.insert(
                 WorkloadName(name.to_string()),
                 crate::types::WorkloadStatusReport {
                     state,
                     pod_id,
                     ip,
+                    restart_count,
                     conditions: BTreeMap::new(),
                     labels,
                 },

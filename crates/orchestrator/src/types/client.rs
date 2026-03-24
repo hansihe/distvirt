@@ -199,6 +199,7 @@ pub struct WorkloadStatusReport {
     pub state: WorkloadStatus,
     pub pod_id: Option<PodId>,
     pub ip: String,
+    pub restart_count: u32,
     pub conditions: BTreeMap<String, String>,
     pub labels: BTreeMap<String, String>,
 }

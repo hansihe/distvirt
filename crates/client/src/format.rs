@@ -282,6 +282,11 @@ pub fn render_namespace_overview(report: &NamespaceStatusReport) -> String {
             .as_ref()
             .map(|s| workload_state_label(s))
             .unwrap_or_else(|| "unknown".into());
+        let restarts = if workload.restart_count > 0 {
+            format!(" ({} restarts)", workload.restart_count)
+        } else {
+            String::new()
+        };
         let spliced = if workload.spliced { " [spliced]" } else { "" };
         let ip = if workload.ip.is_empty() {
             ""
@@ -289,12 +294,12 @@ pub fn render_namespace_overview(report: &NamespaceStatusReport) -> String {
             &workload.ip
         };
         if ip.is_empty() {
-            writeln!(&mut buf, "  workload/{:<20} {}{}", workload_id, state, spliced).unwrap();
+            writeln!(&mut buf, "  workload/{:<20} {}{}{}", workload_id, state, restarts, spliced).unwrap();
         } else {
             writeln!(
                 &mut buf,
-                "  workload/{:<20} {}  {}{}",
-                workload_id, state, ip, spliced
+                "  workload/{:<20} {}{}  {}{}",
+                workload_id, state, restarts, ip, spliced
             )
             .unwrap();
         }

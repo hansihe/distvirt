@@ -50,6 +50,7 @@ fn pod_failure_backoff_and_retry() {
     let wl = router.get_workload(&W1).unwrap();
     assert!(wl.pod_running);
     assert_eq!(wl.consecutive_failures, 0); // reset on success
+    assert_eq!(wl.restart_count, 1); // NOT reset on success
 
     // No timers while running.
     assert_no_timer_output(&mut router);
@@ -176,6 +177,7 @@ fn failed_recovery_via_spec_change() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 0);
+    assert_eq!(wl.restart_count, 0); // reset on spec change
     assert!(!wl.in_backoff);
     assert!(wl.pod_id.is_some()); // new pod created
 }
@@ -201,6 +203,7 @@ fn failed_recovery_via_restart() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 0);
+    assert_eq!(wl.restart_count, 0); // reset on admin restart
     assert!(!wl.in_backoff);
     assert!(wl.pod_id.is_some()); // new pod created
 }
@@ -530,6 +533,7 @@ fn scavenge_during_failed() {
 }
 
 /// 31. Success resets failure counter: fail, retry, succeed, fail again → counter=1.
+/// restart_count accumulates across the cycle.
 #[test]
 fn success_resets_failure_counter() {
     let mut router = Router::new(16);
@@ -542,6 +546,7 @@ fn success_resets_failure_counter() {
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
+    assert_eq!(wl.restart_count, 1);
 
     // First backoff: generation 1.
     assert_timer_requested(
@@ -559,19 +564,21 @@ fn success_resets_failure_counter() {
 
     let pod2 = router.get_workload(&W1).unwrap().pod_id.unwrap();
 
-    // Succeed — counter resets.
+    // Succeed — consecutive_failures resets, restart_count persists.
     make_pod_running(&mut router, worker, pod2);
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 0);
+    assert_eq!(wl.restart_count, 1); // NOT reset on success
     assert!(wl.pod_running);
 
-    // Fail again — counter should be 1, not 2.
+    // Fail again — consecutive_failures=1, restart_count=2.
     router.send_notify_pod_status(worker, pod2, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
     router.propagate();
 
     let wl = router.get_workload(&W1).unwrap();
     assert_eq!(wl.consecutive_failures, 1);
+    assert_eq!(wl.restart_count, 2); // accumulated
     assert!(wl.in_backoff);
 
     // Second backoff: generation 2 (incremented again after success reset).
@@ -583,4 +590,72 @@ fn success_resets_failure_counter() {
             duration: Duration::from_millis(500),
         }],
     );
+}
+
+/// 32. restart_count does NOT reset on demand drop (unlike consecutive_failures).
+#[test]
+fn restart_count_persists_across_demand_cycle() {
+    let mut router = Router::new(16);
+    router.create_timer(TIMER);
+    let worker = WK1;
+    router.create_worker(worker);
+    router.set_worker_info(worker, WorkerInfo { capacity: 10, ..Default::default() });
+
+    let mgmt = router.create_management();
+    router.create_schedule_request(SCHEDULE_REQUEST);
+    router.create_workload(W1, WorkloadSm::with_max_retries(5));
+    router.set_workload_config_edges(mgmt, vec![W1]);
+    router.set_management_wl_spec(
+        mgmt,
+        WorkloadSpec {
+            pod_spec: PodSpec { image: "app:v1".into(), ..Default::default() },
+            config: WorkloadConfig { respects_demand: true, ..Default::default() },
+        },
+    );
+
+    router.create_service(S1, ServiceSm::new());
+    router.set_service_config_edges(mgmt, vec![S1]);
+    router.set_management_svc_spec(
+        mgmt,
+        ServiceSpec {
+            workload: W1,
+            has_activation: true,
+            ..Default::default()
+        },
+    );
+    router.propagate();
+
+    let ep_id = router.get_service(&S1).unwrap().endpoint_id.unwrap();
+    let demand_port = router.create_endpoint_demand();
+    router.set_endpoint_port_demand_edges(demand_port, vec![ep_id]);
+
+    // Activate → running pod.
+    router.set_endpoint_demand_active(demand_port, true);
+    router.propagate();
+
+    let pod_id = router.get_workload(&W1).unwrap().pod_id.unwrap();
+    make_pod_running(&mut router, worker, pod_id);
+
+    // Fail once.
+    router.send_notify_pod_status(worker, pod_id, PodStatus::Failed { exit_code: Some(1), reason: "test failure".to_string() });
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.consecutive_failures, 1);
+    assert_eq!(wl.restart_count, 1);
+
+    // Drop demand — consecutive_failures resets, restart_count persists.
+    router.set_endpoint_demand_active(demand_port, false);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.consecutive_failures, 0);
+    assert_eq!(wl.restart_count, 1); // persists across demand drop
+
+    // Re-activate — restart_count still carries over.
+    router.set_endpoint_demand_active(demand_port, true);
+    router.propagate();
+
+    let wl = router.get_workload(&W1).unwrap();
+    assert_eq!(wl.restart_count, 1); // still 1
 }

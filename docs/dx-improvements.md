@@ -13,10 +13,11 @@ Foundational changes to how specs are applied and managed.
 - **Prerequisite for**: reliable multi-client partial apply.
 
 ### Individual fragment apply / partial apply / labels
-- **Current**: Fragments (`kind: WorkloadFragment`) exist and `PatchNamespace` RPC does upsert, but fragments are merged client-side. No labels/tags concept.
+- **Current**: Fragments (`kind: WorkloadFragment`) exist and `PatchNamespace` RPC does upsert, but fragments are merged client-side. Labels infrastructure landed (see below), but CLI filtering not yet wired.
 - **Goal**: Support `dv apply -l env=staging` to selectively apply subsets. Enable phased deployments.
-- **Scope**: Spec types (add labels to workloads/services), CLI argument parsing, patch filtering logic.
+- **Scope**: ~~Spec types (add labels to workloads/services)~~, CLI argument parsing, patch filtering logic.
 - **Depends on**: orchestrator-side IP allocation for correctness with multi-client workflows.
+- **Labels (done)**: `map<string, string> labels` added to `WorkloadSpec`, `ServiceSpec` (proto + internal types), and `WorkloadStatusReport`, `ServiceStatusReport`. YAML spec supports `labels:` on workloads, inline services, and top-level services. Inline services inherit parent workload labels with service-level overrides winning. Labels are stored on the orchestrator spec layer and surfaced in status reports. Remaining: CLI `-l` flag for apply/status filtering.
 
 ## 2. guest-init Process Model
 
@@ -42,10 +43,9 @@ Events generated at lower layers need to propagate up through worker -> orchestr
 - **Goal**: Add `GuestEvent::MemoryPressure` / `GuestEvent::OomKill` events. Propagate through worker -> orchestrator -> client event stream. Surface in `dv status -w` and `dv events`.
 - **Scope**: guest-init event emission (`memory/task.rs`), worker-protocol, orchestrator event routing, CLI display.
 
-### Restart counter in `dv status`
-- **Current**: Not tracked. Orchestrator knows when pods fail and new ones are created but doesn't count restarts.
-- **Goal**: Add `restart_count` to workload state. Show in `dv status` output. Makes crash loops visible at a glance.
-- **Scope**: Orchestrator workload state, client-protocol status fields, CLI status rendering.
+### Restart counter in `dv status` ✓
+- **Done**: `restart_count` field on `WorkloadSm`, propagated through proto → gRPC → client model → CLI. Shown as `(N restarts)` in `dv status` when > 0. Resets on spec change or admin restart only (not on pod reaching Running or demand changes). Stateright model updated with normalization.
+- **Remaining**: Event stream doesn't carry `restart_count` yet — watch mode has correct initial value but won't update live. Requires bundling the counter into the observability signal.
 
 ### Progress tracing on pod launch
 - **Current**: Flat 120s `launch_timeout` in pod SM (`pod.rs`). No intermediate progress signals, no forward-progress detection.

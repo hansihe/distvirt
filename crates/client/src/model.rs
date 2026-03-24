@@ -99,6 +99,7 @@ pub struct Workload {
     pub state: WorkloadState,
     pub spliced: bool,
     pub ip: Option<String>,
+    pub restart_count: u32,
     pub demanding_services: u32,
 }
 
@@ -291,6 +292,7 @@ impl NamespaceModel {
                     } else {
                         Some(ws.ip.clone())
                     },
+                    restart_count: ws.restart_count,
                     demanding_services: 0,
                 },
             );

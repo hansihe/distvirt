@@ -372,6 +372,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
                 spliced: false,
                 ip: wl.ip.clone(),
                 labels: wl.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                restart_count: wl.restart_count,
             },
         );
     }

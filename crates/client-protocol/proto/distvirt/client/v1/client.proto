@@ -240,6 +240,7 @@ message WorkloadStatusReport {
     bool spliced = 2;
     string ip = 3;
     map<string, string> labels = 4;
+    uint32 restart_count = 5;
 }
 
 message WorkloadState {

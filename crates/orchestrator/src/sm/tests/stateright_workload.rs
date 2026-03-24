@@ -920,6 +920,10 @@ impl Representative for WlNewModelState {
         // affect SM decision-making.
         s.sm.pod_ip = std::net::Ipv4Addr::UNSPECIFIED;
 
+        // restart_count: purely observational counter, does not affect SM
+        // decision-making. Normalize to avoid state space explosion.
+        s.sm.restart_count = 0;
+
         // last_exit_code / last_failure_reason: only used to populate
         // WlStatus variants. Normalize to avoid state space explosion.
         s.sm.last_exit_code = None;

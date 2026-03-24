@@ -29,6 +29,9 @@ pub struct WorkloadSm {
 
     /// Number of consecutive pod failures without a successful Running transition.
     pub consecutive_failures: u32,
+    /// Total pod failures since last spec change or admin restart. Unlike
+    /// `consecutive_failures`, this does NOT reset when a pod reaches Running.
+    pub restart_count: u32,
     /// Maximum retries before entering terminal Failed state.
     pub max_retries: u32,
     /// True while waiting for a retry backoff timer to fire.
@@ -96,6 +99,7 @@ impl WorkloadSm {
             spec_version: 0,
             launched_with_spec_version: 0,
             consecutive_failures: 0,
+            restart_count: 0,
             max_retries,
             in_backoff: false,
             backoff_generation: 0,
@@ -250,6 +254,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         self.reap_retained_pod(ctx);
 
                         self.consecutive_failures = 0;
+                        self.restart_count = 0;
                         self.in_backoff = false;
                         self.completed = false;
 
@@ -417,6 +422,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                         // a fresh one. Reset spec version tracking since this is
                         // an intentional restart, not a stale-spec detection.
                         self.consecutive_failures = 0;
+                        self.restart_count = 0;
                         self.in_backoff = false;
                         self.completed = false;
                         self.destroy_current_pod(ctx);
@@ -576,6 +582,7 @@ impl WorkloadSm {
         // of backoff/failed state.
 
         self.consecutive_failures += 1;
+        self.restart_count += 1;
 
         // Re-evaluate commitment: no demand after pod death → no reason to retry.
         if !self.effective_demand() {
