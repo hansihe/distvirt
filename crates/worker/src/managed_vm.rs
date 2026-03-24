@@ -22,6 +22,9 @@ use crate::vsock_client::{DriverExitSignal, GuestEventStream, GuestSession};
 pub struct EventDispatchState {
     /// Containers that have exited, with their exit codes.
     pub exited: HashMap<String, i32>,
+    /// Total output bytes dropped across all containers (buffer full during
+    /// final drain). Non-zero means some container output was lost.
+    pub output_bytes_dropped: u64,
     /// Latest balloon size requested by the guest (last-value-wins).
     pub balloon_mib: Option<u32>,
     /// Fatal task error from guest-init. Set once, never cleared.
@@ -47,10 +50,17 @@ impl EventDispatch {
         let task = TaskHandle::spawn(async move {
             loop {
                 match stream.next().await {
-                    Ok(Some(GuestEvent::ContainerExited { id, code })) => {
+                    Ok(Some(GuestEvent::ContainerExited { id, code, output_bytes_dropped })) => {
                         log::info!("EventDispatch: container {} exited with code {}", id, code);
+                        if output_bytes_dropped > 0 {
+                            log::warn!(
+                                "EventDispatch: container {} dropped {} bytes of output",
+                                id, output_bytes_dropped
+                            );
+                        }
                         state_tx.send_modify(|s| {
                             s.exited.insert(id, code);
+                            s.output_bytes_dropped += output_bytes_dropped;
                         });
                     }
                     Ok(Some(GuestEvent::BalloonSet { amount_mib })) => {
@@ -466,21 +476,15 @@ impl<I: VmInstance> ManagedVm<I> {
         Ok(artifacts)
     }
 
-    /// Gracefully shut down containers, then the VM.
+    /// Send SIGTERM to all started containers and wait for them to exit.
     ///
-    /// Sends SIGTERM to each started container, waits for the `EventDispatch`
-    /// state to show all containers exited (up to `timeout`), then sends
-    /// Shutdown to the guest.
-    ///
-    /// The caller passes its own `watch::Receiver` (obtained from
-    /// `EventDispatch::subscribe()`). This avoids any event-stream race:
-    /// the dispatch task updates state concurrently, and `wait_for` holds
-    /// the borrow across predicate check and re-registration.
-    pub async fn graceful_shutdown(
+    /// Best-effort: if containers don't exit within `timeout`, logs a warning
+    /// and returns. Does **not** send `Shutdown` to the guest or kill the VM.
+    pub async fn stop_containers(
         &mut self,
         timeout: Duration,
         rx: &mut watch::Receiver<EventDispatchState>,
-    ) -> anyhow::Result<()> {
+    ) {
         // Signal all started containers with SIGTERM (best-effort).
         for id in self.started_containers.clone() {
             let _ = self
@@ -515,14 +519,14 @@ impl<I: VmInstance> ManagedVm<I> {
                         false
                     }
                     Ok(Err(_)) => {
-                        log::warn!("event dispatch closed during graceful shutdown");
+                        log::warn!("event dispatch closed during stop_containers");
                         false
                     }
                     Err(_) => true,
                 }
             };
             if !timed_out {
-                log::info!("all containers exited during graceful shutdown");
+                log::info!("all containers exited during stop_containers");
             } else {
                 let state = rx.borrow();
                 let remaining: Vec<_> = started
@@ -536,7 +540,24 @@ impl<I: VmInstance> ManagedVm<I> {
                 );
             }
         }
+    }
 
+    /// Gracefully shut down containers, then the VM.
+    ///
+    /// Sends SIGTERM to each started container, waits for the `EventDispatch`
+    /// state to show all containers exited (up to `timeout`), then sends
+    /// Shutdown to the guest.
+    ///
+    /// The caller passes its own `watch::Receiver` (obtained from
+    /// `EventDispatch::subscribe()`). This avoids any event-stream race:
+    /// the dispatch task updates state concurrently, and `wait_for` holds
+    /// the borrow across predicate check and re-registration.
+    pub async fn graceful_shutdown(
+        &mut self,
+        timeout: Duration,
+        rx: &mut watch::Receiver<EventDispatchState>,
+    ) -> anyhow::Result<()> {
+        self.stop_containers(timeout, rx).await;
         self.shutdown().await
     }
 

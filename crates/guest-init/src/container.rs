@@ -531,15 +531,18 @@ pub async fn container_task(
 
     // Signal fill task for final output drain.
     let fill_handle = containers.borrow_mut().take_fill_task_handle(&id);
-    if let Some(handle) = fill_handle {
-        handle.signal_exit().await;
-    }
+    let output_bytes_dropped = if let Some(handle) = fill_handle {
+        handle.signal_exit().await
+    } else {
+        0
+    };
 
     // Push exit event (buffered, survives disconnects).
     if let Err(e) = event_tx
         .send(GuestEvent::ContainerExited {
             id: id.clone(),
             code,
+            output_bytes_dropped,
         })
         .await
     {

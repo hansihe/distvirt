@@ -529,6 +529,39 @@ async fn setup_instance<I: VmInstance>(
 /// Timeout for suspend handshake with guest.
 const SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timeout for waiting for the output stream to drain after container exit.
+/// This is a safety valve — normally the drain completes promptly once the
+/// container exits and the guest sends EOF on the yamux output stream.
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for the log streaming task to complete (output stream EOF), with a timeout.
+///
+/// On success, all container output has been delivered to the log stream.
+/// On timeout or error, some output may have been lost.
+async fn await_log_drain(pod_id: &PodId, log_task: &mut Option<TaskHandle<bool>>) {
+    let task = match log_task.take() {
+        Some(t) => t,
+        None => return,
+    };
+    match tokio::time::timeout(OUTPUT_DRAIN_TIMEOUT, task).await {
+        Ok(Ok(true)) => {
+            log::info!("pod '{}': output stream drained completely", pod_id);
+        }
+        Ok(Ok(false)) => {
+            log::warn!("pod '{}': output stream ended before EOF (output may be incomplete)", pod_id);
+        }
+        Ok(Err(e)) => {
+            log::warn!("pod '{}': log task panicked: {}", pod_id, e);
+        }
+        Err(_) => {
+            log::warn!(
+                "pod '{}': output drain timed out after {:?} (output may be incomplete)",
+                pod_id, OUTPUT_DRAIN_TIMEOUT
+            );
+        }
+    }
+}
+
 /// Pod monitor: watches a running pod's sub-tasks and handles cleanup.
 ///
 /// This owns the `ManagedVm` and coordinates between container exit,
@@ -543,26 +576,30 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
     pod_id: PodId,
     mut suspend_rx: mpsc::Receiver<SuspendRequest>,
 ) {
-    // Spawn log streaming as a non-fatal sub-task.
-    // Uses TaskHandle so it's automatically aborted when monitor exits.
-    let _log_task = io_session.map(|(mut session, mut log_stream)| {
+    // Spawn log streaming as a sub-task. Returns whether output was fully
+    // drained (EOF received) or incomplete (I/O error / log write failure).
+    // On the normal and cancel exit paths we await this task before shutting
+    // down the VM so all output is flushed. On fatal paths (VM crash, yamux
+    // driver death) the task is dropped and aborted via TaskHandle.
+    let mut log_task: Option<TaskHandle<bool>> = io_session.map(|(mut session, mut log_stream)| {
         let log_pod_id = pod_id.clone();
         TaskHandle::spawn(async move {
-            loop {
+            let complete = loop {
                 match session.next_event().await {
                     Ok(IoEvent::Stdout(data)) | Ok(IoEvent::Stderr(data)) => {
                         if log_stream.write_all(&data).await.is_err() {
-                            break;
+                            break false;
                         }
                     }
-                    Ok(IoEvent::Eof) => break,
+                    Ok(IoEvent::Eof) => break true,
                     Err(e) => {
                         log::warn!("pod '{}' log stream error: {:#}", log_pod_id, e);
-                        break;
+                        break false;
                     }
                 }
-            }
+            };
             let _ = log_stream.close().await;
+            complete
         })
     });
 
@@ -631,13 +668,18 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
                     };
                 }
 
-                // 2. Container exit → graceful shutdown.
+                // 2. Container exit → drain output, then graceful shutdown.
                 if !state.exited.is_empty() {
                     // Use the first exited container's code as the pod exit code.
                     let (id, code) = state.exited.iter().next().unwrap();
                     let code = *code;
                     log::info!("pod '{}': container {} exited with code {}", pod_id, id, code);
                     drop(state);
+
+                    // Wait for the output stream to drain (EOF) before tearing
+                    // down the VM. This ensures all container output is delivered.
+                    await_log_drain(&pod_id, &mut log_task).await;
+
                     match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8), &mut rx)).await {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
@@ -781,19 +823,27 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
                 }
             }
 
-            // Cancellation: graceful shutdown requested.
+            // Cancellation: stop containers, drain output, then shutdown VM.
             _ = cancel.cancelled() => {
                 log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
-                match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8), &mut rx)).await {
+
+                // Phase 1: SIGTERM containers and wait for them to exit.
+                vm.stop_containers(Duration::from_secs(8), &mut rx).await;
+
+                // Phase 2: Wait for output stream to drain.
+                await_log_drain(&pod_id, &mut log_task).await;
+
+                // Phase 3: Shutdown VM.
+                match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.shutdown()).await {
                     Ok(Ok(())) => {
                         log::info!("pod '{}': graceful shutdown complete", pod_id);
                     }
                     Ok(Err(e)) => {
-                        log::warn!("pod '{}': graceful shutdown error: {:#}, force killing", pod_id, e);
+                        log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
                         let _ = vm.force_kill().await;
                     }
                     Err(_) => {
-                        log::warn!("pod '{}': graceful shutdown timed out, force killing", pod_id);
+                        log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
                         let _ = vm.force_kill().await;
                     }
                 }
@@ -806,7 +856,8 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
         }
     };
 
-    // _log_task is dropped here, automatically aborting via TaskHandle.
+    // log_task is dropped here. On normal/cancel paths it was already awaited
+    // (and is None). On fatal paths it's aborted via TaskHandle::drop.
 
     // Send the event back to the main loop.
     send_event(&event_tx, event).await;

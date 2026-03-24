@@ -18,15 +18,18 @@ use distvirt_guest_protocol::{GuestEvent, STREAM_STDERR, STREAM_STDOUT, encode_o
 /// Handle for a spawned per-container fill task.
 pub struct FillTaskHandle {
     exit_tx: async_channel::Sender<()>,
-    done_rx: async_channel::Receiver<()>,
+    done_rx: async_channel::Receiver<u64>,
 }
 
 impl FillTaskHandle {
     /// Signal the fill task to perform a final drain of pipes into the buffer,
     /// then wait for it to complete.
-    pub async fn signal_exit(self) {
+    ///
+    /// Returns the number of output bytes dropped during the final drain
+    /// (zero if everything was buffered successfully).
+    pub async fn signal_exit(self) -> u64 {
         let _ = self.exit_tx.send(()).await;
-        let _ = self.done_rx.recv().await;
+        self.done_rx.recv().await.unwrap_or(0)
     }
 }
 
@@ -43,7 +46,7 @@ pub fn spawn_fill_task(
     ex: &LocalExecutor<'_>,
 ) -> FillTaskHandle {
     let (exit_tx, exit_rx) = async_channel::bounded::<()>(1);
-    let (done_tx, done_rx) = async_channel::bounded::<()>(1);
+    let (done_tx, done_rx) = async_channel::bounded::<u64>(1);
 
     ex.spawn(fill_loop(id, stdout, stderr, buffer_tx, exit_rx, done_tx))
         .detach();
@@ -63,7 +66,7 @@ async fn fill_loop(
     mut stderr: Option<Async<PipeFd>>,
     buffer_tx: async_channel::Sender<Vec<u8>>,
     exit_rx: async_channel::Receiver<()>,
-    done_tx: async_channel::Sender<()>,
+    done_tx: async_channel::Sender<u64>,
 ) {
     loop {
         let stdout_ready = async {
@@ -86,7 +89,7 @@ async fn fill_loop(
         if stdout.is_none() && stderr.is_none() {
             match exit_rx.recv().await {
                 Ok(()) | Err(_) => {
-                    let _ = done_tx.send(()).await;
+                    let _ = done_tx.send(0).await;
                     return;
                 }
             }
@@ -127,19 +130,12 @@ async fn fill_loop(
                     stderr = None;
                 }
             }
-            Action::ExitSignal => {
+            Action::ExitSignal | Action::Disconnected => {
                 // Final drain: read all remaining pipe data into the buffer.
-                final_drain_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id).await;
-                final_drain_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id).await;
-                let _ = done_tx.send(()).await;
-                return;
-            }
-            Action::Disconnected => {
-                // FillTaskHandle was dropped (e.g. container removed without signal_exit).
-                // Still do a final drain so no data is lost.
-                final_drain_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id).await;
-                final_drain_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id).await;
-                let _ = done_tx.send(()).await;
+                // Track bytes that couldn't be buffered (e.g. buffer full while disconnected).
+                let d1 = final_drain_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id).await;
+                let d2 = final_drain_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id).await;
+                let _ = done_tx.send(d1 + d2).await;
                 return;
             }
         }
@@ -187,23 +183,28 @@ async fn drain_pipe_to_buffer(
 /// instead of losing data still in kernel pipe buffers. Uses `try_send` to
 /// avoid deadlocking if the output buffer is full (container has exited, no
 /// drain task may be running).
+///
+/// Returns the number of payload bytes that could not be buffered (dropped).
+/// The pipe is always drained to EOF so the total loss is accurately counted.
 async fn final_drain_to_buffer(
     pipe: &mut Option<Async<PipeFd>>,
     buffer_tx: &async_channel::Sender<Vec<u8>>,
     stream_id: u8,
     container_id: &str,
-) {
+) -> u64 {
     let p = match pipe.take() {
         Some(p) => p,
-        None => return,
+        None => return 0,
     };
+    let mut bytes_dropped: u64 = 0;
     loop {
         match crate::util::read_pipe(p.as_raw_fd()) {
             Ok(ReadPipeResult::Data(data)) => {
+                let len = data.len() as u64;
                 let chunk = encode_output_chunk(stream_id, &data);
                 if buffer_tx.try_send(chunk).is_err() {
-                    log::warn!("output buffer full during final drain for {}", container_id);
-                    break;
+                    bytes_dropped += len;
+                    // Continue draining pipe to count total loss.
                 }
             }
             Ok(ReadPipeResult::WouldBlock) => {
@@ -215,6 +216,13 @@ async fn final_drain_to_buffer(
             Ok(ReadPipeResult::Eof) | Err(_) => break,
         }
     }
+    if bytes_dropped > 0 {
+        log::warn!(
+            "output buffer full during final drain for {}: {} bytes dropped",
+            container_id, bytes_dropped
+        );
+    }
+    bytes_dropped
 }
 
 // ---------------------------------------------------------------------------

@@ -120,6 +120,10 @@ pub enum GuestEvent {
     ContainerExited {
         id: String,
         code: i32,
+        /// Number of output bytes dropped during final pipe drain (e.g. buffer
+        /// was full while disconnected). Zero means all output was delivered.
+        #[serde(default)]
+        output_bytes_dropped: u64,
     },
     /// Guest requests the host to set the balloon to this size.
     BalloonSet {

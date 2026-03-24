@@ -263,7 +263,7 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
                     ContainerBehavior::ExitImmediately(code) => {
                         write_framed(
                             &mut event_stream,
-                            &GuestEvent::ContainerExited { id, code: *code },
+                            &GuestEvent::ContainerExited { id, code: *code, output_bytes_dropped: 0 },
                         )
                         .await
                         .context("send ContainerExited event")?;
@@ -285,7 +285,7 @@ pub async fn run_guest_sim(socket: UnixStream, config: GuestSimConfig) -> anyhow
                     waiting_for_signal = None;
                     write_framed(
                         &mut event_stream,
-                        &GuestEvent::ContainerExited { id, code: 0 },
+                        &GuestEvent::ContainerExited { id, code: 0, output_bytes_dropped: 0 },
                     )
                     .await
                     .context("send ContainerExited event after signal")?;
