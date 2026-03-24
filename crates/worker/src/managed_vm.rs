@@ -352,6 +352,8 @@ impl<I: VmInstance> ManagedVm<I> {
         &mut self,
         id: &str,
         config: &ContainerConfig,
+        uid: Option<u32>,
+        gid: Option<u32>,
     ) -> anyhow::Result<u32> {
         self.session
             .send(&HostMessage::StartContainer {
@@ -364,8 +366,8 @@ impl<I: VmInstance> ManagedVm<I> {
                 },
                 env: config.env.clone(),
                 working_dir: config.working_dir.clone(),
-                uid: config.uid,
-                gid: config.gid,
+                uid,
+                gid,
                 hostname: config.hostname.clone(),
                 capture_output: config.capture_output,
                 stdin: config.stdin,

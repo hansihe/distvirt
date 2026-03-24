@@ -26,6 +26,19 @@ impl ImageProvider for ContainerdOverlayfsProvider {
         .await
         .context("preparing containerd image")?;
 
+        // Read /etc/passwd and /etc/group from the mounted rootfs before
+        // building the ext4 image. These are used later to resolve named users
+        // (e.g. "postgres") to numeric uid/gid.
+        let mut config = prepared.config.clone();
+        let passwd_path = prepared.rootfs_path.join("etc/passwd");
+        let group_path = prepared.rootfs_path.join("etc/group");
+        if let Ok(content) = std::fs::read_to_string(&passwd_path) {
+            config.passwd_entries = crate::oci::parse_passwd(&content);
+        }
+        if let Ok(content) = std::fs::read_to_string(&group_path) {
+            config.group_entries = crate::oci::parse_group(&content);
+        }
+
         let rootfs_path = prepared.rootfs_path.clone();
         let tmp = NamedTempFile::new().context("create temp file for ext4 image")?;
         let image_path = tmp.path().to_path_buf();
@@ -36,8 +49,6 @@ impl ImageProvider for ContainerdOverlayfsProvider {
 
         let image_path = tmp.path().to_path_buf();
         log::info!("built container image at {}", image_path.display());
-
-        let config = prepared.config.clone();
 
         // Keep both the PreparedImage (snapshot/mount) and temp file alive
         // until the artifact is dropped.

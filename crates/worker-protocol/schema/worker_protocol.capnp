@@ -73,12 +73,13 @@ struct ContainerConfig {
   # Environment variables in KEY=VALUE format (OCI convention).
   workingDir @3 :Text;
   # Working directory inside the container. Empty string = not set (falls back to image default).
-  hasUid @4 :Bool;
-  uid @5 :UInt32;
-  # User ID to run as. hasUid=false means fall back to image default.
-  hasGid @6 :Bool;
-  gid @7 :UInt32;
-  # Group ID to run as. hasGid=false means fall back to image default.
+  user @4 :Text;
+  # User to run as (e.g. "1000", "1000:1000", "postgres", "postgres:postgres").
+  # Empty string = not set (falls back to image default).
+  # Resolved to numeric uid/gid by the worker using the image's /etc/passwd.
+  deprecated5 @5 :UInt32;
+  deprecated6 @6 :Bool;
+  deprecated7 @7 :UInt32;
   hostname @8 :Text;
   # Hostname for the container. Empty string = not set.
   captureOutput @9 :Bool;

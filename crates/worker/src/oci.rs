@@ -5,7 +5,7 @@
 //! - `Entrypoint` / `Cmd` — full OCI resolution rules
 //! - `Env` — merged with overrides (image first, overrides appended)
 //! - `WorkingDir` — override takes precedence, falls back to image default
-//! - `User` — numeric uid:gid only (no /etc/passwd lookup)
+//! - `User` — numeric uid:gid or username, resolved via image /etc/passwd
 //! - `Hostname` — passed through to guest `sethostname()`
 //!
 //! # Missing OCI image config fields
@@ -20,7 +20,6 @@
 //! - `Domainname` — only hostname is set
 //!
 //! Medium value:
-//! - `User` by name — no /etc/passwd lookup, so `USER nobody` style images fail
 //! - `AdditionalGids` — supplementary groups not supported
 //! - `Umask` — not configurable
 //!
@@ -45,6 +44,21 @@ use anyhow::{Context, bail};
 
 use distvirt_worker_protocol::ContainerConfig;
 
+/// An entry from /etc/passwd.
+#[derive(Debug, Clone)]
+pub struct PasswdEntry {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// An entry from /etc/group.
+#[derive(Debug, Clone)]
+pub struct GroupEntry {
+    pub name: String,
+    pub gid: u32,
+}
+
 /// Parsed OCI image configuration relevant for container execution.
 #[derive(Clone)]
 pub struct ImageConfig {
@@ -53,27 +67,106 @@ pub struct ImageConfig {
     pub env: Vec<String>,
     pub working_dir: Option<String>,
     pub user: Option<String>,
+    pub passwd_entries: Vec<PasswdEntry>,
+    pub group_entries: Vec<GroupEntry>,
 }
 
-/// Parse a numeric user string like "1000" or "1000:1000" into (uid, gid).
-pub fn parse_user_numeric(user: &str) -> anyhow::Result<(Option<u32>, Option<u32>)> {
-    if user.is_empty() {
-        return Ok((None, None));
-    }
-    if let Some((uid_str, gid_str)) = user.split_once(':') {
-        let uid: u32 = uid_str
-            .parse()
-            .with_context(|| format!("non-numeric uid: {}", uid_str))?;
-        let gid: u32 = gid_str
-            .parse()
-            .with_context(|| format!("non-numeric gid: {}", gid_str))?;
-        Ok((Some(uid), Some(gid)))
+/// Parse /etc/passwd content into entries.
+///
+/// Format: `name:password:uid:gid:gecos:home:shell`
+/// Skips malformed lines.
+pub fn parse_passwd(content: &str) -> Vec<PasswdEntry> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 4 {
+                return None;
+            }
+            let uid = fields[2].parse().ok()?;
+            let gid = fields[3].parse().ok()?;
+            Some(PasswdEntry {
+                name: fields[0].to_string(),
+                uid,
+                gid,
+            })
+        })
+        .collect()
+}
+
+/// Parse /etc/group content into entries.
+///
+/// Format: `name:password:gid:members`
+/// Skips malformed lines.
+pub fn parse_group(content: &str) -> Vec<GroupEntry> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 3 {
+                return None;
+            }
+            let gid = fields[2].parse().ok()?;
+            Some(GroupEntry {
+                name: fields[0].to_string(),
+                gid,
+            })
+        })
+        .collect()
+}
+
+/// Resolve a user string to (uid, optional gid).
+///
+/// Supports formats:
+/// - `"1000"` — numeric uid
+/// - `"1000:1000"` — numeric uid:gid
+/// - `"postgres"` — username, looked up in passwd entries
+/// - `"postgres:postgres"` — user:group, looked up in passwd/group entries
+pub fn resolve_user(
+    user: &str,
+    passwd: &[PasswdEntry],
+    groups: &[GroupEntry],
+) -> anyhow::Result<(u32, Option<u32>)> {
+    if let Some((user_part, group_part)) = user.split_once(':') {
+        let uid = resolve_uid(user_part, passwd)?;
+        let gid = resolve_gid(group_part, passwd, groups)?;
+        Ok((uid, Some(gid)))
     } else {
-        let uid: u32 = user
-            .parse()
-            .with_context(|| format!("non-numeric user: {}", user))?;
-        Ok((Some(uid), None))
+        let uid = resolve_uid(user, passwd)?;
+        // When only a user is specified, also use their primary gid from passwd.
+        let gid = passwd.iter().find(|e| e.uid == uid).map(|e| e.gid);
+        Ok((uid, gid))
     }
+}
+
+fn resolve_uid(user: &str, passwd: &[PasswdEntry]) -> anyhow::Result<u32> {
+    if let Ok(uid) = user.parse::<u32>() {
+        return Ok(uid);
+    }
+    passwd
+        .iter()
+        .find(|e| e.name == user)
+        .map(|e| e.uid)
+        .with_context(|| format!("user '{}' not found in image /etc/passwd", user))
+}
+
+fn resolve_gid(
+    group: &str,
+    passwd: &[PasswdEntry],
+    groups: &[GroupEntry],
+) -> anyhow::Result<u32> {
+    if let Ok(gid) = group.parse::<u32>() {
+        return Ok(gid);
+    }
+    // Try /etc/group first, then fall back to passwd entries (some images
+    // use the username as group name with matching gid in passwd).
+    if let Some(entry) = groups.iter().find(|e| e.name == group) {
+        return Ok(entry.gid);
+    }
+    if let Some(entry) = passwd.iter().find(|e| e.name == group) {
+        return Ok(entry.gid);
+    }
+    bail!("group '{}' not found in image /etc/group", group)
 }
 
 /// Merge OCI image config with overrides following OCI entrypoint/cmd resolution rules.
@@ -117,13 +210,6 @@ pub fn merge_config(
     let mut env = image.env.clone();
     env.extend(overrides.env.iter().cloned());
 
-    let (img_uid, img_gid) = image
-        .user
-        .as_deref()
-        .map(parse_user_numeric)
-        .transpose()?
-        .unwrap_or((None, None));
-
     Ok(ContainerConfig {
         entrypoint,
         args,
@@ -132,8 +218,7 @@ pub fn merge_config(
             .working_dir
             .clone()
             .or_else(|| image.working_dir.clone()),
-        uid: overrides.uid.or(img_uid),
-        gid: overrides.gid.or(img_gid),
+        user: overrides.user.clone().or_else(|| image.user.clone()),
         hostname: overrides.hostname.clone(),
         capture_output: overrides.capture_output,
         stdin: overrides.stdin,

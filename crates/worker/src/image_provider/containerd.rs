@@ -354,6 +354,8 @@ async fn read_image_config(
         user: oci_config
             .and_then(|c| c.user().clone())
             .filter(|s| !s.is_empty()),
+        passwd_entries: Vec::new(),
+        group_entries: Vec::new(),
     })
 }
 

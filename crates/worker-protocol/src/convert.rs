@@ -137,19 +137,9 @@ pub fn write_container_config(
         Some(wd) => builder.set_working_dir(wd),
         None => builder.set_working_dir(""),
     }
-    match val.uid {
-        Some(uid) => {
-            builder.set_has_uid(true);
-            builder.set_uid(uid);
-        }
-        None => builder.set_has_uid(false),
-    }
-    match val.gid {
-        Some(gid) => {
-            builder.set_has_gid(true);
-            builder.set_gid(gid);
-        }
-        None => builder.set_has_gid(false),
+    match &val.user {
+        Some(user) => builder.set_user(user),
+        None => builder.set_user(""),
     }
     match &val.hostname {
         Some(h) => builder.set_hostname(h),
@@ -200,15 +190,9 @@ pub fn read_container_config(
         } else {
             Some(wd.to_string())
         },
-        uid: if reader.get_has_uid() {
-            Some(reader.get_uid())
-        } else {
-            None
-        },
-        gid: if reader.get_has_gid() {
-            Some(reader.get_gid())
-        } else {
-            None
+        user: {
+            let u = reader.get_user()?.to_str()?;
+            if u.is_empty() { None } else { Some(u.to_string()) }
         },
         hostname: if hostname.is_empty() {
             None

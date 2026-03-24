@@ -76,6 +76,34 @@ enum Commands {
     Resource(ResourceCommands),
     #[command(flatten)]
     Auth(AuthCommands),
+    /// Internal commands (not for direct use)
+    #[command(hide = true)]
+    Internal {
+        #[command(subcommand)]
+        command: InternalCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum InternalCommands {
+    /// Create a TUN device and pass the fd back to the parent process
+    SetupTun {
+        /// Path to the Unix domain socket
+        #[arg(long)]
+        socket: PathBuf,
+        /// Nonce for authentication
+        #[arg(long)]
+        nonce: String,
+        /// Client IP address
+        #[arg(long)]
+        client_ip: String,
+        /// Prefix length
+        #[arg(long)]
+        prefix_len: u8,
+        /// Subnet CIDR
+        #[arg(long)]
+        subnet: String,
+    },
 }
 
 /// Layer 1 — task-oriented commands
@@ -302,6 +330,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
+        // Internal commands — privileged helpers, no gRPC needed
+        Commands::Internal {
+            command:
+                InternalCommands::SetupTun {
+                    socket,
+                    nonce,
+                    client_ip,
+                    prefix_len,
+                    subnet,
+                },
+        } => {
+            return commands::internal::setup_tun(socket, nonce, client_ip, prefix_len, subnet);
+        }
+
         // Auth commands — no gRPC needed
         Commands::Auth(AuthCommands::Login { server, token }) => {
             commands::auth::login(server.as_deref(), token.as_deref(), cli.context.as_deref())?;
@@ -424,6 +466,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Commands::Auth(AuthCommands::Login { .. })
                 | Commands::Auth(AuthCommands::Context { .. })
+                | Commands::Internal { .. }
                 | Commands::Task(TaskCommands::Spec {
                     command: SpecCommands::Validate { .. } | SpecCommands::Render { .. },
                 }) => unreachable!(),

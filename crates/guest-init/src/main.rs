@@ -451,6 +451,14 @@ fn run() -> anyhow::Result<()> {
         log::warn!("failed to bring up loopback: {:#}", e);
     }
 
+    // Allow unlimited overcommit so that large virtual allocations succeed
+    // immediately. Physical memory pressure is handled by cgroup limits and
+    // balloon deflation — rejecting allocations at the virtual level would
+    // bypass that mechanism entirely.
+    if let Err(e) = std::fs::write("/proc/sys/vm/overcommit_memory", "1") {
+        log::warn!("failed to set vm.overcommit_memory=1: {}", e);
+    }
+
     let vm_mem_mib = memory::init::read_memtotal_mib()?;
     let vm_config = memory::init::VmMemoryConfig::from_vm_mem(vm_mem_mib);
     memory::init::setup_zram_swap(&vm_config);

@@ -300,6 +300,24 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         container.config
     };
 
+    // Resolve user string to numeric uid/gid using the image's /etc/passwd.
+    let (resolved_uid, resolved_gid) = if let Some(ref user) = config.user {
+        let passwd = artifact
+            .oci_config
+            .as_ref()
+            .map(|c| c.passwd_entries.as_slice())
+            .unwrap_or(&[]);
+        let groups = artifact
+            .oci_config
+            .as_ref()
+            .map(|c| c.group_entries.as_slice())
+            .unwrap_or(&[]);
+        let (uid, gid) = oci::resolve_user(user, passwd, groups)?;
+        (Some(uid), gid)
+    } else {
+        (None, None)
+    };
+
     let net_config = NetConfig::from(&network);
 
     let (vcpu_count, mem_size_mib) = resources
@@ -413,7 +431,8 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                 .await?;
 
             log::info!("pod '{}': starting container '{}'", pod_id, container_id);
-            vm.start_container(&container_id, &config).await?;
+            vm.start_container(&container_id, &config, resolved_uid, resolved_gid)
+                .await?;
 
             // Set up log streaming via yamux log streams.
             let io_session = if config.capture_output {
@@ -1015,8 +1034,7 @@ mod tests {
                 args: vec!["hello".to_string()],
                 env: vec![],
                 working_dir: None,
-                uid: None,
-                gid: None,
+                user: None,
                 hostname: None,
                 capture_output: false,
                 stdin: false,

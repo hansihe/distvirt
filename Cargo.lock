@@ -1276,6 +1276,7 @@ dependencies = [
  "futures",
  "libc",
  "log",
+ "rand 0.10.0",
  "serde",
  "serde_json",
  "tabled",

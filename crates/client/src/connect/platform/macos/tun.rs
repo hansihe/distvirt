@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
 use anyhow::{Context, bail};
 use tokio::io::unix::AsyncFd;
@@ -47,6 +47,26 @@ struct SockaddrCtl {
 }
 
 impl TunDevice {
+    /// Wrap an existing utun file descriptor received from another process
+    /// (e.g. via `SCM_RIGHTS` fd passing).
+    pub fn from_raw_fd(fd: OwnedFd, name: String) -> anyhow::Result<Self> {
+        // Ensure non-blocking for async I/O.
+        let raw_fd = fd.as_raw_fd();
+        let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+        if flags < 0 {
+            bail!("fcntl F_GETFL: {}", io::Error::last_os_error());
+        }
+        if flags & libc::O_NONBLOCK == 0 {
+            let ret = unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            if ret < 0 {
+                bail!("fcntl F_SETFL O_NONBLOCK: {}", io::Error::last_os_error());
+            }
+        }
+
+        let async_fd = AsyncFd::new(fd).context("AsyncFd::new")?;
+        Ok(TunDevice { async_fd, name })
+    }
+
     /// Create a new utun device with a kernel-assigned name.
     pub fn create() -> anyhow::Result<Self> {
         // 1. Open PF_SYSTEM / SYSPROTO_CONTROL socket.
@@ -134,6 +154,14 @@ impl TunDevice {
 
         log::info!("created utun device: {}", name);
         Ok(TunDevice { async_fd, name })
+    }
+
+    /// Consume this TunDevice and return the raw file descriptor.
+    ///
+    /// The caller takes ownership of the fd. The utun device will remain
+    /// alive as long as the fd is open.
+    pub fn into_raw_fd(self) -> RawFd {
+        self.async_fd.into_inner().into_raw_fd()
     }
 
     /// Read a single IP packet from the utun device.

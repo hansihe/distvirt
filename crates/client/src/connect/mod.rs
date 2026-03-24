@@ -1,6 +1,7 @@
 pub mod kernel;
 pub mod userspace;
-mod platform;
+pub mod fd_pass;
+pub mod platform;
 mod wireguard;
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -87,6 +88,21 @@ impl ProvisionedTunnel {
         self.public_key.as_bytes()
     }
 
+    /// The client IP address assigned by the server.
+    pub fn client_ip(&self) -> Ipv4Addr {
+        self.client_ip
+    }
+
+    /// The subnet prefix length.
+    pub fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
+
+    /// The subnet CIDR string (e.g. "10.0.0.0/24").
+    pub fn subnet(&self) -> &str {
+        &self.subnet
+    }
+
     /// Connection metadata.
     pub fn info(&self) -> ConnectInfo {
         ConnectInfo {
@@ -94,6 +110,25 @@ impl ProvisionedTunnel {
             subnet: self.subnet.clone(),
             endpoint: self.endpoint,
         }
+    }
+
+    /// Generate a wg-quick compatible configuration string from this tunnel's
+    /// provisioned parameters.
+    pub fn to_wg_quick_config(&self) -> String {
+        let private_key_b64 = BASE64.encode(self.private_key.to_bytes());
+        let server_pub_b64 = BASE64.encode(self.server_public_key.as_bytes());
+        format!(
+            "[Interface]\n\
+             PrivateKey = {}\n\
+             Address = {}/{}\n\
+             \n\
+             [Peer]\n\
+             PublicKey = {}\n\
+             Endpoint = {}\n\
+             AllowedIPs = {}\n\
+             PersistentKeepalive = 25\n",
+            private_key_b64, self.client_ip, self.prefix_len, server_pub_b64, self.endpoint, self.subnet
+        )
     }
 
     /// Create the boringtun Tunn and bind a UDP socket.
@@ -117,47 +152,8 @@ pub async fn wg_quick_config(
     client: &mut Client,
     namespace_id: &str,
 ) -> anyhow::Result<String> {
-    let private_key = StaticSecret::from(rand::random::<[u8; 32]>());
-    let public_key = PublicKey::from(&private_key);
-
-    let resp = client
-        .connect_network(ConnectNetworkRequest {
-            namespace_id: namespace_id.to_string(),
-            client_public_key: public_key.as_bytes().to_vec(),
-        })
-        .await
-        .map_err(handle_grpc_error)?
-        .into_inner();
-
-    let server_public_key_bytes: [u8; 32] = resp
-        .server_public_key
-        .as_slice()
-        .try_into()
-        .context("server public key must be 32 bytes")?;
-    let client_ip = &resp.client_ip;
-    let subnet = &resp.subnet;
-    let prefix_len: u8 = subnet
-        .split('/')
-        .nth(1)
-        .context("subnet missing /prefix_len")?
-        .parse()
-        .context("invalid prefix length in subnet")?;
-
-    let private_key_b64 = BASE64.encode(private_key.to_bytes());
-    let server_pub_b64 = BASE64.encode(server_public_key_bytes);
-
-    Ok(format!(
-        "[Interface]\n\
-         PrivateKey = {}\n\
-         Address = {}/{}\n\
-         \n\
-         [Peer]\n\
-         PublicKey = {}\n\
-         Endpoint = {}\n\
-         AllowedIPs = {}\n\
-         PersistentKeepalive = 25\n",
-        private_key_b64, client_ip, prefix_len, server_pub_b64, resp.endpoint, subnet
-    ))
+    let provisioned = ProvisionedTunnel::connect(client, namespace_id).await?;
+    Ok(provisioned.to_wg_quick_config())
 }
 
 /// Disconnect from the namespace via gRPC.

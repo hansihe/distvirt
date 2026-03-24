@@ -215,8 +215,7 @@ async fn main() -> Result<()> {
         ],
         env: vec![],
         working_dir: None,
-        uid: None,
-        gid: None,
+        user: None,
         hostname: Some("mem-testbench".to_string()),
         capture_output: true,
         stdin: false,
@@ -224,7 +223,7 @@ async fn main() -> Result<()> {
     };
 
     let pid = vm
-        .start_container(container_id, &container_config)
+        .start_container(container_id, &container_config, None, None)
         .await
         .context("start container")?;
     eprintln!("       -> container started (guest pid={})", pid);

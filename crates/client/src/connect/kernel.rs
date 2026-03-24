@@ -4,14 +4,16 @@ use anyhow::Context;
 use tokio::sync::Mutex;
 
 use super::platform::{TunDevice, add_route, configure_interface, remove_route};
-use super::wireguard;
 use super::{ConnectInfo, ProvisionedTunnel};
+use super::wireguard;
 use crate::connection::Client;
 
 /// An active WireGuard tunnel using an OS TUN device.
 ///
-/// Requires root or `CAP_NET_ADMIN`. Created via
-/// [`ProvisionedTunnel::into_kernel`].
+/// Created via [`ProvisionedTunnel::into_kernel`] (creates TUN + configures,
+/// requires root), [`ProvisionedTunnel::into_kernel_with_tun`] (caller-created
+/// TUN + configures), or [`ProvisionedTunnel::into_kernel_preconfigured`]
+/// (pre-configured TUN, e.g. from a privileged helper).
 pub struct KernelTunnel {
     tun: Arc<TunDevice>,
     tunn: Arc<Mutex<boringtun::noise::Tunn>>,
@@ -29,9 +31,35 @@ impl ProvisionedTunnel {
     /// privileges to create TUN devices.
     pub async fn into_kernel(self) -> anyhow::Result<KernelTunnel> {
         let tun = TunDevice::create().context("failed to create TUN device")?;
+        self.finish_kernel(tun, true).await
+    }
 
-        configure_interface(&tun.name, &self.client_ip.to_string(), self.prefix_len)?;
-        add_route(&self.subnet, &tun.name)?;
+    /// Materialize this tunnel using an already-created TUN device,
+    /// configuring the interface address and route.
+    ///
+    /// Use this when the caller has already created the TUN device (e.g.
+    /// to check for `PermissionDenied` before consuming `self`).
+    /// Requires root or `CAP_NET_ADMIN` for interface/route configuration.
+    pub async fn into_kernel_with_tun(self, tun: TunDevice) -> anyhow::Result<KernelTunnel> {
+        self.finish_kernel(tun, true).await
+    }
+
+    /// Materialize this tunnel using a pre-created TUN device.
+    ///
+    /// Use this when the TUN device was created externally (e.g. via a
+    /// privileged helper that also configured the interface address and
+    /// routes). Skips interface/route configuration.
+    pub async fn into_kernel_preconfigured(self, tun: TunDevice) -> anyhow::Result<KernelTunnel> {
+        self.finish_kernel(tun, false).await
+    }
+
+    /// Shared kernel tunnel setup: create WireGuard tunnel and optionally
+    /// configure the interface/route (skipped when the helper already did it).
+    async fn finish_kernel(self, tun: TunDevice, configure_net: bool) -> anyhow::Result<KernelTunnel> {
+        if configure_net {
+            configure_interface(&tun.name, &self.client_ip.to_string(), self.prefix_len)?;
+            add_route(&self.subnet, &tun.name)?;
+        }
 
         let (tunn, udp) = self.create_wg_tunnel().await?;
 

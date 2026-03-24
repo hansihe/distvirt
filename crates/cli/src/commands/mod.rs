@@ -1,6 +1,8 @@
 pub mod attach;
 pub mod auth;
 pub mod connect;
+mod escalate;
+pub mod internal;
 pub mod namespace;
 pub mod resource;
 pub mod splice;

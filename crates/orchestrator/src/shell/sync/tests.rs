@@ -10,7 +10,7 @@ use super::{MockWorkerConfig, SyncShell};
 fn test_timer_config() -> TimerConfig {
     TimerConfig {
         retry_backoff: Duration::from_millis(500),
-        launch_timeout: Duration::from_secs(30),
+        launch_timeout: Duration::from_secs(120),
         suspend_timeout: Duration::from_secs(30),
         idle_timeout: Duration::from_secs(60),
     }
@@ -43,8 +43,7 @@ fn container_spec(image: &str) -> distvirt_worker_protocol::ContainerSpec {
             args: vec!["hello".to_string()],
             env: vec![],
             working_dir: None,
-            uid: None,
-            gid: None,
+            user: None,
             hostname: None,
             capture_output: false,
             stdin: false,
@@ -274,7 +273,7 @@ fn launch_hang_triggers_timeout() {
     );
 
     // Advance past launch timeout.
-    shell.advance_time(Duration::from_secs(31));
+    shell.advance_time(Duration::from_secs(121));
     shell.drain();
 
     // After timeout, the pod should have failed and the workload should be in backoff.

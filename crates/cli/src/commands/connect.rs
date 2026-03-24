@@ -5,8 +5,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use distvirt_client_protocol::*;
 
+use distvirt_client::connect::fd_pass;
+use distvirt_client::connect::platform::TunDevice;
 use distvirt_client::connect::{ProvisionedTunnel, wg_quick_config};
 use distvirt_client::connection::{handle_grpc_error, Client, ConnectionParams};
+
+use super::escalate::{self, SetupTunArgs};
 
 /// Check whether an anyhow error chain contains a permission-denied I/O error.
 fn is_permission_denied(err: &anyhow::Error) -> bool {
@@ -18,58 +22,6 @@ fn is_permission_denied(err: &anyhow::Error) -> bool {
         }
     }
     false
-}
-
-/// Re-execute the current process with `sudo`, passing connection params explicitly
-/// so that the root shell doesn't lose the user's context/config.
-///
-/// Uses `exec()` to fully replace the current process, avoiding any interference
-/// from the tokio runtime or open file descriptors with sudo's terminal I/O.
-fn reexec_with_sudo(params: &ConnectionParams) -> anyhow::Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let exe = std::env::current_exe().context("cannot determine own executable path")?;
-    let args: Vec<String> = std::env::args().collect();
-
-    eprintln!("creating a network tunnel requires root privileges, re-running with sudo...");
-
-    let mut cmd = std::process::Command::new("sudo");
-    cmd.arg("--").arg(&exe);
-
-    // Pass connection params explicitly so sudo's env doesn't matter.
-    cmd.arg("--server").arg(&params.server);
-    if let Some(ref token) = params.token {
-        cmd.arg("--token").arg(token);
-    }
-
-    // Re-add the subcommand and its arguments from the original invocation.
-    // Skip argv[0] and any global flags we already handled above.
-    let mut skip_next = false;
-    for arg in &args[1..] {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match arg.as_str() {
-            "--server" | "--token" | "--context" => {
-                skip_next = true;
-                continue;
-            }
-            s if s.starts_with("--server=")
-                || s.starts_with("--token=")
-                || s.starts_with("--context=") =>
-            {
-                continue;
-            }
-            _ => {}
-        }
-        cmd.arg(arg);
-    }
-
-    // Replace the current process entirely. This ensures sudo gets clean
-    // access to the terminal without the tokio runtime running in the background.
-    let err = cmd.exec();
-    bail!("failed to exec sudo: {}", err);
 }
 
 /// State file for tracking active connections.
@@ -90,10 +42,78 @@ fn state_file_path(namespace_id: &str) -> anyhow::Result<PathBuf> {
     Ok(connections_dir()?.join(format!("{}.json", namespace_id)))
 }
 
+/// Launch a privileged helper to create a TUN device and receive the fd back
+/// via `SCM_RIGHTS`. The helper also configures the interface and routes.
+async fn escalate_tun(provisioned: &ProvisionedTunnel) -> anyhow::Result<TunDevice> {
+    let (listener, sock_path, _tmp_dir) = fd_pass::setup_listener()?;
+
+    let nonce: String = {
+        let val: u64 = rand::random();
+        format!("{:016x}", val)
+    };
+
+    let args = SetupTunArgs {
+        socket_path: sock_path.to_string_lossy().into_owned(),
+        nonce: nonce.clone(),
+        client_ip: provisioned.client_ip().to_string(),
+        prefix_len: provisioned.prefix_len(),
+        subnet: provisioned.subnet().to_string(),
+    };
+
+    // Launch the privileged helper in a blocking thread so we don't
+    // block the tokio runtime while it waits for the user to authenticate.
+    // The helper will connect to our socket and send the fd, so we must
+    // accept concurrently.
+    let helper_handle =
+        tokio::task::spawn_blocking(move || escalate::launch_privileged_helper(&args));
+
+    // Accept the connection from the helper. This blocks until the helper
+    // connects (after the user authenticates).
+    let conn = tokio::task::spawn_blocking(move || fd_pass::accept(&listener))
+        .await
+        .context("accept task panicked")??;
+
+    // Wait for the helper to finish.
+    let status = helper_handle.await.context("helper task panicked")??;
+    if !status.success() {
+        bail!(
+            "privileged helper exited with status {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    let mut buf = [0u8; 1024];
+    let (n, maybe_fd) = fd_pass::recv_fd(&conn, &mut buf)?;
+
+    let payload = std::str::from_utf8(&buf[..n])
+        .context("helper sent non-UTF-8 payload")?;
+
+    // Parse protocol: "OK:<nonce>:<device_name>" or "ERR:<nonce>:<message>"
+    if let Some(rest) = payload.strip_prefix("ERR:") {
+        let msg = rest
+            .strip_prefix(nonce.as_str())
+            .and_then(|r| r.strip_prefix(':'))
+            .context("nonce mismatch in error response from helper")?;
+        bail!("privileged helper error: {}", msg);
+    }
+
+    let rest = payload
+        .strip_prefix("OK:")
+        .context("unexpected helper response")?;
+    let rest = rest
+        .strip_prefix(nonce.as_str())
+        .and_then(|r| r.strip_prefix(':'))
+        .context("nonce mismatch from helper")?;
+    let device_name = rest.to_string();
+
+    let fd = maybe_fd.context("helper did not send a file descriptor")?;
+    TunDevice::from_raw_fd(fd, device_name)
+}
+
 /// `dv connect` — establish a WireGuard tunnel into a namespace.
 pub async fn connect(
     mut client: Client,
-    params: &ConnectionParams,
+    _params: &ConnectionParams,
     namespace_id: &str,
     config_only: bool,
 ) -> anyhow::Result<()> {
@@ -104,18 +124,17 @@ pub async fn connect(
     }
 
     let provisioned = ProvisionedTunnel::connect(&mut client, namespace_id).await?;
-    let public_key = *provisioned.public_key();
 
-    // Materialize as kernel TUN tunnel (requires root).
-    let tunnel = match provisioned.into_kernel().await {
-        Ok(t) => t,
+    // Try creating the kernel tunnel directly. If we lack privileges,
+    // fall back to a privileged helper that creates the TUN device and
+    // passes the fd back via SCM_RIGHTS.
+    let tunnel = match TunDevice::create() {
+        Ok(tun) => provisioned.into_kernel_with_tun(tun).await?,
         Err(e) if is_permission_denied(&e) => {
-            // Clean up the provisioned tunnel before re-exec'ing with sudo.
-            // The sudo'd process will provision its own tunnel with new keys.
-            distvirt_client::connect::disconnect(&mut client, namespace_id, &public_key).await?;
-            return reexec_with_sudo(params);
+            let tun = escalate_tun(&provisioned).await?;
+            provisioned.into_kernel_preconfigured(tun).await?
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.context("failed to create TUN device")),
     };
 
     // Write connection state file.

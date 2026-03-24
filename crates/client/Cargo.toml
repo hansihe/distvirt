@@ -22,6 +22,4 @@ nix = { version = "0.31", features = ["ioctl"] }
 tokio = { workspace = true, features = ["net", "time", "io-util", "sync"] }
 rand.workspace = true
 smoltcp = { workspace = true, features = ["socket-udp"] }
-
-[dev-dependencies]
 tempfile.workspace = true

@@ -163,12 +163,6 @@ fn convert_proto_run_policy(policy: proto::RunPolicy) -> RunPolicy {
 fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec, Status> {
     let config = c.config.unwrap_or_default();
 
-    let (uid, gid) = if config.user.is_empty() {
-        (None, None)
-    } else {
-        parse_user_field(&config.user)?
-    };
-
     let volume_mounts = config
         .volume_mounts
         .into_iter()
@@ -194,8 +188,11 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
             } else {
                 Some(config.working_dir)
             },
-            uid,
-            gid,
+            user: if config.user.is_empty() {
+                None
+            } else {
+                Some(config.user)
+            },
             hostname: if config.hostname.is_empty() {
                 None
             } else {
@@ -206,23 +203,6 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
             volume_mounts,
         },
     })
-}
-
-fn parse_user_field(user: &str) -> Result<(Option<u32>, Option<u32>), Status> {
-    if let Some((uid_str, gid_str)) = user.split_once(':') {
-        let uid: u32 = uid_str
-            .parse()
-            .map_err(|_| Status::invalid_argument(format!("non-numeric uid: '{}'", uid_str)))?;
-        let gid: u32 = gid_str
-            .parse()
-            .map_err(|_| Status::invalid_argument(format!("non-numeric gid: '{}'", gid_str)))?;
-        Ok((Some(uid), Some(gid)))
-    } else {
-        let uid: u32 = user
-            .parse()
-            .map_err(|_| Status::invalid_argument(format!("non-numeric user: '{}'", user)))?;
-        Ok((Some(uid), None))
-    }
 }
 
 fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, Status> {
