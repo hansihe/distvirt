@@ -137,6 +137,8 @@ struct ConfigDataFile {
   # Relative path within the volume (e.g. "nginx.conf" or "certs/ca.pem").
   content @1 :Text;
   # File content (UTF-8).
+  mode @2 :UInt32;
+  # POSIX file mode (e.g. 0o644). Always set by client.
 }
 
 # Mount a volume into a container at a specific path.

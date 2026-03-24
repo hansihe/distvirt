@@ -418,10 +418,12 @@ pub fn config_data_spec() -> NamespaceSpec {
                         ConfigDataFile {
                             path: "app.toml".to_string(),
                             content: "[server]\nport = 8080\n".to_string(),
+                            mode: 0o644,
                         },
                         ConfigDataFile {
                             path: "secrets/db.env".to_string(),
                             content: "DB_HOST=localhost\n".to_string(),
+                            mode: 0o644,
                         },
                     ],
                 },
@@ -474,6 +476,7 @@ pub fn mixed_volumes_spec() -> NamespaceSpec {
                         files: vec![ConfigDataFile {
                             path: "app.conf".to_string(),
                             content: "key=value\n".to_string(),
+                            mode: 0o644,
                         }],
                     },
                 },
@@ -527,6 +530,7 @@ pub fn activation_with_volumes_spec(idle_timeout: Duration) -> NamespaceSpec {
                         files: vec![ConfigDataFile {
                             path: "config.yaml".to_string(),
                             content: "debug: true\n".to_string(),
+                            mode: 0o644,
                         }],
                     },
                 },

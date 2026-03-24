@@ -162,12 +162,28 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                         if cd.files.is_empty() {
                             errs.error(vol_path.key("config_data").key("files"), "files list is empty");
                         }
+                        if let Some(ref dm) = cd.default_mode {
+                            if u32::from_str_radix(dm, 8).is_err() || dm.is_empty() {
+                                errs.error(
+                                    vol_path.key("config_data").key("default_mode"),
+                                    "invalid octal mode (expected e.g. \"0644\")",
+                                );
+                            }
+                        }
                         for (fi, file) in cd.files.iter().enumerate() {
                             if file.path.is_empty() {
                                 errs.error(
                                     vol_path.key("config_data").key("files").index(fi).key("path"),
                                     "file path is empty",
                                 );
+                            }
+                            if let Some(ref mode) = file.mode {
+                                if u32::from_str_radix(mode, 8).is_err() || mode.is_empty() {
+                                    errs.error(
+                                        vol_path.key("config_data").key("files").index(fi).key("mode"),
+                                        "invalid octal mode (expected e.g. \"0644\")",
+                                    );
+                                }
                             }
                         }
                     }
@@ -709,13 +725,22 @@ fn build_namespace_spec(
                                     size_mb: ed.size_mb.unwrap_or(0),
                                 }))
                             } else if let Some(ref cd) = v.config_data {
+                                let default_mode = cd.default_mode.as_deref().unwrap_or("0644");
+                                let default_mode_val = u32::from_str_radix(default_mode, 8)
+                                    .expect("validated earlier");
                                 Some(volume_spec::VolumeType::ConfigData(ConfigDataVolume {
                                     files: cd
                                         .files
                                         .iter()
-                                        .map(|f| ConfigDataFile {
-                                            path: f.path.clone(),
-                                            content: f.content.clone(),
+                                        .map(|f| {
+                                            let mode = f.mode.as_ref()
+                                                .map(|m| u32::from_str_radix(m, 8).expect("validated earlier"))
+                                                .unwrap_or(default_mode_val);
+                                            ConfigDataFile {
+                                                path: f.path.clone(),
+                                                content: f.content.clone(),
+                                                mode,
+                                            }
                                         })
                                         .collect(),
                                 }))

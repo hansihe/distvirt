@@ -158,6 +158,7 @@ message ConfigDataVolume {
 message ConfigDataFile {
     string path = 1;           // relative path within the volume
     string content = 2;        // file content (UTF-8)
+    uint32 mode = 3;           // POSIX file mode (e.g. 0644). Always set by client.
 }
 
 message VolumeMountSpec {

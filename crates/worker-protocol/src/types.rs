@@ -114,6 +114,7 @@ pub struct VolumeSpec {
 pub struct ConfigDataFile {
     pub path: String,
     pub content: String,
+    pub mode: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

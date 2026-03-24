@@ -215,6 +215,7 @@ Inline file content baked into a read-only filesystem image at spec render time.
 volumes:
   - name: config
     config_data:
+      default_mode: "0644"          # Optional. Default POSIX mode for all files. Default: "0644".
       files:
         - path: nginx.conf
           content: |
@@ -224,7 +225,13 @@ volumes:
             }
         - path: certs/ca.pem
           content: "..."
+          mode: "0400"              # Optional. Per-file POSIX mode override.
+        - path: scripts/init.sh
+          content: "#!/bin/sh\necho hello"
+          mode: "0755"
 ```
+
+File permissions are specified as octal strings. `default_mode` sets the mode for all files that don't specify their own `mode`. If neither is set, files default to `0644`. The client expands `default_mode` before sending to the orchestrator — the wire protocol always carries an explicit mode on every file.
 
 #### persistent_volume
 

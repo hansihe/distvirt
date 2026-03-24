@@ -118,6 +118,7 @@ pub struct SpecEmptyDir {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpecConfigData {
+    pub default_mode: Option<String>,
     pub files: Vec<SpecConfigDataFile>,
 }
 
@@ -126,6 +127,7 @@ pub struct SpecConfigData {
 pub struct SpecConfigDataFile {
     pub path: String,
     pub content: String,
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

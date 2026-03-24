@@ -104,6 +104,12 @@ async fn create_config_data_image(
         tokio::fs::write(&file_path, &file.content)
             .await
             .with_context(|| format!("write config file {}", file.path))?;
+        if file.mode != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(file.mode))
+                .await
+                .with_context(|| format!("set permissions on {}", file.path))?;
+        }
     }
 
     // Calculate a reasonable image size: at least 1MB, or enough for the files + overhead.
@@ -172,6 +178,7 @@ mod tests {
                 files: vec![ConfigDataFile {
                     path: "hello.txt".to_string(),
                     content: "world".to_string(),
+                    mode: 0o644,
                 }],
             },
         }];

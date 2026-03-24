@@ -128,6 +128,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
                             .map(|f| ConfigDataFile {
                                 path: f.path,
                                 content: f.content,
+                                mode: f.mode,
                             })
                             .collect(),
                     }

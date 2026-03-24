@@ -187,6 +187,7 @@ async fn test_config_data_content_change_restarts_pod() {
             files: vec![ConfigDataFile {
                 path: "app.toml".to_string(),
                 content: "[server]\nport = 9090\n".to_string(),
+                mode: 0o644,
             }],
         },
     }];

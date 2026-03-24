@@ -239,6 +239,7 @@ pub fn write_volume_spec(
                 let mut fb = list.reborrow().get(i as u32);
                 fb.set_path(&f.path);
                 fb.set_content(&f.content);
+                fb.set_mode(f.mode);
             }
         }
     }
@@ -262,6 +263,7 @@ pub fn read_volume_spec(
                 files.push(ConfigDataFile {
                     path: f.get_path()?.to_string()?,
                     content: f.get_content()?.to_string()?,
+                    mode: f.get_mode(),
                 });
             }
             VolumeType::ConfigData { files }
