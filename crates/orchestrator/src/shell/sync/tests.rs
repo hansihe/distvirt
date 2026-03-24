@@ -1,9 +1,8 @@
 use std::time::Duration;
 
 use crate::adapter::timer::TimerConfig;
-use crate::core::ClientCommand;
 use crate::sm::PodStatus;
-use crate::types::{NamespaceId, NamespaceSpec, ServiceSpec, WorkloadSpec};
+use crate::types::{NamespaceId, NamespaceSpec, NamespaceSpecInput, ServiceSpec, WorkloadSpec};
 
 use super::{MockWorkerConfig, SyncShell};
 
@@ -112,8 +111,7 @@ fn basic_pod_lifecycle() {
     let w1 = shell.add_worker_default();
 
     shell.create_namespace(ns("test"), default_network());
-    shell.client_command(&ns("test"), ClientCommand::UpdateSpec(always_on_spec()));
-    shell.drain();
+    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     // The workload should have been created and launched.
     let ns_core = shell
@@ -167,8 +165,7 @@ fn worker_disconnect_and_recovery() {
     let w1 = shell.add_worker_default();
 
     shell.create_namespace(ns("test"), default_network());
-    shell.client_command(&ns("test"), ClientCommand::UpdateSpec(always_on_spec()));
-    shell.drain();
+    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     // Verify running.
     let wl_id = shell
@@ -238,8 +235,7 @@ fn launch_hang_triggers_timeout() {
     let _w1 = shell.add_worker(MockWorkerConfig::with_launch_hang());
 
     shell.create_namespace(ns("test"), default_network());
-    shell.client_command(&ns("test"), ClientCommand::UpdateSpec(always_on_spec()));
-    shell.drain();
+    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     let wl_id = shell
         .namespace(&ns("test"))
@@ -300,8 +296,7 @@ fn launch_failure_retries() {
     let _w1 = shell.add_worker(MockWorkerConfig::with_launch_failure());
 
     shell.create_namespace(ns("test"), default_network());
-    shell.client_command(&ns("test"), ClientCommand::UpdateSpec(always_on_spec()));
-    shell.drain();
+    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     let wl_id = shell
         .namespace(&ns("test"))

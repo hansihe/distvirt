@@ -11,9 +11,11 @@ use distvirt_worker_protocol::WorkerCommand;
 fn test_patch_add_workload() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
-    h.create_namespace("ns", always_on_spec());
+    let alloc = h.create_namespace("ns", always_on_spec());
     h.converge();
     h.assert_workload_running("ns", "echo");
+
+    let echo_svc_ip = alloc.service_ips["echo-svc"].ip;
 
     // Patch in a second workload + service
     let mut workloads = BTreeMap::new();
@@ -45,7 +47,7 @@ fn test_patch_add_workload() {
             labels: BTreeMap::new(),
         },
     );
-    h.patch_namespace(
+    let alloc2 = h.patch_namespace(
         "ns",
         NamespacePatch {
             workloads,
@@ -56,13 +58,15 @@ fn test_patch_add_workload() {
     );
     h.converge();
 
+    let svc_b_ip = alloc2.service_ips["svc-b"].ip;
+
     // Both workloads should be running
     h.assert_workload_running("ns", "echo");
     h.assert_workload_running("ns", "echo-b");
 
     // Both services should have endpoint entries with backends.
-    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 100));
-    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 101));
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", echo_svc_ip);
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", svc_b_ip);
 }
 
 /// Patch: remove a workload from a two-workload namespace.
@@ -70,10 +74,13 @@ fn test_patch_add_workload() {
 fn test_patch_remove_workload() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
-    h.create_namespace("ns", always_on_two_workloads_spec());
+    let alloc = h.create_namespace("ns", always_on_two_workloads_spec());
     h.converge();
     h.assert_workload_running("ns", "echo-a");
     h.assert_workload_running("ns", "echo-b");
+
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
+    let svc_b_ip = alloc.service_ips["svc-b"].ip;
 
     // Patch: remove echo-b and its service
     h.patch_namespace(
@@ -108,8 +115,8 @@ fn test_patch_remove_workload() {
     });
 
     // svc-a endpoint should still be present, svc-b should be removed.
-    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 100));
-    h.assert_worker_has_no_endpoint(&w1, "ns", Ipv4Addr::new(172, 16, 0, 101));
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", svc_a_ip);
+    h.assert_worker_has_no_endpoint(&w1, "ns", svc_b_ip);
 }
 
 /// Patch: replace an existing workload's image (upsert over existing key).

@@ -16,6 +16,7 @@ use crate::shell::r#async::ShellHandle;
 use crate::types::NamespaceId;
 
 use conversions::{convert_pod_status_report, convert_proto_patch, convert_proto_spec, convert_status_report, convert_worker_query_info};
+use crate::types::{IpAllocKind, IpAllocResult};
 
 fn client_error_to_status(err: ClientError) -> Status {
     match err {
@@ -24,6 +25,7 @@ fn client_error_to_status(err: ClientError) -> Status {
         ClientError::NamespaceAlreadyExists => Status::already_exists(err.to_string()),
         ClientError::NoTunnelWorker => Status::failed_precondition(err.to_string()),
         ClientError::IpExhausted => Status::resource_exhausted(err.to_string()),
+        ClientError::IpAllocation(_) => Status::invalid_argument(err.to_string()),
         ClientError::ShellGone => Status::unavailable(err.to_string()),
     }
 }
@@ -65,6 +67,25 @@ impl DistvirtClientService {
     }
 }
 
+fn alloc_to_proto_ips(alloc: &IpAllocResult) -> (
+    std::collections::HashMap<String, proto::IpAllocation>,
+    std::collections::HashMap<String, proto::IpAllocation>,
+) {
+    let workload_ips = alloc.workload_ips.iter().map(|(k, v)| {
+        (k.0.clone(), proto::IpAllocation {
+            ip: v.ip.to_string(),
+            is_manual: v.kind == IpAllocKind::Manual,
+        })
+    }).collect();
+    let service_ips = alloc.service_ips.iter().map(|(k, v)| {
+        (k.clone(), proto::IpAllocation {
+            ip: v.ip.to_string(),
+            is_manual: v.kind == IpAllocKind::Manual,
+        })
+    }).collect();
+    (workload_ips, service_ips)
+}
+
 // --- gRPC Service Implementation ---
 
 #[tonic::async_trait]
@@ -89,11 +110,15 @@ impl DistvirtClient for DistvirtClientService {
             .create_namespace(namespace_id.clone(), network)
             .await
             .map_err(client_error_to_status)?;
-        self.handle
+        let alloc = self.handle
             .update_namespace(namespace_id, spec)
             .await
             .map_err(client_error_to_status)?;
-        Ok(Response::new(proto::CreateNamespaceResponse {}))
+        let (workload_ips, service_ips) = alloc_to_proto_ips(&alloc);
+        Ok(Response::new(proto::CreateNamespaceResponse {
+            workload_ips,
+            service_ips,
+        }))
     }
 
     async fn update_namespace(
@@ -105,11 +130,15 @@ impl DistvirtClient for DistvirtClientService {
             req.spec
                 .ok_or_else(|| Status::invalid_argument("missing spec"))?,
         )?;
-        self.handle
+        let alloc = self.handle
             .update_namespace(NamespaceId(req.namespace_id), spec)
             .await
             .map_err(client_error_to_status)?;
-        Ok(Response::new(proto::UpdateNamespaceResponse {}))
+        let (workload_ips, service_ips) = alloc_to_proto_ips(&alloc);
+        Ok(Response::new(proto::UpdateNamespaceResponse {
+            workload_ips,
+            service_ips,
+        }))
     }
 
     async fn patch_namespace(
@@ -119,11 +148,15 @@ impl DistvirtClient for DistvirtClientService {
         let req = request.into_inner();
         let ns_id = NamespaceId(req.namespace_id.clone());
         let patch = convert_proto_patch(req)?;
-        self.handle
+        let alloc = self.handle
             .patch_namespace(ns_id, patch)
             .await
             .map_err(client_error_to_status)?;
-        Ok(Response::new(proto::PatchNamespaceResponse {}))
+        let (workload_ips, service_ips) = alloc_to_proto_ips(&alloc);
+        Ok(Response::new(proto::PatchNamespaceResponse {
+            workload_ips,
+            service_ips,
+        }))
     }
 
     async fn delete_namespace(

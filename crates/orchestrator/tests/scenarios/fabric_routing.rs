@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use distvirt_orchestrator::types::WorkloadName;
 use distvirt_worker_protocol::{WorkerCommand, WorkerEvent};
 
 use crate::harness::mock_worker::MockWorkerConfig;
@@ -20,11 +21,13 @@ fn test_fabric_route_update_on_pod_launch() {
 
     // Create always-on namespace — pod will launch on one worker.
     let spec = always_on_spec();
-    h.create_namespace("ns1", spec);
+    let alloc = h.create_namespace("ns1", spec);
     h.converge();
 
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
     h.assert_workload_running("ns1", "echo");
+
+    let svc_ip = alloc.service_ips["echo-svc"].ip;
 
     // Determine which worker got the pod.
     let pod_worker_id = h
@@ -36,14 +39,14 @@ fn test_fabric_route_update_on_pod_launch() {
     h.assert_worker_has_service_endpoint_with_backend(
         other_worker_id,
         "ns1",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // The hosting worker should also have the endpoint entry.
     h.assert_worker_has_service_endpoint_with_backend(
         &pod_worker_id,
         "ns1",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 }
 
@@ -59,8 +62,10 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.converge();
 
     let spec = activation_spec(Duration::from_secs(30));
-    h.create_namespace("ns1", spec);
+    let alloc = h.create_namespace("ns1", spec);
     h.converge();
+
+    let svc_ip = alloc.service_ips["web-svc"].ip;
 
     // Activate via EndpointActivation.
     h.activate_service_on("ns1", "web-svc", &w1);
@@ -75,7 +80,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.assert_worker_has_service_endpoint_with_backend(
         &other_worker_id,
         "ns1",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // Idle → suspend.
@@ -87,7 +92,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.assert_worker_has_service_endpoint_without_backend(
         &other_worker_id,
         "ns1",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // Re-activate via EndpointActivation → resume.
@@ -97,7 +102,7 @@ fn test_fabric_route_lifecycle_with_suspend_resume() {
     h.assert_worker_has_service_endpoint_with_backend(
         &other_worker_id,
         "ns1",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 }
 
@@ -107,14 +112,16 @@ fn test_route_miss_activates_dormant_workload() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
+    let alloc = h.create_namespace("ns", activation_spec(timeout));
     h.converge();
     h.assert_workload_dormant("ns", "web");
+
+    let wl_ip = alloc.workload_ips[&WorkloadName("web".into())].ip;
 
     // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: wl_ip,
         service_id: None,
     });
     h.converge();
@@ -131,9 +138,11 @@ fn test_route_miss_activates_suspended_workload() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
+    let alloc = h.create_namespace("ns", activation_spec(timeout));
     h.converge();
     h.assert_workload_dormant("ns", "web");
+
+    let wl_ip = alloc.workload_ips[&WorkloadName("web".into())].ip;
 
     // Activate via service → run → idle → suspend
     h.activate_service("ns", "web-svc");
@@ -144,7 +153,7 @@ fn test_route_miss_activates_suspended_workload() {
     // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: wl_ip,
         service_id: None,
     });
     h.converge();
@@ -161,8 +170,10 @@ fn test_route_miss_ignored_when_already_running() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
+    let alloc = h.create_namespace("ns", activation_spec(timeout));
     h.converge();
+
+    let wl_ip = alloc.workload_ips[&WorkloadName("web".into())].ip;
 
     // Activate via service first
     h.activate_service("ns", "web-svc");
@@ -172,7 +183,7 @@ fn test_route_miss_ignored_when_already_running() {
 
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: wl_ip,
         service_id: None,
     });
     h.converge();
@@ -216,22 +227,24 @@ fn test_route_miss_demand_leak() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
+    let alloc = h.create_namespace("ns", activation_spec(timeout));
     h.converge();
     h.assert_workload_dormant("ns", "web");
+
+    let wl_ip = alloc.workload_ips[&WorkloadName("web".into())].ip;
+    let svc_ip = alloc.service_ips["web-svc"].ip;
 
     // Low-level: testing exact demand leak behavior with endpoint activation interaction
     // Step 1: EndpointActivation (no service_id) activates the workload.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: wl_ip,
         service_id: None,
     });
     h.converge();
     h.assert_workload_running("ns", "web");
 
     // Step 2: EndpointActivation with service_id arrives (real traffic hits the service IP).
-    let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
         ip: svc_ip,
@@ -244,7 +257,7 @@ fn test_route_miss_demand_leak() {
     // Step 3: Signal no more demand → start idle timer.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 10),
+        ip: wl_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
         active: false,
     });
@@ -259,7 +272,7 @@ fn test_route_miss_demand_leak() {
     h.assert_worker_has_service_endpoint_without_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 }
 
@@ -272,15 +285,17 @@ fn test_route_miss_demand_leak() {
 fn test_endpoint_table_populated_on_always_on_create() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
-    h.create_namespace("ns", always_on_spec());
+    let alloc = h.create_namespace("ns", always_on_spec());
     h.converge();
     h.assert_workload_running("ns", "echo");
+
+    let svc_ip = alloc.service_ips["echo-svc"].ip;
 
     // Service endpoint should exist with backend (workload is running).
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 }
 
@@ -292,9 +307,11 @@ fn test_endpoint_updated_after_reschedule() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
     let w2 = h.add_worker();
-    h.create_namespace("ns", always_on_spec());
+    let alloc = h.create_namespace("ns", always_on_spec());
     h.converge();
     h.assert_workload_running("ns", "echo");
+
+    let svc_ip = alloc.service_ips["echo-svc"].ip;
 
     let pod_worker = h
         .workload_global_worker_id("ns", "echo")
@@ -305,7 +322,7 @@ fn test_endpoint_updated_after_reschedule() {
     h.assert_worker_has_service_endpoint_with_backend(
         &other,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // Disconnect the hosting worker → workload reschedules to the other.
@@ -317,7 +334,7 @@ fn test_endpoint_updated_after_reschedule() {
     h.assert_worker_has_service_endpoint_with_backend(
         &other,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 }
 
@@ -328,15 +345,17 @@ fn test_endpoint_backend_lifecycle_activation() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
+    let alloc = h.create_namespace("ns", activation_spec(timeout));
     h.converge();
     h.assert_workload_dormant("ns", "web");
+
+    let svc_ip = alloc.service_ips["web-svc"].ip;
 
     // Before activation: service endpoint should exist but without a backend.
     h.assert_worker_has_service_endpoint_without_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // Activate → running
@@ -346,7 +365,7 @@ fn test_endpoint_backend_lifecycle_activation() {
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // Suspend
@@ -358,7 +377,7 @@ fn test_endpoint_backend_lifecycle_activation() {
     h.assert_worker_has_service_endpoint_without_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 
     // Resume
@@ -368,6 +387,6 @@ fn test_endpoint_backend_lifecycle_activation() {
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_ip,
     );
 }

@@ -19,7 +19,7 @@ use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig, TimerIdentit
 use crate::core::namespace::wg_peers::{WgPeerOutput, WireGuardPeerManager};
 use crate::core::types::{NamespaceEffects, OrchestratorToNamespace, SchedulerMessage};
 use crate::core::{
-    ClientCommand, GlobalWorkerId, SchedulerDecision,
+    ClientCommand, ClientError, GlobalWorkerId, SchedulerDecision,
     WorkerNamespaceEventKind,
 };
 use crate::id_registry::IdRegistry;
@@ -31,7 +31,11 @@ use crate::sm::{
     WireGuardPeerEndpointInfo, WireGuardPeerId, WlStatus, WorkerId,
     endpoint::EndpointStatus,
 };
-use crate::types::{NamespaceId, NamespaceSpec, NamespaceStatusReport, WorkloadName};
+use crate::core::namespace::ip_alloc::{NamespaceIpAllocator, ip_to_mac};
+use crate::types::{
+    IpAllocResult, IpResourceKey, NamespaceId, NamespacePatchInput, NamespaceSpec,
+    NamespaceSpecInput, NamespaceStatusReport, PodNetworkConfig, WorkloadName,
+};
 
 // =============================================================================
 // ID conversion helpers (same u64 value, different newtypes)
@@ -48,6 +52,12 @@ fn router_pod_id(proto_id: &distvirt_worker_protocol::PodId) -> PodId {
 // =============================================================================
 // Helper types
 // =============================================================================
+
+/// Intermediate result from resolving a patch input.
+struct ResolvedPatch {
+    workloads: std::collections::BTreeMap<WorkloadName, crate::types::WorkloadSpec>,
+    services: std::collections::BTreeMap<String, crate::types::ServiceSpec>,
+}
 
 /// Worker that has connected but not yet confirmed namespace creation.
 struct PendingWorker {
@@ -100,6 +110,9 @@ pub struct Namespace {
 
     pub(crate) current_spec: Option<NamespaceSpec>,
 
+    /// Per-namespace IP allocator for workload and service IPs.
+    ip_allocator: NamespaceIpAllocator,
+
     /// WireGuard peer IP allocation and tracking.
     wg_peer_mgr: WireGuardPeerManager,
     /// Maps client public key → WireGuardPeerId (router port).
@@ -148,6 +161,7 @@ impl Namespace {
             worker_pod_edges: HashMap::new(),
             pod_worker: HashMap::new(),
             current_spec: None,
+            ip_allocator: NamespaceIpAllocator::new(network.subnet, network.prefix_len, 10),
             wg_peer_mgr: WireGuardPeerManager::new(network.subnet, network.prefix_len),
             wg_peer_ports: HashMap::new(),
             pending_workers: HashMap::new(),
@@ -515,44 +529,206 @@ impl Namespace {
     }
 
     // =========================================================================
+    // Spec operations (dedicated methods, not routed through ClientCommand)
+    // =========================================================================
+
+    /// Apply a full spec replacement with orchestrator-side IP allocation.
+    ///
+    /// Returns namespace effects and a full allocation snapshot.
+    pub fn apply_full_spec(
+        &mut self,
+        input: NamespaceSpecInput,
+    ) -> Result<(NamespaceEffects, IpAllocResult), ClientError> {
+        // Release IPs for resources removed in the new spec.
+        if let Some(ref current) = self.current_spec {
+            for name in current.workloads.keys() {
+                if !input.workloads.contains_key(name) {
+                    self.ip_allocator.release(&IpResourceKey::Workload(name.clone()));
+                }
+            }
+            for name in current.services.keys() {
+                if !input.services.contains_key(name) {
+                    self.ip_allocator.release(&IpResourceKey::Service(name.clone()));
+                }
+            }
+        }
+
+        // Allocate IPs and build the resolved spec.
+        let new_spec = self.resolve_spec_input(input)?;
+
+        // Apply via management adapter.
+        self.adapters.management.apply_namespace_spec(
+            &mut self.router,
+            self.current_spec.as_ref(),
+            &new_spec,
+        );
+        self.current_spec = Some(new_spec);
+
+        let mut effects = NamespaceEffects::default();
+        self.run_cycle(&mut effects);
+
+        Ok((effects, self.ip_allocator.full_snapshot()))
+    }
+
+    /// Apply a patch (upsert + removals) with orchestrator-side IP allocation.
+    ///
+    /// Returns namespace effects and a full allocation snapshot.
+    pub fn apply_patch(
+        &mut self,
+        input: NamespacePatchInput,
+    ) -> Result<(NamespaceEffects, IpAllocResult), ClientError> {
+        if self.current_spec.is_none() {
+            return Err(ClientError::NamespaceNotFound);
+        }
+
+        // Release IPs for removed resources.
+        for name in &input.remove_workloads {
+            self.ip_allocator.release(&IpResourceKey::Workload(name.clone()));
+        }
+        for name in &input.remove_services {
+            self.ip_allocator.release(&IpResourceKey::Service(name.clone()));
+        }
+
+        // Allocate IPs for upserted resources and build patch.
+        let resolved_patch = self.resolve_patch_input(&input)?;
+
+        // Build new spec from current.
+        let mut new_spec = self.current_spec.as_ref().unwrap().clone();
+        for name in &input.remove_workloads {
+            new_spec.workloads.remove(name);
+        }
+        for name in &input.remove_services {
+            new_spec.services.remove(name);
+        }
+        for (name, spec) in resolved_patch.workloads {
+            new_spec.workloads.insert(name, spec);
+        }
+        for (name, spec) in resolved_patch.services {
+            new_spec.services.insert(name, spec);
+        }
+
+        // Apply via management adapter.
+        self.adapters.management.apply_namespace_spec(
+            &mut self.router,
+            self.current_spec.as_ref(),
+            &new_spec,
+        );
+        self.current_spec = Some(new_spec);
+
+        let mut effects = NamespaceEffects::default();
+        self.run_cycle(&mut effects);
+
+        Ok((effects, self.ip_allocator.full_snapshot()))
+    }
+
+    /// Resolve a full spec input into a resolved NamespaceSpec with allocated IPs.
+    fn resolve_spec_input(
+        &mut self,
+        input: NamespaceSpecInput,
+    ) -> Result<NamespaceSpec, ClientError> {
+        let mut workloads = std::collections::BTreeMap::new();
+        for (name, wl_input) in input.workloads {
+            let alloc = self.ip_allocator
+                .allocate(IpResourceKey::Workload(name.clone()), wl_input.explicit_ip)
+                .map_err(ClientError::IpAllocation)?;
+            let mac = ip_to_mac(alloc.ip);
+            workloads.insert(name, crate::types::WorkloadSpec {
+                containers: wl_input.containers,
+                network: PodNetworkConfig {
+                    ip: alloc.ip,
+                    mac,
+                    gateway: std::net::Ipv4Addr::new(0, 0, 0, 0),
+                    netmask: String::new(),
+                },
+                suspend_on_idle: wl_input.suspend_on_idle,
+                resources: wl_input.resources,
+                activation: wl_input.activation,
+                run_policy: wl_input.run_policy,
+                respects_demand: wl_input.respects_demand,
+                volumes: wl_input.volumes,
+                labels: wl_input.labels,
+            });
+        }
+
+        let mut services = std::collections::BTreeMap::new();
+        for (name, svc_input) in input.services {
+            let alloc = self.ip_allocator
+                .allocate(IpResourceKey::Service(name.clone()), svc_input.explicit_ip)
+                .map_err(ClientError::IpAllocation)?;
+            services.insert(name, crate::types::ServiceSpec {
+                workload_id: svc_input.workload_id,
+                ip: alloc.ip,
+                ports: svc_input.ports,
+                has_activation: svc_input.has_activation,
+                idle_timeout: svc_input.idle_timeout,
+                buffer_frames: svc_input.buffer_frames,
+                buffer_timeout_ms: svc_input.buffer_timeout_ms,
+                labels: svc_input.labels,
+            });
+        }
+
+        Ok(NamespaceSpec {
+            network: input.network,
+            workloads,
+            services,
+        })
+    }
+
+    /// Resolve a patch input into resolved workload/service specs.
+    fn resolve_patch_input(
+        &mut self,
+        input: &NamespacePatchInput,
+    ) -> Result<ResolvedPatch, ClientError> {
+        let mut workloads = std::collections::BTreeMap::new();
+        for (name, wl_input) in &input.workloads {
+            let alloc = self.ip_allocator
+                .allocate(IpResourceKey::Workload(name.clone()), wl_input.explicit_ip)
+                .map_err(ClientError::IpAllocation)?;
+            let mac = ip_to_mac(alloc.ip);
+            workloads.insert(name.clone(), crate::types::WorkloadSpec {
+                containers: wl_input.containers.clone(),
+                network: PodNetworkConfig {
+                    ip: alloc.ip,
+                    mac,
+                    gateway: std::net::Ipv4Addr::new(0, 0, 0, 0),
+                    netmask: String::new(),
+                },
+                suspend_on_idle: wl_input.suspend_on_idle,
+                resources: wl_input.resources.clone(),
+                activation: wl_input.activation.clone(),
+                run_policy: wl_input.run_policy.clone(),
+                respects_demand: wl_input.respects_demand,
+                volumes: wl_input.volumes.clone(),
+                labels: wl_input.labels.clone(),
+            });
+        }
+
+        let mut services = std::collections::BTreeMap::new();
+        for (name, svc_input) in &input.services {
+            let alloc = self.ip_allocator
+                .allocate(IpResourceKey::Service(name.clone()), svc_input.explicit_ip)
+                .map_err(ClientError::IpAllocation)?;
+            services.insert(name.clone(), crate::types::ServiceSpec {
+                workload_id: svc_input.workload_id.clone(),
+                ip: alloc.ip,
+                ports: svc_input.ports.clone(),
+                has_activation: svc_input.has_activation,
+                idle_timeout: svc_input.idle_timeout,
+                buffer_frames: svc_input.buffer_frames,
+                buffer_timeout_ms: svc_input.buffer_timeout_ms,
+                labels: svc_input.labels.clone(),
+            });
+        }
+
+        Ok(ResolvedPatch { workloads, services })
+    }
+
+    // =========================================================================
     // Client command handling
     // =========================================================================
 
     fn handle_client_command(&mut self, cmd: ClientCommand) {
         match cmd {
-            ClientCommand::UpdateSpec(new_spec) => {
-                self.adapters.management.apply_namespace_spec(
-                    &mut self.router,
-                    self.current_spec.as_ref(),
-                    &new_spec,
-                );
-                self.current_spec = Some(new_spec);
-            }
-            ClientCommand::PatchSpec(patch) => {
-                if let Some(current) = self.current_spec.as_ref() {
-                    let mut new_spec = current.clone();
-
-                    for name in &patch.remove_workloads {
-                        new_spec.workloads.remove(name);
-                    }
-                    for name in &patch.remove_services {
-                        new_spec.services.remove(name);
-                    }
-                    for (name, spec) in patch.workloads {
-                        new_spec.workloads.insert(name, spec);
-                    }
-                    for (name, spec) in patch.services {
-                        new_spec.services.insert(name, spec);
-                    }
-
-                    self.adapters.management.apply_namespace_spec(
-                        &mut self.router,
-                        self.current_spec.as_ref(),
-                        &new_spec,
-                    );
-                    self.current_spec = Some(new_spec);
-                }
-            }
             ClientCommand::AdminRestart { workload_name } => {
                 self.adapters.management.send_admin_command(
                     &mut self.router,

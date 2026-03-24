@@ -1,14 +1,11 @@
 use crate::spec::convert::spec_to_namespace_spec;
 use crate::spec::helpers::parse_duration_ms;
 use crate::spec::includes::resolve_includes;
-use crate::spec::ip_alloc::IpAllocator;
 use crate::spec::parse::{try_parse, ParsedSpec};
-use crate::spec::resolve::resolve_refs;
 
 use distvirt_client_protocol::*;
 
 use std::io::Write;
-use std::net::Ipv4Addr;
 use std::path::Path;
 use tempfile::{NamedTempFile, TempDir};
 
@@ -19,8 +16,7 @@ use tempfile::{NamedTempFile, TempDir};
     }
 
     fn convert(yaml: &str) -> (Option<String>, NamespaceSpec) {
-        let mut parsed = parse_yaml(yaml);
-        resolve_refs(&mut parsed).unwrap();
+        let parsed = parse_yaml(yaml);
         spec_to_namespace_spec(&parsed).unwrap()
     }
 
@@ -108,112 +104,10 @@ workloads:
         ));
     }
 
-    // --- (b) IP stability on addition ---
+    // --- (b) Explicit IP passed through ---
 
     #[test]
-    fn ip_stable_on_addition() {
-        let yaml_base = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    containers:
-      - image: img
-  database:
-    containers:
-      - image: img
-"#;
-        let (_, proto1) = convert(yaml_base);
-        let api_ip1 = &proto1.workloads["api"].network.as_ref().unwrap().ip;
-        let db_ip1 = &proto1.workloads["database"].network.as_ref().unwrap().ip;
-
-        let yaml_added = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    containers:
-      - image: img
-  database:
-    containers:
-      - image: img
-  cache:
-    containers:
-      - image: img
-"#;
-        let (_, proto2) = convert(yaml_added);
-        let api_ip2 = &proto2.workloads["api"].network.as_ref().unwrap().ip;
-        let db_ip2 = &proto2.workloads["database"].network.as_ref().unwrap().ip;
-
-        assert_eq!(
-            api_ip1, api_ip2,
-            "api IP should be stable after adding cache"
-        );
-        assert_eq!(
-            db_ip1, db_ip2,
-            "database IP should be stable after adding cache"
-        );
-    }
-
-    // --- (c) IP stability on removal ---
-
-    #[test]
-    fn ip_stable_on_removal() {
-        let yaml_full = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    containers:
-      - image: img
-  database:
-    containers:
-      - image: img
-  frontend:
-    containers:
-      - image: img
-"#;
-        let (_, proto1) = convert(yaml_full);
-        let api_ip1 = &proto1.workloads["api"].network.as_ref().unwrap().ip;
-        let fe_ip1 = &proto1.workloads["frontend"].network.as_ref().unwrap().ip;
-
-        let yaml_removed = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    containers:
-      - image: img
-  frontend:
-    containers:
-      - image: img
-"#;
-        let (_, proto2) = convert(yaml_removed);
-        let api_ip2 = &proto2.workloads["api"].network.as_ref().unwrap().ip;
-        let fe_ip2 = &proto2.workloads["frontend"].network.as_ref().unwrap().ip;
-
-        assert_eq!(
-            api_ip1, api_ip2,
-            "api IP should be stable after removing database"
-        );
-        assert_eq!(
-            fe_ip1, fe_ip2,
-            "frontend IP should be stable after removing database"
-        );
-    }
-
-    // --- (d) Explicit IP respected ---
-
-    #[test]
-    fn explicit_ip_respected() {
+    fn explicit_ip_passed_through() {
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
@@ -224,31 +118,21 @@ workloads:
     ip: 172.16.0.50
     containers:
       - image: img
-  auto1:
-    containers:
-      - image: img
-  auto2:
+  auto:
     containers:
       - image: img
 "#;
         let (_, proto) = convert(yaml);
-        let fixed_ip = &proto.workloads["fixed"].network.as_ref().unwrap().ip;
-        let auto1_ip = &proto.workloads["auto1"].network.as_ref().unwrap().ip;
-        let auto2_ip = &proto.workloads["auto2"].network.as_ref().unwrap().ip;
+        let fixed_net = proto.workloads["fixed"].network.as_ref().unwrap();
+        assert_eq!(fixed_net.ip, "172.16.0.50");
+        assert_eq!(fixed_net.mac, "");
 
-        assert_eq!(fixed_ip, "172.16.0.50");
-        assert_ne!(
-            auto1_ip, "172.16.0.50",
-            "auto-assigned should not collide with explicit"
-        );
-        assert_ne!(
-            auto2_ip, "172.16.0.50",
-            "auto-assigned should not collide with explicit"
-        );
-        assert_ne!(auto1_ip, auto2_ip, "auto-assigned IPs should be distinct");
+        let auto_net = proto.workloads["auto"].network.as_ref().unwrap();
+        assert_eq!(auto_net.ip, "");
+        assert_eq!(auto_net.mac, "");
     }
 
-    // --- (e) Defaults merging: suspend_on_idle ---
+    // --- (c) Defaults merging: suspend_on_idle ---
 
     #[test]
     fn defaults_suspend_on_idle() {
@@ -352,46 +236,6 @@ services:
         );
     }
 
-    // --- IpAllocator unit tests ---
-
-    #[test]
-    fn allocator_deterministic() {
-        let mut a1 = IpAllocator::new("10.0.0.0/24").unwrap();
-        let mut a2 = IpAllocator::new("10.0.0.0/24").unwrap();
-        let ip1 = a1.assign("foo").unwrap();
-        let ip2 = a2.assign("foo").unwrap();
-        assert_eq!(ip1, ip2, "same name should always get same IP");
-    }
-
-    #[test]
-    fn allocator_reserve_prevents_collision() {
-        let mut alloc = IpAllocator::new("10.0.0.0/24").unwrap();
-        let reserved: Ipv4Addr = "10.0.0.2".parse().unwrap();
-        alloc.reserve(reserved).unwrap();
-
-        // Assign many names, none should get the reserved IP
-        for i in 0..50 {
-            let ip = alloc.assign(&format!("name-{}", i)).unwrap();
-            assert_ne!(ip, reserved, "should not assign reserved IP");
-        }
-    }
-
-    #[test]
-    fn allocator_reserve_duplicate_errors() {
-        let mut alloc = IpAllocator::new("10.0.0.0/24").unwrap();
-        alloc.reserve("10.0.0.5".parse().unwrap()).unwrap();
-        assert!(alloc.reserve("10.0.0.5".parse().unwrap()).is_err());
-    }
-
-    #[test]
-    fn allocator_exhaustion() {
-        // /30 = 4 addresses, minus .0 and .1 = 2 usable
-        let mut alloc = IpAllocator::new("10.0.0.0/30").unwrap();
-        alloc.assign("a").unwrap();
-        alloc.assign("b").unwrap();
-        assert!(alloc.assign("c").is_err(), "should be exhausted");
-    }
-
     // --- Validation tests ---
 
     /// Helper: parse YAML and attempt conversion, expecting an error.
@@ -463,23 +307,6 @@ services:
     }
 
     #[test]
-    fn validation_ip_outside_subnet() {
-        let err = convert_err(r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    ip: 10.0.0.5
-    containers:
-      - image: img
-"#);
-        assert!(err.contains("outside the subnet"), "got: {}", err);
-        assert!(err.contains("workloads.api.ip"), "got: {}", err);
-    }
-
-    #[test]
     fn validation_duplicate_explicit_ips() {
         let err = convert_err(r#"
 apiVersion: v1
@@ -526,7 +353,6 @@ workloads:
   api:
     containers: []
   db:
-    ip: 10.0.0.1
     activation:
       idle_timeout: bad
     containers:
@@ -537,7 +363,6 @@ services:
 "#);
         // Should contain multiple errors
         assert!(err.contains("containers list is empty"), "got: {}", err);
-        assert!(err.contains("outside the subnet"), "got: {}", err);
         assert!(err.contains("invalid duration 'bad'"), "got: {}", err);
         assert!(err.contains("workload 'ghost' does not exist"), "got: {}", err);
     }
@@ -623,18 +448,14 @@ workloads:
         let err = convert_err(r#"
 apiVersion: v1
 kind: Namespace
-network:
-  subnet: 172.16.0.0/24
 workloads:
   api:
-    ip: 10.0.0.5
     containers:
-      - image: img
+      - image: ""
 "#);
         // Should have annotate-snippets style output with source pointer
         assert!(err.contains("-->"), "expected source location pointer, got:\n{}", err);
-        assert!(err.contains("10.0.0.5"), "expected value in snippet, got:\n{}", err);
-        assert!(err.contains("^^^^"), "expected underline, got:\n{}", err);
+        assert!(err.contains("image is empty"), "expected error message in snippet, got:\n{}", err);
     }
 
     #[test]
@@ -661,7 +482,6 @@ workloads:
         let spec_path = write_file(dir.path(), "distvirt.yaml", ns_yaml);
         let mut parsed = try_parse(&spec_path).unwrap().unwrap();
         resolve_includes(&mut parsed, &spec_path).unwrap();
-        resolve_refs(&mut parsed).unwrap();
         spec_to_namespace_spec(&parsed).unwrap()
     }
 
@@ -954,26 +774,9 @@ include:
     }
 
     #[test]
-    fn fragment_ip_stability() {
+    fn fragment_workload_network_empty() {
         let dir = TempDir::new().unwrap();
 
-        // First: namespace with just database
-        let yaml_base = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  database:
-    containers:
-      - image: postgres:16
-"#;
-        let spec_path = write_file(dir.path(), "distvirt.yaml", yaml_base);
-        let parsed = try_parse(&spec_path).unwrap().unwrap();
-        let (_, proto1) = spec_to_namespace_spec(&parsed).unwrap();
-        let db_ip1 = proto1.workloads["database"].network.as_ref().unwrap().ip.clone();
-
-        // Now add a fragment
         write_file(dir.path(), "api.yaml", r#"
 apiVersion: v1
 kind: WorkloadFragment
@@ -982,7 +785,7 @@ workloads:
     containers:
       - image: myorg/api:latest
 "#);
-        let yaml_with_fragment = r#"
+        let (_, proto) = parse_with_includes(&dir, r#"
 apiVersion: v1
 kind: Namespace
 network:
@@ -993,14 +796,14 @@ workloads:
       - image: postgres:16
 include:
   - path: api.yaml
-"#;
-        let spec_path2 = write_file(dir.path(), "distvirt2.yaml", yaml_with_fragment);
-        let mut parsed2 = try_parse(&spec_path2).unwrap().unwrap();
-        resolve_includes(&mut parsed2, &spec_path2).unwrap();
-        let (_, proto2) = spec_to_namespace_spec(&parsed2).unwrap();
-        let db_ip2 = &proto2.workloads["database"].network.as_ref().unwrap().ip;
-
-        assert_eq!(&db_ip1, db_ip2, "database IP should be stable after adding fragment");
+"#);
+        // IPs are not allocated by the client; they should be empty
+        let db_net = proto.workloads["database"].network.as_ref().unwrap();
+        assert_eq!(db_net.ip, "");
+        assert_eq!(db_net.mac, "");
+        let api_net = proto.workloads["api"].network.as_ref().unwrap();
+        assert_eq!(api_net.ip, "");
+        assert_eq!(api_net.mac, "");
     }
 
     #[test]
@@ -1028,10 +831,12 @@ include:
         assert!(proto.workloads.contains_key("app"));
     }
 
-    // --- Expression resolution tests ---
+    // --- Expression passthrough tests ---
+    // Expressions like ${self.ip}, ${workloads.X.ip}, ${services.X.ip} are now
+    // passed through as-is for the orchestrator to resolve at runtime.
 
     #[test]
-    fn resolve_self_ip_in_env() {
+    fn expression_self_ip_passed_through() {
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
@@ -1045,17 +850,16 @@ workloads:
           MY_IP: "${self.ip}"
 "#;
         let (_, proto) = convert(yaml);
-        let api_ip = &proto.workloads["api"].network.as_ref().unwrap().ip;
         let env = &proto.workloads["api"].containers[0]
             .config
             .as_ref()
             .unwrap()
             .env;
-        assert_eq!(env.get("MY_IP").unwrap(), api_ip);
+        assert_eq!(env.get("MY_IP").unwrap(), "${self.ip}");
     }
 
     #[test]
-    fn resolve_workload_ip_in_env() {
+    fn expression_workload_ip_passed_through() {
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
@@ -1072,17 +876,16 @@ workloads:
       - image: postgres:16
 "#;
         let (_, proto) = convert(yaml);
-        let db_ip = &proto.workloads["database"].network.as_ref().unwrap().ip;
         let env = &proto.workloads["api"].containers[0]
             .config
             .as_ref()
             .unwrap()
             .env;
-        assert_eq!(env.get("DB_HOST").unwrap(), db_ip);
+        assert_eq!(env.get("DB_HOST").unwrap(), "${workloads.database.ip}");
     }
 
     #[test]
-    fn resolve_service_ip_in_env() {
+    fn expression_service_ip_passed_through() {
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
@@ -1101,18 +904,16 @@ workloads:
       db: {}
 "#;
         let (_, proto) = convert(yaml);
-        let db_svc_ip = &proto.services["db"].network.as_ref().unwrap().ip;
         let env = &proto.workloads["api"].containers[0]
             .config
             .as_ref()
             .unwrap()
             .env;
-        let expected = format!("postgres://{}:5432/myapp", db_svc_ip);
-        assert_eq!(env.get("DB_URL").unwrap(), &expected);
+        assert_eq!(env.get("DB_URL").unwrap(), "postgres://${services.db.ip}:5432/myapp");
     }
 
     #[test]
-    fn resolve_in_config_data() {
+    fn expression_in_config_data_passed_through() {
         let yaml = r#"
 apiVersion: v1
 kind: Namespace
@@ -1136,7 +937,6 @@ workloads:
       - image: img
 "#;
         let (_, proto) = convert(yaml);
-        let api_ip = &proto.workloads["api"].network.as_ref().unwrap().ip;
         let proxy = &proto.workloads["proxy"];
         let config_content = &proxy.volumes[0]
             .volume_type
@@ -1144,55 +944,14 @@ workloads:
             .unwrap();
         match config_content {
             distvirt_client_protocol::volume_spec::VolumeType::ConfigData(cd) => {
-                let expected = format!("upstream backend {{ server {}:8080; }}", api_ip);
-                assert_eq!(cd.files[0].content, expected);
+                assert_eq!(cd.files[0].content, "upstream backend { server ${workloads.api.ip}:8080; }");
             }
             _ => panic!("expected config_data volume"),
         }
     }
 
     #[test]
-    fn resolve_unknown_expression_errors() {
-        let yaml = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    containers:
-      - image: img
-        env:
-          BAD: "${unknown.thing}"
-"#;
-        let mut parsed = parse_yaml(yaml);
-        let err = resolve_refs(&mut parsed).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("unknown expression"), "got: {}", msg);
-    }
-
-    #[test]
-    fn resolve_nonexistent_workload_ref_errors() {
-        let yaml = r#"
-apiVersion: v1
-kind: Namespace
-network:
-  subnet: 172.16.0.0/24
-workloads:
-  api:
-    containers:
-      - image: img
-        env:
-          HOST: "${workloads.nonexistent.ip}"
-"#;
-        let mut parsed = parse_yaml(yaml);
-        let err = resolve_refs(&mut parsed).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("does not exist"), "got: {}", msg);
-    }
-
-    #[test]
-    fn resolve_in_fragment_with_values_and_refs() {
+    fn fragment_with_values_and_expression_refs() {
         let dir = TempDir::new().unwrap();
         write_file(dir.path(), "app.yaml", r#"
 apiVersion: v1
@@ -1221,8 +980,9 @@ include:
       IMAGE: myorg/app:v2
 "#);
         let app = &proto.workloads["app"];
+        // values substitution still works
         assert_eq!(app.containers[0].image, "myorg/app:v2");
-        let db_svc_ip = &proto.services["db"].network.as_ref().unwrap().ip;
+        // expression refs are passed through for orchestrator resolution
         let env = &app.containers[0].config.as_ref().unwrap().env;
-        assert_eq!(env.get("DB_HOST").unwrap(), db_svc_ip);
+        assert_eq!(env.get("DB_HOST").unwrap(), "${services.db.ip}");
     }

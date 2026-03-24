@@ -10,7 +10,7 @@ use crate::types::*;
 
 // --- Proto -> Internal conversions ---
 
-pub(super) fn convert_proto_spec(spec: proto::NamespaceSpec) -> Result<NamespaceSpec, Status> {
+pub(super) fn convert_proto_spec(spec: proto::NamespaceSpec) -> Result<NamespaceSpecInput, Status> {
     let network = spec
         .network
         .ok_or_else(|| Status::invalid_argument("missing network config"))?;
@@ -18,15 +18,15 @@ pub(super) fn convert_proto_spec(spec: proto::NamespaceSpec) -> Result<Namespace
 
     let mut workloads = BTreeMap::new();
     for (id, wl) in spec.workloads {
-        workloads.insert(WorkloadName(id), convert_proto_workload_spec(wl)?);
+        workloads.insert(WorkloadName(id), convert_proto_workload_input(wl)?);
     }
 
     let mut services = BTreeMap::new();
     for (id, svc) in spec.services {
-        services.insert(id, convert_proto_service_spec(svc)?);
+        services.insert(id, convert_proto_service_input(svc)?);
     }
 
-    Ok(NamespaceSpec {
+    Ok(NamespaceSpecInput {
         network,
         workloads,
         services,
@@ -61,33 +61,20 @@ fn parse_network_config(subnet_str: &str) -> Result<NetworkConfig, Status> {
     })
 }
 
-fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, Status> {
+fn convert_proto_workload_input(wl: proto::WorkloadSpec) -> Result<WorkloadSpecInput, Status> {
     let run_policy = convert_proto_run_policy(wl.run_policy());
 
-    let network = wl
-        .network
-        .ok_or_else(|| Status::invalid_argument("workload missing network config"))?;
-    let ip: Ipv4Addr = network
-        .ip
-        .parse()
-        .map_err(|_| Status::invalid_argument(format!("invalid workload IP: '{}'", network.ip)))?;
-    // Gateway and netmask are populated from the namespace's NetworkConfig
-    // during pod launch/resume in Namespace::fill_network_from_namespace.
-    // Generate a locally-administered unicast MAC from the IP so the guest
-    // network stack gets a valid hardware address.
-    let ip_octets = ip.octets();
-    let pod_network = PodNetworkConfig {
-        ip,
-        mac: [
-            0x02,
-            0x00,
-            ip_octets[0],
-            ip_octets[1],
-            ip_octets[2],
-            ip_octets[3],
-        ],
-        gateway: Ipv4Addr::new(0, 0, 0, 0),
-        netmask: String::new(),
+    // IP is optional: empty string = auto-assign, non-empty = explicit override.
+    let explicit_ip = if let Some(network) = &wl.network {
+        if network.ip.is_empty() {
+            None
+        } else {
+            Some(network.ip.parse::<Ipv4Addr>().map_err(|_| {
+                Status::invalid_argument(format!("invalid workload IP: '{}'", network.ip))
+            })?)
+        }
+    } else {
+        None
     };
 
     let containers = wl
@@ -107,7 +94,6 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         }),
     });
 
-    // Workload-level activation: extract idle_timeout
     let activation = wl.activation.map(|act| ActivationSpec {
         idle_timeout: Duration::from_millis(act.idle_timeout_ms),
     });
@@ -142,9 +128,9 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         })
         .collect();
 
-    Ok(WorkloadSpec {
+    Ok(WorkloadSpecInput {
+        explicit_ip,
         containers,
-        network: pod_network,
         suspend_on_idle: wl.suspend_on_idle,
         resources,
         activation,
@@ -207,15 +193,20 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
     })
 }
 
-fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, Status> {
-    let network = svc
-        .network
-        .ok_or_else(|| Status::invalid_argument("service missing network config"))?;
-    let ip: Ipv4Addr = network
-        .ip
-        .parse()
-        .map_err(|_| Status::invalid_argument(format!("invalid service IP: '{}'", network.ip)))?;
-    // Convert per-port config.
+fn convert_proto_service_input(svc: proto::ServiceSpec) -> Result<ServiceSpecInput, Status> {
+    // IP is optional: empty string = auto-assign, non-empty = explicit override.
+    let explicit_ip = if let Some(network) = &svc.network {
+        if network.ip.is_empty() {
+            None
+        } else {
+            Some(network.ip.parse::<Ipv4Addr>().map_err(|_| {
+                Status::invalid_argument(format!("invalid service IP: '{}'", network.ip))
+            })?)
+        }
+    } else {
+        None
+    };
+
     let ports: Vec<crate::types::PortConfig> = svc
         .ports
         .into_iter()
@@ -240,7 +231,6 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
 
     let has_activation = ports.iter().any(|p| p.activator.is_some());
 
-    // Validate mutual exclusivity: if any port has an activator, all must.
     if has_activation {
         let all_have = ports.iter().all(|p| p.activator.is_some());
         if !all_have {
@@ -254,7 +244,7 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
     let idle_timeout = if svc.idle_timeout_ms > 0 {
         Duration::from_millis(svc.idle_timeout_ms)
     } else if has_activation {
-        Duration::from_secs(30) // default when activation is present
+        Duration::from_secs(30)
     } else {
         Duration::ZERO
     };
@@ -262,9 +252,9 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
     let buffer_frames = if svc.buffer_frames == 0 { 64 } else { svc.buffer_frames };
     let buffer_timeout_ms = if svc.buffer_timeout_ms == 0 { 5000 } else { svc.buffer_timeout_ms };
 
-    Ok(ServiceSpec {
+    Ok(ServiceSpecInput {
         workload_id: WorkloadName(svc.workload_id),
-        ip,
+        explicit_ip,
         ports,
         has_activation,
         idle_timeout,
@@ -278,18 +268,18 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
 
 pub(super) fn convert_proto_patch(
     req: proto::PatchNamespaceRequest,
-) -> Result<crate::types::NamespacePatch, Status> {
+) -> Result<crate::types::NamespacePatchInput, Status> {
     let mut workloads = BTreeMap::new();
     for (name, wl) in req.workloads {
-        workloads.insert(WorkloadName(name), convert_proto_workload_spec(wl)?);
+        workloads.insert(WorkloadName(name), convert_proto_workload_input(wl)?);
     }
 
     let mut services = BTreeMap::new();
     for (name, svc) in req.services {
-        services.insert(name, convert_proto_service_spec(svc)?);
+        services.insert(name, convert_proto_service_input(svc)?);
     }
 
-    Ok(crate::types::NamespacePatch {
+    Ok(crate::types::NamespacePatchInput {
         workloads,
         services,
         remove_workloads: req.remove_workloads.into_iter().map(WorkloadName).collect(),

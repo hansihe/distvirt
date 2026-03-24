@@ -1,3 +1,4 @@
+use crossterm::style::Stylize;
 use distvirt_client::format::{
     namespace_state_label, pod_state_label, render_event_line, render_namespace_overview,
     service_state_label, workload_state_label,
@@ -191,11 +192,12 @@ pub fn print_log_chunk(chunk: &LogChunk) {
         chunk.pod_id.clone()
     };
     for line in text.lines() {
-        if chunk.container_id.is_empty() {
-            println!("[{}] {}", label, line);
+        let prefix = if chunk.container_id.is_empty() {
+            format!("[{}]", label)
         } else {
-            println!("[{}/{}] {}", label, chunk.container_id, line);
-        }
+            format!("[{}/{}]", label, chunk.container_id)
+        };
+        println!("{} {}", prefix.dim(), line);
     }
 }
 

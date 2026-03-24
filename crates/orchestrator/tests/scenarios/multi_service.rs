@@ -18,19 +18,21 @@ use distvirt_worker_protocol::WorkerEvent;
 fn test_two_services_one_workload_shared_demand() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
-    h.create_namespace("ns", multi_service_spec());
+    let alloc = h.create_namespace("ns", multi_service_spec());
     h.converge();
     h.assert_workload_dormant("ns", "shared");
     h.assert_service_idle("ns", "svc-a");
     h.assert_service_idle("ns", "svc-b");
 
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
+    let svc_b_ip = alloc.service_ips["svc-b"].ip;
     let svc_a_id = h.proto_service_id("ns", "svc-a");
     let svc_b_id = h.proto_service_id("ns", "svc-b");
 
     // Activate svc-a → workload launches
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
     h.converge();
@@ -40,7 +42,7 @@ fn test_two_services_one_workload_shared_demand() {
     // Activate svc-b with sustained demand → workload already running
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: svc_b_ip,
         service_id: Some(svc_b_id),
         active: true,
     });
@@ -72,16 +74,18 @@ fn test_two_services_one_workload_shared_demand() {
 fn test_service_activation_while_already_running() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
-    h.create_namespace("ns", multi_service_spec());
+    let alloc = h.create_namespace("ns", multi_service_spec());
     h.converge();
 
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
+    let svc_b_ip = alloc.service_ips["svc-b"].ip;
     let svc_a_id = h.proto_service_id("ns", "svc-a");
     let svc_b_id = h.proto_service_id("ns", "svc-b");
 
     // Activate svc-a
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
     h.converge();
@@ -94,7 +98,7 @@ fn test_service_activation_while_already_running() {
     // Activate svc-b while already running
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: svc_b_ip,
         service_id: Some(svc_b_id),
     });
     h.converge();
@@ -120,8 +124,11 @@ fn test_service_activation_while_already_running() {
 fn test_always_on_multi_service_both_get_create_service() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
-    h.create_namespace("ns", always_on_multi_service_spec());
+    let alloc = h.create_namespace("ns", always_on_multi_service_spec());
     h.converge();
+
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
+    let svc_b_ip = alloc.service_ips["svc-b"].ip;
 
     // Workload should be running (always-on).
     h.assert_workload_running("ns", "shared");
@@ -134,12 +141,12 @@ fn test_always_on_multi_service_both_get_create_service() {
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_a_ip,
     );
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 101),
+        svc_b_ip,
     );
 }
 
@@ -149,10 +156,12 @@ fn test_always_on_multi_service_both_get_create_service() {
 fn test_add_service_to_running_workload() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker();
-    h.create_namespace("ns", always_on_spec());
+    let alloc = h.create_namespace("ns", always_on_spec());
     h.converge();
     h.assert_workload_running("ns", "echo");
     h.assert_service_active("ns", "echo-svc");
+
+    let echo_svc_ip = alloc.service_ips["echo-svc"].ip;
 
     // Add a second always-on service via spec update.
     let mut new_spec = always_on_spec();
@@ -169,8 +178,10 @@ fn test_add_service_to_running_workload() {
             labels: BTreeMap::new(),
         },
     );
-    h.update_namespace("ns", new_spec);
+    let alloc2 = h.update_namespace("ns", new_spec);
     h.converge();
+
+    let echo_svc_2_ip = alloc2.service_ips["echo-svc-2"].ip;
 
     // Workload should still be running (no restart).
     h.assert_workload_running("ns", "echo");
@@ -184,12 +195,12 @@ fn test_add_service_to_running_workload() {
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        echo_svc_ip,
     );
     h.assert_worker_has_service_endpoint_with_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 101),
+        echo_svc_2_ip,
     );
 }
 
@@ -200,15 +211,16 @@ fn test_add_service_to_suspended_workload() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
     let timeout = Duration::from_secs(30);
-    h.create_namespace("ns", activation_spec(timeout));
+    let alloc = h.create_namespace("ns", activation_spec(timeout));
     h.converge();
 
+    let web_svc_ip = alloc.service_ips["web-svc"].ip;
     let web_svc_id = h.proto_service_id("ns", "web-svc");
 
     // Activate → running → idle → suspended
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: web_svc_ip,
         service_id: Some(web_svc_id),
     });
     h.converge();
@@ -244,8 +256,10 @@ fn test_add_service_to_suspended_workload() {
             labels: BTreeMap::new(),
         },
     );
-    h.update_namespace("ns", new_spec);
+    let alloc2 = h.update_namespace("ns", new_spec);
     h.converge();
+
+    let web_svc_2_ip = alloc2.service_ips["web-svc-2"].ip;
 
     // New service should be Idle (activation service, workload is Suspended).
     h.assert_service_idle("ns", "web-svc-2");
@@ -256,13 +270,13 @@ fn test_add_service_to_suspended_workload() {
     h.assert_worker_has_service_endpoint_without_backend(
         &w1,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 101),
+        web_svc_2_ip,
     );
 
     // Activating the new service should resume the workload.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: web_svc_2_ip,
         service_id: Some(web_svc_2_id),
     });
     h.converge();
@@ -276,9 +290,12 @@ fn test_add_service_to_suspended_workload() {
 fn test_late_joining_worker_receives_create_service() {
     let mut h = TestHarness::new();
     let _w1 = h.add_worker();
-    h.create_namespace("ns", always_on_multi_service_spec());
+    let alloc = h.create_namespace("ns", always_on_multi_service_spec());
     h.converge();
     h.assert_workload_running("ns", "shared");
+
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
+    let svc_b_ip = alloc.service_ips["svc-b"].ip;
 
     // Add a second worker.
     let w2 = h.add_worker();
@@ -288,12 +305,12 @@ fn test_late_joining_worker_receives_create_service() {
     h.assert_worker_has_service_endpoint_with_backend(
         &w2,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 100),
+        svc_a_ip,
     );
     h.assert_worker_has_service_endpoint_with_backend(
         &w2,
         "ns",
-        Ipv4Addr::new(172, 16, 0, 101),
+        svc_b_ip,
     );
 }
 
@@ -303,22 +320,24 @@ fn test_late_joining_worker_receives_create_service() {
 fn test_remove_service_updates_demand() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
-    h.create_namespace("ns", multi_service_spec());
+    let alloc = h.create_namespace("ns", multi_service_spec());
     h.converge();
 
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
+    let svc_b_ip = alloc.service_ips["svc-b"].ip;
     let svc_a_id = h.proto_service_id("ns", "svc-a");
     let svc_b_id = h.proto_service_id("ns", "svc-b");
 
     // Activate both services.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
     h.converge();
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 101),
+        ip: svc_b_ip,
         service_id: Some(svc_b_id),
     });
     h.converge();
@@ -329,17 +348,19 @@ fn test_remove_service_updates_demand() {
     // Remove svc-b via spec update.
     let mut new_spec = multi_service_spec();
     new_spec.services.remove(&"svc-b".to_string());
-    h.update_namespace("ns", new_spec);
+    let alloc2 = h.update_namespace("ns", new_spec);
     h.converge();
+
+    let svc_a_ip_after = alloc2.service_ips["svc-a"].ip;
 
     // Workload should still be running (svc-a still has demand).
     h.assert_workload_running("ns", "shared");
     h.assert_service_active("ns", "svc-a");
 
     // svc-b's IP should have been removed from the endpoint table.
-    h.assert_worker_has_no_endpoint(&w1, "ns", Ipv4Addr::new(172, 16, 0, 101));
+    h.assert_worker_has_no_endpoint(&w1, "ns", svc_b_ip);
     // svc-a should still be present with a backend.
-    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", Ipv4Addr::new(172, 16, 0, 100));
+    h.assert_worker_has_service_endpoint_with_backend(&w1, "ns", svc_a_ip_after);
 
     // svc-b should no longer exist in the namespace.
     let ns = h.namespace("ns");
@@ -356,15 +377,16 @@ fn test_remove_service_updates_demand() {
 fn test_remove_only_active_service_drops_demand() {
     let mut h = TestHarness::new();
     let w1 = h.add_worker_with(MockWorkerConfig::with_pool());
-    h.create_namespace("ns", multi_service_spec());
+    let alloc = h.create_namespace("ns", multi_service_spec());
     h.converge();
 
+    let svc_a_ip = alloc.service_ips["svc-a"].ip;
     let svc_a_id = h.proto_service_id("ns", "svc-a");
 
     // Activate svc-a only.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
         namespace_id: "ns".into(),
-        ip: Ipv4Addr::new(172, 16, 0, 100),
+        ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
     h.converge();

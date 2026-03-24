@@ -6,7 +6,7 @@
 use distvirt_worker_protocol::NamespaceId;
 use tokio::sync::mpsc;
 
-use crate::{sm::PodId, types::NamespaceSpec};
+use crate::sm::PodId;
 
 pub mod namespace;
 pub mod orchestrator;
@@ -124,11 +124,12 @@ pub enum WorkerNamespaceEventKind {
 // =============================================================================
 
 /// Commands from external clients (management API) to a namespace task.
+///
+/// Note: spec operations (update/patch) are NOT routed through this enum.
+/// They use dedicated methods on `Namespace`/`NamespaceUnit` that return
+/// `Result<(NamespaceEffects, IpAllocResult), ClientError>` for explicit
+/// error threading and IP allocation result propagation.
 pub enum ClientCommand {
-    /// Apply a new namespace spec (creates/updates/removes workloads and services).
-    UpdateSpec(NamespaceSpec),
-    /// Partially update a namespace spec (upsert/remove individual resources).
-    PatchSpec(crate::types::NamespacePatch),
     /// Restart a workload by protocol name.
     AdminRestart { workload_name: String },
     /// Scavenge a workload by protocol name.
@@ -168,6 +169,8 @@ pub enum ClientError {
     IpExhausted,
     /// No worker with the given ID exists.
     WorkerNotFound,
+    /// IP allocation failed (zone exhaustion, collision, migration, etc.).
+    IpAllocation(crate::core::namespace::ip_alloc::IpAllocError),
     /// The shell event loop has stopped.
     ShellGone,
 }
@@ -180,6 +183,7 @@ impl std::fmt::Display for ClientError {
             ClientError::WorkerNotFound => write!(f, "worker not found"),
             ClientError::NoTunnelWorker => write!(f, "no worker with tunnel capabilities"),
             ClientError::IpExhausted => write!(f, "WireGuard peer IP pool exhausted"),
+            ClientError::IpAllocation(e) => write!(f, "IP allocation: {e}"),
             ClientError::ShellGone => write!(f, "orchestrator shell has stopped"),
         }
     }

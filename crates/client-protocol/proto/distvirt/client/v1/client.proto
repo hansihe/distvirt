@@ -179,6 +179,12 @@ message NetworkConfig {
     string subnet = 1;
 }
 
+// IP allocation result returned by the orchestrator after apply/sync/patch.
+message IpAllocation {
+    string ip = 1;
+    bool is_manual = 2;  // true = user-specified, false = auto-assigned by orchestrator
+}
+
 
 // --- Namespace Lifecycle ---
 
@@ -186,13 +192,19 @@ message CreateNamespaceRequest {
     string namespace_id = 1;
     NamespaceSpec spec = 2;
 }
-message CreateNamespaceResponse {}
+message CreateNamespaceResponse {
+    map<string, IpAllocation> workload_ips = 1;
+    map<string, IpAllocation> service_ips = 2;
+}
 
 message UpdateNamespaceRequest {
     string namespace_id = 1;
     NamespaceSpec spec = 2;
 }
-message UpdateNamespaceResponse {}
+message UpdateNamespaceResponse {
+    map<string, IpAllocation> workload_ips = 1;
+    map<string, IpAllocation> service_ips = 2;
+}
 
 message DeleteNamespaceRequest {
     string namespace_id = 1;
@@ -347,7 +359,10 @@ message PatchNamespaceRequest {
     repeated string remove_workloads = 4;
     repeated string remove_services = 5;
 }
-message PatchNamespaceResponse {}
+message PatchNamespaceResponse {
+    map<string, IpAllocation> workload_ips = 1;
+    map<string, IpAllocation> service_ips = 2;
+}
 
 // --- Deactivate Workload ---
 

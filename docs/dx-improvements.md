@@ -6,10 +6,8 @@ Grouped by subsystem, roughly in dependency order.
 
 Foundational changes to how specs are applied and managed.
 
-### Orchestrator-side IP allocation
-- **Current**: IP allocation is client-side using deterministic FNV-1a hashing (`client/src/spec/ip_alloc.rs`). Applying partial specs from different CLI invocations can produce collisions if the allocation context differs.
-- **Goal**: Move allocation to the orchestrator so it has the full view of allocated IPs per namespace. Stable allocation regardless of which client or fragment is applying.
-- **Scope**: Client spec resolution, orchestrator namespace management, client-protocol changes.
+### Orchestrator-side IP allocation ✓
+- **Done**: IP allocation moved from client to orchestrator. `NamespaceIpAllocator` in `orchestrator/src/core/namespace/ip_alloc.rs` owns per-namespace state. Subnet split into auto zone (bottom half, sequential assignment) and manual zone (top half, user-specified explicit IPs), with WireGuard reserve at the top. Allocations are sticky (survive re-apply). Client-side `ip_alloc.rs`, `resolve.rs` (`${...}` IP expressions) deleted. Responses now return full `IpAllocResult` snapshot with auto/manual indicator per resource. Dedicated `apply_full_spec`/`apply_patch` methods on `NamespaceUnit` with explicit `Result<(NamespaceOutput, IpAllocResult), ClientError>` return type.
 - **Prerequisite for**: reliable multi-client partial apply.
 
 ### Individual fragment apply / partial apply / labels
@@ -70,6 +68,7 @@ All contained within `log_bus.rs` + CLI log rendering.
 - **Current**: Format is `[workload_name/pod_id/container_id] line`. Hard to scan across multiple workloads.
 - **Goal**: Per-workload color coding (hash name to terminal color), or fixed-width left-margin gutter. Easier visual distinction.
 - **Scope**: `format.rs` log line rendering.
+- **Progress**: `[...]` prefix now rendered with dim styling (crossterm `Stylize`) so metadata visually recedes from log content. Further improvements (per-workload colors, fixed-width gutter) possible later.
 
 ## 5. CLI UX
 

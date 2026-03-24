@@ -71,8 +71,10 @@ pub struct TestCluster {
     _shell_task: JoinHandle<()>,
     worker_handles: Vec<(GlobalWorkerId, JoinHandle<anyhow::Result<()>>)>,
     gateway_provider: SimGatewayProvider,
-    /// Cache of namespace specs for service_ip / idle_timeout lookups.
+    /// Cache of namespace specs for idle_timeout lookups.
     specs: BTreeMap<String, NamespaceSpec>,
+    /// Cache of allocated IPs for service_ip lookups.
+    allocs: BTreeMap<String, IpAllocResult>,
 }
 
 impl TestCluster {
@@ -89,6 +91,7 @@ impl TestCluster {
             worker_handles: Vec::new(),
             gateway_provider: SimGatewayProvider::new(),
             specs: BTreeMap::new(),
+            allocs: BTreeMap::new(),
         }
     }
 
@@ -238,10 +241,12 @@ impl TestCluster {
             .create_namespace(NamespaceId::from(ns_id), spec.network.clone())
             .await
             .expect("create_namespace failed");
-        self.shell
-            .update_namespace(NamespaceId::from(ns_id), spec)
+        let input = NamespaceSpecInput::from_resolved(&spec);
+        let alloc = self.shell
+            .update_namespace(NamespaceId::from(ns_id), input)
             .await
             .expect("update_namespace (initial spec) failed");
+        self.allocs.insert(ns_id.to_string(), alloc);
     }
 
     pub async fn delete_namespace(&mut self, ns_id: &str) {
@@ -254,10 +259,12 @@ impl TestCluster {
 
     pub async fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
         self.specs.insert(ns_id.to_string(), spec.clone());
-        self.shell
-            .update_namespace(NamespaceId::from(ns_id), spec)
+        let input = NamespaceSpecInput::from_resolved(&spec);
+        let alloc = self.shell
+            .update_namespace(NamespaceId::from(ns_id), input)
             .await
             .expect("update_namespace failed");
+        self.allocs.insert(ns_id.to_string(), alloc);
         self.converge().await;
     }
 
@@ -306,17 +313,17 @@ impl TestCluster {
             .clone()
     }
 
-    /// Look up the service IP from the cached spec.
+    /// Look up the service IP from the cached allocation result.
     pub fn service_ip(&self, ns_id: &str, svc_id: &str) -> Ipv4Addr {
-        let spec = self
-            .specs
+        let alloc = self
+            .allocs
             .get(ns_id)
-            .unwrap_or_else(|| panic!("no cached spec for namespace '{}'", ns_id));
-        spec.services
+            .unwrap_or_else(|| panic!("no cached alloc for namespace '{}'", ns_id));
+        alloc.service_ips
             .get(svc_id)
             .unwrap_or_else(|| {
                 panic!(
-                    "service spec '{}' not found in namespace '{}'",
+                    "service '{}' not found in allocation for namespace '{}'",
                     svc_id, ns_id
                 )
             })

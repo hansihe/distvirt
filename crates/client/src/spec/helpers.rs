@@ -1,5 +1,3 @@
-use std::net::Ipv4Addr;
-
 use distvirt_client_protocol::*;
 
 use crate::errors::SpecError;
@@ -71,43 +69,6 @@ pub(crate) fn convert_buffer(buffer: &Option<SpecBuffer>) -> (u32, u32) {
         }
         None => (0, 0),
     }
-}
-
-pub(crate) fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), SpecError> {
-    let (ip_str, prefix_str) = cidr
-        .split_once('/')
-        .ok_or_else(|| SpecError::Validation {
-            message: format!("invalid CIDR: {}", cidr),
-        })?;
-    let ip: Ipv4Addr = ip_str
-        .parse()
-        .map_err(|e| SpecError::Validation {
-            message: format!("invalid IP in CIDR: {e}"),
-        })?;
-    let prefix: u8 = prefix_str
-        .parse()
-        .map_err(|e| SpecError::Validation {
-            message: format!("invalid prefix in CIDR: {e}"),
-        })?;
-    Ok((ip, prefix))
-}
-
-pub(crate) fn ip_to_u32(ip: Ipv4Addr) -> u32 {
-    u32::from(ip)
-}
-
-pub(crate) fn u32_to_ip(val: u32) -> Ipv4Addr {
-    Ipv4Addr::from(val)
-}
-
-pub(crate) fn ip_to_mac(ip: &str) -> String {
-    // Generate a deterministic MAC from IP: 02:00:xx:xx:xx:xx
-    let addr: Ipv4Addr = ip.parse().unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
-    let octets = addr.octets();
-    format!(
-        "02:00:{:02X}:{:02X}:{:02X}:{:02X}",
-        octets[0], octets[1], octets[2], octets[3]
-    )
 }
 
 /// Parse a human-readable duration string into milliseconds.

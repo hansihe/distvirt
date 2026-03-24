@@ -3,11 +3,13 @@ use std::time::Duration;
 
 use distvirt_orchestrator::adapter::timer::TimerConfig;
 use distvirt_orchestrator::core::namespace::NamespaceUnit;
-use distvirt_orchestrator::core::{ClientCommand, GlobalWorkerId};
+use distvirt_orchestrator::core::GlobalWorkerId;
 use distvirt_orchestrator::shell::sync::{MockWorkerConfig, SyncShell};
 use distvirt_orchestrator::sm::endpoint::{EndpointSm, EndpointState, EndpointStatus};
 use distvirt_orchestrator::sm::{ServiceSm, WlStatus, WorkloadSm};
-use distvirt_orchestrator::types::NamespaceSpec;
+use distvirt_orchestrator::types::{
+    IpAllocResult, NamespacePatchInput, NamespaceSpec, NamespaceSpecInput,
+};
 use distvirt_worker_protocol::{NamespaceId, PsiMetrics, WorkerCommand, WorkerEvent};
 
 fn test_timer_config() -> TimerConfig {
@@ -68,27 +70,24 @@ impl TestHarness {
     // Namespace lifecycle
     // =========================================================================
 
-    pub fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
+    pub fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) -> IpAllocResult {
         let namespace_id = NamespaceId::from(ns_id);
         self.shell
             .create_namespace(namespace_id.clone(), spec.network.clone());
-        self.shell
-            .client_command(&namespace_id, ClientCommand::UpdateSpec(spec));
-        self.shell.drain();
+        let input = NamespaceSpecInput::from_resolved(&spec);
+        self.shell.apply_full_spec(&namespace_id, input).unwrap()
     }
 
-    pub fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
+    pub fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) -> IpAllocResult {
         let namespace_id = NamespaceId::from(ns_id);
-        self.shell
-            .client_command(&namespace_id, ClientCommand::UpdateSpec(spec));
-        self.shell.drain();
+        let input = NamespaceSpecInput::from_resolved(&spec);
+        self.shell.apply_full_spec(&namespace_id, input).unwrap()
     }
 
-    pub fn patch_namespace(&mut self, ns_id: &str, patch: crate::harness::NamespacePatch) {
+    pub fn patch_namespace(&mut self, ns_id: &str, patch: crate::harness::NamespacePatch) -> IpAllocResult {
         let namespace_id = NamespaceId::from(ns_id);
-        self.shell
-            .client_command(&namespace_id, ClientCommand::PatchSpec(patch));
-        self.shell.drain();
+        let input = NamespacePatchInput::from_resolved(&patch);
+        self.shell.apply_patch(&namespace_id, input).unwrap()
     }
 
     pub fn delete_namespace(&mut self, ns_id: &str) {

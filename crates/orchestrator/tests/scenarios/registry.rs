@@ -16,12 +16,14 @@ fn test_registry_sync_on_namespace_create() {
 
     // Create namespace with always-on service.
     let spec = always_on_spec();
-    h.create_namespace("ns1", spec);
+    let alloc = h.create_namespace("ns1", spec);
     h.converge();
 
     h.assert_namespace_status("ns1", distvirt_orchestrator::types::NamespaceStatus::Active);
 
-    // Worker should have received RegistryUpdate with "echo-svc" → 172.16.0.100
+    let svc_ip = alloc.service_ips["echo-svc"].ip;
+
+    // Worker should have received RegistryUpdate with "echo-svc" → allocated IP
     // (service creation produces incremental Add action).
     h.assert_worker_received_command_matching(
         &w1,
@@ -29,7 +31,7 @@ fn test_registry_sync_on_namespace_create() {
         |cmd| match cmd {
             WorkerCommand::RegistryUpdate { added, .. } => added
                 .iter()
-                .any(|e| e.name == "echo-svc" && e.ip == Ipv4Addr::new(172, 16, 0, 100)),
+                .any(|e| e.name == "echo-svc" && e.ip == svc_ip),
             _ => false,
         },
     );

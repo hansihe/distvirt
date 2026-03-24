@@ -519,6 +519,34 @@ impl SyncShell {
         ));
     }
 
+    /// Apply a full spec with IP allocation (mirrors async shell's dedicated method).
+    pub fn apply_full_spec(
+        &mut self,
+        namespace_id: &NamespaceId,
+        input: crate::types::NamespaceSpecInput,
+    ) -> Result<crate::types::IpAllocResult, crate::core::ClientError> {
+        let ns = self.namespaces.get_mut(namespace_id)
+            .ok_or(crate::core::ClientError::NamespaceNotFound)?;
+        let (ns_output, alloc) = ns.apply_full_spec(input, self.now)?;
+        self.route_namespace_output(namespace_id, ns_output);
+        self.delivery_loop();
+        Ok(alloc)
+    }
+
+    /// Apply a patch with IP allocation (mirrors async shell's dedicated method).
+    pub fn apply_patch(
+        &mut self,
+        namespace_id: &NamespaceId,
+        input: crate::types::NamespacePatchInput,
+    ) -> Result<crate::types::IpAllocResult, crate::core::ClientError> {
+        let ns = self.namespaces.get_mut(namespace_id)
+            .ok_or(crate::core::ClientError::NamespaceNotFound)?;
+        let (ns_output, alloc) = ns.apply_patch(input, self.now)?;
+        self.route_namespace_output(namespace_id, ns_output);
+        self.delivery_loop();
+        Ok(alloc)
+    }
+
     pub fn inject_worker_event(
         &mut self,
         namespace_id: &NamespaceId,

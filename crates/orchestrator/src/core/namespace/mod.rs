@@ -1,6 +1,7 @@
 //! Per-namespace state: core logic, timer wheel, WG peers.
 
 pub(crate) mod inner;
+pub mod ip_alloc;
 pub mod timer_wheel;
 pub mod wg_peers;
 
@@ -14,9 +15,9 @@ use timer_wheel::NamespaceTimerWheel;
 
 use crate::adapter::timer::TimerConfig;
 use crate::core::types::{NamespaceEffects, NamespaceOutput, OrchestratorToNamespace};
-use crate::core::GlobalWorkerId;
+use crate::core::{ClientError, GlobalWorkerId};
 use crate::id_registry::IdRegistry;
-use crate::types::NamespaceId;
+use crate::types::{IpAllocResult, NamespaceId, NamespacePatchInput, NamespaceSpecInput};
 
 // Re-export for external use.
 pub use inner::Namespace;
@@ -100,6 +101,32 @@ impl NamespaceUnit {
             broadcast_commands: effects.broadcast_commands,
             observability_events: effects.observability_events,
         }
+    }
+
+    // =========================================================================
+    // Spec operations (dedicated request-response methods)
+    // =========================================================================
+
+    /// Apply a full spec replacement with IP allocation.
+    pub fn apply_full_spec(
+        &mut self,
+        input: NamespaceSpecInput,
+        now: Duration,
+    ) -> Result<(NamespaceOutput, IpAllocResult), ClientError> {
+        let (effects, alloc) = self.namespace.apply_full_spec(input)?;
+        let output = self.convert_effects(effects, now);
+        Ok((output, alloc))
+    }
+
+    /// Apply a patch (upsert + removals) with IP allocation.
+    pub fn apply_patch(
+        &mut self,
+        input: NamespacePatchInput,
+        now: Duration,
+    ) -> Result<(NamespaceOutput, IpAllocResult), ClientError> {
+        let (effects, alloc) = self.namespace.apply_patch(input)?;
+        let output = self.convert_effects(effects, now);
+        Ok((output, alloc))
     }
 
     // =========================================================================

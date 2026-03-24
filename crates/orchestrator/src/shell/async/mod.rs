@@ -31,7 +31,7 @@ use crate::core::{ClientCommand, ClientError, ConnectResult, GlobalWorkerId, Wor
 use crate::event_bus::EventBusHandle;
 use crate::id_registry::IdRegistryMap;
 use crate::log_bus::LogBusHandle;
-use crate::types::{NamespaceId, NamespaceSpec};
+use crate::types::NamespaceId;
 
 // =============================================================================
 // Shell event
@@ -67,13 +67,13 @@ enum ShellCommand {
     },
     UpdateNamespace {
         namespace_id: NamespaceId,
-        spec: NamespaceSpec,
-        response: oneshot::Sender<Result<(), ClientError>>,
+        spec: crate::types::NamespaceSpecInput,
+        response: oneshot::Sender<Result<crate::types::IpAllocResult, ClientError>>,
     },
     PatchNamespace {
         namespace_id: NamespaceId,
-        patch: crate::types::NamespacePatch,
-        response: oneshot::Sender<Result<(), ClientError>>,
+        patch: crate::types::NamespacePatchInput,
+        response: oneshot::Sender<Result<crate::types::IpAllocResult, ClientError>>,
     },
     GetNamespaceStatus {
         namespace_id: NamespaceId,
@@ -164,8 +164,8 @@ impl ShellHandle {
     pub async fn update_namespace(
         &self,
         namespace_id: NamespaceId,
-        spec: NamespaceSpec,
-    ) -> Result<(), ClientError> {
+        spec: crate::types::NamespaceSpecInput,
+    ) -> Result<crate::types::IpAllocResult, ClientError> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -181,8 +181,8 @@ impl ShellHandle {
     pub async fn patch_namespace(
         &self,
         namespace_id: NamespaceId,
-        patch: crate::types::NamespacePatch,
-    ) -> Result<(), ClientError> {
+        patch: crate::types::NamespacePatchInput,
+    ) -> Result<crate::types::IpAllocResult, ClientError> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -497,15 +497,15 @@ impl Shell {
                     spec,
                     response,
                 } => {
-                    let result = if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
-                        let ns_output = ns.process(
-                            OrchestratorToNamespace::ClientCommand(ClientCommand::UpdateSpec(spec)),
-                            now,
-                        );
-                        self.route_namespace_output(&namespace_id, ns_output).await;
-                        Ok(())
-                    } else {
-                        Err(ClientError::NamespaceNotFound)
+                    let result = match self.namespaces.get_mut(&namespace_id) {
+                        Some(ns) => match ns.apply_full_spec(spec, now) {
+                            Ok((ns_output, alloc)) => {
+                                self.route_namespace_output(&namespace_id, ns_output).await;
+                                Ok(alloc)
+                            }
+                            Err(e) => Err(e),
+                        },
+                        None => Err(ClientError::NamespaceNotFound),
                     };
                     let _ = response.send(result);
                 }
@@ -514,15 +514,15 @@ impl Shell {
                     patch,
                     response,
                 } => {
-                    let result = if let Some(ns) = self.namespaces.get_mut(&namespace_id) {
-                        let ns_output = ns.process(
-                            OrchestratorToNamespace::ClientCommand(ClientCommand::PatchSpec(patch)),
-                            now,
-                        );
-                        self.route_namespace_output(&namespace_id, ns_output).await;
-                        Ok(())
-                    } else {
-                        Err(ClientError::NamespaceNotFound)
+                    let result = match self.namespaces.get_mut(&namespace_id) {
+                        Some(ns) => match ns.apply_patch(patch, now) {
+                            Ok((ns_output, alloc)) => {
+                                self.route_namespace_output(&namespace_id, ns_output).await;
+                                Ok(alloc)
+                            }
+                            Err(e) => Err(e),
+                        },
+                        None => Err(ClientError::NamespaceNotFound),
                     };
                     let _ = response.send(result);
                 }
