@@ -59,10 +59,8 @@ Events generated at lower layers need to propagate up through worker -> orchestr
 
 All contained within `log_bus.rs` + CLI log rendering.
 
-### Follow for new pods not working
-- **Current**: `subscribe_by_workload()` in `log_bus.rs` registers standing subscriptions that should auto-attach to new topics. Mechanism exists (lines 143-166, 269-308) but reportedly broken.
-- **Goal**: Fix subscription matching for newly created topics. Add test case for this scenario.
-- **Scope**: `log_bus.rs` topic registration + standing subscription matching. Possibly a race condition.
+### Follow for new pods not working ✓
+- **Done**: Two-part race condition fixed. (1) `spawn_log_ingest` resolved `workload_name` once on stream open; if id registry wasn't populated yet (`sync_dynamic_ids` runs after reconcile), name was `None` for the stream's lifetime. Fix: re-resolve on each chunk until successful. (2) `LogBusHandle::publish` only matched standing subscriptions on new topic creation; when a topic was created with `workload_name: None` and later backfilled, standing subscriptions were never attached. Fix: also match standing subscriptions on backfill. Test added for the late-backfill scenario.
 
 ### Logs formatting
 - **Current**: Format is `[workload_name/pod_id/container_id] line`. Hard to scan across multiple workloads.

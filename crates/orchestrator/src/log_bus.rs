@@ -140,10 +140,21 @@ impl LogBusHandle {
 
         let is_new_topic = !inner.topics.contains_key(&key);
 
-        // For new topics, collect matching workload subscription senders
-        // before creating the topic (avoids borrow conflict).
+        // For new topics or topics being backfilled with a workload_name,
+        // collect matching workload subscription senders.
+        let needs_sub_matching = if is_new_topic {
+            workload_name.is_some()
+        } else {
+            // Backfill case: topic exists without workload_name, now we have one.
+            workload_name.is_some()
+                && inner
+                    .topics
+                    .get(&key)
+                    .map_or(false, |t| t.workload_name.is_none())
+        };
+
         let mut matching_subs = Vec::new();
-        if is_new_topic {
+        if needs_sub_matching {
             if let Some(ref wl_name) = workload_name {
                 // Prune dead workload subscriptions while we're here.
                 inner.workload_subscriptions.retain(|sub| !sub.tx.is_closed());
@@ -178,7 +189,8 @@ impl LogBusHandle {
         // Clear retirement when new data arrives (stream reconnected).
         topic.retired_at = None;
 
-        // Register collected workload subscription senders on the new topic.
+        // Register collected workload subscription senders on the new topic
+        // (or newly-backfilled topic).
         for tx in matching_subs {
             topic.subscribers.push(tx);
         }
@@ -572,6 +584,42 @@ mod tests {
 
         let chunk = rx.try_recv().unwrap();
         assert_eq!(chunk.data, b"new-pod");
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_by_workload_late_name_backfill() {
+        // Simulates the race condition where a pod's log stream opens before
+        // sync_dynamic_ids has populated the id registry. The first chunks
+        // arrive with workload_name=None, then later chunks arrive with the
+        // correct name. The standing subscription should attach on backfill.
+        let bus = LogBusHandle::new(1024);
+
+        // Existing topic so we can subscribe by workload.
+        bus.publish(
+            make_chunk("ns1", 1, "main", b"existing"),
+            Some("my-app".to_string()),
+        );
+
+        // Subscribe by workload — registers standing subscription.
+        let (_historical, mut rx) =
+            bus.subscribe_by_workload(&NamespaceId::from("ns1"), "my-app", None);
+
+        // New pod's log stream opens before registry is populated.
+        // First chunk arrives with workload_name=None.
+        bus.publish(make_chunk("ns1", 2, "main", b"early-no-name"), None);
+
+        // Nothing should be received yet (topic has no workload_name).
+        assert!(rx.try_recv().is_err());
+
+        // Registry catches up — next chunk has the workload_name.
+        // This should backfill the topic and attach the standing subscription.
+        bus.publish(
+            make_chunk("ns1", 2, "main", b"after-backfill"),
+            Some("my-app".to_string()),
+        );
+
+        let chunk = rx.try_recv().unwrap();
+        assert_eq!(chunk.data, b"after-backfill");
     }
 
     #[tokio::test]

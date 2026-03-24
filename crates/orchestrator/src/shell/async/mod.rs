@@ -921,10 +921,11 @@ fn spawn_log_ingest(
                 };
             let bus = log_bus.clone();
 
-            // Resolve workload name once per stream.
+            // Resolve workload name lazily per stream.
             // Convert protocol PodId to router PodId for registry lookup.
             let router_pod_id = crate::sm::PodId(header.pod_id.0);
-            let workload_name = id_registry_map
+            let id_registry_map_clone = id_registry_map.clone();
+            let mut workload_name: Option<String> = id_registry_map
                 .get(&header.namespace_id)
                 .and_then(|reg| reg.pod_workload_name(&router_pod_id));
 
@@ -935,6 +936,15 @@ fn spawn_log_ingest(
                     match stream.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
+                            // Re-resolve workload name if previously unknown.
+                            // The id registry may not have been populated when the
+                            // stream first opened (race with sync_dynamic_ids).
+                            if workload_name.is_none() {
+                                workload_name = id_registry_map_clone
+                                    .get(&header.namespace_id)
+                                    .and_then(|reg| reg.pod_workload_name(&router_pod_id));
+                            }
+
                             bus.publish(
                                 crate::log_bus::LogChunk {
                                     namespace_id: header.namespace_id.clone(),
