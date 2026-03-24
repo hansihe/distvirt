@@ -25,6 +25,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
     workloads.insert(
@@ -38,6 +39,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -56,6 +58,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     services.insert(
@@ -72,6 +75,7 @@ fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 

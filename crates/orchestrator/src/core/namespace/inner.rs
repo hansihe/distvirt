@@ -1092,6 +1092,13 @@ impl Namespace {
                 .map(|ep| ep.ip.to_string())
                 .unwrap_or_default();
 
+            let labels = self
+                .current_spec
+                .as_ref()
+                .and_then(|spec| spec.workloads.get(&WorkloadName(name.to_string())))
+                .map(|wl_spec| wl_spec.labels.clone())
+                .unwrap_or_default();
+
             workloads.insert(
                 WorkloadName(name.to_string()),
                 crate::types::WorkloadStatusReport {
@@ -1099,6 +1106,7 @@ impl Namespace {
                     pod_id,
                     ip,
                     conditions: BTreeMap::new(),
+                    labels,
                 },
             );
         }
@@ -1128,6 +1136,13 @@ impl Namespace {
                 .map(|svc_spec| svc_spec.workload_id.clone())
                 .unwrap_or_else(|| WorkloadName(String::new()));
 
+            let labels = self
+                .current_spec
+                .as_ref()
+                .and_then(|spec| spec.services.get(name))
+                .map(|svc_spec| svc_spec.labels.clone())
+                .unwrap_or_default();
+
             services.insert(
                 name.to_string(),
                 crate::types::ServiceStatusReport {
@@ -1137,6 +1152,7 @@ impl Namespace {
                     activation_enabled: has_activation,
                     ip: service_ip.to_string(),
                     conditions: BTreeMap::new(),
+                    labels,
                 },
             );
         }

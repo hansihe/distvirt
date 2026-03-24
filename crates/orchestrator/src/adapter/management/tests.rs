@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use crate::id_registry::IdRegistry;
@@ -42,6 +43,7 @@ fn simple_workload_spec() -> WorkloadSpec {
         run_policy: Default::default(),
         respects_demand: false,
         volumes: vec![],
+        labels: BTreeMap::new(),
     }
 }
 
@@ -54,6 +56,7 @@ fn simple_service_spec(workload_name: &str) -> ServiceSpec {
         idle_timeout: std::time::Duration::ZERO,
         buffer_frames: 0,
         buffer_timeout_ms: 0,
+        labels: BTreeMap::new(),
     }
 }
 

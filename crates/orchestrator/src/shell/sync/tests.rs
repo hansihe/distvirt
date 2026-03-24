@@ -76,6 +76,7 @@ fn always_on_spec() -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -90,6 +91,7 @@ fn always_on_spec() -> NamespaceSpec {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 

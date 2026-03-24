@@ -28,6 +28,7 @@ fn test_patch_add_workload() {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
     let mut services = BTreeMap::new();
@@ -41,6 +42,7 @@ fn test_patch_add_workload() {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     h.patch_namespace(
@@ -134,6 +136,7 @@ fn test_patch_replace_workload_image() {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
     h.patch_namespace(

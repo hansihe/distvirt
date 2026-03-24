@@ -200,6 +200,7 @@ pub struct WorkloadStatusReport {
     pub pod_id: Option<PodId>,
     pub ip: String,
     pub conditions: BTreeMap<String, String>,
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,4 +211,5 @@ pub struct ServiceStatusReport {
     pub activation_enabled: bool,
     pub ip: String,
     pub conditions: BTreeMap<String, String>,
+    pub labels: BTreeMap<String, String>,
 }

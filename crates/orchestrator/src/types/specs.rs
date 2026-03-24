@@ -61,6 +61,9 @@ pub struct WorkloadSpec {
     /// Pod-scoped volumes. Mounted into containers via volume_mounts.
     #[serde(default)]
     pub volumes: Vec<VolumeSpec>,
+    /// User-defined labels for filtering and metadata.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -72,6 +75,9 @@ pub struct ServiceSpec {
     pub idle_timeout: Duration,
     pub buffer_frames: u32,
     pub buffer_timeout_ms: u32,
+    /// User-defined labels for filtering and metadata.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

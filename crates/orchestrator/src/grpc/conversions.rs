@@ -151,6 +151,7 @@ fn convert_proto_workload_spec(wl: proto::WorkloadSpec) -> Result<WorkloadSpec, 
         run_policy,
         respects_demand: wl.respects_demand,
         volumes,
+        labels: wl.labels.into_iter().collect(),
     })
 }
 
@@ -269,6 +270,7 @@ fn convert_proto_service_spec(svc: proto::ServiceSpec) -> Result<ServiceSpec, St
         idle_timeout,
         buffer_frames,
         buffer_timeout_ms,
+        labels: svc.labels.into_iter().collect(),
     })
 }
 
@@ -369,6 +371,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
                 )),
                 spliced: false,
                 ip: wl.ip.clone(),
+                labels: wl.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             },
         );
     }
@@ -401,6 +404,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
                 spliced: false,
                 ip: svc.ip.clone(),
                 mac: String::new(),
+                labels: svc.labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             },
         );
     }

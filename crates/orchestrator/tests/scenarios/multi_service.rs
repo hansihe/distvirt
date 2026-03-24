@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -165,6 +166,7 @@ fn test_add_service_to_running_workload() {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     h.update_namespace("ns", new_spec);
@@ -239,6 +241,7 @@ fn test_add_service_to_suspended_workload() {
             idle_timeout: timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     h.update_namespace("ns", new_spec);

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -97,6 +98,7 @@ fn test_add_workload_to_existing_namespace() {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
     new_spec.services.insert(
@@ -109,6 +111,7 @@ fn test_add_workload_to_existing_namespace() {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     h.update_namespace("ns", new_spec);

@@ -76,6 +76,7 @@ pub struct SpecWorkload {
     pub resources: Option<SpecResources>,
     pub healthcheck: Option<UnsupportedField>,
     pub services: Option<HashMap<String, SpecInlineService>>,
+    pub labels: Option<HashMap<String, String>>,
 }
 
 /// Workload-level activation config.
@@ -159,6 +160,7 @@ pub struct SpecInlineService {
     pub ports: Option<Vec<SpecPort>>,
     pub idle_timeout: Option<String>,
     pub buffer: Option<SpecBuffer>,
+    pub labels: Option<HashMap<String, String>>,
 }
 
 /// Top-level service
@@ -170,6 +172,7 @@ pub struct SpecService {
     pub ports: Option<Vec<SpecPort>>,
     pub idle_timeout: Option<String>,
     pub buffer: Option<SpecBuffer>,
+    pub labels: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]

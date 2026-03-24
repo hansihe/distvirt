@@ -779,6 +779,7 @@ fn build_namespace_spec(
                     respects_demand: wl.respects_demand,
                     volumes,
                     run_policy: 0, // SERVICE (default)
+                    labels: wl.labels.clone().unwrap_or_default(),
                 },
             );
 
@@ -803,6 +804,12 @@ fn build_namespace_spec(
                     let (buffer_frames, buffer_timeout_ms) =
                         convert_buffer(&svc.buffer);
 
+                    // Inline services inherit workload labels, with service-level overrides winning.
+                    let mut svc_labels = wl.labels.clone().unwrap_or_default();
+                    if let Some(ref own_labels) = svc.labels {
+                        svc_labels.extend(own_labels.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+
                     services.insert(
                         sid.clone(),
                         ServiceSpec {
@@ -815,6 +822,7 @@ fn build_namespace_spec(
                             idle_timeout_ms,
                             buffer_frames,
                             buffer_timeout_ms,
+                            labels: svc_labels,
                         },
                     );
                 }
@@ -855,6 +863,7 @@ fn build_namespace_spec(
                     idle_timeout_ms,
                     buffer_frames,
                     buffer_timeout_ms,
+                    labels: svc.labels.clone().unwrap_or_default(),
                 },
             );
         }

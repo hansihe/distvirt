@@ -61,6 +61,7 @@ pub fn no_activation_spec() -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -87,6 +88,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -101,6 +103,7 @@ pub fn always_on_spec() -> NamespaceSpec {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
@@ -127,6 +130,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -145,6 +149,7 @@ pub fn activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
@@ -171,6 +176,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -189,6 +195,7 @@ pub fn activation_no_suspend_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
@@ -215,6 +222,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
     workloads.insert(
@@ -228,6 +236,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: false,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -242,6 +251,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     services.insert(
@@ -254,6 +264,7 @@ pub fn two_workload_spec() -> NamespaceSpec {
             idle_timeout: Duration::ZERO,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
@@ -280,6 +291,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
     workloads.insert(
@@ -293,6 +305,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -311,6 +324,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     services.insert(
@@ -327,6 +341,7 @@ pub fn two_activation_workloads_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
@@ -380,6 +395,7 @@ pub fn empty_dir_spec() -> NamespaceSpec {
                 name: "scratch".to_string(),
                 volume_type: VolumeType::EmptyDir { size_mb: 64 },
             }],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -428,6 +444,7 @@ pub fn config_data_spec() -> NamespaceSpec {
                     ],
                 },
             }],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -481,6 +498,7 @@ pub fn mixed_volumes_spec() -> NamespaceSpec {
                     },
                 },
             ],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -535,6 +553,7 @@ pub fn activation_with_volumes_spec(idle_timeout: Duration) -> NamespaceSpec {
                     },
                 },
             ],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -553,6 +572,7 @@ pub fn activation_with_volumes_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
@@ -578,6 +598,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             run_policy: Default::default(),
             respects_demand: true,
             volumes: vec![],
+            labels: BTreeMap::new(),
         },
     );
 
@@ -596,6 +617,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
     services.insert(
@@ -612,6 +634,7 @@ pub fn multi_service_activation_spec(idle_timeout: Duration) -> NamespaceSpec {
             idle_timeout,
             buffer_frames: 100,
             buffer_timeout_ms: 5000,
+            labels: BTreeMap::new(),
         },
     );
 
