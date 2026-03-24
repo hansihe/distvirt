@@ -777,13 +777,19 @@ fn child_exec_inner(
     }
 
     // Set gid before uid (after setuid we may lack permission for setgid).
+    // Use raw syscalls instead of glibc wrappers: glibc's setgid/setuid use
+    // nptl_setxid to synchronize credentials across all threads, but after
+    // clone3 the parent's thread bookkeeping is stale (the async-io reactor
+    // thread no longer exists), causing EAGAIN.
     if let Some(g) = gid {
-        if unsafe { libc::setgid(g) } != 0 {
+        let ret = unsafe { libc::syscall(libc::SYS_setgid, g as libc::c_ulong) };
+        if ret != 0 {
             bail!("setgid({}): {}", g, std::io::Error::last_os_error());
         }
     }
     if let Some(u) = uid {
-        if unsafe { libc::setuid(u) } != 0 {
+        let ret = unsafe { libc::syscall(libc::SYS_setuid, u as libc::c_ulong) };
+        if ret != 0 {
             bail!("setuid({}): {}", u, std::io::Error::last_os_error());
         }
     }
