@@ -428,6 +428,7 @@ dependencies = [
  "serde-saphyr",
  "smoltcp",
  "snafu",
+ "tempfile",
  "tokio",
  "toml",
  "tonic",

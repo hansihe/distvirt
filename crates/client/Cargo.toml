@@ -21,5 +21,5 @@ libc.workspace = true
 nix = { version = "0.31", features = ["ioctl"] }
 tokio = { workspace = true, features = ["net", "time", "io-util", "sync"] }
 rand.workspace = true
-smoltcp = { workspace = true, features = ["socket-udp"] }
+smoltcp = { workspace = true, features = ["socket-udp", "socket-dns"] }
 tempfile.workspace = true

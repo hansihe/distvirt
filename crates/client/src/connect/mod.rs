@@ -19,6 +19,7 @@ use crate::connection::{Client, handle_grpc_error};
 /// Info returned after a tunnel is provisioned.
 pub struct ConnectInfo {
     pub client_ip: Ipv4Addr,
+    pub gateway_ip: Ipv4Addr,
     pub subnet: String,
     pub endpoint: SocketAddr,
 }
@@ -33,6 +34,7 @@ pub struct ProvisionedTunnel {
     public_key: PublicKey,
     server_public_key: PublicKey,
     client_ip: Ipv4Addr,
+    gateway_ip: Ipv4Addr,
     subnet: String,
     prefix_len: u8,
     endpoint: SocketAddr,
@@ -72,11 +74,21 @@ impl ProvisionedTunnel {
             .parse()
             .context("invalid prefix length in subnet")?;
 
+        // Gateway is subnet base + 1 (e.g. 10.0.0.0/24 -> 10.0.0.1).
+        let subnet_base: Ipv4Addr = subnet
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .context("invalid subnet base address")?;
+        let gateway_ip = Ipv4Addr::from(u32::from(subnet_base) + 1);
+
         Ok(ProvisionedTunnel {
             private_key,
             public_key,
             server_public_key: PublicKey::from(server_public_key_bytes),
             client_ip,
+            gateway_ip,
             subnet: subnet.clone(),
             prefix_len,
             endpoint,
@@ -104,9 +116,14 @@ impl ProvisionedTunnel {
     }
 
     /// Connection metadata.
+    pub fn gateway_ip(&self) -> Ipv4Addr {
+        self.gateway_ip
+    }
+
     pub fn info(&self) -> ConnectInfo {
         ConnectInfo {
             client_ip: self.client_ip,
+            gateway_ip: self.gateway_ip,
             subnet: self.subnet.clone(),
             endpoint: self.endpoint,
         }

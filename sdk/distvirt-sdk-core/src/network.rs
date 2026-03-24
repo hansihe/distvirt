@@ -55,7 +55,25 @@ impl PyUserspaceNetwork {
         })
     }
 
+    /// Resolve a hostname to an IPv4 address using the namespace's DNS server.
+    fn resolve<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let network = Arc::clone(&self.network);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = network.lock().await;
+            let net = guard
+                .as_ref()
+                .ok_or_else(|| ApiError::new_err("network is closed"))?;
+
+            let ip = net
+                .resolve(&name)
+                .await
+                .map_err(|e| ApiError::new_err(format!("{e}")))?;
+            Ok(ip.to_string())
+        })
+    }
+
     /// Open a TCP connection to an address inside the namespace.
+    /// Accepts both IP addresses and hostnames (resolved via namespace DNS).
     fn connect_tcp<'py>(
         &self,
         py: Python<'py>,
@@ -64,17 +82,13 @@ impl PyUserspaceNetwork {
     ) -> PyResult<Bound<'py, PyAny>> {
         let network = Arc::clone(&self.network);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let addr: SocketAddr = format!("{}:{}", host, port)
-                .parse()
-                .map_err(|e| ApiError::new_err(format!("invalid address: {e}")))?;
-
             let guard = network.lock().await;
             let net = guard
                 .as_ref()
                 .ok_or_else(|| ApiError::new_err("network is closed"))?;
 
             let stream = net
-                .connect_tcp(addr)
+                .connect_tcp_host(&host, port)
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
 

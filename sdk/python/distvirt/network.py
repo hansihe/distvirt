@@ -184,6 +184,10 @@ class Network:
     async def __aexit__(self, *exc: Any) -> None:
         await self.disconnect()
 
+    async def resolve(self, name: str) -> str:
+        """Resolve a hostname to an IP address using the namespace DNS server."""
+        return await self._inner.resolve(name)
+
     async def create_connection(
         self,
         protocol_factory: Callable[[], asyncio.Protocol],

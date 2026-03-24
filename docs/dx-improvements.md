@@ -85,7 +85,6 @@ Display and argument parsing improvements. Can happen anytime.
 - **Goal**: Uniform `namespace/type/name` or similar format across all commands.
 - **Scope**: `namespace.rs` argument parsing, all CLI command definitions.
 
-### Hostname resolution in Python client
-- **Current**: Tonic's `Channel::from_shared()` handles DNS transparently. Auto-prepends `http://` for bare `host:port`. May need better error messages for edge cases.
-- **Goal**: Document supported formats, improve error messages for malformed connection strings.
-- **Scope**: `connection.rs` error handling, Python SDK docs.
+### Hostname resolution in fabric network clients ✓
+- **Done**: DNS resolution via smoltcp's built-in `dns::Socket`, querying the namespace gateway's DNS server (port 53). Gateway IP derived as subnet base + 1 (matching orchestrator convention). DNS socket lives in the `UserspaceNetwork` poll loop alongside existing TCP/UDP sockets. `resolve(name)` sends a command to the poll loop which calls `start_query`, results are checked after each `iface.poll()`. `connect_tcp_host(host, port)` auto-resolves hostnames that don't parse as IPs. Python SDK's `open_connection("my-service", 8080)` and `create_connection(proto, "my-service", 8080)` now transparently resolve hostnames. Explicit `Network.resolve(name)` also exposed.
+- **Files**: `crates/client/src/connect/userspace.rs` (DNS socket, resolve command, result checking), `crates/client/src/connect/mod.rs` (gateway IP derivation), `sdk/distvirt-sdk-core/src/network.rs` (PyO3 FFI), `sdk/python/distvirt/network.py` (Python wrapper).

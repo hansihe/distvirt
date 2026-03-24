@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 use anyhow::bail;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::{tcp, udp};
+use smoltcp::socket::{dns, tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -172,6 +172,10 @@ enum Command {
         port: u16,
         reply: oneshot::Sender<anyhow::Result<(SocketHandle, Arc<Mutex<UdpSocketState>>)>>,
     },
+    Resolve {
+        name: String,
+        reply: oneshot::Sender<anyhow::Result<Ipv4Addr>>,
+    },
     Shutdown,
 }
 
@@ -218,6 +222,7 @@ impl ProvisionedTunnel {
             udp,
             self.endpoint,
             self.client_ip,
+            self.gateway_ip,
             self.prefix_len,
             cmd_rx,
             Arc::clone(&inner),
@@ -240,6 +245,32 @@ impl UserspaceNetwork {
     /// The client's WireGuard public key.
     pub fn public_key(&self) -> &[u8; 32] {
         self.provisioned.public_key()
+    }
+
+    /// Resolve a hostname to an IPv4 address using the namespace's DNS server.
+    pub async fn resolve(&self, name: &str) -> anyhow::Result<Ipv4Addr> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.inner
+            .cmd_tx
+            .send(Command::Resolve {
+                name: name.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("tunnel shut down"))?;
+        self.inner.notify.notify_one();
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("tunnel shut down"))?
+    }
+
+    /// Open a TCP connection to a host:port inside the namespace.
+    /// `host` may be an IP address or a hostname (resolved via the namespace DNS).
+    pub async fn connect_tcp_host(&self, host: &str, port: u16) -> anyhow::Result<TcpStream> {
+        let ip: Ipv4Addr = match host.parse() {
+            Ok(ip) => ip,
+            Err(_) => self.resolve(host).await?,
+        };
+        self.connect_tcp(SocketAddr::new(ip.into(), port)).await
     }
 
     /// Open a TCP connection to an address inside the namespace.
@@ -541,6 +572,7 @@ async fn poll_loop(
     udp: tokio::net::UdpSocket,
     endpoint: SocketAddr,
     client_ip: Ipv4Addr,
+    gateway_ip: Ipv4Addr,
     prefix_len: u8,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     inner: Arc<Inner>,
@@ -552,7 +584,8 @@ async fn poll_loop(
 
     // Set up smoltcp interface.
     let mut device = ChannelDevice::new();
-    let config = Config::new(smoltcp::wire::HardwareAddress::Ip);
+    let mut config = Config::new(smoltcp::wire::HardwareAddress::Ip);
+    config.random_seed = rand::random();
     let mut iface = Interface::new(config, &mut device, smol_now(epoch));
     iface.update_ip_addrs(|addrs| {
         addrs
@@ -564,6 +597,13 @@ async fn poll_loop(
     });
 
     let mut sockets = SocketSet::new(vec![]);
+
+    // DNS socket for resolving hostnames via the namespace's gateway DNS server.
+    let gateway_smoltcp = IpAddress::Ipv4(Ipv4Address::from(gateway_ip));
+    let dns_socket = dns::Socket::new(&[gateway_smoltcp], vec![]);
+    let dns_handle = sockets.add(dns_socket);
+    let mut dns_pending: Vec<(dns::QueryHandle, oneshot::Sender<anyhow::Result<Ipv4Addr>>)> =
+        Vec::new();
 
     // Tracked socket states, keyed by smoltcp SocketHandle.
     let mut tcp_states: HashMap<SocketHandle, Arc<Mutex<TcpSocketState>>> = HashMap::new();
@@ -643,6 +683,17 @@ async fn poll_loop(
                             Ok((handle, state))
                         })();
                         let _ = reply.send(result);
+                    }
+                    Command::Resolve { name, reply } => {
+                        let dns_socket = sockets.get_mut::<dns::Socket>(dns_handle);
+                        match dns_socket.start_query(iface.context(), &name, smoltcp::wire::DnsQueryType::A) {
+                            Ok(handle) => {
+                                dns_pending.push((handle, reply));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(anyhow::anyhow!("dns start_query: {}", e)));
+                            }
+                        }
                     }
                     Command::Shutdown => {
                         shutting_down = true;
@@ -791,6 +842,32 @@ async fn poll_loop(
         // ── Poll smoltcp ───────────────────────────────────────────────────
 
         iface.poll(smol_now(epoch), &mut device, &mut sockets);
+
+        // ── Check DNS query results ───────────────────────────────────────
+
+        {
+            let dns_socket = sockets.get_mut::<dns::Socket>(dns_handle);
+            let pending = std::mem::take(&mut dns_pending);
+            for (handle, reply) in pending {
+                match dns_socket.get_query_result(handle) {
+                    Ok(addrs) => {
+                        let result = addrs
+                            .iter()
+                            .find_map(|addr| match addr {
+                                IpAddress::Ipv4(v4) => Some(Ipv4Addr::from(v4.octets())),
+                            })
+                            .ok_or_else(|| anyhow::anyhow!("no IPv4 address in DNS response"));
+                        let _ = reply.send(result);
+                    }
+                    Err(dns::GetQueryResultError::Pending) => {
+                        dns_pending.push((handle, reply));
+                    }
+                    Err(dns::GetQueryResultError::Failed) => {
+                        let _ = reply.send(Err(anyhow::anyhow!("DNS query failed")));
+                    }
+                }
+            }
+        }
 
         // ── Sync: smoltcp → read_buf / recv_queue (after poll) ─────────────
 
