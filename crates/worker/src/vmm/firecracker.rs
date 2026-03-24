@@ -116,8 +116,8 @@ impl Vmm for Firecracker {
         //   panic=-1       — reboot immediately on kernel panic (no delay)
         //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
         //   init=/sbin/init — our custom init binary (not systemd)
-        let console_dev = if cfg!(target_arch = "aarch64") { "ttyAMA0" } else { "ttyS0" };
-        let mut boot_args = format!("console={console_dev} reboot=k panic=-1 pci=off init=/sbin/init");
+        // Firecracker uses an 8250 UART on both x86_64 and aarch64.
+        let mut boot_args = format!("console=ttyS0 reboot=k panic=-1 pci=off init=/sbin/init");
         if let Some(ref balloon) = config.balloon {
             boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
         }
