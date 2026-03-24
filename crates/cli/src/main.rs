@@ -4,10 +4,12 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod connection;
+pub mod entity_ref;
 mod format;
 mod status_watch;
 
 use commands::OutputFormat;
+use entity_ref::{EntityRefSpec, ResourceType};
 
 const GROUPED_HELP: &str = "\x1b[1;4mTask commands:\x1b[0m
   down          Delete a namespace
@@ -118,13 +120,13 @@ enum TaskCommands {
     /// Delete a namespace
     #[command(hide = true)]
     Down {
-        /// Namespace ID
-        namespace_id: String,
+        /// Entity reference: /namespace
+        target: String,
     },
     /// Show live namespace status
     #[command(hide = true)]
     Status {
-        /// Target: "namespace" or "namespace/workload"
+        /// Entity reference: /namespace or /namespace/wl/name
         target: String,
         /// Watch: show status then stream events
         #[arg(short, long)]
@@ -133,11 +135,8 @@ enum TaskCommands {
     /// Stream logs from a namespace
     #[command(hide = true)]
     Logs {
-        /// Namespace ID
-        namespace_id: String,
-        /// Filter to a specific workload
-        #[arg(long)]
-        workload: Option<String>,
+        /// Entity reference: /namespace or /namespace/wl/name
+        target: String,
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
@@ -145,14 +144,9 @@ enum TaskCommands {
     /// Stream events from a namespace
     #[command(hide = true)]
     Events {
-        /// Namespace ID
-        namespace_id: String,
-        /// Filter to specific workloads (can be repeated)
-        #[arg(long)]
-        workload: Vec<String>,
-        /// Filter to specific services (can be repeated)
-        #[arg(long)]
-        service: Vec<String>,
+        /// Entity references: /namespace, /namespace/wl/name, /namespace/svc/name
+        #[arg(required = true)]
+        targets: Vec<String>,
         /// Follow event stream
         #[arg(short, long)]
         follow: bool,
@@ -160,14 +154,14 @@ enum TaskCommands {
     /// Hint the orchestrator to deactivate a workload immediately
     #[command(hide = true)]
     Deactivate {
-        /// Target: "namespace/workload"
+        /// Entity reference: /namespace/wl/name
         target: String,
     },
     /// Connect to a namespace network via WireGuard tunnel
     #[command(hide = true)]
     Connect {
-        /// Namespace ID
-        namespace_id: String,
+        /// Entity reference: /namespace
+        target: String,
         /// Print wg-quick config instead of establishing tunnel
         #[arg(long)]
         config: bool,
@@ -175,13 +169,13 @@ enum TaskCommands {
     /// Disconnect from a namespace network
     #[command(hide = true)]
     Disconnect {
-        /// Namespace ID
-        namespace_id: String,
+        /// Entity reference: /namespace
+        target: String,
     },
     /// Attach to a running workload's stdin/stdout/stderr
     #[command(hide = true)]
     Attach {
-        /// Target: "namespace/workload"
+        /// Entity reference: /namespace/wl/name
         target: String,
     },
     /// Clone a namespace
@@ -207,16 +201,11 @@ enum TaskCommands {
 /// Layer 2 — uniform resource commands
 #[derive(Subcommand)]
 enum ResourceCommands {
-    /// Get resources
+    /// List or describe resources
     #[command(hide = true)]
     Get {
-        /// Resource type (namespaces, workers, pods)
-        resource: String,
-        /// Resource name (optional)
-        name: Option<String>,
-        /// Namespace for scoped resources
-        #[arg(short, long)]
-        namespace: Option<String>,
+        /// Entity reference or global type: /ns/wl, /ns/wl/name, namespaces, workers/name
+        target: String,
         /// Output format
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
@@ -224,10 +213,8 @@ enum ResourceCommands {
     /// Describe a resource in detail
     #[command(hide = true)]
     Describe {
-        /// Resource type
-        resource: String,
-        /// Resource name
-        name: String,
+        /// Entity reference or global type: /namespace, namespaces/name, workers/name
+        target: String,
         /// Output format
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
@@ -235,13 +222,8 @@ enum ResourceCommands {
     /// Delete a resource
     #[command(hide = true)]
     Delete {
-        /// Resource type
-        resource: String,
-        /// Resource name
-        name: String,
-        /// Namespace (required for workloads and services)
-        #[arg(short, long)]
-        namespace: Option<String>,
+        /// Entity reference or global type: /namespace, /ns/wl/name, /ns/svc/name
+        target: String,
     },
 }
 
@@ -392,37 +374,109 @@ async fn main() -> anyhow::Result<()> {
                     commands::namespace::sync(client, namespace_id.as_deref(), file.as_deref())
                         .await?;
                 }
-                Commands::Task(TaskCommands::Down { namespace_id }) => {
-                    commands::namespace::down(client, &namespace_id).await?;
+                Commands::Task(TaskCommands::Down { target }) => {
+                    let spec = EntityRefSpec::new("down")
+                        .accept_namespace();
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::namespace::down(client, resolved.namespace()).await?;
                 }
                 Commands::Task(TaskCommands::Status { target, watch }) => {
-                    commands::namespace::status(client, &target, watch).await?;
-                }
-                Commands::Task(TaskCommands::Logs {
-                    namespace_id,
-                    workload,
-                    follow,
-                }) => {
-                    commands::streaming::logs(client, &namespace_id, workload.as_deref(), follow)
+                    let spec = EntityRefSpec::new("status")
+                        .accept_namespace()
+                        .accept_resource_of(&[ResourceType::Workload]);
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::namespace::status(client, resolved.namespace(), resolved.name(), watch)
                         .await?;
                 }
-                Commands::Task(TaskCommands::Events {
-                    namespace_id,
-                    workload,
-                    service,
-                    follow,
-                }) => {
-                    commands::streaming::events(client, &namespace_id, &workload, &service, follow)
-                        .await?;
+                Commands::Task(TaskCommands::Logs { target, follow }) => {
+                    let spec = EntityRefSpec::new("logs")
+                        .default_type(ResourceType::Workload)
+                        .accept_namespace()
+                        .accept_resource_of(&[ResourceType::Workload]);
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::streaming::logs(
+                        client,
+                        resolved.namespace(),
+                        resolved.name(),
+                        follow,
+                    )
+                    .await?;
+                }
+                Commands::Task(TaskCommands::Events { targets, follow }) => {
+                    let spec = EntityRefSpec::new("events")
+                        .default_type(ResourceType::Workload)
+                        .accept_namespace()
+                        .accept_resource_of(&[
+                            ResourceType::Workload,
+                            ResourceType::Service,
+                        ]);
+                    let resolved: Vec<_> = targets
+                        .iter()
+                        .map(|t| entity_ref::parse_and_resolve(t, &spec, None))
+                        .collect::<Result<_, _>>()?;
+
+                    let namespace_id = resolved
+                        .first()
+                        .expect("clap requires at least one target")
+                        .namespace();
+                    for r in &resolved {
+                        if r.namespace() != namespace_id {
+                            anyhow::bail!(
+                                "all targets must be in the same namespace (got {} and {})",
+                                resolved[0].path(),
+                                r.path()
+                            );
+                        }
+                    }
+
+                    let mut workloads = Vec::new();
+                    let mut services = Vec::new();
+                    for r in &resolved {
+                        if let Some(name) = r.name() {
+                            match r.resource_type() {
+                                Some(ResourceType::Workload) => {
+                                    workloads.push(name.to_string())
+                                }
+                                Some(ResourceType::Service) => {
+                                    services.push(name.to_string())
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    commands::streaming::events(
+                        client,
+                        namespace_id,
+                        &workloads,
+                        &services,
+                        follow,
+                    )
+                    .await?;
                 }
                 Commands::Task(TaskCommands::Deactivate { target }) => {
-                    commands::namespace::deactivate(client, &target).await?;
+                    let spec = EntityRefSpec::new("deactivate")
+                        .default_type(ResourceType::Workload)
+                        .accept_resource_of(&[ResourceType::Workload]);
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::namespace::deactivate(
+                        client,
+                        resolved.namespace(),
+                        resolved.name().expect("validated by spec"),
+                    )
+                    .await?;
                 }
                 Commands::Task(TaskCommands::Attach { target }) => {
-                    let (namespace_id, workload_id) = target
-                        .split_once('/')
-                        .ok_or_else(|| anyhow::anyhow!("target must be namespace/workload"))?;
-                    commands::attach::attach(client, namespace_id, workload_id).await?;
+                    let spec = EntityRefSpec::new("attach")
+                        .default_type(ResourceType::Workload)
+                        .accept_resource_of(&[ResourceType::Workload]);
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::attach::attach(
+                        client,
+                        resolved.namespace(),
+                        resolved.name().expect("validated by spec"),
+                    )
+                    .await?;
                 }
                 Commands::Task(TaskCommands::Splice {
                     namespace_id,
@@ -435,37 +489,138 @@ async fn main() -> anyhow::Result<()> {
                 Commands::Task(TaskCommands::Clone { source, target }) => {
                     commands::namespace::clone_namespace(client, &source, &target).await?;
                 }
-                Commands::Resource(ResourceCommands::Get {
-                    resource,
-                    name,
-                    namespace,
-                    output,
-                }) => {
-                    if let Some(ref n) = name {
-                        commands::resource::describe(client, &resource, n, &output).await?;
+                Commands::Resource(ResourceCommands::Get { target, output }) => {
+                    if let Some((type_name, name)) = parse_global_resource(&target) {
+                        if let Some(name) = name {
+                            commands::resource::describe(client, type_name, name, &output)
+                                .await?;
+                        } else {
+                            commands::resource::get(client, type_name, None, &output).await?;
+                        }
                     } else {
-                        commands::resource::get(client, &resource, namespace.as_deref(), &output)
-                            .await?;
+                        let spec = EntityRefSpec::new("get")
+                            .accept_namespace()
+                            .accept_type_of(&[
+                                ResourceType::Workload,
+                                ResourceType::Service,
+                                ResourceType::Pod,
+                            ])
+                            .accept_resource_of(&[
+                                ResourceType::Workload,
+                                ResourceType::Service,
+                                ResourceType::Pod,
+                            ]);
+                        let resolved =
+                            entity_ref::parse_and_resolve(&target, &spec, None)?;
+                        match &resolved {
+                            entity_ref::ResolvedRef::Namespace(ns) => {
+                                commands::resource::describe(
+                                    client,
+                                    "namespaces",
+                                    ns,
+                                    &output,
+                                )
+                                .await?;
+                            }
+                            entity_ref::ResolvedRef::TypeInNamespace(ns, rt) => {
+                                commands::resource::get(
+                                    client,
+                                    rt.plural(),
+                                    Some(ns.as_str()),
+                                    &output,
+                                )
+                                .await?;
+                            }
+                            entity_ref::ResolvedRef::Resource(ns, rt, name) => {
+                                commands::resource::describe_namespaced(
+                                    client,
+                                    ns,
+                                    *rt,
+                                    name,
+                                    &output,
+                                )
+                                .await?;
+                            }
+                        }
                     }
                 }
-                Commands::Resource(ResourceCommands::Describe {
-                    resource,
-                    name,
-                    output,
-                }) => {
-                    commands::resource::describe(client, &resource, &name, &output).await?;
+                Commands::Resource(ResourceCommands::Describe { target, output }) => {
+                    if let Some((type_name, name)) = parse_global_resource(&target) {
+                        let name = name.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "`describe` requires a name. Try: dv describe {}/name",
+                                type_name
+                            )
+                        })?;
+                        commands::resource::describe(client, type_name, name, &output)
+                            .await?;
+                    } else {
+                        let spec = EntityRefSpec::new("describe")
+                            .accept_namespace();
+                        let resolved =
+                            entity_ref::parse_and_resolve(&target, &spec, None)?;
+                        commands::resource::describe(
+                            client,
+                            "namespaces",
+                            resolved.namespace(),
+                            &output,
+                        )
+                        .await?;
+                    }
                 }
-                Commands::Resource(ResourceCommands::Delete { resource, name, namespace }) => {
-                    commands::resource::delete(client, &resource, &name, namespace.as_deref()).await?;
+                Commands::Resource(ResourceCommands::Delete { target }) => {
+                    if let Some((type_name, name)) = parse_global_resource(&target) {
+                        let name = name.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "`delete` requires a name. Try: dv delete {}/name",
+                                type_name
+                            )
+                        })?;
+                        commands::resource::delete(client, type_name, name, None).await?;
+                    } else {
+                        let spec = EntityRefSpec::new("delete")
+                            .accept_namespace()
+                            .accept_resource_of(&[
+                                ResourceType::Workload,
+                                ResourceType::Service,
+                            ]);
+                        let resolved =
+                            entity_ref::parse_and_resolve(&target, &spec, None)?;
+                        match &resolved {
+                            entity_ref::ResolvedRef::Namespace(ns) => {
+                                commands::resource::delete(
+                                    client,
+                                    "namespaces",
+                                    ns,
+                                    None,
+                                )
+                                .await?;
+                            }
+                            entity_ref::ResolvedRef::Resource(ns, rt, name) => {
+                                commands::resource::delete(
+                                    client,
+                                    rt.plural(),
+                                    name,
+                                    Some(ns.as_str()),
+                                )
+                                .await?;
+                            }
+                            _ => unreachable!("spec only accepts Namespace and Resource"),
+                        }
+                    }
                 }
-                Commands::Task(TaskCommands::Connect {
-                    namespace_id,
-                    config,
-                }) => {
-                    commands::connect::connect(client, &params, &namespace_id, config).await?;
+                Commands::Task(TaskCommands::Connect { target, config }) => {
+                    let spec = EntityRefSpec::new("connect")
+                        .accept_namespace();
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::connect::connect(client, &params, resolved.namespace(), config)
+                        .await?;
                 }
-                Commands::Task(TaskCommands::Disconnect { namespace_id }) => {
-                    commands::connect::disconnect(client, &namespace_id).await?;
+                Commands::Task(TaskCommands::Disconnect { target }) => {
+                    let spec = EntityRefSpec::new("disconnect")
+                        .accept_namespace();
+                    let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
+                    commands::connect::disconnect(client, resolved.namespace()).await?;
                 }
                 Commands::Auth(AuthCommands::Login { .. })
                 | Commands::Auth(AuthCommands::Context { .. })
@@ -478,4 +633,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Check if the input refers to a global (non-namespaced) resource type.
+/// Returns the normalized type name and optional resource name.
+fn parse_global_resource(input: &str) -> Option<(&'static str, Option<&str>)> {
+    if input.starts_with('/') {
+        return None;
+    }
+    let (first, rest) = match input.split_once('/') {
+        Some((f, r)) => (f, Some(r)),
+        None => (input, None),
+    };
+    let normalized = match first {
+        "namespace" | "namespaces" | "ns" => "namespaces",
+        "worker" | "workers" => "workers",
+        _ => return None,
+    };
+    Some((normalized, rest))
 }

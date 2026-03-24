@@ -113,8 +113,12 @@ pub async fn down(mut client: Client, namespace_id: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub async fn status(mut client: Client, target: &str, watch: bool) -> anyhow::Result<()> {
-    let (namespace_id, workload_id) = parse_target(target);
+pub async fn status(
+    mut client: Client,
+    namespace_id: &str,
+    workload_id: Option<&str>,
+    watch: bool,
+) -> anyhow::Result<()> {
 
     if watch && workload_id.is_none() {
         let watcher =
@@ -183,10 +187,11 @@ pub async fn status(mut client: Client, target: &str, watch: bool) -> anyhow::Re
     Ok(())
 }
 
-pub async fn deactivate(mut client: Client, target: &str) -> anyhow::Result<()> {
-    let (namespace_id, workload_id) = parse_target(target);
-    let workload_id = workload_id
-        .ok_or_else(|| anyhow::anyhow!("target must be namespace/workload (e.g. myapp/api)"))?;
+pub async fn deactivate(
+    mut client: Client,
+    namespace_id: &str,
+    workload_id: &str,
+) -> anyhow::Result<()> {
 
     let outcome = distvirt_client::operations::deactivate(
         &mut client,
@@ -223,10 +228,3 @@ pub async fn clone_namespace(
     Ok(())
 }
 
-/// Parse "ns" or "ns/workload" target string
-fn parse_target(target: &str) -> (&str, Option<&str>) {
-    match target.split_once('/') {
-        Some((ns, workload)) => (ns, Some(workload)),
-        None => (target, None),
-    }
-}

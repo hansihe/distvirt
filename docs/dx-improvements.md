@@ -80,10 +80,12 @@ Display and argument parsing improvements. Can happen anytime.
 - **Goal**: Render all service state changes in the watch display.
 - **Scope**: `status_watch.rs` event handling and rendering.
 
-### CLI entity format revamp
-- **Current**: Inconsistent — some commands take `namespace_id`, others take `namespace/workload` via `parse_target()`.
-- **Goal**: Uniform `namespace/type/name` or similar format across all commands.
-- **Scope**: `namespace.rs` argument parsing, all CLI command definitions.
+### CLI entity format revamp ✓
+- **Done**: Unified entity reference format across all commands. Leading `/` anchors an absolute reference (`/namespace/type/name`), no leading `/` is relative to default namespace context. Type keywords: `workload`/`wl`, `service`/`svc`, `pod`/`po`. Commands with an obvious primary type (e.g. `logs`, `attach`) define a default type so bare names work (`dv logs my-app` with default ns). Each command declares accepted forms via `EntityRefSpec` (namespace, type-in-namespace, resource, with optional type constraints). Rich contextual error messages with substitution hints (e.g. wrong type → suggests corrected ref, missing namespace → suggests fully qualified form).
+- **Module**: `crates/cli/src/entity_ref.rs` — `ResourceType`, `ResolvedRef`, `EntityRefSpec` (builder pattern), `EntityRefError` (implements `Display` with multi-line hints), `parse_and_resolve()` entry point.
+- **Ported commands**: `status`, `logs`, `events`, `deactivate`, `attach`, `down`, `connect`, `disconnect` (tier 1+3); `get`, `describe`, `delete` (tier 2, with `parse_global_resource()` for non-namespaced types like `namespaces`/`workers`). `describe_namespaced()` added for individual workload/service detail via entity ref.
+- **Not ported**: `clone` (two namespace positionals), `splice` (namespace + workload + worker\_id), `spec apply/sync` (namespace from spec file).
+- **Remaining**: Default namespace context (`dv context set-namespace`) to enable relative refs. Tab completion for entity refs.
 
 ### Hostname resolution in fabric network clients ✓
 - **Done**: DNS resolution via smoltcp's built-in `dns::Socket`, querying the namespace gateway's DNS server (port 53). Gateway IP derived as subnet base + 1 (matching orchestrator convention). DNS socket lives in the `UserspaceNetwork` poll loop alongside existing TCP/UDP sockets. `resolve(name)` sends a command to the poll loop which calls `start_query`, results are checked after each `iface.poll()`. `connect_tcp_host(host, port)` auto-resolves hostnames that don't parse as IPs. Python SDK's `open_connection("my-service", 8080)` and `create_connection(proto, "my-service", 8080)` now transparently resolve hostnames. Explicit `Network.resolve(name)` also exposed.

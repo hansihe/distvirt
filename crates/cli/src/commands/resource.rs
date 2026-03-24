@@ -2,6 +2,7 @@ use distvirt_client::connection::{handle_grpc_error, Client};
 use distvirt_client_protocol::*;
 
 use crate::commands::OutputFormat;
+use crate::entity_ref::ResourceType;
 use crate::format;
 
 pub async fn get(
@@ -226,6 +227,107 @@ pub async fn delete(
             anyhow::bail!(
                 "delete not supported for '{}'. Try: namespaces, workloads, services",
                 other
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Describe an individual namespaced resource.
+pub async fn describe_namespaced(
+    mut client: Client,
+    namespace_id: &str,
+    resource_type: ResourceType,
+    name: &str,
+    output: &OutputFormat,
+) -> anyhow::Result<()> {
+    match resource_type {
+        ResourceType::Workload => {
+            let resp = client
+                .get_namespace_status(GetNamespaceStatusRequest {
+                    namespace_id: namespace_id.to_string(),
+                })
+                .await
+                .map_err(handle_grpc_error)?;
+            let report = resp
+                .into_inner()
+                .status
+                .ok_or_else(|| anyhow::anyhow!("server returned empty status"))?;
+            let workload = report
+                .workloads
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("workload '{}' not found in namespace", name))?;
+            match output {
+                OutputFormat::Text => {
+                    let state = workload
+                        .state
+                        .as_ref()
+                        .map(|s| distvirt_client::format::workload_state_detail(s))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let spliced = if workload.spliced { " [spliced]" } else { "" };
+                    println!("Workload: {}/{}", namespace_id, name);
+                    println!("State:    {}{}", state, spliced);
+                    if !workload.ip.is_empty() {
+                        println!("IP:       {}", workload.ip);
+                    }
+
+                    let services: Vec<_> = report
+                        .services
+                        .iter()
+                        .filter(|(_, s)| s.workload_id == name)
+                        .collect();
+                    if !services.is_empty() {
+                        println!("\nServices:");
+                        for (svc_id, _) in &services {
+                            println!("  service/{}", svc_id);
+                        }
+                    }
+                }
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::workloads_to_json(
+                            &[(name.to_string(), workload.clone())].into_iter().collect()
+                        ))?
+                    );
+                }
+            }
+        }
+        ResourceType::Service => {
+            let resp = client
+                .get_namespace_status(GetNamespaceStatusRequest {
+                    namespace_id: namespace_id.to_string(),
+                })
+                .await
+                .map_err(handle_grpc_error)?;
+            let report = resp
+                .into_inner()
+                .status
+                .ok_or_else(|| anyhow::anyhow!("server returned empty status"))?;
+            let service = report
+                .services
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("service '{}' not found in namespace", name))?;
+            match output {
+                OutputFormat::Text => {
+                    format::print_service_table(
+                        &[(name.to_string(), service.clone())].into_iter().collect(),
+                    );
+                }
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&format::services_to_json(
+                            &[(name.to_string(), service.clone())].into_iter().collect()
+                        ))?
+                    );
+                }
+            }
+        }
+        ResourceType::Pod => {
+            anyhow::bail!(
+                "describing individual pods is not supported. Try: dv get /{}/po",
+                namespace_id
             );
         }
     }
