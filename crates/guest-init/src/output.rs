@@ -68,6 +68,8 @@ async fn fill_loop(
     exit_rx: async_channel::Receiver<()>,
     done_tx: async_channel::Sender<u64>,
 ) {
+    let mut seq: u64 = 0;
+
     loop {
         let stdout_ready = async {
             if let Some(ref p) = stdout {
@@ -121,20 +123,28 @@ async fn fill_loop(
 
         match action {
             Action::Stdout => {
-                if !drain_pipe_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id).await {
+                if !drain_pipe_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id, &mut seq)
+                    .await
+                {
                     stdout = None;
                 }
             }
             Action::Stderr => {
-                if !drain_pipe_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id).await {
+                if !drain_pipe_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id, &mut seq)
+                    .await
+                {
                     stderr = None;
                 }
             }
             Action::ExitSignal | Action::Disconnected => {
                 // Final drain: read all remaining pipe data into the buffer.
                 // Track bytes that couldn't be buffered (e.g. buffer full while disconnected).
-                let d1 = final_drain_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id).await;
-                let d2 = final_drain_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id).await;
+                let d1 =
+                    final_drain_to_buffer(&mut stdout, &buffer_tx, STREAM_STDOUT, &id, &mut seq)
+                        .await;
+                let d2 =
+                    final_drain_to_buffer(&mut stderr, &buffer_tx, STREAM_STDERR, &id, &mut seq)
+                        .await;
                 let _ = done_tx.send(d1 + d2).await;
                 return;
             }
@@ -149,6 +159,7 @@ async fn drain_pipe_to_buffer(
     buffer_tx: &async_channel::Sender<Vec<u8>>,
     stream_id: u8,
     container_id: &str,
+    seq: &mut u64,
 ) -> bool {
     let p = match pipe {
         Some(p) => p,
@@ -156,7 +167,8 @@ async fn drain_pipe_to_buffer(
     };
     match crate::util::read_pipe(p.as_raw_fd()) {
         Ok(ReadPipeResult::Data(data)) => {
-            let chunk = encode_output_chunk(stream_id, &data);
+            let chunk = encode_output_chunk(stream_id, *seq, &data);
+            *seq += 1;
             // Backpressure: blocks when buffer is full.
             if buffer_tx.send(chunk).await.is_err() {
                 log::warn!("output buffer closed for {}", container_id);
@@ -191,6 +203,7 @@ async fn final_drain_to_buffer(
     buffer_tx: &async_channel::Sender<Vec<u8>>,
     stream_id: u8,
     container_id: &str,
+    seq: &mut u64,
 ) -> u64 {
     let p = match pipe.take() {
         Some(p) => p,
@@ -201,7 +214,8 @@ async fn final_drain_to_buffer(
         match crate::util::read_pipe(p.as_raw_fd()) {
             Ok(ReadPipeResult::Data(data)) => {
                 let len = data.len() as u64;
-                let chunk = encode_output_chunk(stream_id, &data);
+                let chunk = encode_output_chunk(stream_id, *seq, &data);
+                *seq += 1;
                 if buffer_tx.try_send(chunk).is_err() {
                     bytes_dropped += len;
                     // Continue draining pipe to count total loss.

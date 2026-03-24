@@ -1,4 +1,5 @@
 use distvirt_client_protocol::*;
+use distvirt_client_protocol::selector::Selector;
 use tonic::Streaming;
 
 use crate::connection::{handle_grpc_error, Client};
@@ -7,6 +8,52 @@ use crate::errors::ApiError;
 pub enum ApplyOutcome {
     Created,
     Patched,
+}
+
+/// Filter a `NamespaceSpec` to only include workloads and services whose
+/// labels match the given selector. Services are included if either:
+/// - The service's own labels match, OR
+/// - The service belongs to a matched workload
+pub fn filter_spec(spec: &NamespaceSpec, selector: &Selector) -> NamespaceSpec {
+    let workloads: std::collections::HashMap<String, WorkloadSpec> = spec
+        .workloads
+        .iter()
+        .filter(|(_, wl)| selector.matches(|k| wl.labels.get(k).map(|v| v.as_str())))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let services: std::collections::HashMap<String, ServiceSpec> = spec
+        .services
+        .iter()
+        .filter(|(_, svc)| selector.matches(|k| svc.labels.get(k).map(|v| v.as_str())))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    NamespaceSpec {
+        network: spec.network.clone(),
+        workloads,
+        services,
+    }
+}
+
+/// Patch a namespace with the given spec (upsert workloads/services, no removals).
+/// Used for filtered/partial applies where we only want to update a subset.
+pub async fn apply_patch(
+    client: &mut Client,
+    namespace_id: &str,
+    spec: &NamespaceSpec,
+) -> Result<(), ApiError> {
+    client
+        .patch_namespace(PatchNamespaceRequest {
+            namespace_id: namespace_id.to_string(),
+            workloads: spec.workloads.clone(),
+            services: spec.services.clone(),
+            remove_workloads: vec![],
+            remove_services: vec![],
+        })
+        .await
+        .map_err(handle_grpc_error)?;
+    Ok(())
 }
 
 /// Apply a spec: create the namespace if new, patch (upsert) workloads/services if it exists.

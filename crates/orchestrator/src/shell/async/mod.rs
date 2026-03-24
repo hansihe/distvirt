@@ -930,12 +930,10 @@ fn spawn_log_ingest(
                 .and_then(|reg| reg.pod_workload_name(&router_pod_id));
 
             tokio::spawn(async move {
-                use futures_lite::io::AsyncReadExt;
-                let mut buf = [0u8; 8192];
                 loop {
-                    match stream.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
+                    match distvirt_worker_protocol::codec::recv_log_frame(&mut stream).await {
+                        Ok(None) => break,
+                        Ok(Some((seq, payload))) => {
                             // Re-resolve workload name if previously unknown.
                             // The id registry may not have been populated when the
                             // stream first opened (race with sync_dynamic_ids).
@@ -951,8 +949,9 @@ fn spawn_log_ingest(
                                     pod_id: header.pod_id.clone(),
                                     container_id: header.container_id.clone(),
                                     workload_name: workload_name.clone(),
-                                    data: buf[..n].to_vec(),
+                                    data: payload,
                                     timestamp: std::time::Instant::now(),
+                                    seq,
                                 },
                                 workload_name.clone(),
                             );

@@ -10,12 +10,12 @@ Foundational changes to how specs are applied and managed.
 - **Done**: IP allocation moved from client to orchestrator. `NamespaceIpAllocator` in `orchestrator/src/core/namespace/ip_alloc.rs` owns per-namespace state. Subnet split into auto zone (bottom half, sequential assignment) and manual zone (top half, user-specified explicit IPs), with WireGuard reserve at the top. Allocations are sticky (survive re-apply). Client-side `ip_alloc.rs`, `resolve.rs` (`${...}` IP expressions) deleted. Responses now return full `IpAllocResult` snapshot with auto/manual indicator per resource. Dedicated `apply_full_spec`/`apply_patch` methods on `NamespaceUnit` with explicit `Result<(NamespaceOutput, IpAllocResult), ClientError>` return type.
 - **Prerequisite for**: reliable multi-client partial apply.
 
-### Individual fragment apply / partial apply / labels
-- **Current**: Fragments (`kind: WorkloadFragment`) exist and `PatchNamespace` RPC does upsert, but fragments are merged client-side. Labels infrastructure landed (see below), but CLI filtering not yet wired.
-- **Goal**: Support `dv apply -l env=staging` to selectively apply subsets. Enable phased deployments.
-- **Scope**: ~~Spec types (add labels to workloads/services)~~, CLI argument parsing, patch filtering logic.
-- **Depends on**: orchestrator-side IP allocation for correctness with multi-client workflows.
-- **Labels (done)**: `map<string, string> labels` added to `WorkloadSpec`, `ServiceSpec` (proto + internal types), and `WorkloadStatusReport`, `ServiceStatusReport`. YAML spec supports `labels:` on workloads, inline services, and top-level services. Inline services inherit parent workload labels with service-level overrides winning. Labels are stored on the orchestrator spec layer and surfaced in status reports. Remaining: CLI `-l` flag for apply/status filtering.
+### Individual fragment apply / partial apply / labels ✓
+- **Done**: Full label selector engine and CLI `-l` flag on `dv spec apply`.
+- **Selector engine** (`client-protocol/src/selector.rs`): Kubernetes-style label selector syntax — `=`, `!=`, `in (...)`, `notin (...)`, existence (`key`), non-existence (`!key`). Comma-separated predicates with AND semantics. Closure-based `matches()` decouples the engine from storage representation; lives in `client-protocol` so it's usable from both client and orchestrator. Re-exported via `distvirt-client::selector`.
+- **CLI**: `dv spec apply -l "env=staging"` parses the selector, filters the spec client-side (workloads by label match, services included if own labels match OR parent workload matched), then sends only the filtered subset via `PatchNamespace` (additive upsert, no removals). Reports matched counts before patching.
+- **Labels (done)**: `map<string, string> labels` added to `WorkloadSpec`, `ServiceSpec` (proto + internal types), and `WorkloadStatusReport`, `ServiceStatusReport`. YAML spec supports `labels:` on workloads, inline services, and top-level services. Inline services inherit parent workload labels with service-level overrides winning. Labels are stored on the orchestrator spec layer and surfaced in status reports.
+- **Remaining**: `-l` flag for `dv status` filtering. Orchestrator-side selector evaluation (engine is already in `client-protocol` for when this is needed).
 
 ## 2. guest-init Process Model
 
@@ -50,10 +50,8 @@ Events generated at lower layers need to propagate up through worker -> orchestr
 - **Goal**: Worker reports intermediate status (image pulled, VM booting, init responding). Timer resets on progress. No false timeouts on slow but progressing launches.
 - **Scope**: Worker-protocol (new progress message types), pod state machine, timer logic, CLI display.
 
-### Logs dropped detection
-- **Current**: Log bus uses `try_send` and silently drops on full channels. guest-init fill/drain tracks `bytes_dropped` internally but doesn't propagate.
-- **Goal**: Counter in log bus subscriber that increments on `Full`. Periodic "X messages dropped" sentinels injected into stream. CLI renders visual indicator.
-- **Scope**: `log_bus.rs` subscriber machinery, new `StreamLogsResponse` message type, CLI log rendering.
+### Logs dropped detection ✓
+- **Done**: End-to-end drop detection via monotonic per-container sequence numbers. Guest-init fill task assigns a `seq: u64` to each output chunk (shared across stdout/stderr, increments even for dropped chunks so gaps are visible). Seq flows through: guest-init frame format (`[stream_id][seq][length][payload]`) → worker `IoSession` parses seq → worker re-frames with `send_log_frame` (new `[seq][length][payload]` codec in worker-protocol) → orchestrator `spawn_log_ingest` does frame-aware reads (replaces raw 8KB `stream.read`) → `LogChunk.seq` in LogBus → proto `LogChunk.seq` → CLI. CLI tracks expected next seq per (pod_id, container_id) and prints `*** N log chunk(s) dropped ***` on gaps. Detects drops at any stage: guest-init buffer overflow during final drain, LogBus subscriber backpressure, or network-level losses.
 
 ## 4. Logs Subsystem
 

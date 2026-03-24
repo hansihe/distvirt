@@ -765,4 +765,5 @@ message LogChunk {
     int64 timestamp_unix_ms = 3;
     string container_id = 4;
     string pod_id = 5;
+    uint64 seq = 6;
 }

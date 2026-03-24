@@ -16,3 +16,5 @@ pub use spec::convert::spec_to_namespace_spec;
 pub use spec::includes::resolve_includes;
 pub use errors::{ApiError, ConfigError, ConnectionError, SpecError};
 pub use spec::parse::{try_parse, ParsedSpec};
+
+pub use distvirt_client_protocol::selector;

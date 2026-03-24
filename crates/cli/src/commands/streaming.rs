@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use distvirt_client::connection::{handle_grpc_error, Client};
@@ -14,9 +15,25 @@ pub async fn logs(
     let mut stream =
         distvirt_client::operations::stream_logs(&mut client, namespace_id, workload).await?;
 
+    // Track expected next seq per (pod_id, container_id) for drop detection.
+    let mut expected_seq: HashMap<(String, String), u64> = HashMap::new();
+
     while let Some(resp) = stream.message().await.map_err(handle_grpc_error)? {
         match resp.message {
-            Some(Message::LogChunk(chunk)) => format::print_log_chunk(&chunk),
+            Some(Message::LogChunk(chunk)) => {
+                let key = (chunk.pod_id.clone(), chunk.container_id.clone());
+                if let Some(expected) = expected_seq.get(&key) {
+                    if chunk.seq > *expected {
+                        let dropped = chunk.seq - *expected;
+                        let label = format::log_chunk_label(&chunk);
+                        format::print_drop_notice(&label, dropped);
+                    }
+                }
+                // Always update to next expected seq (during both historical and live).
+                // During historical phase, the first chunk per topic sets the baseline.
+                expected_seq.insert(key, chunk.seq + 1);
+                format::print_log_chunk(&chunk);
+            }
             Some(Message::HistoricalComplete(_)) => {
                 if !follow {
                     break;

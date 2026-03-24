@@ -8,8 +8,8 @@ use distvirt_guest_protocol::{
 /// An event received from a container's output stream.
 #[derive(Debug)]
 pub enum IoEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
+    Stdout(u64, Vec<u8>),
+    Stderr(u64, Vec<u8>),
     Eof,
 }
 
@@ -42,7 +42,7 @@ impl IoSession {
             }
         }
 
-        let (stream_id, payload_len) = parse_output_chunk_header(&header);
+        let (stream_id, seq, payload_len) = parse_output_chunk_header(&header);
         let payload_len = payload_len as usize;
 
         // Safety limit: reject chunks > 16 MiB to prevent a malicious or
@@ -60,8 +60,8 @@ impl IoSession {
         }
 
         match stream_id {
-            STREAM_STDOUT => Ok(IoEvent::Stdout(payload)),
-            STREAM_STDERR => Ok(IoEvent::Stderr(payload)),
+            STREAM_STDOUT => Ok(IoEvent::Stdout(seq, payload)),
+            STREAM_STDERR => Ok(IoEvent::Stderr(seq, payload)),
             other => bail!("unknown output stream id: {}", other),
         }
     }

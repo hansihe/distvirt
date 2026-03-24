@@ -605,8 +605,15 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
         TaskHandle::spawn(async move {
             let complete = loop {
                 match session.next_event().await {
-                    Ok(IoEvent::Stdout(data)) | Ok(IoEvent::Stderr(data)) => {
-                        if log_stream.write_all(&data).await.is_err() {
+                    Ok(IoEvent::Stdout(seq, data)) | Ok(IoEvent::Stderr(seq, data)) => {
+                        if distvirt_worker_protocol::codec::send_log_frame(
+                            &mut log_stream,
+                            seq,
+                            &data,
+                        )
+                        .await
+                        .is_err()
+                        {
                             break false;
                         }
                     }

@@ -515,6 +515,7 @@ pub(super) fn convert_log_chunk(chunk: crate::log_bus::LogChunk) -> proto::LogCh
         container_id: chunk.container_id,
         data: chunk.data,
         timestamp_unix_ms,
+        seq: chunk.seq,
     }
 }
 

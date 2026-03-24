@@ -140,21 +140,25 @@ pub const STREAM_STDIN: u8 = 0;
 pub const STREAM_STDOUT: u8 = 1;
 pub const STREAM_STDERR: u8 = 2;
 
-/// Output chunk header size: [stream_id: u8][length: u32 LE] = 5 bytes.
-pub const OUTPUT_CHUNK_HEADER_SIZE: usize = 5;
+/// Output chunk header size: [stream_id: u8][seq: u64 LE][length: u32 LE] = 13 bytes.
+pub const OUTPUT_CHUNK_HEADER_SIZE: usize = 13;
 
-/// Encode an output chunk: `[stream_id: u8][u32 LE length][payload]`.
-pub fn encode_output_chunk(stream_id: u8, payload: &[u8]) -> Vec<u8> {
+/// Encode an output chunk: `[stream_id: u8][seq: u64 LE][u32 LE length][payload]`.
+pub fn encode_output_chunk(stream_id: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(OUTPUT_CHUNK_HEADER_SIZE + payload.len());
     frame.push(stream_id);
+    frame.extend_from_slice(&seq.to_le_bytes());
     frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     frame.extend_from_slice(payload);
     frame
 }
 
-/// Parse a 5-byte output chunk header into `(stream_id, payload_length)`.
-pub fn parse_output_chunk_header(header: &[u8; OUTPUT_CHUNK_HEADER_SIZE]) -> (u8, u32) {
+/// Parse a 13-byte output chunk header into `(stream_id, seq, payload_length)`.
+pub fn parse_output_chunk_header(header: &[u8; OUTPUT_CHUNK_HEADER_SIZE]) -> (u8, u64, u32) {
     let stream_id = header[0];
-    let length = u32::from_le_bytes([header[1], header[2], header[3], header[4]]);
-    (stream_id, length)
+    let seq = u64::from_le_bytes([
+        header[1], header[2], header[3], header[4], header[5], header[6], header[7], header[8],
+    ]);
+    let length = u32::from_le_bytes([header[9], header[10], header[11], header[12]]);
+    (stream_id, seq, length)
 }

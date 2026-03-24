@@ -184,21 +184,33 @@ pub fn print_event_line(event: &NamespaceEvent) {
     println!("{}", render_event_line(event));
 }
 
-pub fn print_log_chunk(chunk: &LogChunk) {
-    let text = String::from_utf8_lossy(&chunk.data);
+pub fn log_chunk_label(chunk: &LogChunk) -> String {
     let label = if !chunk.workload_name.is_empty() {
         format!("{}/{}", chunk.workload_name, chunk.pod_id)
     } else {
         chunk.pod_id.clone()
     };
-    for line in text.lines() {
-        let prefix = if chunk.container_id.is_empty() {
-            format!("[{}]", label)
-        } else {
-            format!("[{}/{}]", label, chunk.container_id)
-        };
-        println!("{} {}", prefix.dim(), line);
+    if chunk.container_id.is_empty() {
+        label
+    } else {
+        format!("{}/{}", label, chunk.container_id)
     }
+}
+
+pub fn print_log_chunk(chunk: &LogChunk) {
+    let text = String::from_utf8_lossy(&chunk.data);
+    let label = log_chunk_label(chunk);
+    for line in text.lines() {
+        println!("{} {}", format!("[{}]", label).dim(), line);
+    }
+}
+
+pub fn print_drop_notice(label: &str, dropped: u64) {
+    eprintln!(
+        "{} {}",
+        format!("[{}]", label).dim(),
+        format!("*** {} log chunk(s) dropped ***", dropped).yellow()
+    );
 }
 
 // --- JSON output helpers ---

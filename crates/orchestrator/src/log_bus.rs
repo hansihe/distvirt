@@ -30,6 +30,9 @@ pub struct LogChunk {
     pub workload_name: Option<String>,
     pub data: Vec<u8>,
     pub timestamp: Instant,
+    /// Monotonic sequence number assigned at the source (guest-init fill task).
+    /// Gaps in the sequence indicate dropped chunks.
+    pub seq: u64,
 }
 
 /// Key identifying a single log topic (one container's output).
@@ -334,6 +337,16 @@ mod tests {
     use super::*;
 
     fn make_chunk(ns: &str, pod: u64, container: &str, data: &[u8]) -> LogChunk {
+        make_chunk_seq(ns, pod, container, data, 0)
+    }
+
+    fn make_chunk_seq(
+        ns: &str,
+        pod: u64,
+        container: &str,
+        data: &[u8],
+        seq: u64,
+    ) -> LogChunk {
         LogChunk {
             namespace_id: NamespaceId::from(ns),
             pod_id: PodId::from(pod),
@@ -341,6 +354,7 @@ mod tests {
             workload_name: None,
             data: data.to_vec(),
             timestamp: Instant::now(),
+            seq,
         }
     }
 

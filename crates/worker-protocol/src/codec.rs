@@ -196,3 +196,56 @@ pub async fn recv_worker_ready<R: AsyncReadExt + Unpin>(
     let root = msg.get_root::<schema::worker_ready::Reader<'_>>()?;
     Ok(convert::read_worker_ready(root))
 }
+
+// --- Log Data Frames ---
+//
+// After the initial LogStreamHeader, log streams carry framed chunks:
+// `[seq: u64 LE][length: u32 LE][payload]` (12-byte header).
+
+/// Log data frame header size: [seq: u64 LE][length: u32 LE] = 12 bytes.
+pub const LOG_FRAME_HEADER_SIZE: usize = 12;
+
+/// Send a log data frame with sequence number.
+pub async fn send_log_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    seq: u64,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let mut header = [0u8; LOG_FRAME_HEADER_SIZE];
+    header[..8].copy_from_slice(&seq.to_le_bytes());
+    header[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    writer
+        .write_all(&header)
+        .await
+        .context("write log frame header")?;
+    writer
+        .write_all(payload)
+        .await
+        .context("write log frame payload")?;
+    Ok(())
+}
+
+/// Receive a log data frame. Returns `None` on clean EOF.
+pub async fn recv_log_frame<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
+    let mut header = [0u8; LOG_FRAME_HEADER_SIZE];
+    match reader.read_exact(&mut header).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e).context("read log frame header"),
+    }
+    let seq = u64::from_le_bytes(header[..8].try_into().unwrap());
+    let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+    if len > MAX_MESSAGE_SIZE {
+        bail!("log frame too large: {} bytes (max {})", len, MAX_MESSAGE_SIZE);
+    }
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        reader
+            .read_exact(&mut payload)
+            .await
+            .context("read log frame payload")?;
+    }
+    Ok(Some((seq, payload)))
+}

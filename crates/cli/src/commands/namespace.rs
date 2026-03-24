@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use distvirt_client::connection::Client;
+use distvirt_client::selector::Selector;
 
 use crate::format;
 
@@ -42,20 +43,43 @@ pub fn render(file: &Path) -> anyhow::Result<()> {
 }
 
 /// Apply a spec: create the namespace if new, patch (upsert) workloads/services if it exists.
+/// When a selector is given, only matching workloads/services are applied (always as a patch).
 pub async fn apply(
     mut client: Client,
     namespace_id: Option<&str>,
     file: Option<&Path>,
+    selector: Option<&str>,
 ) -> anyhow::Result<()> {
     let (namespace_id, spec) =
         distvirt_client::spec::resolve_spec(namespace_id, file)?;
 
-    match distvirt_client::operations::apply(&mut client, &namespace_id, &spec).await? {
-        distvirt_client::operations::ApplyOutcome::Created => {
-            eprintln!("namespace '{}' created", namespace_id);
+    let selector = selector.map(Selector::parse).transpose()
+        .map_err(|e| anyhow::anyhow!("invalid selector: {}", e))?;
+
+    if let Some(ref sel) = selector {
+        let filtered = distvirt_client::operations::filter_spec(&spec, sel);
+
+        if filtered.workloads.is_empty() && filtered.services.is_empty() {
+            eprintln!("no workloads or services matched selector '{}'", sel);
+            return Ok(());
         }
-        distvirt_client::operations::ApplyOutcome::Patched => {
-            eprintln!("namespace '{}' patched", namespace_id);
+
+        eprintln!(
+            "selector matched {} workload(s), {} service(s)",
+            filtered.workloads.len(),
+            filtered.services.len()
+        );
+
+        distvirt_client::operations::apply_patch(&mut client, &namespace_id, &filtered).await?;
+        eprintln!("namespace '{}' patched", namespace_id);
+    } else {
+        match distvirt_client::operations::apply(&mut client, &namespace_id, &spec).await? {
+            distvirt_client::operations::ApplyOutcome::Created => {
+                eprintln!("namespace '{}' created", namespace_id);
+            }
+            distvirt_client::operations::ApplyOutcome::Patched => {
+                eprintln!("namespace '{}' patched", namespace_id);
+            }
         }
     }
 

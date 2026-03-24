@@ -275,6 +275,9 @@ enum SpecCommands {
         /// Path to spec file (distvirt.yaml)
         #[arg(short, long)]
         file: Option<PathBuf>,
+        /// Label selector to filter which workloads/services to apply (e.g. "env=staging,team=platform")
+        #[arg(short = 'l', long = "selector")]
+        selector: Option<String>,
     },
     /// Sync a spec: create namespace if new, fully replace spec if existing
     Sync {
@@ -378,9 +381,9 @@ async fn main() -> anyhow::Result<()> {
 
             match cmd {
                 Commands::Task(TaskCommands::Spec {
-                    command: SpecCommands::Apply { namespace_id, file },
+                    command: SpecCommands::Apply { namespace_id, file, selector },
                 }) => {
-                    commands::namespace::apply(client, namespace_id.as_deref(), file.as_deref())
+                    commands::namespace::apply(client, namespace_id.as_deref(), file.as_deref(), selector.as_deref())
                         .await?;
                 }
                 Commands::Task(TaskCommands::Spec {

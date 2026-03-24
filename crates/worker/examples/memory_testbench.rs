@@ -246,13 +246,13 @@ async fn main() -> Result<()> {
     let _output_handle = tokio::spawn(async move {
         loop {
             match io_session.next_event().await {
-                Ok(IoEvent::Stdout(data)) => {
+                Ok(IoEvent::Stdout(_seq, data)) => {
                     let text = String::from_utf8_lossy(&data);
                     for line in text.lines() {
                         eprintln!("  [stdout] {}", line);
                     }
                 }
-                Ok(IoEvent::Stderr(data)) => {
+                Ok(IoEvent::Stderr(_seq, data)) => {
                     let text = String::from_utf8_lossy(&data);
                     for line in text.lines() {
                         eprintln!("  [stderr] {}", line);
