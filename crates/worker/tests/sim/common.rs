@@ -192,8 +192,8 @@ pub async fn launch_pod(
             container_id: "ctr-sim".into(),
             image_ref: "stub://ignored".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/true".into()],
-                args: vec![],
+                command: Some(vec!["/bin/true".into()]),
+                args: Some(vec![]),
                 env: vec![],
                 working_dir: None,
                 user: None,

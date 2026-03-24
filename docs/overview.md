@@ -179,7 +179,7 @@ Output paths: `guest-image/result-kernel/bzImage` (kernel), `guest-image/result-
 
 Trait-based container image preparation. Two implementations:
 
-- **ContainerdOverlayfsProvider** (primary) — Pulls OCI images via containerd gRPC API, mounts overlayfs snapshot, builds ext4 image from merged rootfs via `mkfs.ext4 -d`. Parses OCI config (entrypoint, env, working_dir, user).
+- **ContainerdOverlayfsProvider** (primary) — Pulls OCI images via containerd gRPC API, mounts overlayfs snapshot, builds ext4 image from merged rootfs via `mkfs.ext4 -d`. Parses OCI config (Entrypoint, Cmd, env, working_dir, user).
 - **RootfsDirProvider** (dev/test) — Builds ext4 from a host directory.
 
 ---

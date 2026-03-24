@@ -683,8 +683,10 @@ fn build_namespace_spec(
                         name,
                         image: c.image.clone(),
                         config: Some(ContainerConfig {
-                            entrypoint: c.entrypoint.clone().unwrap_or_default(),
+                            command: c.command.clone().unwrap_or_default(),
+                            has_command: c.command.is_some(),
                             args: c.args.clone().unwrap_or_default(),
+                            has_args: c.args.is_some(),
                             env: c.env.clone().unwrap_or_default(),
                             working_dir: c.working_dir.clone().unwrap_or_default(),
                             user: c.user.clone().unwrap_or_default(),

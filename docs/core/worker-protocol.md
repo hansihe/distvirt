@@ -466,7 +466,7 @@ ContainerSpec {
 }
 
 ContainerConfig {
-  entrypoint: Vec<String>,    // entrypoint command (e.g. ["/bin/sh", "-c"])
+  command: Option<Vec<String>>,  // command override (e.g. ["/bin/sh", "-c"])
   args: Vec<String>,
   env: Vec<String>,           // KEY=VALUE format (OCI convention)
   working_dir: Option<String>,
@@ -488,7 +488,7 @@ Shutdown {}
 
 `PodNetworkConfig` includes the full network configuration the pod needs to configure its guest interface, including the pod's MAC address for the TAP device. The orchestrator derives these from the namespace's `NetworkConfig` and the pod's assigned IP/MAC.
 
-When a `ContainerSpec` references an OCI image, the worker parses the image's config (entrypoint, cmd, env, working_dir, user) and merges it with the `ContainerConfig` overrides. Explicit overrides take precedence; empty/None fields fall through to the image defaults.
+When a `ContainerSpec` references an OCI image, the worker parses the image's OCI config (Entrypoint, Cmd, env, working_dir, user) and merges it with the `ContainerConfig` overrides. Explicit overrides take precedence; `None` fields fall through to the image defaults.
 
 `LaunchPod` tells the worker to:
 1. Prepare container images (pull if needed, parse OCI config)

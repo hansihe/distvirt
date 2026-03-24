@@ -80,8 +80,7 @@ pub fn execute_command(
         }
         HostMessage::StartContainer {
             id,
-            entrypoint,
-            args,
+            argv,
             env,
             working_dir,
             uid,
@@ -90,17 +89,25 @@ pub fn execute_command(
             capture_output,
             stdin,
         } => {
+            let (program, args) = match argv.split_first() {
+                Some((p, a)) => (p.as_str(), a),
+                None => {
+                    return CommandResult::Response(GuestMessage::Error {
+                        message: "empty argv in StartContainer".to_string(),
+                    });
+                }
+            };
             log::info!(
-                "StartContainer: id={}, entrypoint={}, capture_output={}, stdin={}",
+                "StartContainer: id={}, program={}, capture_output={}, stdin={}",
                 id,
-                entrypoint,
+                program,
                 capture_output,
                 stdin
             );
             match containers.start(
                 &id,
-                &entrypoint,
-                &args,
+                program,
+                args,
                 &env,
                 working_dir.as_deref(),
                 uid,

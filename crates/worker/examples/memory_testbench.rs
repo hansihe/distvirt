@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         "    containerd:      {} (ns={})",
         args.containerd_socket, args.containerd_namespace
     );
-    eprintln!("    entrypoint:      /bin/test-containers mem-stress");
+    eprintln!("    command:         /bin/test-containers mem-stress");
     eprintln!("    stress target:   {} MiB", args.stress_target_mib);
     eprintln!("    stress step:     {} MiB", args.stress_step_mib);
     eprintln!("    stress interval: {} ms", args.stress_interval_ms);
@@ -207,12 +207,12 @@ async fn main() -> Result<()> {
     eprintln!("       -> container filesystem added");
 
     let container_config = ContainerConfig {
-        entrypoint: vec!["/bin/test-containers".to_string(), "mem-stress".to_string()],
-        args: vec![
+        command: Some(vec!["/bin/test-containers".to_string(), "mem-stress".to_string()]),
+        args: Some(vec![
             format!("--target-mib={}", args.stress_target_mib),
             format!("--step-mib={}", args.stress_step_mib),
             format!("--interval-ms={}", args.stress_interval_ms),
-        ],
+        ]),
         env: vec![],
         working_dir: None,
         user: None,

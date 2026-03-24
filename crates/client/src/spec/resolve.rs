@@ -157,9 +157,9 @@ pub fn resolve_refs(parsed: &mut super::parse::ParsedSpec) -> Result<(), SpecErr
 
                 resolve_string(&mut container.image, wid, &ctx, &c_path.key("image"))?;
 
-                if let Some(ref mut entrypoint) = container.entrypoint {
-                    for (i, s) in entrypoint.iter_mut().enumerate() {
-                        resolve_string(s, wid, &ctx, &c_path.key("entrypoint").index(i))?;
+                if let Some(ref mut command) = container.command {
+                    for (i, s) in command.iter_mut().enumerate() {
+                        resolve_string(s, wid, &ctx, &c_path.key("command").index(i))?;
                     }
                 }
                 if let Some(ref mut args) = container.args {

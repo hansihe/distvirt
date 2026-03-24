@@ -90,7 +90,7 @@ pub struct SpecWorkloadActivation {
 pub struct SpecContainer {
     pub name: Option<String>,
     pub image: String,
-    pub entrypoint: Option<Vec<String>>,
+    pub command: Option<Vec<String>>,
     pub args: Option<Vec<String>>,
     pub env: Option<HashMap<String, String>>,
     pub working_dir: Option<String>,

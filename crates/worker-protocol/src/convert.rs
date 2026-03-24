@@ -113,18 +113,18 @@ pub fn write_container_config(
     builder: &mut schema::container_config::Builder<'_>,
     val: &ContainerConfig,
 ) {
-    {
-        let mut ep = builder
+    if let Some(ref command) = val.command {
+        let mut cmd = builder
             .reborrow()
-            .init_entrypoint(val.entrypoint.len() as u32);
-        for (i, e) in val.entrypoint.iter().enumerate() {
-            ep.set(i as u32, e);
+            .init_command(command.len() as u32);
+        for (i, c) in command.iter().enumerate() {
+            cmd.set(i as u32, c);
         }
     }
-    {
-        let mut args = builder.reborrow().init_args(val.args.len() as u32);
-        for (i, a) in val.args.iter().enumerate() {
-            args.set(i as u32, a);
+    if let Some(ref args) = val.args {
+        let mut a = builder.reborrow().init_args(args.len() as u32);
+        for (i, arg) in args.iter().enumerate() {
+            a.set(i as u32, arg);
         }
     }
     {
@@ -162,11 +162,6 @@ pub fn write_container_config(
 pub fn read_container_config(
     reader: schema::container_config::Reader<'_>,
 ) -> capnp::Result<ContainerConfig> {
-    let args = reader.get_args()?;
-    let mut args_vec = Vec::with_capacity(args.len() as usize);
-    for i in 0..args.len() {
-        args_vec.push(args.get(i)?.to_string()?);
-    }
     let env = reader.get_env()?;
     let mut env_vec = Vec::with_capacity(env.len() as usize);
     for i in 0..env.len() {
@@ -175,15 +170,26 @@ pub fn read_container_config(
     let wd = reader.get_working_dir()?.to_str()?;
     let hostname = reader.get_hostname()?.to_str()?;
     Ok(ContainerConfig {
-        entrypoint: {
-            let ep = reader.get_entrypoint()?;
-            let mut ep_vec = Vec::with_capacity(ep.len() as usize);
-            for i in 0..ep.len() {
-                ep_vec.push(ep.get(i)?.to_string()?);
+        command: if reader.has_command() {
+            let cmd = reader.get_command()?;
+            let mut cmd_vec = Vec::with_capacity(cmd.len() as usize);
+            for i in 0..cmd.len() {
+                cmd_vec.push(cmd.get(i)?.to_string()?);
             }
-            ep_vec
+            Some(cmd_vec)
+        } else {
+            None
         },
-        args: args_vec,
+        args: if reader.has_args() {
+            let args = reader.get_args()?;
+            let mut args_vec = Vec::with_capacity(args.len() as usize);
+            for i in 0..args.len() {
+                args_vec.push(args.get(i)?.to_string()?);
+            }
+            Some(args_vec)
+        } else {
+            None
+        },
         env: env_vec,
         working_dir: if wd.is_empty() {
             None

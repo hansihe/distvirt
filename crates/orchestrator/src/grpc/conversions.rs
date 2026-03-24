@@ -176,8 +176,8 @@ fn convert_proto_container_spec(c: proto::ContainerSpec) -> Result<ContainerSpec
         container_id: c.name,
         image_ref: c.image,
         config: ContainerConfig {
-            entrypoint: config.entrypoint,
-            args: config.args,
+            command: if config.has_command { Some(config.command) } else { None },
+            args: if config.has_args { Some(config.args) } else { None },
             env: config
                 .env
                 .into_iter()

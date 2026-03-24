@@ -63,8 +63,8 @@ pub fn container_spec(image: &str) -> ContainerSpec {
         container_id: "main".to_string(),
         image_ref: image.to_string(),
         config: ContainerConfig {
-            entrypoint: vec!["/bin/echo".to_string()],
-            args: vec!["hello".to_string()],
+            command: Some(vec!["/bin/echo".to_string()]),
+            args: Some(vec!["hello".to_string()]),
             env: vec![],
             working_dir: None,
             user: None,

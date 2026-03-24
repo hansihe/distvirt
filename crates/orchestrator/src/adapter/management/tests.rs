@@ -19,8 +19,8 @@ fn simple_workload_spec() -> WorkloadSpec {
             container_id: "main".into(),
             image_ref: "app:v1".into(),
             config: distvirt_worker_protocol::ContainerConfig {
-                entrypoint: vec![],
-                args: vec![],
+                command: None,
+                args: None,
                 env: vec![],
                 working_dir: None,
                 user: None,

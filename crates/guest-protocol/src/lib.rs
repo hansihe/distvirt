@@ -28,8 +28,7 @@ pub enum HostMessage {
     },
     StartContainer {
         id: String,
-        entrypoint: String,
-        args: Vec<String>,
+        argv: Vec<String>,
         #[serde(default)]
         env: Vec<String>,
         #[serde(default)]

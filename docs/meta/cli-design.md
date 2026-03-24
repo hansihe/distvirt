@@ -228,7 +228,7 @@ Runs in the foreground. Press Ctrl+C to unsplice.
 
 ### `dv attach`
 
-Attach to the stdin/stdout/stderr of a running workload's entrypoint process. Runs in the foreground, forwarding I/O until detached.
+Attach to the stdin/stdout/stderr of a running workload's command process. Runs in the foreground, forwarding I/O until detached.
 
 ```
 dv attach <namespace>/<workload>
@@ -245,7 +245,7 @@ dv attach myapp/api --detach-keys ctrl-] # custom detach sequence
 
 Multiple clients can attach simultaneously — stdout/stderr are broadcast to all, stdin is delivered to one (last attach wins).
 
-**Implementation**: The guest-init agent holds the entrypoint's stdio file descriptors (PTY master FD or pipe FDs, depending on `tty` in the container spec) and multiplexes them over the host communication channel. The worker proxies streams between guest-init and the orchestrator. The orchestrator exposes a bidirectional gRPC streaming RPC (`AttachWorkload`) that the CLI connects to. The CLI sets the local terminal to raw mode and handles detach key detection.
+**Implementation**: The guest-init agent holds the command process's stdio file descriptors (PTY master FD or pipe FDs, depending on `tty` in the container spec) and multiplexes them over the host communication channel. The worker proxies streams between guest-init and the orchestrator. The orchestrator exposes a bidirectional gRPC streaming RPC (`AttachWorkload`) that the CLI connects to. The CLI sets the local terminal to raw mode and handles detach key detection.
 
 ### `dv clone`
 

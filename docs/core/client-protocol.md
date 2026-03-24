@@ -46,7 +46,7 @@ Client                               Orchestrator
   |                                       |
 ```
 
-Most RPCs are either unary (one request, one response) or server-streaming (one request, many responses). The exception is `AttachWorkload`, which uses bidirectional streaming to forward stdin/stdout/stderr between the client and a running workload's entrypoint process.
+Most RPCs are either unary (one request, one response) or server-streaming (one request, many responses). The exception is `AttachWorkload`, which uses bidirectional streaming to forward stdin/stdout/stderr between the client and a running workload's command process.
 
 ### Connection Lifecycle
 
@@ -231,15 +231,17 @@ message TcpActivator {
 message Http2Activator {}
 
 message ContainerConfig {
-    repeated string entrypoint = 1;
+    repeated string command = 1;
+    bool has_command = 10;       // presence flag: true if command was explicitly set
     repeated string args = 2;
+    bool has_args = 11;          // presence flag: true if args was explicitly set
     map<string, string> env = 3;
     // Fields 4 (memory_mb) and 5 (vcpus) are reserved --
     // these moved to ResourceRequirements on WorkloadSpec.
     string working_dir = 6;
     string user = 7;
     string hostname = 8;
-    bool tty = 9;              // allocate a PTY for the entrypoint at launch
+    bool tty = 9;              // allocate a PTY for the command process at launch
 }
 
 message ServiceNetworkConfig {
@@ -486,9 +488,9 @@ Note: the server implementation currently ignores `overrides` -- it clones the s
 
 ### AttachWorkload (Bidirectional Streaming)
 
-Attaches to the stdin/stdout/stderr of a running workload's entrypoint process. This is the only bidirectional streaming RPC in the protocol.
+Attaches to the stdin/stdout/stderr of a running workload's command process. This is the only bidirectional streaming RPC in the protocol.
 
-Whether the entrypoint runs with a PTY is determined at launch time by `ContainerConfig.tty` in the workload spec — not at attach time. The guest-init allocates (or doesn't) a PTY when starting the process, and attach simply connects to whatever streams already exist.
+Whether the command runs with a PTY is determined at launch time by `ContainerConfig.tty` in the workload spec — not at attach time. The guest-init allocates (or doesn't) a PTY when starting the process, and attach simply connects to whatever streams already exist.
 
 The first client message must be `AttachStart` to identify the target. Subsequent client messages carry stdin data or terminal resize events. Server messages carry stdout/stderr data or an exit notification when the process terminates.
 
@@ -525,7 +527,7 @@ message AttachWorkloadOutput {
 }
 
 message AttachStarted {
-    bool tty = 1;              // whether the entrypoint is running with a PTY
+    bool tty = 1;              // whether the command is running with a PTY
 }
 
 message AttachStdout {
@@ -546,10 +548,10 @@ message AttachExited {
 1. Client sends `AttachStart` with namespace/workload.
 2. Server responds with `AttachStarted`, which reports whether the session is a TTY. The CLI uses this to decide whether to enter raw mode.
 3. Client sends `AttachStdin` messages; server sends `AttachStdout`/`AttachStderr` messages.
-4. When the entrypoint process exits, server sends `AttachExited` with the exit code and closes the stream.
-5. If the client cancels the stream (detach), the entrypoint process is **not** killed — it continues running.
+4. When the command process exits, server sends `AttachExited` with the exit code and closes the stream.
+5. If the client cancels the stream (detach), the command process is **not** killed — it continues running.
 
-**TTY vs non-TTY:** The PTY is allocated at process start based on `ContainerConfig.tty`. When the entrypoint has a PTY, stdout and stderr are merged (standard PTY behavior) — the server only sends `AttachStdout`. The client should send `AttachResize` when the local terminal size changes. When the entrypoint has no PTY, stdout and stderr are separate pipe-backed streams and `AttachResize` is ignored.
+**TTY vs non-TTY:** The PTY is allocated at process start based on `ContainerConfig.tty`. When the command has a PTY, stdout and stderr are merged (standard PTY behavior) — the server only sends `AttachStdout`. The client should send `AttachResize` when the local terminal size changes. When the command has no PTY, stdout and stderr are separate pipe-backed streams and `AttachResize` is ignored.
 
 **Error cases:**
 - Workload not found: `NOT_FOUND`

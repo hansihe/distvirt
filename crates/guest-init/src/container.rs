@@ -159,11 +159,11 @@ impl ContainerManager {
         Ok(())
     }
 
-    /// Fork a child process, chroot into the container rootfs, and exec the entrypoint.
+    /// Fork a child process, chroot into the container rootfs, and exec the program.
     pub fn start(
         &mut self,
         id: &str,
-        entrypoint: &str,
+        program: &str,
         args: &[String],
         env: &[String],
         working_dir: Option<&str>,
@@ -238,7 +238,7 @@ impl ContainerManager {
             let stdin_read_fd = stdin_pipe.as_ref().map(|(r, _)| r.as_raw_fd());
             child_exec(
                 &container.mount_point,
-                entrypoint,
+                program,
                 args,
                 env,
                 working_dir,
@@ -558,7 +558,7 @@ pub async fn container_task(
 /// Runs in the child process after fork. Never returns.
 fn child_exec(
     mount_point: &str,
-    entrypoint: &str,
+    program: &str,
     args: &[String],
     env: &[String],
     working_dir: Option<&str>,
@@ -571,7 +571,7 @@ fn child_exec(
 ) -> ! {
     let result = child_exec_inner(
         mount_point,
-        entrypoint,
+        program,
         args,
         env,
         working_dir,
@@ -590,7 +590,7 @@ fn child_exec(
 
 fn child_exec_inner(
     mount_point: &str,
-    entrypoint: &str,
+    program: &str,
     args: &[String],
     env: &[String],
     working_dir: Option<&str>,
@@ -794,16 +794,16 @@ fn child_exec_inner(
         }
     }
 
-    // Resolve entrypoint via PATH if it's not an absolute/relative path.
-    let resolved_entrypoint = if entrypoint.contains('/') {
-        entrypoint.to_string()
+    // Resolve program via PATH if it's not an absolute/relative path.
+    let resolved_program = if program.contains('/') {
+        program.to_string()
     } else {
-        resolve_in_path(entrypoint, env).unwrap_or_else(|| entrypoint.to_string())
+        resolve_in_path(program, env).unwrap_or_else(|| program.to_string())
     };
 
     // Build argv for execve.
-    let entrypoint_c = CString::new(resolved_entrypoint.as_str())?;
-    let args_c: Vec<CString> = std::iter::once(CString::new(entrypoint)?)
+    let program_c = CString::new(resolved_program.as_str())?;
+    let args_c: Vec<CString> = std::iter::once(CString::new(program)?)
         .chain(
             args.iter()
                 .map(|a| CString::new(a.as_str()).context("invalid argument"))
@@ -821,10 +821,10 @@ fn child_exec_inner(
     let mut envp: Vec<*const libc::c_char> = env_c.iter().map(|e| e.as_ptr()).collect();
     envp.push(ptr::null());
 
-    unsafe { libc::execve(entrypoint_c.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+    unsafe { libc::execve(program_c.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
     bail!(
         "execve {}: {}",
-        resolved_entrypoint,
+        resolved_program,
         std::io::Error::last_os_error()
     );
 }

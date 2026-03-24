@@ -30,5 +30,5 @@ Issues identified while debugging the full-stack E2E WireGuard tunnel test.
 
 ## Resolved
 
-- **#1 — entrypoint `join(" ")`** — OCI entrypoint/cmd resolution consolidated in `merge_config()`. CLI and orchestrator pass `Vec<String>` without splitting. Proto extended with `working_dir`, `user`, `hostname`. Old `ImageOverrides` eliminated.
+- **#1 — command `join(" ")`** — OCI Entrypoint/Cmd resolution consolidated in `merge_config()`. CLI and orchestrator pass `Vec<String>` without splitting. Proto extended with `working_dir`, `user`, `hostname`. Old `ImageOverrides` eliminated.
 - **#7 — yamux deadlock in `drain_container_pipes_final`** — Drain now runs concurrently with a yamux-driving `poll_fn` via `future::or`.

@@ -48,8 +48,8 @@ async fn test_registry_sync() -> anyhow::Result<()> {
             container_id: "ctr-dns".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec!["dns-lookup".into(), "--host".into(), "myservice".into()],
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec!["dns-lookup".into(), "--host".into(), "myservice".into()]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -148,8 +148,8 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
             container_id: "ctr-tcp-act".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -159,7 +159,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
                     "trigger\n".into(),
                     "--timeout".into(),
                     "5".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -255,8 +255,8 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
             container_id: "ctr-backend".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "recv".into(),
                     "--port".into(),
                     "80".into(),
@@ -266,7 +266,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                     "ok".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -334,8 +334,8 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
             container_id: "ctr-client".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -345,7 +345,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
                     "hello-service\n".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -455,8 +455,8 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
             container_id: "ctr-backend".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "recv".into(),
                     "--port".into(),
                     "80".into(),
@@ -466,7 +466,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                     "ok".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -511,8 +511,8 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
             container_id: "ctr-client".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -522,7 +522,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
                     "hello-buffered\n".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,

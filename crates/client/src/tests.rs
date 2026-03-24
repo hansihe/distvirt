@@ -40,7 +40,7 @@ workloads:
     containers:
       - name: main
         image: docker.io/myorg/api:latest
-        entrypoint: ["/app/server"]
+        command: ["/app/server"]
         args: ["--port", "8080"]
         env:
           DATABASE_URL: "postgres://db:5432/myapp"
@@ -85,7 +85,7 @@ workloads:
         assert_eq!(c.name, "main");
         assert_eq!(c.image, "docker.io/myorg/api:latest");
         let cfg = c.config.as_ref().unwrap();
-        assert_eq!(cfg.entrypoint, vec!["/app/server"]);
+        assert_eq!(cfg.command, vec!["/app/server"]);
         assert_eq!(cfg.args, vec!["--port", "8080"]);
         assert_eq!(cfg.working_dir, "/app");
         assert_eq!(cfg.user, "1000:1000");

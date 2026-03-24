@@ -74,8 +74,8 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
                 container_id: "ctr-migrate".into(),
                 image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
                 config: ContainerConfig {
-                    entrypoint: vec!["/bin/test-containers".into()],
-                    args: vec!["sleep".into()],
+                    command: Some(vec!["/bin/test-containers".into()]),
+                    args: Some(vec!["sleep".into()]),
                     env: vec![],
                     working_dir: None,
                     user: None,

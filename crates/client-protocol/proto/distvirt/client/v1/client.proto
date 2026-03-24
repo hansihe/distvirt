@@ -123,16 +123,18 @@ message ActivationSpec {
 }
 
 message ContainerConfig {
-    repeated string entrypoint = 1;
-    repeated string args = 2;
+    repeated string command = 1;   // Overrides image entrypoint. Presence indicated by has_command.
+    repeated string args = 2;     // Overrides image CMD. Presence indicated by has_args.
     map<string, string> env = 3;
     reserved 4, 5;
     reserved "memory_mb", "vcpus";
     string working_dir = 6;
     string user = 7;
     string hostname = 8;
-    bool tty = 9;              // allocate a PTY for the entrypoint at launch
+    bool tty = 9;              // allocate a PTY for the command at launch
     repeated VolumeMountSpec volume_mounts = 10;
+    bool has_command = 11;     // true if command was explicitly specified (even if empty)
+    bool has_args = 12;        // true if args was explicitly specified (even if empty)
 }
 
 // --- Volume Types ---

@@ -45,8 +45,8 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
             container_id: "ctr-suspend".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec!["sleep".into()],
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec!["sleep".into()]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -276,8 +276,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             container_id: "ctr-server".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "serve".into(),
                     "--port".into(),
                     "80".into(),
@@ -285,7 +285,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                     "pong".into(),
                     "--timeout".into(),
                     "120".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -347,8 +347,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             container_id: "ctr-client-pre".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -358,7 +358,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                     "ping\n".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -508,8 +508,8 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
             container_id: "ctr-client-post".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -519,7 +519,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
                     "ping\n".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -655,8 +655,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             container_id: "ctr-server".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "serve".into(),
                     "--port".into(),
                     "80".into(),
@@ -664,7 +664,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                     "pong".into(),
                     "--timeout".into(),
                     "120".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -730,8 +730,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             container_id: "ctr-pre-check".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -741,7 +741,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                     "ping\n".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,
@@ -866,8 +866,8 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
             container_id: "ctr-client".into(),
             image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
             config: ContainerConfig {
-                entrypoint: vec!["/bin/test-containers".into()],
-                args: vec![
+                command: Some(vec!["/bin/test-containers".into()]),
+                args: Some(vec![
                     "send".into(),
                     "--host".into(),
                     "10.0.0.99".into(),
@@ -877,7 +877,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
                     "ping\n".into(),
                     "--timeout".into(),
                     "30".into(),
-                ],
+                ]),
                 env: vec![],
                 working_dir: None,
                 user: None,

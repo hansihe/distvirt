@@ -228,8 +228,8 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                 container_id: "ctr-b".into(),
                 image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
                 config: ContainerConfig {
-                    entrypoint: vec!["/bin/test-containers".into()],
-                    args: vec!["sleep".into()],
+                    command: Some(vec!["/bin/test-containers".into()]),
+                    args: Some(vec!["sleep".into()]),
                     env: vec![],
                     working_dir: None,
                     user: None,
@@ -275,14 +275,14 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
                 container_id: "ctr-a".into(),
                 image_ref: "docker.io/library/alpine:latest".into(),
                 config: ContainerConfig {
-                    entrypoint: vec!["/bin/ping".into()],
-                    args: vec![
+                    command: Some(vec!["/bin/ping".into()]),
+                    args: Some(vec![
                         "-c".into(),
                         "3".into(),
                         "-W".into(),
                         "5".into(),
                         pod_b_ip.to_string(),
-                    ],
+                    ]),
                     env: vec![],
                     working_dir: None,
                     user: None,

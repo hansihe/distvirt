@@ -94,8 +94,8 @@ async fn test_cross_worker_artifact_transfer() -> anyhow::Result<()> {
                 container_id: "ctr-xfer".into(),
                 image_ref: "docker.io/library/distvirt-test-containers:latest".into(),
                 config: ContainerConfig {
-                    entrypoint: vec!["/bin/test-containers".into()],
-                    args: vec!["sleep".into()],
+                    command: Some(vec!["/bin/test-containers".into()]),
+                    args: Some(vec!["sleep".into()]),
                     env: vec![],
                     working_dir: None,
                     user: None,

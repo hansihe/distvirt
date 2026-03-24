@@ -62,13 +62,16 @@ struct PodNetworkConfig {
 #
 # When a ContainerSpec references an OCI image, the worker parses the image's
 # config (entrypoint, cmd, env, working_dir, user) and merges it with these
-# overrides. Explicit values here take precedence; unset fields fall through
-# to image defaults.
+# overrides. Explicit values here take precedence; unset (null) fields fall
+# through to image defaults. An explicitly empty list overrides the image
+# default with nothing.
 struct ContainerConfig {
-  entrypoint @0 :List(Text);
-  # Entrypoint command (e.g. ["/bin/sh", "-c"]). Merged with image entrypoint/cmd by the worker.
+  command @0 :List(Text);
+  # Command to run (e.g. ["/bin/sh", "-c"]). Overrides image entrypoint.
+  # Null = use image default. Empty list = explicitly no command.
   args @1 :List(Text);
-  # Arguments to the entrypoint.
+  # Arguments to the command. Overrides image CMD.
+  # Null = use image default. Empty list = explicitly no args.
   env @2 :List(Text);
   # Environment variables in KEY=VALUE format (OCI convention).
   workingDir @3 :Text;

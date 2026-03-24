@@ -169,50 +169,47 @@ fn resolve_gid(
     bail!("group '{}' not found in image /etc/group", group)
 }
 
-/// Merge OCI image config with overrides following OCI entrypoint/cmd resolution rules.
+/// Merge OCI image config with overrides following OCI/Kubernetes resolution rules.
 ///
-/// The `overrides` come from the orchestrator (via the worker protocol). Empty
-/// `entrypoint` vec means "no override" — fall through to image defaults.
+/// The `overrides` come from the orchestrator (via the worker protocol).
+/// `None` means "not specified" — fall through to image defaults.
+/// `Some(vec![])` means "explicitly empty" — override image default with nothing.
 pub fn merge_config(
     image: &ImageConfig,
     overrides: &ContainerConfig,
 ) -> anyhow::Result<ContainerConfig> {
-    let has_entrypoint_override = !overrides.entrypoint.is_empty();
-    let has_args_override = !overrides.args.is_empty();
-
-    let (entrypoint, args) = if has_entrypoint_override {
-        // Override entrypoint provided — use it with override args (or image cmd as default args).
-        let ep = overrides.entrypoint.clone();
-        let args = if has_args_override {
-            overrides.args.clone()
-        } else {
-            image.cmd.clone()
-        };
-        (ep, args)
-    } else if !image.entrypoint.is_empty() {
-        // Image has entrypoint, no override — use image entrypoint with override args or image cmd.
-        let args = if has_args_override {
-            overrides.args.clone()
-        } else {
-            image.cmd.clone()
-        };
-        (image.entrypoint.clone(), args)
-    } else if has_args_override {
-        // No entrypoint anywhere, but override args provided (compose `command:` replaces CMD).
-        (overrides.args.clone(), vec![])
-    } else if !image.cmd.is_empty() {
-        // Image has CMD only.
-        (image.cmd.clone(), vec![])
-    } else {
-        bail!("image has no entrypoint or cmd, and none was specified");
+    let (command, args) = match (&overrides.command, &overrides.args) {
+        // Both specified — use both as-is.
+        (Some(cmd), Some(a)) => (cmd.clone(), a.clone()),
+        // Command specified, args not — command + image CMD as default args.
+        (Some(cmd), None) => (cmd.clone(), image.cmd.clone()),
+        // Args specified, command not — image entrypoint + override args.
+        (None, Some(a)) => {
+            if !image.entrypoint.is_empty() {
+                (image.entrypoint.clone(), a.clone())
+            } else {
+                // No entrypoint anywhere, args become the command (compose `command:` style).
+                (a.clone(), vec![])
+            }
+        }
+        // Neither specified — full image defaults.
+        (None, None) => {
+            if !image.entrypoint.is_empty() {
+                (image.entrypoint.clone(), image.cmd.clone())
+            } else if !image.cmd.is_empty() {
+                (image.cmd.clone(), vec![])
+            } else {
+                bail!("image has no entrypoint or cmd, and none was specified");
+            }
+        }
     };
 
     let mut env = image.env.clone();
     env.extend(overrides.env.iter().cloned());
 
     Ok(ContainerConfig {
-        entrypoint,
-        args,
+        command: Some(command),
+        args: Some(args),
         env,
         working_dir: overrides
             .working_dir

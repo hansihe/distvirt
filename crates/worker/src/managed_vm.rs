@@ -358,11 +358,13 @@ impl<I: VmInstance> ManagedVm<I> {
         self.session
             .send(&HostMessage::StartContainer {
                 id: id.to_string(),
-                entrypoint: config.entrypoint.first().cloned().unwrap_or_default(),
-                args: {
-                    let mut a = config.entrypoint.get(1..).unwrap_or_default().to_vec();
-                    a.extend(config.args.iter().cloned());
-                    a
+                argv: {
+                    let command = config.command.as_deref().unwrap_or(&[]);
+                    let args = config.args.as_deref().unwrap_or(&[]);
+                    let mut argv = Vec::with_capacity(command.len() + args.len());
+                    argv.extend(command.iter().cloned());
+                    argv.extend(args.iter().cloned());
+                    argv
                 },
                 env: config.env.clone(),
                 working_dir: config.working_dir.clone(),

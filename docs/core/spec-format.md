@@ -44,7 +44,7 @@ workloads:
     containers:
       - name: main
         image: docker.io/myorg/api:latest
-        entrypoint: ["/app/server"]
+        command: ["/app/server"]
         args: ["--port", "8080"]
         env:
           DATABASE_URL: "postgres://${services.database.ip}:5432/myapp"
@@ -111,7 +111,7 @@ workloads:
     containers:
       - name: <string>         # Container ID within pod. Default: "main".
         image: <oci-ref>       # Required. OCI image reference.
-        entrypoint: [<args>]   # Override image entrypoint.
+        command: [<args>]      # Override image entrypoint.
         args: [<args>]         # Override image CMD.
         env: {<map>}           # KEY: VALUE environment variables. Supports ${...} expressions.
         working_dir: <path>    # Working directory.
@@ -661,7 +661,7 @@ distvirt supports `${...}` expressions in string fields for referencing dynamic 
 
 ### Reference expressions
 
-Reference expressions resolve to IPs allocated from the namespace subnet. They can be used in any string field within a workload: `env` values, `image`, `args`, `entrypoint`, `working_dir`, `user`, `hostname`, and `config_data` file content.
+Reference expressions resolve to IPs allocated from the namespace subnet. They can be used in any string field within a workload: `env` values, `image`, `args`, `command`, `working_dir`, `user`, `hostname`, and `config_data` file content.
 
 ```yaml
 workloads:
