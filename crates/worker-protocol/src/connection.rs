@@ -445,4 +445,50 @@ impl WorkerConnection {
     pub async fn open_log_stream(&self, header: &LogStreamHeader) -> anyhow::Result<YamuxStream> {
         self.log_stream_opener().open_log_stream(header).await
     }
+
+    /// Split into separate reader and writer halves plus a log stream opener.
+    ///
+    /// This allows concurrent reading and writing on the control stream
+    /// without cancellation-safety issues. The reader should be moved into
+    /// a dedicated task so that `recv_command` is never cancelled mid-read.
+    pub fn into_split(self) -> (WorkerReader, WorkerWriter, LogStreamOpener, DriverHandle) {
+        let log_opener = LogStreamOpener {
+            conn_tx: self.conn_tx,
+        };
+        let (read_half, write_half) = futures_lite::io::split(self.control);
+        (
+            WorkerReader { read_half },
+            WorkerWriter { write_half },
+            log_opener,
+            self._driver,
+        )
+    }
+}
+
+/// Read half of a worker connection.
+pub struct WorkerReader {
+    read_half: futures_lite::io::ReadHalf<YamuxStream>,
+}
+
+impl WorkerReader {
+    /// Receive a command from the orchestrator.
+    pub async fn recv_command(&mut self) -> anyhow::Result<WorkerCommand> {
+        codec::recv_worker_command(&mut self.read_half)
+            .await
+            .context("recv command")
+    }
+}
+
+/// Write half of a worker connection.
+pub struct WorkerWriter {
+    write_half: futures_lite::io::WriteHalf<YamuxStream>,
+}
+
+impl WorkerWriter {
+    /// Send an event to the orchestrator.
+    pub async fn send_event(&mut self, event: &WorkerEvent) -> anyhow::Result<()> {
+        codec::send_worker_event(&mut self.write_half, event)
+            .await
+            .context("send event")
+    }
 }

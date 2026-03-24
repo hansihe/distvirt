@@ -276,7 +276,51 @@ impl<
         log::info!("worker: handshake complete, entering command loop");
 
         // --- Command loop ---
-        let log_opener = conn.log_stream_opener();
+        //
+        // Split the connection into separate reader/writer halves to avoid
+        // cancellation-safety issues. `recv_command` uses `read_exact` under
+        // the hood, which is NOT cancellation-safe — if a `tokio::select!`
+        // branch wins while `read_exact` has partially consumed bytes from
+        // the yamux stream, those bytes are lost and the framing is corrupted.
+        //
+        // By moving reads into a dedicated task, `recv_command` is never
+        // cancelled mid-read. The main loop only touches mpsc channels,
+        // which are cancellation-safe.
+        let (reader, writer, log_opener, _conn_driver) = conn.into_split();
+
+        // Reader task: continuously receives commands and forwards them.
+        // Owned by a TaskHandle so it's aborted if the main loop exits.
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerCommand>(64);
+        let _reader_task = TaskHandle::spawn(async move {
+            let mut reader = reader;
+            loop {
+                match reader.recv_command().await {
+                    Ok(cmd) => {
+                        if cmd_tx.send(cmd).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("worker: connection read error: {:#}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Writer task: receives events from a channel and sends them on the wire.
+        // Owned by a TaskHandle so it's aborted if the main loop exits.
+        let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>(64);
+        let _writer_task = TaskHandle::spawn(async move {
+            let mut writer = writer;
+            let mut event_rx = event_rx;
+            while let Some(event) = event_rx.recv().await {
+                if let Err(e) = writer.send_event(&event).await {
+                    log::error!("worker: connection write error: {:#}", e);
+                    break;
+                }
+            }
+        });
 
         let mut capacity_interval = tokio::time::interval(std::time::Duration::from_secs(30));
         capacity_interval.tick().await; // consume the immediate first tick
@@ -293,22 +337,22 @@ impl<
 
         let result = 'result: loop {
             tokio::select! {
-                cmd_result = conn.recv_command() => {
+                cmd_result = cmd_rx.recv() => {
                     match cmd_result {
-                        Ok(WorkerCommand::Shutdown) => {
+                        Some(WorkerCommand::Shutdown) => {
                             log::info!("worker: received Shutdown command");
-                            let _ = conn.send_event(&WorkerEvent::ShuttingDown).await;
+                            let _ = event_tx.send(WorkerEvent::ShuttingDown).await;
                             break Ok(());
                         }
-                        Ok(cmd) => {
+                        Some(cmd) => {
                             if let Err(e) = self.handle_command(cmd, &log_opener).await {
                                 log::error!("worker: fatal error: {}", e);
                                 break Err(anyhow::anyhow!("{}", e));
                             }
                         }
-                        Err(e) => {
-                            log::error!("worker: connection lost: {:#}", e);
-                            break Err(e);
+                        None => {
+                            log::error!("worker: connection lost");
+                            break Err(anyhow::anyhow!("connection lost: reader task exited"));
                         }
                     }
                 }
@@ -323,9 +367,9 @@ impl<
                         }
                         _ => {}
                     }
-                    if let Err(e) = conn.send_event(&event).await {
-                        log::error!("worker: failed to send event: {:#}", e);
-                        break Err(e);
+                    if event_tx.send(event).await.is_err() {
+                        log::error!("worker: failed to send event: writer task exited");
+                        break Err(anyhow::anyhow!("connection lost: writer task exited"));
                     }
                 }
                 _ = capacity_interval.tick() => {
@@ -372,7 +416,7 @@ impl<
 
                             // Hard threshold: 95%
                             let hard_active = used_pct >= 95;
-                            if let Err(e) = conn.send_event(&WorkerEvent::WorkerCondition {
+                            if event_tx.send(WorkerEvent::WorkerCondition {
                                 key: hard_key,
                                 active: hard_active,
                                 message: if hard_active {
@@ -380,14 +424,14 @@ impl<
                                 } else {
                                     String::new()
                                 },
-                            }).await {
-                                log::error!("worker: failed to send condition event: {:#}", e);
-                                break 'result Err(e);
+                            }).await.is_err() {
+                                log::error!("worker: failed to send condition event: writer task exited");
+                                break 'result Err(anyhow::anyhow!("connection lost: writer task exited"));
                             }
 
                             // Soft threshold: 85%
                             let soft_active = used_pct >= 85;
-                            if let Err(e) = conn.send_event(&WorkerEvent::WorkerCondition {
+                            if event_tx.send(WorkerEvent::WorkerCondition {
                                 key: soft_key,
                                 active: soft_active,
                                 message: if soft_active {
@@ -395,17 +439,17 @@ impl<
                                 } else {
                                     String::new()
                                 },
-                            }).await {
-                                log::error!("worker: failed to send condition event: {:#}", e);
-                                break 'result Err(e);
+                            }).await.is_err() {
+                                log::error!("worker: failed to send condition event: writer task exited");
+                                break 'result Err(anyhow::anyhow!("connection lost: writer task exited"));
                             }
                         }
 
-                        if let Err(e) = conn.send_event(&WorkerEvent::PoolCapacityUpdate {
+                        if event_tx.send(WorkerEvent::PoolCapacityUpdate {
                             pools: pools.clone(),
-                        }).await {
-                            log::error!("worker: failed to send capacity update: {:#}", e);
-                            break 'result Err(e);
+                        }).await.is_err() {
+                            log::error!("worker: failed to send capacity update: writer task exited");
+                            break 'result Err(anyhow::anyhow!("connection lost: writer task exited"));
                         }
                         last_pools = pools;
                     }
@@ -417,13 +461,13 @@ impl<
                             None => true,
                         };
                         if should_send {
-                            if let Err(e) = conn.send_event(&WorkerEvent::PressureUpdate {
+                            if event_tx.send(WorkerEvent::PressureUpdate {
                                 cpu: psi.0.clone(),
                                 memory: psi.1.clone(),
                                 io: psi.2.clone(),
-                            }).await {
-                                log::error!("worker: failed to send pressure update: {:#}", e);
-                                break 'result Err(e);
+                            }).await.is_err() {
+                                log::error!("worker: failed to send pressure update: writer task exited");
+                                break 'result Err(anyhow::anyhow!("connection lost: writer task exited"));
                             }
                             last_psi = Some(psi);
                         }

@@ -153,6 +153,6 @@ pub mod worker_protocol_capnp {
 
 pub use connection::{
     DriverHandle, LogStreamOpener, OrchestratorConnection, OrchestratorReader, OrchestratorWriter,
-    WorkerConnection,
+    WorkerConnection, WorkerReader, WorkerWriter,
 };
 pub use types::*;
