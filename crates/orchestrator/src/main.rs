@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     let timer_config = TimerConfig {
         retry_backoff: std::time::Duration::from_secs(5),
-        launch_timeout: std::time::Duration::from_secs(60),
+        launch_timeout: std::time::Duration::from_secs(120),
         suspend_timeout: std::time::Duration::from_secs(60),
         idle_timeout: std::time::Duration::from_secs(30),
     };
