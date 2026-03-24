@@ -89,7 +89,7 @@ impl PodSm {
                 ctx.set_wanted_timers(vec![PodTimerRequest {
                     key: PodTimerKey::LaunchTimeout,
                     generation: self.timer_generation,
-                    duration: Duration::from_secs(30),
+                    duration: Duration::from_secs(60),
                 }]);
             }
             PodStatus::Suspending => {
