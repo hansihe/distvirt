@@ -60,11 +60,17 @@ async fn run_inner(
                 Err(_) => None,
             }
         };
+        let deadline_fut = async {
+            match mm.borrow().next_deadline() {
+                Some(instant) => async_io::Timer::at(instant).await,
+                None => futures::future::pending().await,
+            }
+        };
 
         futures::select! {
             level = psi_ready.fuse() => {
-                let mut mm = mm.borrow_mut();
-                if let Some(event) = mm.handle_psi_event(level, cgroup::CGROUP_ROOT) {
+                let events = mm.borrow_mut().handle_psi_event(level, cgroup::CGROUP_ROOT);
+                for event in events {
                     if event_tx.send(event).await.is_err() {
                         return;
                     }
@@ -72,8 +78,8 @@ async fn run_inner(
             }
             _ = inflation_tick.fuse() => {
                 inflation_timer = async_io::Timer::after(std::time::Duration::from_secs(5));
-                let mut mm = mm.borrow_mut();
-                if let Some(event) = mm.tick_inflation(cgroup::CGROUP_ROOT) {
+                let events = mm.borrow_mut().tick_inflation(cgroup::CGROUP_ROOT);
+                for event in events {
                     if event_tx.send(event).await.is_err() {
                         return;
                     }
@@ -88,24 +94,42 @@ async fn run_inner(
                 // Primary deflation trigger: memory.high breaches cause PSI some
                 // (kernel throttling) but not PSI full, so we deflate here.
                 if diff.high > 0 {
-                    let mut mm = mm.borrow_mut();
-                    if let Some(event) = mm.handle_pressure() {
+                    let events = mm.borrow_mut().handle_pressure();
+                    for event in events {
                         if event_tx.send(event).await.is_err() {
                             return;
                         }
+                    }
+                }
+                if diff.oom_kill > 0 {
+                    let event = mm.borrow_mut().handle_oom_kill(diff.oom_kill);
+                    if event_tx.send(event).await.is_err() {
+                        return;
                     }
                 }
             }
             change = balloon_change.fuse() => {
                 match change {
                     Some(BalloonChange { old_pages, new_pages }) => {
-                        let mut mm = mm.borrow_mut();
-                        mm.on_balloon_pages_changed(old_pages, new_pages, cgroup::CGROUP_ROOT);
+                        let events = mm.borrow_mut().on_balloon_pages_changed(old_pages, new_pages, cgroup::CGROUP_ROOT);
+                        for event in events {
+                            if event_tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
                     }
                     None => {
                         // Balloon monitor channel closed — monitor exited.
                         // Must return to avoid busy-looping (recv returns Err immediately).
                         log::warn!("[balloon_task] balloon monitor channel closed");
+                        return;
+                    }
+                }
+            }
+            _ = deadline_fut.fuse() => {
+                let events = mm.borrow_mut().check_deflation_deadline(cgroup::CGROUP_ROOT);
+                for event in events {
+                    if event_tx.send(event).await.is_err() {
                         return;
                     }
                 }

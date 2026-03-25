@@ -210,6 +210,36 @@ pub(crate) fn classify(worker_id: GlobalWorkerId, event: WorkerEvent) -> Classif
         }),
 
         // =====================================================================
+        // Memory observability events
+        // =====================================================================
+        WorkerEvent::PodMemoryConstrained {
+            namespace_id,
+            pod_id,
+            reason,
+        } => ns_event(
+            &namespace_id,
+            worker_id,
+            WorkerNamespaceEventKind::PodMemoryConstrained { pod_id, reason },
+        ),
+        WorkerEvent::PodMemoryConstraintCleared {
+            namespace_id,
+            pod_id,
+        } => ns_event(
+            &namespace_id,
+            worker_id,
+            WorkerNamespaceEventKind::PodMemoryConstraintCleared { pod_id },
+        ),
+        WorkerEvent::PodOomKill {
+            namespace_id,
+            pod_id,
+            count,
+        } => ns_event(
+            &namespace_id,
+            worker_id,
+            WorkerNamespaceEventKind::PodOomKill { pod_id, count },
+        ),
+
+        // =====================================================================
         // Ignored
         // =====================================================================
         WorkerEvent::ShuttingDown

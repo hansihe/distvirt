@@ -734,6 +734,28 @@ struct EndpointDemandActiveEvt {
   serviceId @4 :Text;
 }
 
+enum MemoryConstraintReason {
+  balloonExhausted @0;
+  deflationStalled @1;
+}
+
+struct PodMemoryConstrainedEvt {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+  reason @2 :MemoryConstraintReason;
+}
+
+struct PodMemoryConstraintClearedEvt {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+}
+
+struct PodOomKillEvt {
+  namespaceId @0 :Text;
+  podId @1 :Text;
+  count @2 :UInt64;
+}
+
 # --- Control Stream: Commands (orchestrator -> worker) ---
 
 # Commands sent from the orchestrator to the worker.
@@ -921,6 +943,9 @@ struct WorkerEvent {
     # Periodic PSI pressure metrics from the worker.
     endpointDemandTraffic @18 :EndpointDemandTrafficEvt;
     endpointDemandActive @19 :EndpointDemandActiveEvt;
+    podMemoryConstrained @20 :PodMemoryConstrainedEvt;
+    podMemoryConstraintCleared @21 :PodMemoryConstraintClearedEvt;
+    podOomKill @22 :PodOomKillEvt;
   }
 }
 

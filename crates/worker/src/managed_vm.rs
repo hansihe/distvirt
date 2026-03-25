@@ -33,6 +33,12 @@ pub struct EventDispatchState {
     pub stream_closed: bool,
     /// If the stream closed with an error, the message.
     pub stream_error: Option<String>,
+    /// Whether the guest is currently memory-constrained.
+    pub memory_constrained: bool,
+    /// The reason for memory constraint, if any.
+    pub memory_constraint_reason: Option<distvirt_guest_protocol::ConstraintReason>,
+    /// Total OOM kills observed.
+    pub oom_kill_count: u64,
 }
 
 /// Owns the background task that reads the guest event stream and publishes
@@ -78,6 +84,26 @@ impl EventDispatch {
                             if s.task_error.is_none() {
                                 s.task_error = Some((task, message));
                             }
+                        });
+                    }
+                    Ok(Some(GuestEvent::MemoryConstrained { reason })) => {
+                        log::warn!("EventDispatch: memory constrained: {:?}", reason);
+                        state_tx.send_modify(|s| {
+                            s.memory_constrained = true;
+                            s.memory_constraint_reason = Some(reason);
+                        });
+                    }
+                    Ok(Some(GuestEvent::MemoryConstraintCleared)) => {
+                        log::info!("EventDispatch: memory constraint cleared");
+                        state_tx.send_modify(|s| {
+                            s.memory_constrained = false;
+                            s.memory_constraint_reason = None;
+                        });
+                    }
+                    Ok(Some(GuestEvent::OomKill { count })) => {
+                        log::warn!("EventDispatch: OOM kill, {} process(es) killed", count);
+                        state_tx.send_modify(|s| {
+                            s.oom_kill_count += count;
                         });
                     }
                     Ok(None) => {

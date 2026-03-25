@@ -113,6 +113,17 @@ pub enum WorkerNamespaceEventKind {
         service_id: Option<distvirt_worker_protocol::ServiceId>,
         signal: EndpointDemandSignal,
     },
+    PodMemoryConstrained {
+        pod_id: distvirt_worker_protocol::PodId,
+        reason: distvirt_worker_protocol::MemoryConstraintReason,
+    },
+    PodMemoryConstraintCleared {
+        pod_id: distvirt_worker_protocol::PodId,
+    },
+    PodOomKill {
+        pod_id: distvirt_worker_protocol::PodId,
+        count: u64,
+    },
     NamespaceCreated,
     NamespaceFailed {
         error: String,

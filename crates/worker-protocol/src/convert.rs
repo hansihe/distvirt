@@ -1465,6 +1465,41 @@ pub fn write_worker_event(mut builder: schema::worker_event::Builder<'_>, event:
                 None => b.set_has_service_id(false),
             }
         }
+        WorkerEvent::PodMemoryConstrained {
+            namespace_id,
+            pod_id,
+            reason,
+        } => {
+            let mut b = builder.init_pod_memory_constrained();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
+            b.set_reason(match reason {
+                MemoryConstraintReason::BalloonExhausted => {
+                    schema::MemoryConstraintReason::BalloonExhausted
+                }
+                MemoryConstraintReason::DeflationStalled => {
+                    schema::MemoryConstraintReason::DeflationStalled
+                }
+            });
+        }
+        WorkerEvent::PodMemoryConstraintCleared {
+            namespace_id,
+            pod_id,
+        } => {
+            let mut b = builder.init_pod_memory_constraint_cleared();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
+        }
+        WorkerEvent::PodOomKill {
+            namespace_id,
+            pod_id,
+            count,
+        } => {
+            let mut b = builder.init_pod_oom_kill();
+            b.set_namespace_id(namespace_id.as_ref());
+            b.set_pod_id(&write_u64_id(pod_id.0));
+            b.set_count(*count);
+        }
     }
 }
 
@@ -1672,6 +1707,37 @@ pub fn read_worker_event(reader: schema::worker_event::Reader<'_>) -> capnp::Res
                 ip: read_ipv4(r.get_ip()?),
                 service_id,
                 active: r.get_active(),
+            })
+        }
+        PodMemoryConstrained(r) => {
+            let r = r?;
+            let reason = match r.get_reason()? {
+                schema::MemoryConstraintReason::BalloonExhausted => {
+                    MemoryConstraintReason::BalloonExhausted
+                }
+                schema::MemoryConstraintReason::DeflationStalled => {
+                    MemoryConstraintReason::DeflationStalled
+                }
+            };
+            Ok(WorkerEvent::PodMemoryConstrained {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(read_u64_id(r.get_pod_id()?.to_str()?)?),
+                reason,
+            })
+        }
+        PodMemoryConstraintCleared(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodMemoryConstraintCleared {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(read_u64_id(r.get_pod_id()?.to_str()?)?),
+            })
+        }
+        PodOomKill(r) => {
+            let r = r?;
+            Ok(WorkerEvent::PodOomKill {
+                namespace_id: NamespaceId::from(r.get_namespace_id()?.to_str()?),
+                pod_id: PodId::from(read_u64_id(r.get_pod_id()?.to_str()?)?),
+                count: r.get_count(),
             })
         }
     }

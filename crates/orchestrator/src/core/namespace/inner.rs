@@ -12,7 +12,9 @@ use crate::adapter::dns_registry::{DnsRegistryAction, DnsRegistryAdapter};
 use crate::adapter::endpoint::{EndpointAction, EndpointAdapter};
 use crate::adapter::endpoint_demand::EndpointDemandAdapter;
 use crate::adapter::management::ManagementAdapter;
-use crate::adapter::observability::{ObservabilityAdapter, ObservabilityEvent};
+use crate::adapter::observability::{
+    ObservabilityAdapter, ObservabilityEvent, PodEventKind, PodObservabilityEvent,
+};
 use crate::adapter::pod_assignment::{PodAssignmentAction, PodAssignmentAdapter};
 use crate::adapter::schedule_request::{ScheduleRequestAdapter, ScheduleRequestDelta};
 use crate::adapter::timer::{TimerAction, TimerAdapter, TimerConfig, TimerIdentity};
@@ -334,7 +336,7 @@ impl Namespace {
                     );
                     return;
                 }
-                self.dispatch_active_worker_event(worker_id, event);
+                self.dispatch_active_worker_event(worker_id, event, effects);
             }
         }
     }
@@ -436,6 +438,7 @@ impl Namespace {
         &mut self,
         worker_id: WorkerId,
         event: WorkerNamespaceEventKind,
+        effects: &mut NamespaceEffects,
     ) {
         match event {
             WorkerNamespaceEventKind::PodRunning { pod_id } => {
@@ -520,6 +523,33 @@ impl Namespace {
                         signal,
                     );
                 }
+            }
+            WorkerNamespaceEventKind::PodMemoryConstrained { pod_id, reason } => {
+                let pod_id = router_pod_id(&pod_id);
+                effects.observability_events.push(ObservabilityEvent::Pod(
+                    PodObservabilityEvent {
+                        pod_id,
+                        event: PodEventKind::MemoryConstrained { reason },
+                    },
+                ));
+            }
+            WorkerNamespaceEventKind::PodMemoryConstraintCleared { pod_id } => {
+                let pod_id = router_pod_id(&pod_id);
+                effects.observability_events.push(ObservabilityEvent::Pod(
+                    PodObservabilityEvent {
+                        pod_id,
+                        event: PodEventKind::MemoryConstraintCleared,
+                    },
+                ));
+            }
+            WorkerNamespaceEventKind::PodOomKill { pod_id, count } => {
+                let pod_id = router_pod_id(&pod_id);
+                effects.observability_events.push(ObservabilityEvent::Pod(
+                    PodObservabilityEvent {
+                        pod_id,
+                        event: PodEventKind::OomKill { count },
+                    },
+                ));
             }
             WorkerNamespaceEventKind::NamespaceCreated
             | WorkerNamespaceEventKind::NamespaceFailed { .. } => {

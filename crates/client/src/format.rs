@@ -165,6 +165,20 @@ pub fn pod_event_description(pe: &PodEvent) -> String {
         }
         Some(pod_event::Event::Displaced(_)) => "displaced".to_string(),
         Some(pod_event::Event::Reaped(_)) => "reaped".to_string(),
+        Some(pod_event::Event::MemoryConstrained(m)) => {
+            let reason = match ConstraintReason::try_from(m.reason) {
+                Ok(ConstraintReason::BalloonExhausted) => "balloon exhausted",
+                Ok(ConstraintReason::DeflationStalled) => "deflation stalled",
+                _ => "unknown",
+            };
+            format!("memory constrained ({})", reason)
+        }
+        Some(pod_event::Event::MemoryConstraintCleared(_)) => {
+            "memory constraint cleared".to_string()
+        }
+        Some(pod_event::Event::OomKill(o)) => {
+            format!("OOM kill ({} process(es) killed)", o.count)
+        }
         None => "unknown event".to_string(),
     }
 }

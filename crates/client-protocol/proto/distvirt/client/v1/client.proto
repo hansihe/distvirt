@@ -592,6 +592,9 @@ message PodEvent {
         PodResuming resuming = 11;
         PodDisplaced displaced = 12;
         PodReaped reaped = 13;
+        PodMemoryConstrained memory_constrained = 14;
+        PodMemoryConstraintCleared memory_constraint_cleared = 15;
+        PodOomKill oom_kill = 16;
     }
 }
 
@@ -633,6 +636,22 @@ message PodResuming {
 message PodDisplaced {}
 
 message PodReaped {}
+
+enum ConstraintReason {
+    CONSTRAINT_REASON_UNSPECIFIED = 0;
+    CONSTRAINT_REASON_BALLOON_EXHAUSTED = 1;
+    CONSTRAINT_REASON_DEFLATION_STALLED = 2;
+}
+
+message PodMemoryConstrained {
+    ConstraintReason reason = 1;
+}
+
+message PodMemoryConstraintCleared {}
+
+message PodOomKill {
+    uint64 count = 1;
+}
 
 message EndpointEvent {
     string endpoint_id = 1;

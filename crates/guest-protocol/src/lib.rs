@@ -112,6 +112,16 @@ pub enum StreamHeader {
     ContainerInput { container_id: String },
 }
 
+/// Why the guest's memory control loop cannot resolve pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstraintReason {
+    /// Balloon fully deflated but pressure persists — workload needs more
+    /// memory than the VM has.
+    BalloonExhausted,
+    /// Deflation was requested but the host didn't respond in time.
+    DeflationStalled,
+}
+
 /// Async events sent from guest to host on the dedicated event stream.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -132,6 +142,16 @@ pub enum GuestEvent {
     TaskError {
         task: String,
         message: String,
+    },
+    /// The memory control loop failed to resolve pressure.
+    MemoryConstrained {
+        reason: ConstraintReason,
+    },
+    /// Memory pressure has been resolved after a constrained state.
+    MemoryConstraintCleared,
+    /// One or more processes were killed by the OOM killer.
+    OomKill {
+        count: u64,
     },
 }
 

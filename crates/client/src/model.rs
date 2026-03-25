@@ -250,6 +250,19 @@ pub enum StateChange {
         pod_id: String,
         workload_id: String,
     },
+    PodMemoryConstrained {
+        pod_id: String,
+        workload_id: String,
+    },
+    PodMemoryConstraintCleared {
+        pod_id: String,
+        workload_id: String,
+    },
+    PodOomKill {
+        pod_id: String,
+        workload_id: String,
+        count: u64,
+    },
     Endpoint {
         endpoint_id: String,
         service_id: Option<String>,
@@ -460,6 +473,25 @@ impl NamespaceModel {
                         // suspend_failed doesn't map to a PodState — the pod
                         // remains in its previous state. Skip model update.
                         return None;
+                    }
+                    proto::pod_event::Event::MemoryConstrained(_) => {
+                        return Some(StateChange::PodMemoryConstrained {
+                            pod_id: event.pod_id.clone(),
+                            workload_id: event.workload_id.clone(),
+                        });
+                    }
+                    proto::pod_event::Event::MemoryConstraintCleared(_) => {
+                        return Some(StateChange::PodMemoryConstraintCleared {
+                            pod_id: event.pod_id.clone(),
+                            workload_id: event.workload_id.clone(),
+                        });
+                    }
+                    proto::pod_event::Event::OomKill(e) => {
+                        return Some(StateChange::PodOomKill {
+                            pod_id: event.pod_id.clone(),
+                            workload_id: event.workload_id.clone(),
+                            count: e.count,
+                        });
                     }
                     proto::pod_event::Event::Resuming(e) => PodState::Running {
                         worker_id: e.worker_id.clone(),

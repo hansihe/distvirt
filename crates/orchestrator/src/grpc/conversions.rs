@@ -572,6 +572,29 @@ fn convert_pod_obs_event(
             }
         }
         PodEventKind::StatusChanged { old, new } => convert_pod_status_transition(old, new),
+        PodEventKind::MemoryConstrained { reason } => {
+            let proto_reason = match reason {
+                distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted => {
+                    proto::ConstraintReason::BalloonExhausted
+                }
+                distvirt_worker_protocol::MemoryConstraintReason::DeflationStalled => {
+                    proto::ConstraintReason::DeflationStalled
+                }
+            };
+            Some(proto::pod_event::Event::MemoryConstrained(
+                proto::PodMemoryConstrained {
+                    reason: proto_reason.into(),
+                },
+            ))
+        }
+        PodEventKind::MemoryConstraintCleared => Some(
+            proto::pod_event::Event::MemoryConstraintCleared(
+                proto::PodMemoryConstraintCleared {},
+            ),
+        ),
+        PodEventKind::OomKill { count } => Some(proto::pod_event::Event::OomKill(
+            proto::PodOomKill { count: *count },
+        )),
     };
 
     match inner {

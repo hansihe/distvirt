@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use distvirt_guest_protocol::GuestEvent;
+use distvirt_guest_protocol::{ConstraintReason, GuestEvent};
 
 use super::monitor::VIRTIO_BALLOON_PAGES_PER_MIB;
 use crate::cgroup;
@@ -31,6 +31,15 @@ const INFLATION_STREAK_REQUIRED: u32 = 4;
 /// Usage ratio threshold: inflate when current < 75% of high.
 const INFLATION_USAGE_RATIO: f64 = 0.75;
 
+/// How long to wait for a balloon deflation response before declaring stall.
+const DEFLATION_STALL_DEADLINE: Duration = Duration::from_millis(1000);
+
+enum ConstraintState {
+    Normal,
+    WaitingForDeflation { sent_at: Instant },
+    Constrained { reason: ConstraintReason },
+}
+
 pub struct MemoryManager {
     balloon_amount_mib: u32,
     step_size_mib: u32,
@@ -46,6 +55,8 @@ pub struct MemoryManager {
     // Inflation state
     low_usage_streak: u32,
     inflation_suppressed_until: Option<Instant>,
+
+    constraint_state: ConstraintState,
 }
 
 impl MemoryManager {
@@ -59,6 +70,7 @@ impl MemoryManager {
             current_cgroup_max: 0,
             low_usage_streak: 0,
             inflation_suppressed_until: None,
+            constraint_state: ConstraintState::Normal,
         }
     }
 
@@ -77,9 +89,9 @@ impl MemoryManager {
     }
 
     /// Handle a memory pressure event. Computes a deflation step and returns
-    /// a BalloonSet event to send to the host. Does NOT touch cgroup limits —
+    /// events to send to the host. Does NOT touch cgroup limits —
     /// those are raised later when the balloon monitor confirms page release.
-    pub fn handle_pressure(&mut self) -> Option<GuestEvent> {
+    pub fn handle_pressure(&mut self) -> Vec<GuestEvent> {
         // Reset inflation state — active pressure means we should not inflate.
         self.low_usage_streak = 0;
         self.inflation_suppressed_until = Some(Instant::now() + INFLATION_COOLDOWN);
@@ -88,7 +100,21 @@ impl MemoryManager {
             log::warn!(
                 "[balloon] pressure detected but balloon is already 0, cannot deflate further"
             );
-            return None;
+            // Balloon exhausted — emit constrained event on transition only.
+            if !matches!(
+                self.constraint_state,
+                ConstraintState::Constrained {
+                    reason: ConstraintReason::BalloonExhausted
+                }
+            ) {
+                self.constraint_state = ConstraintState::Constrained {
+                    reason: ConstraintReason::BalloonExhausted,
+                };
+                return vec![GuestEvent::MemoryConstrained {
+                    reason: ConstraintReason::BalloonExhausted,
+                }];
+            }
+            return vec![];
         }
 
         // Adaptive step sizing based on pending deflation state.
@@ -99,7 +125,7 @@ impl MemoryManager {
                 self.pending_deflation_mib,
                 self.step_size_mib
             );
-            return None;
+            return vec![];
         } else if self.pending_deflation_mib > 0 {
             // Partial delivery but still under pressure — step was too small.
             self.step_size_mib = (self.step_size_mib * 2).min(MAX_STEP_MIB);
@@ -125,15 +151,24 @@ impl MemoryManager {
             self.pending_deflation_mib,
         );
 
-        Some(GuestEvent::BalloonSet {
+        self.constraint_state = ConstraintState::WaitingForDeflation {
+            sent_at: Instant::now(),
+        };
+
+        vec![GuestEvent::BalloonSet {
             amount_mib: self.balloon_amount_mib,
-        })
+        }]
     }
 
     /// Called when the sysfs monitor observes a change in balloon num_pages.
     /// On deflation (pages decreased): raises cgroup limits by the actual released amount.
     /// On inflation (pages increased): logs confirmation only.
-    pub fn on_balloon_pages_changed(&mut self, old_pages: u32, new_pages: u32, cgroup_path: &str) {
+    pub fn on_balloon_pages_changed(
+        &mut self,
+        old_pages: u32,
+        new_pages: u32,
+        cgroup_path: &str,
+    ) -> Vec<GuestEvent> {
         let old_mib = old_pages / VIRTIO_BALLOON_PAGES_PER_MIB;
         let new_mib = new_pages / VIRTIO_BALLOON_PAGES_PER_MIB;
 
@@ -160,7 +195,7 @@ impl MemoryManager {
                     "[balloon] failed to raise cgroup limits after deflation: {:#}",
                     e
                 );
-                return;
+                return vec![];
             }
 
             self.current_cgroup_high = new_high;
@@ -173,6 +208,9 @@ impl MemoryManager {
                 new_max / (1024 * 1024),
                 self.pending_deflation_mib,
             );
+
+            // Check if constraint is now resolved.
+            return self.check_constraint_cleared(cgroup_path);
         } else if new_pages > old_pages {
             // Inflation confirmed.
             let claimed_mib = new_mib.saturating_sub(old_mib);
@@ -183,6 +221,7 @@ impl MemoryManager {
                 new_pages,
             );
         }
+        vec![]
     }
 
     /// Evaluate a PSI memory pressure event. Logs stats, resets inflation state.
@@ -192,7 +231,7 @@ impl MemoryManager {
         &mut self,
         level: cgroup::PsiLevel,
         cgroup_path: &str,
-    ) -> Option<GuestEvent> {
+    ) -> Vec<GuestEvent> {
         let is_full = matches!(level, cgroup::PsiLevel::Full);
 
         // Log stats.
@@ -231,23 +270,34 @@ impl MemoryManager {
             return self.handle_pressure();
         }
 
-        None
+        vec![]
     }
 
     /// Periodically check if the workload is using much less memory than
     /// allocated, and if so, inflate the balloon to reclaim memory.
     ///
-    /// Returns a BalloonSet event if inflation occurred.
-    pub fn tick_inflation(&mut self, cgroup_path: &str) -> Option<GuestEvent> {
+    /// Returns events including BalloonSet if inflation occurred, and
+    /// MemoryConstraintCleared if constraint resolved.
+    pub fn tick_inflation(&mut self, cgroup_path: &str) -> Vec<GuestEvent> {
+        let mut events = Vec::new();
+
+        // Check if constraint cleared due to low usage.
+        if matches!(self.constraint_state, ConstraintState::Constrained { .. }) {
+            if self.is_pressure_resolved(cgroup_path) {
+                self.constraint_state = ConstraintState::Normal;
+                events.push(GuestEvent::MemoryConstraintCleared);
+            }
+        }
+
         // Don't inflate while deflation is in-flight.
         if self.pending_deflation_mib > 0 {
-            return None;
+            return events;
         }
 
         // Check cooldown.
         if let Some(until) = self.inflation_suppressed_until {
             if Instant::now() < until {
-                return None;
+                return events;
             }
         }
 
@@ -255,7 +305,7 @@ impl MemoryManager {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[inflate] failed to read memory.current: {:#}", e);
-                return None;
+                return events;
             }
         };
 
@@ -263,13 +313,13 @@ impl MemoryManager {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[inflate] failed to read memory.high: {:#}", e);
-                return None;
+                return events;
             }
         };
 
         // Skip if high is "max" (unlimited).
         if high == u64::MAX {
-            return None;
+            return events;
         }
 
         let ratio = current as f64 / high as f64;
@@ -277,11 +327,11 @@ impl MemoryManager {
             self.low_usage_streak += 1;
         } else {
             self.low_usage_streak = 0;
-            return None;
+            return events;
         }
 
         if self.low_usage_streak < INFLATION_STREAK_REQUIRED {
-            return None;
+            return events;
         }
 
         let step_bytes = INFLATION_STEP_MIB as u64 * 1024 * 1024;
@@ -296,7 +346,7 @@ impl MemoryManager {
                 min_high
             );
             self.low_usage_streak = 0;
-            return None;
+            return events;
         }
 
         // Maintain high-to-max gap.
@@ -304,7 +354,7 @@ impl MemoryManager {
 
         if let Err(e) = cgroup::set_memory_limits(cgroup_path, new_high, new_max) {
             log::warn!("[inflate] failed to set cgroup limits: {:#}", e);
-            return None;
+            return events;
         }
 
         self.current_cgroup_high = new_high;
@@ -320,9 +370,71 @@ impl MemoryManager {
             current / (1024 * 1024),
         );
 
-        Some(GuestEvent::BalloonSet {
+        events.push(GuestEvent::BalloonSet {
             amount_mib: self.balloon_amount_mib,
-        })
+        });
+        events
+    }
+
+    /// Check the deflation deadline. Called when the deadline timer fires.
+    pub fn check_deflation_deadline(&mut self, cgroup_path: &str) -> Vec<GuestEvent> {
+        if let ConstraintState::WaitingForDeflation { sent_at } = self.constraint_state {
+            if sent_at.elapsed() >= DEFLATION_STALL_DEADLINE {
+                if self.is_pressure_resolved(cgroup_path) {
+                    self.constraint_state = ConstraintState::Normal;
+                } else {
+                    self.constraint_state = ConstraintState::Constrained {
+                        reason: ConstraintReason::DeflationStalled,
+                    };
+                    return vec![GuestEvent::MemoryConstrained {
+                        reason: ConstraintReason::DeflationStalled,
+                    }];
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// Returns the next deadline instant, if any (for the task loop timer).
+    pub fn next_deadline(&self) -> Option<Instant> {
+        if let ConstraintState::WaitingForDeflation { sent_at } = self.constraint_state {
+            Some(sent_at + DEFLATION_STALL_DEADLINE)
+        } else {
+            None
+        }
+    }
+
+    /// Returns an OomKill event.
+    pub fn handle_oom_kill(&self, count: u64) -> GuestEvent {
+        GuestEvent::OomKill { count }
+    }
+
+    /// Check if memory pressure is resolved (current < high).
+    fn is_pressure_resolved(&self, cgroup_path: &str) -> bool {
+        let current = cgroup::read_cgroup_bytes(cgroup_path, "memory.current").unwrap_or(u64::MAX);
+        let high = cgroup::read_cgroup_bytes(cgroup_path, "memory.high").unwrap_or(0);
+        current < high
+    }
+
+    /// Check if constraint has cleared after a balloon/limit change.
+    fn check_constraint_cleared(&mut self, cgroup_path: &str) -> Vec<GuestEvent> {
+        match self.constraint_state {
+            ConstraintState::Constrained { .. } => {
+                if self.is_pressure_resolved(cgroup_path) {
+                    self.constraint_state = ConstraintState::Normal;
+                    vec![GuestEvent::MemoryConstraintCleared]
+                } else {
+                    vec![]
+                }
+            }
+            ConstraintState::WaitingForDeflation { .. } => {
+                if self.is_pressure_resolved(cgroup_path) {
+                    self.constraint_state = ConstraintState::Normal;
+                }
+                vec![]
+            }
+            ConstraintState::Normal => vec![],
+        }
     }
 }
 
@@ -361,21 +473,29 @@ mod tests {
     fn handle_pressure_deflates_by_initial_step() {
         let mut mm = make_mm(256, 512);
         mm.initial_limits();
-        let event = mm.handle_pressure();
-        match event {
-            Some(GuestEvent::BalloonSet { amount_mib }) => {
-                assert_eq!(amount_mib, 256 - INITIAL_STEP_MIB);
+        let events = mm.handle_pressure();
+        match events.as_slice() {
+            [GuestEvent::BalloonSet { amount_mib }] => {
+                assert_eq!(*amount_mib, 256 - INITIAL_STEP_MIB);
             }
-            other => panic!("expected BalloonSet, got {:?}", other),
+            other => panic!("expected [BalloonSet], got {:?}", other),
         }
         assert_eq!(mm.pending_deflation_mib, INITIAL_STEP_MIB);
     }
 
     #[test]
-    fn handle_pressure_returns_none_when_balloon_zero() {
+    fn handle_pressure_emits_constrained_when_balloon_zero() {
         let mut mm = make_mm(0, 512);
         mm.initial_limits();
-        assert!(mm.handle_pressure().is_none());
+        let events = mm.handle_pressure();
+        assert!(matches!(
+            events.as_slice(),
+            [GuestEvent::MemoryConstrained {
+                reason: ConstraintReason::BalloonExhausted
+            }]
+        ));
+        // Second call should dedup (no event).
+        assert!(mm.handle_pressure().is_empty());
     }
 
     #[test]
@@ -386,7 +506,7 @@ mod tests {
         mm.handle_pressure();
         assert_eq!(mm.pending_deflation_mib, INITIAL_STEP_MIB);
         // Second pressure with full pending: should skip
-        assert!(mm.handle_pressure().is_none());
+        assert!(mm.handle_pressure().is_empty());
     }
 
     #[test]
@@ -398,13 +518,13 @@ mod tests {
         // Simulate partial delivery
         mm.pending_deflation_mib = 16;
         // Second pressure: partial pending → step doubles to 64
-        let event = mm.handle_pressure();
-        match event {
-            Some(GuestEvent::BalloonSet { amount_mib }) => {
+        let events = mm.handle_pressure();
+        match events.as_slice() {
+            [GuestEvent::BalloonSet { amount_mib }] => {
                 // balloon was 224 (256-32), step=64, now 224-64=160
-                assert_eq!(amount_mib, 160);
+                assert_eq!(*amount_mib, 160);
             }
-            other => panic!("expected BalloonSet, got {:?}", other),
+            other => panic!("expected [BalloonSet], got {:?}", other),
         }
         assert_eq!(mm.step_size_mib, INITIAL_STEP_MIB * 2);
     }
@@ -414,12 +534,12 @@ mod tests {
         let mut mm = make_mm(16, 512);
         mm.initial_limits();
         // balloon=16, step=32 → step clamped to 16
-        let event = mm.handle_pressure();
-        match event {
-            Some(GuestEvent::BalloonSet { amount_mib }) => {
-                assert_eq!(amount_mib, 0);
+        let events = mm.handle_pressure();
+        match events.as_slice() {
+            [GuestEvent::BalloonSet { amount_mib }] => {
+                assert_eq!(*amount_mib, 0);
             }
-            other => panic!("expected BalloonSet, got {:?}", other),
+            other => panic!("expected [BalloonSet], got {:?}", other),
         }
     }
 

@@ -651,6 +651,8 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
         }
     };
     let mut last_balloon: Option<u32> = None;
+    let mut last_memory_constrained: bool = false;
+    let mut last_oom_kill_count: u64 = 0;
 
     // Take the driver exit signal so we can select on driver death without
     // moving the TaskHandle out of vm. drain_yamux_driver() still works.
@@ -733,6 +735,49 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
                         }
                     }
                     last_balloon = state.balloon_mib;
+                }
+
+                // 3b. Memory constraint transitions.
+                if state.memory_constrained && !last_memory_constrained {
+                    let reason = state.memory_constraint_reason
+                        .map(|r| match r {
+                            distvirt_guest_protocol::ConstraintReason::BalloonExhausted =>
+                                distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted,
+                            distvirt_guest_protocol::ConstraintReason::DeflationStalled =>
+                                distvirt_worker_protocol::MemoryConstraintReason::DeflationStalled,
+                        })
+                        .unwrap_or(distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted);
+                    send_event(
+                        &event_tx,
+                        WorkerEvent::PodMemoryConstrained {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            reason,
+                        },
+                    ).await;
+                } else if !state.memory_constrained && last_memory_constrained {
+                    send_event(
+                        &event_tx,
+                        WorkerEvent::PodMemoryConstraintCleared {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                        },
+                    ).await;
+                }
+                last_memory_constrained = state.memory_constrained;
+
+                // 3c. OOM kill count increase.
+                if state.oom_kill_count > last_oom_kill_count {
+                    let delta = state.oom_kill_count - last_oom_kill_count;
+                    send_event(
+                        &event_tx,
+                        WorkerEvent::PodOomKill {
+                            namespace_id: namespace_id.clone(),
+                            pod_id: pod_id.clone(),
+                            count: delta,
+                        },
+                    ).await;
+                    last_oom_kill_count = state.oom_kill_count;
                 }
 
                 // 4. Stream closed → force kill.

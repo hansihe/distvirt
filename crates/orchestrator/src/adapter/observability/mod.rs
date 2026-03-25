@@ -34,6 +34,11 @@ pub enum PodEventKind {
     StatusChanged { old: PodStatus, new: PodStatus },
     WorkerChanged { old: Option<WorkerId>, new: Option<WorkerId> },
     Reaped { last_status: PodStatus },
+    MemoryConstrained {
+        reason: distvirt_worker_protocol::MemoryConstraintReason,
+    },
+    MemoryConstraintCleared,
+    OomKill { count: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq)]

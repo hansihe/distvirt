@@ -471,6 +471,28 @@ pub enum WorkerEvent {
         service_id: Option<ServiceId>,
         active: bool,
     },
+    PodMemoryConstrained {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        reason: MemoryConstraintReason,
+    },
+    PodMemoryConstraintCleared {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+    },
+    PodOomKill {
+        namespace_id: NamespaceId,
+        pod_id: PodId,
+        count: u64,
+    },
+}
+
+/// Why the guest's memory control loop cannot resolve pressure.
+/// Duplicated from guest-protocol per crate boundary convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryConstraintReason {
+    BalloonExhausted,
+    DeflationStalled,
 }
 
 /// PSI (Pressure Stall Information) metrics for a single resource dimension.

@@ -7,7 +7,7 @@ use distvirt_orchestrator::adapter::observability::{
     EndpointEventKind, ObservabilityEvent, PodEventKind, WorkloadEventKind,
 };
 use distvirt_orchestrator::sm::{PodStatus, WlStatus, endpoint::EndpointStatus};
-use distvirt_worker_protocol::NamespaceId;
+use distvirt_worker_protocol::{MemoryConstraintReason, NamespaceId};
 
 use distvirt_orchestrator::shell::sync::MockWorkerConfig;
 
@@ -240,4 +240,125 @@ fn test_activation_cycle_events() {
     let ns = h.namespace("ns");
     let svc_id = ns.management().lookup_service("web-svc").unwrap();
     assert_eq!(registry.service_name(&svc_id), Some("web-svc".to_string()));
+}
+
+// =============================================================================
+// Test: memory constraint and OOM kill events flow through event bus
+// =============================================================================
+
+#[test]
+fn test_memory_constraint_events() {
+    let mut h = TestHarness::new();
+    let w1 = h.add_worker();
+
+    h.create_namespace("ns", always_on_spec());
+    h.assert_workload_running("ns", "echo");
+
+    // Subscribe to events before injecting memory events.
+    let (_pre, mut rx) = h.shell.event_bus().subscribe(&NamespaceId::from("ns"));
+
+    // 1. Inject PodMemoryConstrained (balloon exhausted).
+    h.inject_pod_memory_constrained(
+        &w1,
+        "ns",
+        "echo",
+        MemoryConstraintReason::BalloonExhausted,
+    );
+
+    let mut live_events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        live_events.push(event);
+    }
+
+    let has_constrained = live_events.iter().any(|e| matches!(
+        e,
+        ObservabilityEvent::Pod(pe)
+            if matches!(
+                &pe.event,
+                PodEventKind::MemoryConstrained {
+                    reason: MemoryConstraintReason::BalloonExhausted,
+                }
+            )
+    ));
+    assert!(
+        has_constrained,
+        "expected MemoryConstrained(BalloonExhausted) event, got: {:?}",
+        live_events
+    );
+
+    // 2. Inject PodOomKill.
+    h.inject_pod_oom_kill(&w1, "ns", "echo", 3);
+
+    while let Ok(event) = rx.try_recv() {
+        live_events.push(event);
+    }
+
+    let has_oom = live_events.iter().any(|e| matches!(
+        e,
+        ObservabilityEvent::Pod(pe)
+            if matches!(&pe.event, PodEventKind::OomKill { count: 3 })
+    ));
+    assert!(
+        has_oom,
+        "expected OomKill {{ count: 3 }} event, got: {:?}",
+        live_events
+    );
+
+    // 3. Inject PodMemoryConstraintCleared.
+    h.inject_pod_memory_constraint_cleared(&w1, "ns", "echo");
+
+    while let Ok(event) = rx.try_recv() {
+        live_events.push(event);
+    }
+
+    let has_cleared = live_events.iter().any(|e| matches!(
+        e,
+        ObservabilityEvent::Pod(pe)
+            if matches!(&pe.event, PodEventKind::MemoryConstraintCleared)
+    ));
+    assert!(
+        has_cleared,
+        "expected MemoryConstraintCleared event, got: {:?}",
+        live_events
+    );
+}
+
+#[test]
+fn test_memory_constraint_deflation_stalled() {
+    let mut h = TestHarness::new();
+    let w1 = h.add_worker();
+
+    h.create_namespace("ns", always_on_spec());
+    h.assert_workload_running("ns", "echo");
+
+    let (_pre, mut rx) = h.shell.event_bus().subscribe(&NamespaceId::from("ns"));
+
+    // Inject DeflationStalled variant.
+    h.inject_pod_memory_constrained(
+        &w1,
+        "ns",
+        "echo",
+        MemoryConstraintReason::DeflationStalled,
+    );
+
+    let mut live_events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        live_events.push(event);
+    }
+
+    let has_stalled = live_events.iter().any(|e| matches!(
+        e,
+        ObservabilityEvent::Pod(pe)
+            if matches!(
+                &pe.event,
+                PodEventKind::MemoryConstrained {
+                    reason: MemoryConstraintReason::DeflationStalled,
+                }
+            )
+    ));
+    assert!(
+        has_stalled,
+        "expected MemoryConstrained(DeflationStalled) event, got: {:?}",
+        live_events
+    );
 }

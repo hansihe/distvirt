@@ -517,6 +517,64 @@ impl TestHarness {
         panic!("send_event_to_service_worker not implemented for SyncShell harness");
     }
 
+    /// Inject a PodMemoryConstrained event for a workload's current pod.
+    pub fn inject_pod_memory_constrained(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+        reason: distvirt_worker_protocol::MemoryConstraintReason,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        self.worker(worker_id)
+            .send_event(WorkerEvent::PodMemoryConstrained {
+                namespace_id: ns_id.into(),
+                pod_id,
+                reason,
+            });
+        self.converge();
+    }
+
+    /// Inject a PodMemoryConstraintCleared event for a workload's current pod.
+    pub fn inject_pod_memory_constraint_cleared(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        self.worker(worker_id)
+            .send_event(WorkerEvent::PodMemoryConstraintCleared {
+                namespace_id: ns_id.into(),
+                pod_id,
+            });
+        self.converge();
+    }
+
+    /// Inject a PodOomKill event for a workload's current pod.
+    pub fn inject_pod_oom_kill(
+        &mut self,
+        worker_id: &GlobalWorkerId,
+        ns_id: &str,
+        wl_name: &str,
+        count: u64,
+    ) {
+        let pod_id = self
+            .workload_proto_pod_id(ns_id, wl_name)
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
+        self.worker(worker_id)
+            .send_event(WorkerEvent::PodOomKill {
+                namespace_id: ns_id.into(),
+                pod_id,
+                count,
+            });
+        self.converge();
+    }
+
     pub fn send_pressure_update(&mut self, worker_id: &GlobalWorkerId, memory_psi_pct: f64) {
         self.shell.inject_pressure_update(
             *worker_id,
