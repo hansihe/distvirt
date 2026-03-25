@@ -24,6 +24,8 @@ use super::content::read_content;
 use super::generate_id;
 use super::lease::ContainerdLease;
 use super::ns_request;
+use super::resource::ImageRef;
+use super::snapshot::compute_chain_ids;
 use super::super::docker_config;
 
 pub use crate::oci::ImageConfig;
@@ -36,10 +38,84 @@ fn oci_arch() -> &'static str {
     }
 }
 
+/// Pre-resolved image metadata.
+///
+/// Resolves manifest, config, and chain IDs once so downstream operations
+/// don't redundantly re-fetch them.
+pub struct ResolvedImage {
+    manifest: ImageManifest,
+    config: ImageConfiguration,
+    config_digest: String,
+    chain_ids: Vec<String>,
+}
+
+impl ResolvedImage {
+    /// Resolve an image reference to its manifest, config, and chain IDs.
+    pub async fn resolve(
+        channel: &Channel,
+        namespace: &str,
+        image_ref: &str,
+    ) -> anyhow::Result<Self> {
+        let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
+        let config_digest = manifest.config().digest().to_string();
+
+        let mut content = ContentClient::new(channel.clone());
+        let config_bytes = read_content(&mut content, namespace, &config_digest).await?;
+        let config: ImageConfiguration =
+            serde_json::from_slice(&config_bytes).context("parsing image config")?;
+
+        let diff_ids = config.rootfs().diff_ids();
+        let chain_ids = compute_chain_ids(diff_ids);
+
+        Ok(Self {
+            manifest,
+            config,
+            config_digest,
+            chain_ids,
+        })
+    }
+
+    pub fn layers(&self) -> &[oci_spec::image::Descriptor] {
+        self.manifest.layers()
+    }
+
+    pub fn config_digest(&self) -> &str {
+        &self.config_digest
+    }
+
+    pub fn chain_ids(&self) -> &[String] {
+        &self.chain_ids
+    }
+
+    pub fn final_chain_id(&self) -> Option<&str> {
+        self.chain_ids.last().map(|s| s.as_str())
+    }
+
+    /// Extract the OCI runtime config (entrypoint, cmd, env, user, etc).
+    pub fn image_config(&self) -> ImageConfig {
+        let oci_config = self.config.config().as_ref();
+        ImageConfig {
+            entrypoint: oci_config
+                .and_then(|c| c.entrypoint().clone())
+                .unwrap_or_default(),
+            cmd: oci_config.and_then(|c| c.cmd().clone()).unwrap_or_default(),
+            env: oci_config.and_then(|c| c.env().clone()).unwrap_or_default(),
+            working_dir: oci_config
+                .and_then(|c| c.working_dir().clone())
+                .filter(|s| !s.is_empty()),
+            user: oci_config
+                .and_then(|c| c.user().clone())
+                .filter(|s| !s.is_empty()),
+            passwd_entries: Vec::new(),
+            group_entries: Vec::new(),
+        }
+    }
+}
+
 /// Resolve the platform-specific manifest for an image.
 ///
 /// Handles both single manifests and multi-arch image indexes.
-pub async fn resolve_platform_manifest(
+async fn resolve_platform_manifest(
     channel: &Channel,
     namespace: &str,
     image_ref: &str,
@@ -81,9 +157,9 @@ pub async fn resolve_platform_manifest(
 
 /// Ensure the image content is present in containerd's content store.
 ///
-/// If the image already exists locally, this is a no-op. Otherwise it pulls
-/// from the registry. This only downloads content — it does NOT unpack with
-/// any snapshotter. Use `ensure_unpacked` afterwards.
+/// If the image already exists locally, this is a no-op (aside from adding
+/// it to the lease). Otherwise it pulls from the registry. This only
+/// downloads content — it does NOT unpack with any snapshotter.
 pub async fn ensure_image(
     channel: &Channel,
     lease: &ContainerdLease,
@@ -99,6 +175,11 @@ pub async fn ensure_image(
     };
     if images.get(ns_request(req, namespace)).await.is_ok() {
         log::info!("image {} already present locally", image_ref);
+        // Image exists — add to lease for GC protection during our operation.
+        lease
+            .add_resource(&ImageRef(image_ref.to_string()))
+            .await
+            .context("adding existing image to lease")?;
         return Ok(());
     }
 
@@ -157,40 +238,13 @@ pub async fn ensure_image(
         .with_context(|| format!("pulling image {}", image_ref))?;
     log::info!("image {} pulled successfully", image_ref);
 
+    // Image now exists — add to lease for GC protection during our operation.
+    lease
+        .add_resource(&ImageRef(image_ref.to_string()))
+        .await
+        .context("adding pulled image to lease")?;
+
     Ok(())
-}
-
-/// Read OCI image configuration (entrypoint, cmd, env, user, etc).
-pub async fn read_image_config(
-    channel: &Channel,
-    namespace: &str,
-    image_ref: &str,
-) -> anyhow::Result<ImageConfig> {
-    let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
-    let config_digest = manifest.config().digest().to_string();
-
-    let mut content = ContentClient::new(channel.clone());
-    let config_bytes = read_content(&mut content, namespace, &config_digest).await?;
-    let img_config: ImageConfiguration =
-        serde_json::from_slice(&config_bytes).context("parsing image config")?;
-
-    let oci_config = img_config.config().as_ref();
-
-    Ok(ImageConfig {
-        entrypoint: oci_config
-            .and_then(|c| c.entrypoint().clone())
-            .unwrap_or_default(),
-        cmd: oci_config.and_then(|c| c.cmd().clone()).unwrap_or_default(),
-        env: oci_config.and_then(|c| c.env().clone()).unwrap_or_default(),
-        working_dir: oci_config
-            .and_then(|c| c.working_dir().clone())
-            .filter(|s| !s.is_empty()),
-        user: oci_config
-            .and_then(|c| c.user().clone())
-            .filter(|s| !s.is_empty()),
-        passwd_entries: Vec::new(),
-        group_entries: Vec::new(),
-    })
 }
 
 /// Extract specific files from OCI image layer tarballs.
@@ -200,11 +254,10 @@ pub async fn read_image_config(
 pub async fn extract_files_from_layers(
     channel: &Channel,
     namespace: &str,
-    image_ref: &str,
+    resolved: &ResolvedImage,
     target_paths: &[&str],
 ) -> anyhow::Result<HashMap<String, Vec<u8>>> {
-    let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
-    let layers = manifest.layers();
+    let layers = resolved.layers();
 
     let mut content = ContentClient::new(channel.clone());
 

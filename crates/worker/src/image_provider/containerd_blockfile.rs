@@ -4,8 +4,8 @@ use anyhow::Context;
 use tonic::transport::Channel;
 
 use super::containerd;
+use super::containerd::image::ResolvedImage;
 use super::containerd::lease::LeaseManager;
-use super::containerd::resource::ImageRef;
 use super::containerd::unpack::UnpackCoordinator;
 use super::{ImageProvider, PreparedArtifact};
 
@@ -37,15 +37,12 @@ impl ContainerdBlockfileProvider {
 
 impl ImageProvider for ContainerdBlockfileProvider {
     async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact> {
-        // Single operation lease — short-lived, protects resources during
-        // pull + unpack + copy. Expires after 1 hour as a crash safety net.
+        // Short-lived lease protects resources during pull + unpack + copy.
+        // Expires after 1 hour as a crash safety net.
         let lease = self.lease_manager.create_lease().await?;
 
-        // Add the image to our lease for transitive GC protection of all
-        // content blobs via the image record's GC ref labels.
-        lease.add_resource(&ImageRef(image_ref.to_string())).await?;
-
         // Pull image if not present locally (auto-leased via header).
+        // Also adds the image to the lease for transitive GC protection.
         containerd::ensure_image(
             &self.channel,
             &lease,
@@ -55,16 +52,25 @@ impl ImageProvider for ContainerdBlockfileProvider {
         .await
         .context("ensuring image is pulled")?;
 
-        // Unpack layers (Stat for existence, auto-leased Prepare/Commit/Apply).
+        // Resolve image metadata once — used by all subsequent operations.
+        let resolved = ResolvedImage::resolve(&self.channel, lease.namespace(), image_ref)
+            .await
+            .context("resolving image metadata")?;
+        let final_chain_id = resolved
+            .final_chain_id()
+            .context("image has no layers")?
+            .to_string();
+
+        // Unpack layers with the blockfile snapshotter.
         containerd::ensure_unpacked(
             &self.channel,
             &lease,
-            image_ref,
+            &resolved,
             "blockfile",
             &self.unpack_coordinator,
         )
         .await
-        .context("ensuring image is unpacked with blockfile snapshotter")?;
+        .context("unpacking image with blockfile snapshotter")?;
 
         // Set permanent GC protection for committed snapshots.
         // This label on the config blob keeps the snapshot chain alive
@@ -72,22 +78,19 @@ impl ImageProvider for ContainerdBlockfileProvider {
         containerd::content::set_snapshot_gc_label(
             &self.channel,
             lease.namespace(),
-            image_ref,
+            resolved.config_digest(),
+            &final_chain_id,
             "blockfile",
         )
         .await
         .context("setting snapshot GC ref label")?;
 
-        let mut config =
-            containerd::read_image_config(&self.channel, lease.namespace(), image_ref)
-                .await
-                .context("reading image config")?;
-
-        // Extract /etc/passwd and /etc/group from layer tarballs for UID/GID resolution.
+        // Extract OCI config + passwd/group from layer tarballs.
+        let mut config = resolved.image_config();
         let files = containerd::extract_files_from_layers(
             &self.channel,
             lease.namespace(),
-            image_ref,
+            &resolved,
             &["etc/passwd", "etc/group"],
         )
         .await
@@ -107,10 +110,14 @@ impl ImageProvider for ContainerdBlockfileProvider {
         // Create a temporary view, copy the blockfile out of containerd
         // storage, then immediately remove the view. The VM reads its own
         // copy — fully decoupled from containerd's snapshot lifecycle.
-        let (view_path, view_key) =
-            containerd::snapshot::create_blockfile_view(&self.channel, &lease, image_ref)
-                .await
-                .context("creating blockfile view")?;
+        let (view_path, view_key) = containerd::snapshot::create_blockfile_view(
+            &self.channel,
+            &lease,
+            "blockfile",
+            &final_chain_id,
+        )
+        .await
+        .context("creating blockfile view")?;
 
         let temp_file =
             tempfile::NamedTempFile::new().context("creating temp file for blockfile copy")?;

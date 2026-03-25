@@ -10,7 +10,7 @@ use containerd_client as client;
 use tonic::transport::Channel;
 
 // Re-export public items for use by provider implementations.
-pub use image::{ensure_image, extract_files_from_layers, read_image_config};
+pub use image::{ensure_image, extract_files_from_layers};
 pub use unpack::ensure_unpacked;
 
 pub(crate) fn generate_id() -> String {

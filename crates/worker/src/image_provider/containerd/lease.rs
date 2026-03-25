@@ -37,7 +37,7 @@ impl LeaseManager {
                 let mut client = LeasesClient::new(task_channel.clone());
                 let req = LeaseDeleteRequest {
                     id: lease_id.clone(),
-                    sync: true,
+                    sync: false,
                 };
                 if let Err(e) = client.delete(with_namespace!(req, &task_namespace)).await {
                     log::warn!("failed to delete lease {}: {}", lease_id, e);

@@ -1,8 +1,15 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use tokio::io::unix::AsyncFd;
+
+/// Create an `anyhow::Error` from the last OS error, preserving the
+/// `io::Error` in the error chain so that callers can downcast to it
+/// (e.g. to detect `PermissionDenied`).
+fn last_os_error(context: &str) -> anyhow::Error {
+    anyhow::Error::from(io::Error::last_os_error()).context(context.to_string())
+}
 
 /// A non-persistent TUN device for L3 packet I/O (macOS utun).
 ///
@@ -54,12 +61,12 @@ impl TunDevice {
         let raw_fd = fd.as_raw_fd();
         let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
         if flags < 0 {
-            bail!("fcntl F_GETFL: {}", io::Error::last_os_error());
+            return Err(last_os_error("fcntl F_GETFL"));
         }
         if flags & libc::O_NONBLOCK == 0 {
             let ret = unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
             if ret < 0 {
-                bail!("fcntl F_SETFL O_NONBLOCK: {}", io::Error::last_os_error());
+                return Err(last_os_error("fcntl F_SETFL O_NONBLOCK"));
             }
         }
 
@@ -72,7 +79,7 @@ impl TunDevice {
         // 1. Open PF_SYSTEM / SYSPROTO_CONTROL socket.
         let fd = unsafe { libc::socket(PF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL) };
         if fd < 0 {
-            bail!("socket(PF_SYSTEM): {}", io::Error::last_os_error());
+            return Err(last_os_error("socket(PF_SYSTEM)"));
         }
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
@@ -85,7 +92,7 @@ impl TunDevice {
 
         let ret = unsafe { libc::ioctl(owned_fd.as_raw_fd(), CTLIOCGINFO as _, &mut info) };
         if ret < 0 {
-            bail!("CTLIOCGINFO ioctl: {}", io::Error::last_os_error());
+            return Err(last_os_error("CTLIOCGINFO ioctl"));
         }
 
         // 3. Connect with sc_unit = 0 for auto-assignment.
@@ -106,7 +113,7 @@ impl TunDevice {
             )
         };
         if ret < 0 {
-            bail!("connect(utun): {}", io::Error::last_os_error());
+            return Err(last_os_error("connect(utun)"));
         }
 
         // 4. Get the assigned interface name.
@@ -122,10 +129,7 @@ impl TunDevice {
             )
         };
         if ret < 0 {
-            bail!(
-                "getsockopt(UTUN_OPT_IFNAME): {}",
-                io::Error::last_os_error()
-            );
+            return Err(last_os_error("getsockopt(UTUN_OPT_IFNAME)"));
         }
 
         let name = std::ffi::CStr::from_bytes_until_nul(&name_buf)
@@ -137,7 +141,7 @@ impl TunDevice {
         // 5. Set non-blocking for async I/O.
         let flags = unsafe { libc::fcntl(owned_fd.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 {
-            bail!("fcntl F_GETFL: {}", io::Error::last_os_error());
+            return Err(last_os_error("fcntl F_GETFL"));
         }
         let ret = unsafe {
             libc::fcntl(
@@ -147,7 +151,7 @@ impl TunDevice {
             )
         };
         if ret < 0 {
-            bail!("fcntl F_SETFL O_NONBLOCK: {}", io::Error::last_os_error());
+            return Err(last_os_error("fcntl F_SETFL O_NONBLOCK"));
         }
 
         let async_fd = AsyncFd::new(owned_fd).context("AsyncFd::new")?;

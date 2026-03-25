@@ -2,19 +2,15 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use containerd_client::services::v1::PluginsRequest;
-use containerd_client::services::v1::content_client::ContentClient;
 use containerd_client::services::v1::introspection_client::IntrospectionClient;
 use containerd_client::services::v1::snapshots::{
     RemoveSnapshotRequest, StatSnapshotRequest, ViewSnapshotRequest,
     snapshots_client::SnapshotsClient,
 };
-use oci_spec::image::ImageConfiguration;
 use sha2::{Digest, Sha256};
 use tonic::transport::Channel;
 
-use super::content::read_content;
 use super::generate_id;
-use super::image::resolve_platform_manifest;
 use super::lease::ContainerdLease;
 use super::ns_request;
 
@@ -93,51 +89,37 @@ pub async fn remove_snapshot(
     Ok(())
 }
 
-/// Create a blockfile snapshot view for an image.
+/// Create a snapshot view and return the block file path and view key.
 ///
-/// Computes the final chain ID from the image manifest, creates a snapshot
-/// view (auto-leased via the provided lease), and returns the block file path
-/// along with the view's snapshot key (for cleanup via `remove_snapshot`).
+/// Note: `Snapshots.View` does NOT auto-add to the lease despite the lease
+/// header being set. The view is short-lived (copied and removed immediately
+/// by the caller), so the GC risk window is negligible.
 pub async fn create_blockfile_view(
     channel: &Channel,
     lease: &ContainerdLease,
-    image_ref: &str,
+    snapshotter: &str,
+    final_chain_id: &str,
 ) -> anyhow::Result<(PathBuf, String)> {
-    let manifest =
-        resolve_platform_manifest(channel, lease.namespace(), image_ref).await?;
-    let config_digest = manifest.config().digest().to_string();
-
-    let mut content_client = ContentClient::new(channel.clone());
-    let config_bytes =
-        read_content(&mut content_client, lease.namespace(), &config_digest).await?;
-    let img_config: ImageConfiguration =
-        serde_json::from_slice(&config_bytes).context("parsing image config")?;
-    let diff_ids = img_config.rootfs().diff_ids();
-    let chain_ids = compute_chain_ids(diff_ids);
-    let final_chain_id = chain_ids.last().context("image has no layers")?;
-
     let mut snapshots = SnapshotsClient::new(channel.clone());
     let view_key = format!("distvirt-view-{}", generate_id());
     let req = ViewSnapshotRequest {
-        snapshotter: "blockfile".to_string(),
+        snapshotter: snapshotter.to_string(),
         key: view_key.clone(),
-        parent: final_chain_id.clone(),
+        parent: final_chain_id.to_string(),
         labels: Default::default(),
     };
-    // Auto-leased: the view snapshot is added to the lease in the same
-    // DB transaction as creation.
     let resp = snapshots
         .view(lease.request(req))
         .await
-        .context("creating blockfile snapshot view")?;
+        .context("creating snapshot view")?;
     let mounts = resp.into_inner().mounts;
 
     if mounts.is_empty() {
-        bail!("no mounts returned for blockfile snapshot view");
+        bail!("no mounts returned for snapshot view");
     }
 
     let blockfile_path = PathBuf::from(&mounts[0].source);
-    log::info!("blockfile snapshot at {:?}", blockfile_path);
+    log::info!("snapshot view at {:?}", blockfile_path);
 
     Ok((blockfile_path, view_key))
 }
