@@ -5,7 +5,7 @@ use tonic::transport::Channel;
 
 use super::containerd;
 use super::containerd::lease::LeaseManager;
-use super::containerd::resource::ContentRef;
+use super::containerd::resource::ImageRef;
 use super::containerd::unpack::UnpackCoordinator;
 use super::{ImageProvider, PreparedArtifact};
 
@@ -13,7 +13,6 @@ use super::{ImageProvider, PreparedArtifact};
 /// with the blockfile snapshotter, which produces ext4 block files directly.
 pub struct ContainerdBlockfileProvider {
     channel: Channel,
-    namespace: String,
     docker_config: Option<PathBuf>,
     unpack_coordinator: UnpackCoordinator,
     lease_manager: LeaseManager,
@@ -29,7 +28,6 @@ impl ContainerdBlockfileProvider {
         let lease_manager = LeaseManager::new(channel.clone(), namespace.clone());
         Ok(Self {
             channel,
-            namespace,
             docker_config,
             unpack_coordinator: UnpackCoordinator::default(),
             lease_manager,
@@ -39,52 +37,56 @@ impl ContainerdBlockfileProvider {
 
 impl ImageProvider for ContainerdBlockfileProvider {
     async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact> {
-        // Create a lease for this VM's resources.
+        // Single operation lease — short-lived, protects resources during
+        // pull + unpack + copy. Expires after 1 hour as a crash safety net.
         let lease = self.lease_manager.create_lease().await?;
 
-        // Pull image if not present locally.
+        // Add the image to our lease for transitive GC protection of all
+        // content blobs via the image record's GC ref labels.
+        lease.add_resource(&ImageRef(image_ref.to_string())).await?;
+
+        // Pull image if not present locally (auto-leased via header).
         containerd::ensure_image(
             &self.channel,
-            &self.namespace,
+            &lease,
             image_ref,
             self.docker_config.as_deref(),
         )
         .await
         .context("ensuring image is pulled")?;
 
-        // Add image content to the lease for GC protection.
-        let manifest =
-            containerd::resolve_platform_manifest(&self.channel, &self.namespace, image_ref)
-                .await?;
-        lease
-            .add_resource(&ContentRef(manifest.config().digest().to_string()))
-            .await?;
-        for layer in manifest.layers() {
-            lease
-                .add_resource(&ContentRef(layer.digest().to_string()))
-                .await?;
-        }
-
-        // Unpack layers with lease-based lifecycle.
+        // Unpack layers (Stat for existence, auto-leased Prepare/Commit/Apply).
         containerd::ensure_unpacked(
             &self.channel,
-            &self.namespace,
+            &lease,
             image_ref,
             "blockfile",
             &self.unpack_coordinator,
-            &lease,
         )
         .await
         .context("ensuring image is unpacked with blockfile snapshotter")?;
 
-        let mut config = containerd::read_image_config(&self.channel, &self.namespace, image_ref)
-            .await
-            .context("reading image config")?;
+        // Set permanent GC protection for committed snapshots.
+        // This label on the config blob keeps the snapshot chain alive
+        // across pod lifecycles (leases are only temporary).
+        containerd::content::set_snapshot_gc_label(
+            &self.channel,
+            lease.namespace(),
+            image_ref,
+            "blockfile",
+        )
+        .await
+        .context("setting snapshot GC ref label")?;
+
+        let mut config =
+            containerd::read_image_config(&self.channel, lease.namespace(), image_ref)
+                .await
+                .context("reading image config")?;
 
         // Extract /etc/passwd and /etc/group from layer tarballs for UID/GID resolution.
         let files = containerd::extract_files_from_layers(
             &self.channel,
-            &self.namespace,
+            lease.namespace(),
             image_ref,
             &["etc/passwd", "etc/group"],
         )
@@ -102,16 +104,45 @@ impl ImageProvider for ContainerdBlockfileProvider {
             }
         }
 
-        // Create a snapshot view and add it to the lease.
-        let (blockfile_path, view_ref) =
-            containerd::snapshot::create_blockfile_view(&self.channel, &self.namespace, image_ref)
+        // Create a temporary view, copy the blockfile out of containerd
+        // storage, then immediately remove the view. The VM reads its own
+        // copy — fully decoupled from containerd's snapshot lifecycle.
+        let (view_path, view_key) =
+            containerd::snapshot::create_blockfile_view(&self.channel, &lease, image_ref)
                 .await
                 .context("creating blockfile view")?;
-        lease.add_resource(&view_ref).await?;
 
-        log::info!("prepared container image at {}", blockfile_path.display());
+        let temp_file =
+            tempfile::NamedTempFile::new().context("creating temp file for blockfile copy")?;
+        std::fs::copy(&view_path, temp_file.path()).with_context(|| {
+            format!(
+                "copying blockfile from {} to {}",
+                view_path.display(),
+                temp_file.path().display()
+            )
+        })?;
+        let image_path = temp_file.path().to_path_buf();
 
-        // The lease is the cleanup handle — when dropped, resources become GC-eligible.
-        Ok(PreparedArtifact::new(blockfile_path, Some(config), lease))
+        log::info!(
+            "copied blockfile to {} (view={})",
+            image_path.display(),
+            view_key
+        );
+
+        // Remove the view immediately — we have our own copy now.
+        containerd::snapshot::remove_snapshot(
+            &self.channel,
+            lease.namespace(),
+            "blockfile",
+            &view_key,
+        )
+        .await
+        .context("removing blockfile view after copy")?;
+
+        // Lease is dropped here — committed snapshots are protected by GC
+        // ref labels, not the lease. The NamedTempFile is stored as the
+        // cleanup handle: deleted when PreparedArtifact drops. On Linux,
+        // Firecracker's open fd keeps the data alive even after unlink.
+        Ok(PreparedArtifact::new(image_path, Some(config), temp_file))
     }
 }

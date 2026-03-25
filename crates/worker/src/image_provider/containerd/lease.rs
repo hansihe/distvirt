@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use anyhow::Context;
 use containerd_client::services::v1::{
     AddResourceRequest,
     CreateRequest as LeaseCreateRequest,
     DeleteRequest as LeaseDeleteRequest,
-    Resource as LeaseResource,
+    Resource as LeaseResourceProto,
     leases_client::LeasesClient,
 };
 use containerd_client::with_namespace;
@@ -53,18 +55,29 @@ impl LeaseManager {
         }
     }
 
-    /// Create a new containerd lease.
+    /// Create a new containerd lease with a 1-hour expiry safety net.
     ///
-    /// The lease protects resources added to it from garbage collection.
+    /// The lease protects resources created under it from garbage collection.
     /// When the returned `ContainerdLease` is dropped, the lease is deleted
     /// asynchronously via the background cleanup task.
+    ///
+    /// The expiry label ensures leaked leases (from crashes) are eventually
+    /// cleaned up by containerd.
     pub async fn create_lease(&self) -> anyhow::Result<ContainerdLease> {
         let mut client = LeasesClient::new(self.channel.clone());
 
         let lease_id = format!("distvirt-{}", generate_id());
+        let expire = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let expire_rfc3339 = format_rfc3339(expire);
+        let mut labels = HashMap::new();
+        labels.insert(
+            "containerd.io/gc.expire".to_string(),
+            expire_rfc3339,
+        );
+
         let req = LeaseCreateRequest {
             id: lease_id.clone(),
-            labels: Default::default(),
+            labels,
         };
         client
             .create(with_namespace!(req, &self.namespace))
@@ -84,9 +97,14 @@ impl LeaseManager {
 
 /// A containerd lease handle that protects resources from garbage collection.
 ///
-/// Add resources (snapshots, content) to the lease to prevent them from
-/// being collected. When dropped, the lease is deleted via the `LeaseManager`'s
-/// background task, making unreferenced resources eligible for GC.
+/// Use `request()` to build gRPC requests with the `containerd-lease` header.
+/// Resources created under such requests are automatically added to the lease
+/// in the same database transaction as creation (zero TOCTOU window).
+///
+/// Use `add_resource()` to manually protect existing resources (e.g. images,
+/// content blobs you are reading but not creating).
+///
+/// When dropped, the lease is deleted via the `LeaseManager`'s background task.
 pub struct ContainerdLease {
     id: String,
     channel: Channel,
@@ -94,15 +112,54 @@ pub struct ContainerdLease {
     cleanup_tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
+#[allow(dead_code)]
 impl ContainerdLease {
-    /// Add a resource to this lease, protecting it from garbage collection.
+    /// Get the lease ID.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Get the containerd namespace this lease belongs to.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Get the gRPC channel.
+    pub fn channel(&self) -> &Channel {
+        &self.channel
+    }
+
+    /// Build a tonic Request with `containerd-namespace` and `containerd-lease`
+    /// metadata headers.
     ///
-    /// Returns an error if the resource does not exist or the gRPC call fails.
+    /// Resources created by gRPC calls using this request are automatically
+    /// added to the lease in the same database transaction as creation,
+    /// eliminating the TOCTOU window between resource creation and lease
+    /// protection.
+    pub fn request<T>(&self, msg: T) -> tonic::Request<T> {
+        let mut req = tonic::Request::new(msg);
+        let md = req.metadata_mut();
+        md.insert(
+            "containerd-namespace",
+            self.namespace.parse().expect("valid namespace"),
+        );
+        md.insert(
+            "containerd-lease",
+            self.id.parse().expect("valid lease ID"),
+        );
+        req
+    }
+
+    /// Manually add an existing resource to this lease, protecting it from GC.
+    ///
+    /// Use this for resources you are reading (not creating), such as image
+    /// records or content blobs. For resources you create, prefer using
+    /// `request()` which provides automatic lease protection.
     pub async fn add_resource(&self, resource: &impl resource::LeaseResource) -> anyhow::Result<()> {
         let mut client = LeasesClient::new(self.channel.clone());
         let req = AddResourceRequest {
             id: self.id.clone(),
-            resource: Some(LeaseResource {
+            resource: Some(LeaseResourceProto {
                 id: resource.resource_id().to_string(),
                 r#type: resource.resource_type(),
             }),
@@ -120,40 +177,6 @@ impl ContainerdLease {
             })?;
         Ok(())
     }
-
-    /// Try to add a resource to this lease.
-    ///
-    /// Returns `Ok(true)` if the resource was successfully added (it exists
-    /// and is now protected). Returns `Ok(false)` if the resource does not
-    /// exist (e.g. it was garbage collected). Other errors are propagated.
-    pub async fn try_add_resource(
-        &self,
-        resource: &impl resource::LeaseResource,
-    ) -> anyhow::Result<bool> {
-        let mut client = LeasesClient::new(self.channel.clone());
-        let req = AddResourceRequest {
-            id: self.id.clone(),
-            resource: Some(LeaseResource {
-                id: resource.resource_id().to_string(),
-                r#type: resource.resource_type(),
-            }),
-        };
-        match client
-            .add_resource(with_namespace!(req, &self.namespace))
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(e) if e.code() == tonic::Code::NotFound => Ok(false),
-            Err(e) => Err(e).with_context(|| {
-                format!(
-                    "adding resource {}:{} to lease {}",
-                    resource.resource_type(),
-                    resource.resource_id(),
-                    self.id
-                )
-            }),
-        }
-    }
 }
 
 impl Drop for ContainerdLease {
@@ -161,4 +184,35 @@ impl Drop for ContainerdLease {
         // Best-effort: if the receiver is gone, the manager was dropped.
         let _ = self.cleanup_tx.send(self.id.clone());
     }
+}
+
+/// Format a SystemTime as RFC 3339 (e.g. "2026-03-25T16:00:00Z").
+fn format_rfc3339(t: std::time::SystemTime) -> String {
+    let dur = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+
+    // Split into days and time-of-day
+    const SECS_PER_DAY: u64 = 86400;
+    let mut days = (secs / SECS_PER_DAY) as i64;
+    let day_secs = secs % SECS_PER_DAY;
+    let hour = day_secs / 3600;
+    let minute = (day_secs % 3600) / 60;
+    let second = day_secs % 60;
+
+    // Convert days since epoch to y/m/d (civil calendar from days since 1970-01-01)
+    // Algorithm from Howard Hinnant
+    days += 719468;
+    let era = if days >= 0 { days } else { days - 146096 } / 146097;
+    let doe = (days - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, minute, second)
 }

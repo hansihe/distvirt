@@ -10,18 +10,15 @@ use containerd_client::services::v1::{
     ApplyRequest, content_client::ContentClient,
     diff_client::DiffClient,
 };
-use containerd_client::with_namespace;
 use oci_spec::image::ImageConfiguration;
 use tokio_util::sync::CancellationToken;
-use tonic::Request;
 use tonic::transport::Channel;
 
 use super::content::read_content;
 use super::generate_id;
 use super::image::resolve_platform_manifest;
 use super::lease::ContainerdLease;
-use super::resource::SnapshotRef;
-use super::snapshot::{check_snapshotter, compute_chain_ids};
+use super::snapshot::{check_snapshotter, compute_chain_ids, remove_snapshot, stat_snapshot};
 
 /// Coordinates concurrent layer unpack operations so that only one task
 /// unpacks a given layer (identified by chain ID) at a time.  Other tasks
@@ -41,18 +38,23 @@ impl Default for UnpackCoordinator {
 
 /// Ensure the image is unpacked with the given snapshotter.
 ///
-/// Uses the lease's `try_add_resource` to atomically check whether each
-/// layer snapshot exists and protect it from GC. Layers that don't exist
-/// are unpacked, with the `UnpackCoordinator` preventing concurrent
-/// unpack of the same layer by multiple tasks.
+/// Uses `Snapshots.Stat` to check whether each layer snapshot exists.
+/// Layers that don't exist are unpacked with automatic lease protection
+/// via the `containerd-lease` gRPC header (zero TOCTOU window between
+/// resource creation and lease protection).
+///
+/// The `UnpackCoordinator` prevents concurrent unpack of the same layer
+/// by multiple tasks. `AlreadyExists` on Commit is handled as success
+/// (concurrent unpack from another process won the race).
 pub async fn ensure_unpacked(
     channel: &Channel,
-    namespace: &str,
+    lease: &ContainerdLease,
     image_ref: &str,
     snapshotter: &str,
     coordinator: &UnpackCoordinator,
-    lease: &ContainerdLease,
 ) -> anyhow::Result<()> {
+    let namespace = lease.namespace();
+
     // Fail early if the snapshotter plugin isn't available.
     check_snapshotter(channel, snapshotter).await?;
 
@@ -87,19 +89,13 @@ pub async fn ensure_unpacked(
     let mut diff = DiffClient::new(channel.clone());
 
     for (i, (layer_desc, chain_id)) in layers.iter().zip(chain_ids.iter()).enumerate() {
-        let snapshot_ref = SnapshotRef {
-            snapshotter: snapshotter.to_string(),
-            key: chain_id.clone(),
-        };
-
         // Coordinate with other tasks to ensure only one unpacks this layer.
         // Loop handles the case where a concurrent unpack fails and we retry.
         let drop_guard = loop {
-            // Try adding the committed snapshot to our lease. If it succeeds,
-            // the snapshot exists and is now protected from GC.
-            if lease.try_add_resource(&snapshot_ref).await? {
+            // Check if the committed snapshot already exists via Stat.
+            if stat_snapshot(channel, namespace, snapshotter, chain_id).await? {
                 log::debug!(
-                    "layer {}/{}: snapshot {} exists, added to lease",
+                    "layer {}/{}: snapshot {} exists",
                     i + 1, layers.len(), chain_id
                 );
                 break None;
@@ -129,7 +125,7 @@ pub async fn ensure_unpacked(
                         i + 1, layers.len(), chain_id
                     );
                     token.cancelled().await;
-                    // Loop back to re-check via try_add_resource.
+                    // Loop back to re-check via Stat.
                     continue;
                 }
                 Action::Unpack(guard) => break Some(guard),
@@ -156,7 +152,7 @@ pub async fn ensure_unpacked(
             if parent.is_empty() { "<none>" } else { &parent }
         );
 
-        // Prepare a writable snapshot.
+        // Prepare a writable snapshot (auto-leased via header).
         let prepare_req = PrepareSnapshotRequest {
             snapshotter: snapshotter.to_string(),
             key: active_key.clone(),
@@ -164,19 +160,12 @@ pub async fn ensure_unpacked(
             labels: Default::default(),
         };
         let prep_resp = snapshots
-            .prepare(with_namespace!(prepare_req, namespace))
+            .prepare(lease.request(prepare_req))
             .await
             .with_context(|| format!("preparing snapshot for layer {}", i + 1))?;
         let mounts = prep_resp.into_inner().mounts;
 
-        // Protect the active snapshot from GC during apply.
-        let active_ref = SnapshotRef {
-            snapshotter: snapshotter.to_string(),
-            key: active_key.clone(),
-        };
-        lease.add_resource(&active_ref).await?;
-
-        // Apply the layer diff.
+        // Apply the layer diff (auto-leased via header).
         let apply_req = ApplyRequest {
             diff: Some(containerd_client::types::Descriptor {
                 media_type: layer_desc.media_type().to_string(),
@@ -188,24 +177,36 @@ pub async fn ensure_unpacked(
             payloads: Default::default(),
             sync_fs: false,
         };
-        diff.apply(with_namespace!(apply_req, namespace))
+        diff.apply(lease.request(apply_req))
             .await
             .with_context(|| format!("applying layer {} diff", i + 1))?;
 
-        // Commit the snapshot with chain_id as the key.
+        // Commit the snapshot with chain_id as the key (auto-leased via header).
+        // Handle AlreadyExists as success — a concurrent unpack won the race.
         let commit_req = CommitSnapshotRequest {
             snapshotter: snapshotter.to_string(),
             name: chain_id.clone(),
             key: active_key.clone(),
             labels: Default::default(),
         };
-        snapshots
-            .commit(with_namespace!(commit_req, namespace))
-            .await
-            .with_context(|| format!("committing snapshot for layer {}", i + 1))?;
-
-        // Add the committed snapshot to the lease.
-        lease.add_resource(&snapshot_ref).await?;
+        match snapshots.commit(lease.request(commit_req)).await {
+            Ok(_) => {}
+            Err(e) if e.code() == tonic::Code::AlreadyExists => {
+                log::debug!(
+                    "layer {}/{}: snapshot {} already committed by concurrent unpack",
+                    i + 1, layers.len(), chain_id
+                );
+                // Clean up our active snapshot since we lost the race.
+                if let Err(e) = remove_snapshot(channel, namespace, snapshotter, &active_key).await
+                {
+                    log::warn!("failed to remove active snapshot {}: {}", active_key, e);
+                }
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("committing snapshot for layer {}", i + 1));
+            }
+        }
 
         // Unpack succeeded — remove from in-progress map and drop the guard
         // to wake any waiters.

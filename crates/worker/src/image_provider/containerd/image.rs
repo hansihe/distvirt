@@ -14,7 +14,6 @@ use containerd_client::types::Platform;
 use containerd_client::types::transfer::{
     AuthResponse, AuthType, ImageStore, OciRegistry, RegistryResolver,
 };
-use containerd_client::with_namespace;
 use oci_spec::image::{ImageConfiguration, ImageManifest};
 use prost::Name;
 use tokio_stream::wrappers::ReceiverStream;
@@ -23,6 +22,8 @@ use tonic::transport::Channel;
 
 use super::content::read_content;
 use super::generate_id;
+use super::lease::ContainerdLease;
+use super::ns_request;
 use super::super::docker_config;
 
 pub use crate::oci::ImageConfig;
@@ -50,7 +51,7 @@ pub async fn resolve_platform_manifest(
         name: image_ref.to_string(),
     };
     let resp = images
-        .get(with_namespace!(req, namespace))
+        .get(ns_request(req, namespace))
         .await
         .with_context(|| format!("getting image {}", image_ref))?;
     let image = resp.into_inner().image.context("image record missing")?;
@@ -85,16 +86,18 @@ pub async fn resolve_platform_manifest(
 /// any snapshotter. Use `ensure_unpacked` afterwards.
 pub async fn ensure_image(
     channel: &Channel,
-    namespace: &str,
+    lease: &ContainerdLease,
     image_ref: &str,
     docker_config: Option<&Path>,
 ) -> anyhow::Result<()> {
+    let namespace = lease.namespace();
+
     // Check if the image already exists locally.
     let mut images = ImagesClient::new(channel.clone());
     let req = GetImageRequest {
         name: image_ref.to_string(),
     };
-    if images.get(with_namespace!(req, namespace)).await.is_ok() {
+    if images.get(ns_request(req, namespace)).await.is_ok() {
         log::info!("image {} already present locally", image_ref);
         return Ok(());
     }
@@ -149,7 +152,7 @@ pub async fn ensure_image(
 
     let mut transfer = TransferClient::new(channel.clone());
     transfer
-        .transfer(with_namespace!(request, namespace))
+        .transfer(lease.request(request))
         .await
         .with_context(|| format!("pulling image {}", image_ref))?;
     log::info!("image {} pulled successfully", image_ref);
