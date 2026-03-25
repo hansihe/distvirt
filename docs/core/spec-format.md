@@ -103,6 +103,7 @@ workloads:
   <workload-id>:
     ip: <ipv4>                  # Pod IP. Auto-assigned from subnet if omitted.
     suspend_on_idle: <bool>     # Default: true (from defaults). Snapshot instead of stop.
+    run_policy: service | job   # Default: service. Jobs run to completion (exit 0 = done).
     activation:                  # Workload-level activation. If omitted, always-on.
       idle_timeout: <duration>   # Time after last traffic before deactivation.
     volumes:                    # Pod-scoped volume definitions. See Volumes.
@@ -564,6 +565,7 @@ workloads.<id>.activation         -> ActivationSpec                Implemented
   .idle_timeout                   -> ActivationSpec.idle_timeout   Implemented
 workloads.<id>.resources.requests -> ResourceRequirements.requests Implemented
 workloads.<id>.resources.limits   -> ResourceRequirements.limits   Implemented
+workloads.<id>.run_policy         -> WorkloadSpec.run_policy       Implemented
 workloads.<id>.healthcheck        -> (dropped)                     Parsed, ignored
 workloads.<id>.volumes[]          -> VolumeSpec                    Implemented
   .empty_dir                      -> VolumeType::EmptyDir          Implemented

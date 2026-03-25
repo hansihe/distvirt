@@ -115,6 +115,19 @@ fn validate_structure(spec: &SpecFile, errs: &mut SpecErrors) {
                 }
             }
 
+            // run_policy validation
+            if let Some(ref rp) = wl.run_policy {
+                match rp.as_str() {
+                    "service" | "job" => {}
+                    other => {
+                        errs.error(
+                            wl_path.key("run_policy"),
+                            format!("unknown run_policy '{}' (expected 'service' or 'job')", other),
+                        );
+                    }
+                }
+            }
+
             // Healthcheck warning
             if wl.healthcheck.is_some() {
                 errs.warn(
@@ -673,7 +686,10 @@ fn build_namespace_spec(
                     activation: wl_activation,
                     respects_demand: wl.respects_demand,
                     volumes,
-                    run_policy: 0, // SERVICE (default)
+                    run_policy: match wl.run_policy.as_deref() {
+                        Some("job") => 1,
+                        _ => 0,
+                    },
                     labels: wl.labels.clone().unwrap_or_default(),
                 },
             );

@@ -70,6 +70,7 @@ pub struct SpecWorkload {
     /// If false (default), the workload is always-on.
     #[serde(default)]
     pub respects_demand: bool,
+    pub run_policy: Option<String>,
     pub activation: Option<SpecWorkloadActivation>,
     pub volumes: Option<Vec<SpecVolume>>,
     pub containers: Vec<SpecContainer>,
