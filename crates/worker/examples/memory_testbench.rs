@@ -156,11 +156,12 @@ async fn main() -> Result<()> {
 
     // Prepare container image via containerd.
     eprintln!("[1/5] Preparing container image...");
-    let image_provider = ContainerdBlockfileProvider {
-        socket: args.containerd_socket.clone(),
-        namespace: args.containerd_namespace.clone(),
-        docker_config: None,
-    };
+    let image_provider = ContainerdBlockfileProvider::new(
+        args.containerd_socket.clone(),
+        args.containerd_namespace.clone(),
+        None,
+    )
+    .await?;
     let artifact = image_provider
         .prepare(&args.container_image)
         .await

@@ -51,11 +51,12 @@ async fn main() -> anyhow::Result<()> {
 
     let vmm = distvirt_worker::vmm::firecracker::Firecracker::new("firecracker");
     let image_provider =
-        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider {
-            socket: cli.containerd_socket,
-            namespace: cli.containerd_namespace,
-            docker_config: Some(cli.docker_config),
-        };
+        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider::new(
+            cli.containerd_socket,
+            cli.containerd_namespace,
+            Some(cli.docker_config),
+        )
+        .await?;
 
     log::info!("connecting to orchestrator at {}", cli.orchestrator);
     let stream = tokio::net::TcpStream::connect(&cli.orchestrator).await?;

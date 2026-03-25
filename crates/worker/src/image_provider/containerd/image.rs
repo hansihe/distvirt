@@ -1,20 +1,13 @@
 use std::collections::HashMap;
 use std::env::consts;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, bail};
-use containerd_client as client;
-use containerd_client::services::v1::snapshots::{
-    CommitSnapshotRequest, PrepareSnapshotRequest, RemoveSnapshotRequest, StatSnapshotRequest,
-    ViewSnapshotRequest, snapshots_client::SnapshotsClient,
-};
 use containerd_client::services::v1::{
-    ApplyRequest, GetImageRequest, InfoRequest, PluginsRequest, ReadContentRequest, StreamInit,
-    TransferOptions, TransferRequest, UpdateRequest, content_client::ContentClient,
-    diff_client::DiffClient, images_client::ImagesClient,
-    introspection_client::IntrospectionClient, streaming_client::StreamingClient,
-    transfer_client::TransferClient,
+    GetImageRequest, StreamInit, TransferOptions, TransferRequest,
+    content_client::ContentClient, images_client::ImagesClient,
+    streaming_client::StreamingClient, transfer_client::TransferClient,
 };
 use containerd_client::to_any;
 use containerd_client::types::Platform;
@@ -24,40 +17,15 @@ use containerd_client::types::transfer::{
 use containerd_client::with_namespace;
 use oci_spec::image::{ImageConfiguration, ImageManifest};
 use prost::Name;
-use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tonic::transport::Channel;
 
-use super::docker_config;
+use super::content::read_content;
+use super::generate_id;
+use super::super::docker_config;
 
 pub use crate::oci::ImageConfig;
-
-/// RAII guard that removes a blockfile snapshot view on drop.
-pub struct BlockfileCleanup {
-    pub channel: Channel,
-    pub namespace: String,
-    pub view_key: String,
-    pub handle: tokio::runtime::Handle,
-}
-
-impl Drop for BlockfileCleanup {
-    fn drop(&mut self) {
-        let channel = self.channel.clone();
-        let namespace = self.namespace.clone();
-        let view_key = self.view_key.clone();
-        self.handle.spawn(async move {
-            let mut snapshots = SnapshotsClient::new(channel);
-            let req = RemoveSnapshotRequest {
-                snapshotter: "blockfile".to_string(),
-                key: view_key.clone(),
-            };
-            if let Err(e) = snapshots.remove(with_namespace!(req, &namespace)).await {
-                log::warn!("BlockfileCleanup drop: snapshot remove {:?}: {}", view_key, e);
-            }
-        });
-    }
-}
 
 fn oci_arch() -> &'static str {
     match consts::ARCH {
@@ -65,46 +33,6 @@ fn oci_arch() -> &'static str {
         "aarch64" => "arm64",
         _ => consts::ARCH,
     }
-}
-
-/// Connect to a containerd instance.
-pub async fn connect(socket: &str) -> anyhow::Result<Channel> {
-    client::connect(socket)
-        .await
-        .with_context(|| format!("connecting to containerd at {}", socket))
-}
-
-/// Verify that a snapshotter plugin is loaded and initialized in containerd.
-pub async fn check_snapshotter(channel: &Channel, snapshotter: &str) -> anyhow::Result<()> {
-    let mut introspection = IntrospectionClient::new(channel.clone());
-    let resp = introspection
-        .plugins(PluginsRequest {
-            filters: vec![format!(
-                "type==io.containerd.snapshotter.v1,id=={}",
-                snapshotter
-            )],
-        })
-        .await
-        .context("querying containerd plugins")?;
-
-    let plugins = resp.into_inner().plugins;
-    let plugin = plugins.into_iter().next().with_context(|| {
-        format!(
-            "{} snapshotter is not registered in containerd \
-             (is the plugin installed?)",
-            snapshotter
-        )
-    })?;
-
-    if let Some(init_err) = plugin.init_err {
-        bail!(
-            "{} snapshotter failed to initialize: {}",
-            snapshotter,
-            init_err.message
-        );
-    }
-
-    Ok(())
 }
 
 /// Resolve the platform-specific manifest for an image.
@@ -229,235 +157,6 @@ pub async fn ensure_image(
     Ok(())
 }
 
-/// Ensure the image is unpacked with the given snapshotter.
-///
-/// If already unpacked, this is a no-op. Otherwise performs a manual unpack
-/// by iterating layers and using the Snapshots + Diff gRPC APIs, then sets
-/// the GC ref label on the config content.
-pub async fn ensure_unpacked(
-    channel: &Channel,
-    namespace: &str,
-    image_ref: &str,
-    snapshotter: &str,
-) -> anyhow::Result<()> {
-    // Fail early if the snapshotter plugin isn't available.
-    check_snapshotter(channel, snapshotter).await?;
-
-    // Check if already unpacked.
-    if has_snapshot_unpack(channel, namespace, image_ref, snapshotter).await? {
-        log::info!(
-            "image {} already unpacked with {} snapshotter",
-            image_ref, snapshotter
-        );
-        return Ok(());
-    }
-
-    log::info!(
-        "unpacking image {} with {} snapshotter",
-        image_ref, snapshotter
-    );
-
-    // Resolve manifest and read config to get diff_ids and layer descriptors.
-    let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
-    let layers = manifest.layers();
-    let config_digest = manifest.config().digest().to_string();
-
-    let mut content = ContentClient::new(channel.clone());
-    let config_bytes = read_content(&mut content, namespace, &config_digest).await?;
-    let img_config: ImageConfiguration =
-        serde_json::from_slice(&config_bytes).context("parsing image config")?;
-    let diff_ids = img_config.rootfs().diff_ids();
-
-    if diff_ids.len() != layers.len() {
-        bail!(
-            "image config has {} diff_ids but manifest has {} layers",
-            diff_ids.len(),
-            layers.len()
-        );
-    }
-
-    // Compute chain IDs for each layer.
-    let chain_ids = compute_chain_ids(diff_ids);
-
-    let mut snapshots = SnapshotsClient::new(channel.clone());
-    let mut diff = DiffClient::new(channel.clone());
-
-    for (i, (layer_desc, chain_id)) in layers.iter().zip(chain_ids.iter()).enumerate() {
-        // Check if this snapshot already exists (e.g. shared base layer or partial unpack).
-        let stat_req = StatSnapshotRequest {
-            snapshotter: snapshotter.to_string(),
-            key: chain_id.clone(),
-        };
-        if snapshots
-            .stat(with_namespace!(stat_req, namespace))
-            .await
-            .is_ok()
-        {
-            log::debug!("layer {}/{}: snapshot {} already exists", i + 1, layers.len(), chain_id);
-            continue;
-        }
-
-        let parent = if i == 0 {
-            String::new()
-        } else {
-            chain_ids[i - 1].clone()
-        };
-
-        let active_key = format!("extract-{}-{}", generate_id(), i);
-        log::debug!(
-            "layer {}/{}: preparing snapshot (parent={})",
-            i + 1,
-            layers.len(),
-            if parent.is_empty() { "<none>" } else { &parent }
-        );
-
-        // Prepare a writable snapshot.
-        let prepare_req = PrepareSnapshotRequest {
-            snapshotter: snapshotter.to_string(),
-            key: active_key.clone(),
-            parent,
-            labels: Default::default(),
-        };
-        let prep_resp = snapshots
-            .prepare(with_namespace!(prepare_req, namespace))
-            .await
-            .with_context(|| format!("preparing snapshot for layer {}", i + 1))?;
-        let mounts = prep_resp.into_inner().mounts;
-
-        // Apply the layer diff.
-        let apply_req = ApplyRequest {
-            diff: Some(containerd_client::types::Descriptor {
-                media_type: layer_desc.media_type().to_string(),
-                digest: layer_desc.digest().to_string(),
-                size: layer_desc.size() as i64,
-                annotations: Default::default(),
-            }),
-            mounts,
-            payloads: Default::default(),
-            sync_fs: false,
-        };
-        diff.apply(with_namespace!(apply_req, namespace))
-            .await
-            .with_context(|| format!("applying layer {} diff", i + 1))?;
-
-        // Commit the snapshot with chain_id as the key.
-        // If the snapshot was committed concurrently (or by a previous partial
-        // run), treat "already exists" as success and clean up the active key.
-        let commit_req = CommitSnapshotRequest {
-            snapshotter: snapshotter.to_string(),
-            name: chain_id.clone(),
-            key: active_key.clone(),
-            labels: Default::default(),
-        };
-        match snapshots
-            .commit(with_namespace!(commit_req, namespace))
-            .await
-        {
-            Ok(_) => {}
-            Err(e) if e.code() == tonic::Code::AlreadyExists => {
-                log::debug!(
-                    "layer {}/{}: snapshot {} already committed, cleaning up active key",
-                    i + 1, layers.len(), chain_id
-                );
-                // Remove the active snapshot we prepared since it's no longer needed.
-                let rm_req = RemoveSnapshotRequest {
-                    snapshotter: snapshotter.to_string(),
-                    key: active_key,
-                };
-                let _ = snapshots.remove(with_namespace!(rm_req, namespace)).await;
-            }
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("committing snapshot for layer {}", i + 1));
-            }
-        }
-
-        log::debug!("layer {}/{}: committed as {}", i + 1, layers.len(), chain_id);
-    }
-
-    // Set the GC ref label on the config content so `get_blockfile_path` and
-    // `has_snapshot_unpack` can find the final snapshot.
-    let final_chain_id = chain_ids
-        .last()
-        .context("image has no layers")?;
-    let label_key = format!("containerd.io/gc.ref.snapshot.{}", snapshotter);
-
-    // Read existing labels and merge.
-    let info_req = InfoRequest {
-        digest: config_digest.clone(),
-    };
-    let info_resp = content
-        .info(with_namespace!(info_req, namespace))
-        .await
-        .context("reading config content info")?;
-    let mut info = info_resp.into_inner().info.context("content info missing")?;
-    info.labels.insert(label_key, final_chain_id.clone());
-
-    let update_req = UpdateRequest {
-        info: Some(info),
-        update_mask: Some(prost_types::FieldMask {
-            paths: vec!["labels".to_string()],
-        }),
-    };
-    content
-        .update(with_namespace!(update_req, namespace))
-        .await
-        .context("updating config content labels")?;
-
-    log::info!(
-        "image {} unpacked with {} snapshotter (snapshot: {})",
-        image_ref, snapshotter, final_chain_id
-    );
-
-    Ok(())
-}
-
-/// Compute OCI chain IDs from diff IDs.
-///
-/// chain[0] = diff_ids[0]
-/// chain[n] = sha256(chain[n-1] + " " + diff_ids[n])
-fn compute_chain_ids(diff_ids: &[String]) -> Vec<String> {
-    let mut chain_ids: Vec<String> = Vec::with_capacity(diff_ids.len());
-    for (i, diff_id) in diff_ids.iter().enumerate() {
-        let chain_id = if i == 0 {
-            diff_id.clone()
-        } else {
-            let mut hasher = Sha256::new();
-            hasher.update(chain_ids[i - 1].as_bytes());
-            hasher.update(b" ");
-            hasher.update(diff_id.as_bytes());
-            format!("sha256:{:x}", hasher.finalize())
-        };
-        chain_ids.push(chain_id);
-    }
-    chain_ids
-}
-
-/// Check whether an image has been unpacked with a given snapshotter by looking
-/// for the snapshot label on the config content.
-async fn has_snapshot_unpack(
-    channel: &Channel,
-    namespace: &str,
-    image_ref: &str,
-    snapshotter: &str,
-) -> anyhow::Result<bool> {
-    let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
-    let config_digest = manifest.config().digest().to_string();
-
-    let mut content = ContentClient::new(channel.clone());
-    let req = InfoRequest {
-        digest: config_digest,
-    };
-    let resp = content
-        .info(with_namespace!(req, namespace))
-        .await
-        .context("getting content info for config")?;
-    let info = resp.into_inner().info.context("content info missing")?;
-
-    let label = format!("containerd.io/gc.ref.snapshot.{}", snapshotter);
-    Ok(info.labels.contains_key(&label))
-}
-
 /// Read OCI image configuration (entrypoint, cmd, env, user, etc).
 pub async fn read_image_config(
     channel: &Channel,
@@ -489,65 +188,6 @@ pub async fn read_image_config(
         passwd_entries: Vec::new(),
         group_entries: Vec::new(),
     })
-}
-
-/// Get the blockfile path for an image from the blockfile snapshotter.
-///
-/// Creates a snapshot view and returns the block file path along with a
-/// cleanup guard that removes the view on drop.
-pub async fn get_blockfile_path(
-    channel: &Channel,
-    namespace: &str,
-    image_ref: &str,
-) -> anyhow::Result<(PathBuf, BlockfileCleanup)> {
-    let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
-    let config_digest = manifest.config().digest().to_string();
-
-    let mut content = ContentClient::new(channel.clone());
-    let req = InfoRequest {
-        digest: config_digest.clone(),
-    };
-    let resp = content
-        .info(with_namespace!(req, namespace))
-        .await
-        .context("getting content info for config")?;
-    let info = resp.into_inner().info.context("content info missing")?;
-
-    let snapshot_key = info
-        .labels
-        .get("containerd.io/gc.ref.snapshot.blockfile")
-        .context("blockfile snapshot key label not found on config content")?
-        .clone();
-
-    let mut snapshots = SnapshotsClient::new(channel.clone());
-    let view_key = format!("distvirt-view-{}", generate_id());
-    let req = ViewSnapshotRequest {
-        snapshotter: "blockfile".to_string(),
-        key: view_key.clone(),
-        parent: snapshot_key,
-        labels: Default::default(),
-    };
-    let resp = snapshots
-        .view(with_namespace!(req, namespace))
-        .await
-        .context("creating blockfile snapshot view")?;
-    let mounts = resp.into_inner().mounts;
-
-    if mounts.is_empty() {
-        bail!("no mounts returned for blockfile snapshot view");
-    }
-
-    let blockfile_path = PathBuf::from(&mounts[0].source);
-    log::info!("blockfile snapshot at {:?}", blockfile_path);
-
-    let cleanup = BlockfileCleanup {
-        channel: channel.clone(),
-        namespace: namespace.to_string(),
-        view_key,
-        handle: tokio::runtime::Handle::current(),
-    };
-
-    Ok((blockfile_path, cleanup))
 }
 
 /// Extract specific files from OCI image layer tarballs.
@@ -655,28 +295,6 @@ pub async fn extract_files_from_layers(
     Ok(results)
 }
 
-pub async fn read_content(
-    content: &mut ContentClient<Channel>,
-    namespace: &str,
-    digest: &str,
-) -> anyhow::Result<Vec<u8>> {
-    let req = ReadContentRequest {
-        digest: digest.to_string(),
-        ..Default::default()
-    };
-    let resp = content
-        .read(with_namespace!(req, namespace))
-        .await
-        .with_context(|| format!("reading content {}", digest))?;
-
-    let mut data = Vec::new();
-    let mut stream = resp.into_inner();
-    while let Some(chunk) = stream.message().await.context("reading content stream")? {
-        data.extend_from_slice(&chunk.data);
-    }
-    Ok(data)
-}
-
 /// Open a bidirectional streaming connection with containerd and spawn a task
 /// that responds to auth callbacks with the provided credentials.
 async fn setup_auth_stream(
@@ -775,8 +393,4 @@ async fn setup_auth_stream(
     });
 
     Ok(())
-}
-
-fn generate_id() -> String {
-    uuid::Uuid::new_v4().to_string()
 }

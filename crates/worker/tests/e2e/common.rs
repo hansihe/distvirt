@@ -93,11 +93,13 @@ async fn setup_full(
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
     let image_provider =
-        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider {
-            socket: containerd_socket,
-            namespace: "default".into(),
-            docker_config: None,
-        };
+        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider::new(
+            containerd_socket,
+            "default".into(),
+            None,
+        )
+        .await
+        .expect("failed to create containerd blockfile provider");
 
     let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 
