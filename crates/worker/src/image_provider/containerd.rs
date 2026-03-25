@@ -6,22 +6,25 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use containerd_client as client;
 use containerd_client::services::v1::snapshots::{
-    RemoveSnapshotRequest, ViewSnapshotRequest, snapshots_client::SnapshotsClient,
+    CommitSnapshotRequest, PrepareSnapshotRequest, RemoveSnapshotRequest, StatSnapshotRequest,
+    ViewSnapshotRequest, snapshots_client::SnapshotsClient,
 };
 use containerd_client::services::v1::{
-    GetImageRequest, InfoRequest, PluginsRequest, ReadContentRequest, StreamInit, TransferOptions,
-    TransferRequest, content_client::ContentClient, images_client::ImagesClient,
+    ApplyRequest, GetImageRequest, InfoRequest, PluginsRequest, ReadContentRequest, StreamInit,
+    TransferOptions, TransferRequest, UpdateRequest, content_client::ContentClient,
+    diff_client::DiffClient, images_client::ImagesClient,
     introspection_client::IntrospectionClient, streaming_client::StreamingClient,
     transfer_client::TransferClient,
 };
 use containerd_client::to_any;
 use containerd_client::types::Platform;
 use containerd_client::types::transfer::{
-    AuthResponse, AuthType, ImageStore, OciRegistry, RegistryResolver, UnpackConfiguration,
+    AuthResponse, AuthType, ImageStore, OciRegistry, RegistryResolver,
 };
 use containerd_client::with_namespace;
 use oci_spec::image::{ImageConfiguration, ImageManifest};
 use prost::Name;
+use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tonic::transport::Channel;
@@ -147,46 +150,49 @@ pub async fn resolve_platform_manifest(
     }
 }
 
-/// Pull an image via containerd's TransferClient.
+/// Ensure the image content is present in containerd's content store.
 ///
-/// If the image already exists locally and has been unpacked with the requested
-/// snapshotter, this is a no-op. If the image exists but was only unpacked with
-/// a different snapshotter, the transfer is re-run (containerd skips
-/// re-downloading existing layers and just performs the unpack).
-pub async fn pull_image(
+/// If the image already exists locally, this is a no-op. Otherwise it pulls
+/// from the registry. This only downloads content — it does NOT unpack with
+/// any snapshotter. Use `ensure_unpacked` afterwards.
+pub async fn ensure_image(
     channel: &Channel,
     namespace: &str,
     image_ref: &str,
     docker_config: Option<&Path>,
-    snapshotter: &str,
 ) -> anyhow::Result<()> {
-    // Fail early if the snapshotter plugin isn't available.
-    check_snapshotter(channel, snapshotter).await?;
-
     // Check if the image already exists locally.
     let mut images = ImagesClient::new(channel.clone());
     let req = GetImageRequest {
         name: image_ref.to_string(),
     };
-    let image_exists = match images.get(with_namespace!(req, namespace)).await {
-        Ok(_) => {
-            // Image exists — check if it has been unpacked with the requested snapshotter.
-            if has_snapshot_unpack(channel, namespace, image_ref, snapshotter).await? {
-                log::info!(
-                    "image {} already unpacked with {} snapshotter, skipping pull",
-                    image_ref, snapshotter
-                );
-                return Ok(());
-            }
-            true
-        }
-        Err(e) => {
-            log::debug!("image {} not found locally ({}), will pull", image_ref, e);
-            false
-        }
-    };
+    if images.get(with_namespace!(req, namespace)).await.is_ok() {
+        log::info!("image {} already present locally", image_ref);
+        return Ok(());
+    }
 
+    // Pull from registry.
     let arch = oci_arch();
+    log::info!("pulling image {} for linux/{}", image_ref, arch);
+
+    let credential =
+        docker_config.and_then(|path| docker_config::lookup_credentials(path, image_ref));
+
+    let resolver = if let Some(cred) = &credential {
+        let stream_id = format!("distvirt-auth-{}", generate_id());
+        log::debug!(
+            "setting up auth stream {} for image {} (username={})",
+            stream_id, image_ref, cred.username
+        );
+        setup_auth_stream(channel, namespace, &stream_id, cred.clone()).await?;
+        Some(RegistryResolver {
+            auth_stream: stream_id,
+            ..Default::default()
+        })
+    } else {
+        log::debug!("no credentials found for image {}", image_ref);
+        None
+    };
 
     let platform = Platform {
         os: "linux".to_string(),
@@ -195,61 +201,20 @@ pub async fn pull_image(
         os_version: String::new(),
     };
 
+    let source = OciRegistry {
+        reference: image_ref.to_string(),
+        resolver,
+    };
+
     let destination = ImageStore {
         name: image_ref.to_string(),
-        platforms: vec![platform.clone()],
-        unpacks: vec![UnpackConfiguration {
-            platform: Some(platform.clone()),
-            snapshotter: snapshotter.to_string(),
-        }],
+        platforms: vec![platform],
+        // No `unpacks` — we only want to download content, not unpack.
         ..Default::default()
     };
 
-    let (source, description) = if image_exists {
-        // Image content is already local, just unpack for the requested snapshotter.
-        // Use ImageStore as source so containerd performs a local-only unpack
-        // without contacting any registry.
-        log::info!(
-            "image {} exists but not unpacked with {} snapshotter, unpacking locally",
-            image_ref, snapshotter
-        );
-        let source = ImageStore {
-            name: image_ref.to_string(),
-            platforms: vec![platform],
-            ..Default::default()
-        };
-        (to_any(&source), format!("unpacking image {} with {} snapshotter", image_ref, snapshotter))
-    } else {
-        // Image not present locally — pull from registry.
-        log::info!("pulling image {} for linux/{}", image_ref, arch);
-        let credential =
-            docker_config.and_then(|path| docker_config::lookup_credentials(path, image_ref));
-
-        let resolver = if let Some(cred) = &credential {
-            let stream_id = format!("distvirt-auth-{}", generate_id());
-            log::debug!(
-                "setting up auth stream {} for image {} (username={})",
-                stream_id, image_ref, cred.username
-            );
-            setup_auth_stream(channel, namespace, &stream_id, cred.clone()).await?;
-            Some(RegistryResolver {
-                auth_stream: stream_id,
-                ..Default::default()
-            })
-        } else {
-            log::debug!("no credentials found for image {}", image_ref);
-            None
-        };
-
-        let source = OciRegistry {
-            reference: image_ref.to_string(),
-            resolver,
-        };
-        (to_any(&source), format!("pulling image {}", image_ref))
-    };
-
     let request = TransferRequest {
-        source: Some(source),
+        source: Some(to_any(&source)),
         destination: Some(to_any(&destination)),
         options: Some(TransferOptions::default()),
     };
@@ -258,10 +223,214 @@ pub async fn pull_image(
     transfer
         .transfer(with_namespace!(request, namespace))
         .await
-        .with_context(|| description)?;
-    log::info!("image {} ready with {} snapshotter", image_ref, snapshotter);
+        .with_context(|| format!("pulling image {}", image_ref))?;
+    log::info!("image {} pulled successfully", image_ref);
 
     Ok(())
+}
+
+/// Ensure the image is unpacked with the given snapshotter.
+///
+/// If already unpacked, this is a no-op. Otherwise performs a manual unpack
+/// by iterating layers and using the Snapshots + Diff gRPC APIs, then sets
+/// the GC ref label on the config content.
+pub async fn ensure_unpacked(
+    channel: &Channel,
+    namespace: &str,
+    image_ref: &str,
+    snapshotter: &str,
+) -> anyhow::Result<()> {
+    // Fail early if the snapshotter plugin isn't available.
+    check_snapshotter(channel, snapshotter).await?;
+
+    // Check if already unpacked.
+    if has_snapshot_unpack(channel, namespace, image_ref, snapshotter).await? {
+        log::info!(
+            "image {} already unpacked with {} snapshotter",
+            image_ref, snapshotter
+        );
+        return Ok(());
+    }
+
+    log::info!(
+        "unpacking image {} with {} snapshotter",
+        image_ref, snapshotter
+    );
+
+    // Resolve manifest and read config to get diff_ids and layer descriptors.
+    let manifest = resolve_platform_manifest(channel, namespace, image_ref).await?;
+    let layers = manifest.layers();
+    let config_digest = manifest.config().digest().to_string();
+
+    let mut content = ContentClient::new(channel.clone());
+    let config_bytes = read_content(&mut content, namespace, &config_digest).await?;
+    let img_config: ImageConfiguration =
+        serde_json::from_slice(&config_bytes).context("parsing image config")?;
+    let diff_ids = img_config.rootfs().diff_ids();
+
+    if diff_ids.len() != layers.len() {
+        bail!(
+            "image config has {} diff_ids but manifest has {} layers",
+            diff_ids.len(),
+            layers.len()
+        );
+    }
+
+    // Compute chain IDs for each layer.
+    let chain_ids = compute_chain_ids(diff_ids);
+
+    let mut snapshots = SnapshotsClient::new(channel.clone());
+    let mut diff = DiffClient::new(channel.clone());
+
+    for (i, (layer_desc, chain_id)) in layers.iter().zip(chain_ids.iter()).enumerate() {
+        // Check if this snapshot already exists (e.g. shared base layer or partial unpack).
+        let stat_req = StatSnapshotRequest {
+            snapshotter: snapshotter.to_string(),
+            key: chain_id.clone(),
+        };
+        if snapshots
+            .stat(with_namespace!(stat_req, namespace))
+            .await
+            .is_ok()
+        {
+            log::debug!("layer {}/{}: snapshot {} already exists", i + 1, layers.len(), chain_id);
+            continue;
+        }
+
+        let parent = if i == 0 {
+            String::new()
+        } else {
+            chain_ids[i - 1].clone()
+        };
+
+        let active_key = format!("extract-{}-{}", generate_id(), i);
+        log::debug!(
+            "layer {}/{}: preparing snapshot (parent={})",
+            i + 1,
+            layers.len(),
+            if parent.is_empty() { "<none>" } else { &parent }
+        );
+
+        // Prepare a writable snapshot.
+        let prepare_req = PrepareSnapshotRequest {
+            snapshotter: snapshotter.to_string(),
+            key: active_key.clone(),
+            parent,
+            labels: Default::default(),
+        };
+        let prep_resp = snapshots
+            .prepare(with_namespace!(prepare_req, namespace))
+            .await
+            .with_context(|| format!("preparing snapshot for layer {}", i + 1))?;
+        let mounts = prep_resp.into_inner().mounts;
+
+        // Apply the layer diff.
+        let apply_req = ApplyRequest {
+            diff: Some(containerd_client::types::Descriptor {
+                media_type: layer_desc.media_type().to_string(),
+                digest: layer_desc.digest().to_string(),
+                size: layer_desc.size() as i64,
+                annotations: Default::default(),
+            }),
+            mounts,
+            payloads: Default::default(),
+            sync_fs: false,
+        };
+        diff.apply(with_namespace!(apply_req, namespace))
+            .await
+            .with_context(|| format!("applying layer {} diff", i + 1))?;
+
+        // Commit the snapshot with chain_id as the key.
+        // If the snapshot was committed concurrently (or by a previous partial
+        // run), treat "already exists" as success and clean up the active key.
+        let commit_req = CommitSnapshotRequest {
+            snapshotter: snapshotter.to_string(),
+            name: chain_id.clone(),
+            key: active_key.clone(),
+            labels: Default::default(),
+        };
+        match snapshots
+            .commit(with_namespace!(commit_req, namespace))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.code() == tonic::Code::AlreadyExists => {
+                log::debug!(
+                    "layer {}/{}: snapshot {} already committed, cleaning up active key",
+                    i + 1, layers.len(), chain_id
+                );
+                // Remove the active snapshot we prepared since it's no longer needed.
+                let rm_req = RemoveSnapshotRequest {
+                    snapshotter: snapshotter.to_string(),
+                    key: active_key,
+                };
+                let _ = snapshots.remove(with_namespace!(rm_req, namespace)).await;
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("committing snapshot for layer {}", i + 1));
+            }
+        }
+
+        log::debug!("layer {}/{}: committed as {}", i + 1, layers.len(), chain_id);
+    }
+
+    // Set the GC ref label on the config content so `get_blockfile_path` and
+    // `has_snapshot_unpack` can find the final snapshot.
+    let final_chain_id = chain_ids
+        .last()
+        .context("image has no layers")?;
+    let label_key = format!("containerd.io/gc.ref.snapshot.{}", snapshotter);
+
+    // Read existing labels and merge.
+    let info_req = InfoRequest {
+        digest: config_digest.clone(),
+    };
+    let info_resp = content
+        .info(with_namespace!(info_req, namespace))
+        .await
+        .context("reading config content info")?;
+    let mut info = info_resp.into_inner().info.context("content info missing")?;
+    info.labels.insert(label_key, final_chain_id.clone());
+
+    let update_req = UpdateRequest {
+        info: Some(info),
+        update_mask: Some(prost_types::FieldMask {
+            paths: vec!["labels".to_string()],
+        }),
+    };
+    content
+        .update(with_namespace!(update_req, namespace))
+        .await
+        .context("updating config content labels")?;
+
+    log::info!(
+        "image {} unpacked with {} snapshotter (snapshot: {})",
+        image_ref, snapshotter, final_chain_id
+    );
+
+    Ok(())
+}
+
+/// Compute OCI chain IDs from diff IDs.
+///
+/// chain[0] = diff_ids[0]
+/// chain[n] = sha256(chain[n-1] + " " + diff_ids[n])
+fn compute_chain_ids(diff_ids: &[String]) -> Vec<String> {
+    let mut chain_ids: Vec<String> = Vec::with_capacity(diff_ids.len());
+    for (i, diff_id) in diff_ids.iter().enumerate() {
+        let chain_id = if i == 0 {
+            diff_id.clone()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(chain_ids[i - 1].as_bytes());
+            hasher.update(b" ");
+            hasher.update(diff_id.as_bytes());
+            format!("sha256:{:x}", hasher.finalize())
+        };
+        chain_ids.push(chain_id);
+    }
+    chain_ids
 }
 
 /// Check whether an image has been unpacked with a given snapshotter by looking

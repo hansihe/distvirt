@@ -58,22 +58,20 @@ pub async fn prepare_volumes(
 async fn create_empty_dir_image(path: &Path, size_mb: u64) -> anyhow::Result<()> {
     anyhow::ensure!(size_mb > 0, "empty_dir size_mb must be greater than 0");
 
-    let status = Command::new("truncate")
-        .arg("-s")
-        .arg(format!("{}M", size_mb))
-        .arg(path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    // Create a sparse file directly instead of spawning `truncate`.
+    let file = tokio::fs::File::create(path)
         .await
-        .context("run truncate")?;
-    if !status.success() {
-        anyhow::bail!("truncate failed with {}", status);
-    }
+        .context("create volume image file")?;
+    file.set_len(size_mb * 1024 * 1024)
+        .await
+        .context("set volume image file size")?;
+    drop(file);
 
     let status = Command::new("mkfs.ext4")
         .arg("-F")
         .arg("-q")
+        .arg("-E")
+        .arg("lazy_itable_init=1,lazy_journal_init=1")
         .arg(path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

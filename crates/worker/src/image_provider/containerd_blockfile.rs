@@ -17,15 +17,18 @@ impl ImageProvider for ContainerdBlockfileProvider {
     async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact> {
         let channel = containerd::connect(&self.socket).await?;
 
-        containerd::pull_image(
+        containerd::ensure_image(
             &channel,
             &self.namespace,
             image_ref,
             self.docker_config.as_deref(),
-            "blockfile",
         )
         .await
-        .context("pulling image with blockfile snapshotter")?;
+        .context("ensuring image is pulled")?;
+
+        containerd::ensure_unpacked(&channel, &self.namespace, image_ref, "blockfile")
+            .await
+            .context("ensuring image is unpacked with blockfile snapshotter")?;
 
         let mut config = containerd::read_image_config(&channel, &self.namespace, image_ref)
             .await
