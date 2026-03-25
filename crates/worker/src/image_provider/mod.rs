@@ -1,5 +1,5 @@
 pub(crate) mod containerd;
-pub mod containerd_overlayfs;
+pub mod containerd_blockfile;
 pub(crate) mod docker_config;
 pub(crate) mod image;
 pub mod rootfs_dir;

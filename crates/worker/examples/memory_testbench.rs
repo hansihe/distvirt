@@ -18,7 +18,7 @@ use clap::Parser;
 use tokio_util::sync::CancellationToken;
 
 use distvirt_worker::image_provider::ImageProvider;
-use distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider;
+use distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider;
 use distvirt_worker::io_session::IoEvent;
 use distvirt_worker::managed_vm::ManagedVm;
 use distvirt_worker::vmm::firecracker::Firecracker;
@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
 
     // Prepare container image via containerd.
     eprintln!("[1/5] Preparing container image...");
-    let image_provider = ContainerdOverlayfsProvider {
+    let image_provider = ContainerdBlockfileProvider {
         socket: args.containerd_socket.clone(),
         namespace: args.containerd_namespace.clone(),
         docker_config: None,

@@ -32,7 +32,7 @@ async fn setup_worker(
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
     let image_provider =
-        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
+        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider {
             socket: containerd_socket,
             namespace: "default".into(),
             docker_config: None,

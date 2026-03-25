@@ -81,8 +81,8 @@ async fn setup_full(
     let _ = env_logger::try_init();
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let kernel = manifest_dir.join("../guest-image/result-kernel/vmlinux");
-    let rootfs = manifest_dir.join("../guest-image/result-rootfs");
+    let kernel = manifest_dir.join("../../guest-image/result-kernel/vmlinux");
+    let rootfs = manifest_dir.join("../../guest-image/result-rootfs");
 
     assert!(kernel.exists(), "kernel not found at {}", kernel.display());
     assert!(rootfs.exists(), "rootfs not found at {}", rootfs.display());
@@ -93,7 +93,7 @@ async fn setup_full(
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
     let image_provider =
-        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
+        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider {
             socket: containerd_socket,
             namespace: "default".into(),
             docker_config: None,

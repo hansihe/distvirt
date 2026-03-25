@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     let vmm = distvirt_worker::vmm::firecracker::Firecracker::new("firecracker");
     let image_provider =
-        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider {
+        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider {
             socket: cli.containerd_socket,
             namespace: cli.containerd_namespace,
             docker_config: Some(cli.docker_config),
