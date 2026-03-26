@@ -34,29 +34,34 @@ impl Qemu {
 impl Vmm for Qemu {
     type Instance = QemuInstance;
 
-    async fn launch(&self, config: &VmConfig) -> anyhow::Result<QemuInstance> {
+    async fn launch(
+        &self,
+        config: VmConfig,
+    ) -> anyhow::Result<(QemuInstance, super::LaunchResult)> {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
-        // Copy disk images into tmpdir (writable copies).
+        // Copy rootfs image into tmpdir (writable copy).
         copy_file_writable(
             &config.rootfs_image_path,
             &tmpdir.path().join("rootfs.ext4"),
         )
         .await?;
-        copy_file_writable(
-            &config.overlay_image_path,
-            &tmpdir.path().join("overlay.ext4"),
-        )
-        .await?;
 
-        for drive in &config.additional_drives {
-            let filename = drive
-                .image_path
-                .file_name()
-                .context("additional drive has no filename")?
-                .to_str()
-                .context("additional drive filename not valid UTF-8")?;
-            copy_file_writable(&drive.image_path, &tmpdir.path().join(filename)).await?;
+        // Create overlay image.
+        crate::volume::create_overlay_image(&tmpdir.path().join("overlay.ext4"), 256)
+            .await
+            .context("create overlay image")?;
+
+        // Copy block volume images.
+        for vol in &config.volumes {
+            if let super::VmVolumeSource::BlockImage { image_path } = &vol.source {
+                let filename = image_path
+                    .file_name()
+                    .context("block image has no filename")?
+                    .to_str()
+                    .context("block image filename not valid UTF-8")?;
+                copy_file_writable(image_path, &tmpdir.path().join(filename)).await?;
+            }
         }
 
         let qmp_socket_path = tmpdir.path().join("qmp.sock");
@@ -114,22 +119,29 @@ impl Vmm for Qemu {
         ]);
 
         let mut drive_index: u32 = 2;
-        for drive in &config.additional_drives {
-            let filename = drive
-                .image_path
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap();
-            let ro = if drive.read_only { ",readonly=on" } else { "" };
-            cmd.args([
-                "-drive",
-                &format!(
-                    "file=./{},format=raw,if=virtio,index={}{}",
-                    filename, drive_index, ro
-                ),
-            ]);
-            drive_index += 1;
+        let mut volume_mount_instructions = Vec::new();
+        let mut block_idx: u8 = 0;
+        for vol in &config.volumes {
+            if let super::VmVolumeSource::BlockImage { image_path } = &vol.source {
+                let filename = image_path.file_name().unwrap().to_str().unwrap();
+                let ro = if vol.read_only { ",readonly=on" } else { "" };
+                cmd.args([
+                    "-drive",
+                    &format!(
+                        "file=./{},format=raw,if=virtio,index={}{}",
+                        filename, drive_index, ro
+                    ),
+                ]);
+                let device = format!("/dev/vd{}", (b'c' + block_idx) as char);
+                volume_mount_instructions.push(super::VolumeMountInstruction {
+                    name: vol.name.clone(),
+                    source: distvirt_guest_protocol::VolumeSource::Device { device },
+                    read_only: vol.read_only,
+                });
+                drive_index += 1;
+                block_idx += 1;
+            }
+            // QEMU doesn't support virtiofs Directory volumes yet.
         }
 
         // Virtio-serial transport: exposes a unix socket on the host and a
@@ -184,7 +196,7 @@ impl Vmm for Qemu {
             child.id().unwrap_or(0)
         );
 
-        Ok(QemuInstance {
+        let instance = QemuInstance {
             child,
             _qmp: qmp,
             transport_socket_path,
@@ -192,7 +204,17 @@ impl Vmm for Qemu {
             exit_rx,
             _exit_monitor,
             _tmpdir: tmpdir,
-        })
+        };
+
+        // QEMU doesn't support virtiofs, so container rootfs uses Device mode.
+        let launch_result = super::LaunchResult {
+            container_rootfs: distvirt_guest_protocol::ContainerRootfs::Device {
+                device: "/dev/vdb".to_string(),
+            },
+            volume_mounts: volume_mount_instructions,
+        };
+
+        Ok((instance, launch_result))
     }
 }
 
@@ -412,7 +434,7 @@ impl QmpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vmm::{VmConfig, Vmm};
+    use crate::vmm::{SnapshotContext, VmConfig, Vmm};
     use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
 
     /// Returns true if we have the QEMU binary and guest images available.
@@ -474,19 +496,24 @@ mod tests {
         let config = VmConfig {
             kernel_path: kernel,
             rootfs_image_path: rootfs,
-            overlay_image_path: overlay_img,
             vcpu_count: 1,
             mem_size_mib: 128,
             net: None,
             serial_console: true,
             balloon: None,
-            additional_drives: vec![],
-            virtiofs_mounts: vec![],
-            container_image_ref: None,
-            config_volumes: vec![],
+            container_image: crate::image_provider::PreparedArtifact::Directory {
+                path: overlay_img,
+                oci_config: None,
+                _cleanup: None,
+            },
+            volumes: vec![],
+            snapshot_context: SnapshotContext {
+                container_image_ref: None,
+                config_volumes: vec![],
+            },
         };
 
-        let mut instance = qemu.launch(&config).await.expect("QEMU launch failed");
+        let (mut instance, _launch_result) = qemu.launch(config).await.expect("QEMU launch failed");
 
         // Connect to guest-init via virtio-serial transport.
         let socket = instance

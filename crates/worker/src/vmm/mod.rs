@@ -3,6 +3,7 @@ pub mod cloud_hypervisor;
 pub mod guest_sim;
 pub mod qemu;
 pub mod test_vmm;
+pub(crate) mod virtiofs;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,12 @@ use tokio::net::UnixStream;
 use tokio::sync::watch;
 
 use crate::fabric::FabricPort;
+use crate::image_provider::PreparedArtifact;
 use crate::task_handle::TaskHandle;
+
+// ---------------------------------------------------------------------------
+// VM configuration types (high-level, VMM-agnostic)
+// ---------------------------------------------------------------------------
 
 /// Network configuration for a VM.
 #[derive(Clone)]
@@ -41,57 +47,89 @@ impl From<&PodNetworkConfig> for NetConfig {
 /// Configuration for the virtio-balloon device.
 #[derive(Clone, Debug)]
 pub struct BalloonConfig {
-    /// Size of the balloon in MiB (memory reclaimed from the guest).
     pub amount_mib: u32,
-    /// Allow the guest to deflate the balloon on OOM.
     pub deflate_on_oom: bool,
-    /// Interval in seconds for balloon statistics polling (0 = disabled).
     pub stats_polling_interval_s: u32,
 }
 
-/// An additional block device to attach to the VM (for volumes).
-#[derive(Clone, Debug)]
-pub struct AdditionalDrive {
-    pub drive_id: String,
-    pub image_path: PathBuf,
-    pub read_only: bool,
-}
-
-/// A virtiofs filesystem to share with the guest.
-#[derive(Clone, Debug)]
-pub struct VirtiofsMount {
-    /// Tag visible inside the guest (used as the "device" in mount -t virtiofs).
-    pub tag: String,
-    /// Host directory to share.
-    pub source_dir: PathBuf,
-}
-
-/// Configuration for launching a VM.
+/// High-level VM configuration.
+///
+/// The VMM decides how to expose the container image and volumes to the guest
+/// (device assignment, virtiofs, overlay, etc).
 pub struct VmConfig {
     pub kernel_path: PathBuf,
     pub rootfs_image_path: PathBuf,
-    /// Small ext4 image for container overlay upper/work dirs.
-    pub overlay_image_path: PathBuf,
     pub vcpu_count: u32,
     pub mem_size_mib: u32,
     pub net: Option<NetConfig>,
-    /// If true, forward the VM serial console (kernel boot logs) to the host log at debug level.
     pub serial_console: bool,
-    /// Optional balloon device for memory overcommit.
     pub balloon: Option<BalloonConfig>,
-    /// Additional block devices to attach (volume images).
-    pub additional_drives: Vec<AdditionalDrive>,
-    /// virtiofs mounts to expose to the guest via virtiofsd.
-    pub virtiofs_mounts: Vec<VirtiofsMount>,
-    /// OCI image reference (stored in snapshot metadata for cross-host restore).
+    /// Container image — the VMM decides how to expose this to the guest.
+    pub container_image: PreparedArtifact,
+    /// Volumes to attach — the VMM decides the attachment mechanism.
+    pub volumes: Vec<VmVolume>,
+    /// Context persisted by the VMM in snapshot metadata.
+    pub snapshot_context: SnapshotContext,
+}
+
+/// A volume to attach to the VM.
+pub struct VmVolume {
+    pub name: String,
+    pub source: VmVolumeSource,
+    pub read_only: bool,
+}
+
+/// How the volume data is available on the host.
+pub enum VmVolumeSource {
+    /// Block device image file (e.g. EmptyDir ext4).
+    BlockImage { image_path: PathBuf },
+    /// Directory to share (e.g. ConfigData).
+    Directory { dir_path: PathBuf },
+}
+
+/// Context the VMM persists in snapshot metadata for cross-host restore.
+pub struct SnapshotContext {
     pub container_image_ref: Option<String>,
-    /// ConfigData volume specs (stored in snapshot metadata for cross-host restore).
     pub config_volumes: Vec<SnapshotConfigVolume>,
 }
 
-/// Metadata persisted as `metadata.json` in a snapshot directory.
+// ---------------------------------------------------------------------------
+// Launch result types (VMM -> supervisor)
+// ---------------------------------------------------------------------------
+
+/// Instructions from the VMM to the supervisor for guest setup.
 ///
-/// Contains the source paths needed to reconstruct the VM environment on restore.
+/// The supervisor relays these to the guest via the control protocol
+/// without interpreting device names or tags.
+pub struct LaunchResult {
+    pub container_rootfs: distvirt_guest_protocol::ContainerRootfs,
+    pub volume_mounts: Vec<VolumeMountInstruction>,
+}
+
+/// How the supervisor should tell the guest to mount a volume.
+pub struct VolumeMountInstruction {
+    pub name: String,
+    pub source: distvirt_guest_protocol::VolumeSource,
+    pub read_only: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Restore context
+// ---------------------------------------------------------------------------
+
+/// Context for restoring a VM from a snapshot.
+pub struct RestoreContext {
+    pub net: Option<NetConfig>,
+    /// Re-prepared container image on the destination host.
+    pub container_image: Option<PreparedArtifact>,
+    /// ConfigData volume specs for recreation on the destination.
+    pub config_volumes: Vec<SnapshotConfigVolume>,
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot metadata types (serialized to disk)
+// ---------------------------------------------------------------------------
+
 /// Volume drive info persisted in snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotVolumeDrive {
@@ -102,113 +140,83 @@ pub struct SnapshotVolumeDrive {
 /// virtiofs mount info persisted in snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotVirtiofsMount {
-    /// Tag visible inside the guest.
     pub tag: String,
-    /// Host directory shared via virtiofsd.
     pub source_dir: PathBuf,
 }
 
 /// ConfigData volume info persisted in snapshot metadata.
-///
-/// Stores the file contents so the destination worker can recreate the
-/// config directory from scratch (the original temp directory won't exist
-/// on a different host).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotConfigVolume {
-    /// Volume name.
     pub name: String,
-    /// virtiofs tag used inside the guest.
     pub tag: String,
-    /// Files to write into the recreated config directory.
     pub files: Vec<distvirt_worker_protocol::ConfigDataFile>,
 }
 
+/// Metadata persisted as `metadata.json` in a snapshot directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
-    /// Absolute path to the kernel image used for boot (needed by Firecracker restore).
     pub kernel_path: PathBuf,
-    /// Absolute path to the original rootfs image (re-copied into tmpdir on restore).
     pub rootfs_source_path: PathBuf,
-    /// Whether a balloon device was configured (needed for restore to enable `set_balloon`).
     #[serde(default)]
     pub balloon_configured: bool,
-    /// Whether serial console output was enabled (needed for restore to pipe stdout).
     #[serde(default)]
     pub serial_console: bool,
-    /// Volume drives attached to the VM (needed for snapshot/restore).
     #[serde(default)]
     pub volume_drives: Vec<SnapshotVolumeDrive>,
-    /// virtiofs mounts to re-create on restore.
     #[serde(default)]
     pub virtiofs_mounts: Vec<SnapshotVirtiofsMount>,
-    /// OCI image reference for restoring container rootfs on destination.
     #[serde(default)]
     pub container_image_ref: Option<String>,
-    /// ConfigData volume file contents for recreating on destination.
     #[serde(default)]
     pub config_volumes: Vec<SnapshotConfigVolume>,
 }
 
 /// Artifacts produced by a VM snapshot.
-///
-/// The snapshot directory has this layout:
-/// ```text
-/// <snapshot_dir>/
-///   metadata.json   # SnapshotMetadata
-///   snapshot.bin    # Firecracker device state
-///   mem.bin         # VM memory dump
-///   container.ext4  # Container drive with runtime writes
-/// ```
 pub struct SnapshotArtifacts {
-    /// Path to the snapshot directory.
     pub snapshot_dir: PathBuf,
-    /// Deserialized metadata from `metadata.json`.
     pub metadata: SnapshotMetadata,
 }
 
-/// A VMM implementation that can launch VMs.
+// ---------------------------------------------------------------------------
+// VMM traits
+// ---------------------------------------------------------------------------
+
+/// A VMM implementation that can launch and restore VMs.
 pub trait Vmm: Send + Sync {
     type Instance: VmInstance;
+
+    /// Launch a VM with the given configuration.
+    ///
+    /// Takes `VmConfig` by value because it owns the `PreparedArtifact`
+    /// (including the containerd lease for the `Containerd` variant).
+    /// Returns the VM instance and instructions for guest setup.
     fn launch(
         &self,
-        config: &VmConfig,
-    ) -> impl Future<Output = anyhow::Result<Self::Instance>> + Send;
+        config: VmConfig,
+    ) -> impl Future<Output = anyhow::Result<(Self::Instance, LaunchResult)>> + Send;
 
-    /// Restore a VM from a snapshot. The `net` config provides the network
-    /// parameters for the restored instance (fresh TAP, potentially new IP).
+    /// Restore a VM from a snapshot.
     fn restore(
         &self,
         snapshot: &SnapshotArtifacts,
-        net: Option<&NetConfig>,
+        ctx: RestoreContext,
     ) -> impl Future<Output = anyhow::Result<Self::Instance>> + Send {
-        let _ = (snapshot, net);
+        let _ = (snapshot, ctx);
         async { anyhow::bail!("snapshot restore not supported by this VMM") }
     }
 }
 
 /// A running VM instance.
 pub trait VmInstance: Send + 'static {
-    /// Connect to the guest's vsock on the given port.
     fn connect_vsock(&self, port: u32) -> impl Future<Output = anyhow::Result<UnixStream>> + Send;
-    /// Take the fabric port for host-side network I/O, if networking is configured.
     fn take_fabric_port(&mut self) -> Option<FabricPort>;
-    /// Wait for the VM process to exit.
     fn wait(&mut self) -> impl Future<Output = anyhow::Result<ExitStatus>> + Send;
-    /// Kill the VM process.
     fn kill(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
 
-    /// Take a signal that fires when the VM process exits.
-    ///
-    /// Used by callers that need to `select!` on process death alongside
-    /// other futures. The receiver resolves to `Some(ExitStatus)` when
-    /// the process exits.
     fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
         None
     }
 
-    /// Snapshot the VM to the given directory. Pauses vCPUs, writes snapshot
-    /// files, and copies the container disk. The caller should kill the VM
-    /// after this returns.
     fn snapshot(
         &mut self,
         snapshot_dir: &Path,
@@ -217,8 +225,6 @@ pub trait VmInstance: Send + 'static {
         async { anyhow::bail!("snapshot not supported by this VM instance") }
     }
 
-    /// Update the balloon device size. `amount_mib` is the amount of memory
-    /// to reclaim from the guest.
     fn set_balloon(&mut self, amount_mib: u32) -> impl Future<Output = anyhow::Result<()>> + Send {
         let _ = amount_mib;
         async { anyhow::bail!("balloon not supported by this VM instance") }
@@ -229,10 +235,6 @@ pub trait VmInstance: Send + 'static {
 // Shared utilities used by VMM backends
 // ---------------------------------------------------------------------------
 
-/// Copy a file and ensure the destination is writable.
-///
-/// Some VMMs need writable disk images, but the source may live in a
-/// read-only location (e.g. Nix store). Each VM gets its own copy.
 pub(crate) async fn copy_file_writable(src: &Path, dest: &Path) -> anyhow::Result<()> {
     tokio::fs::copy(src, dest)
         .await
@@ -243,7 +245,6 @@ pub(crate) async fn copy_file_writable(src: &Path, dest: &Path) -> anyhow::Resul
     Ok(())
 }
 
-/// Poll for a file to appear on disk, with a timeout.
 pub(crate) async fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -257,9 +258,6 @@ pub(crate) async fn wait_for_file(path: &Path, timeout: Duration) -> anyhow::Res
     }
 }
 
-/// Spawn a pidfd-based exit monitor for a child process.
-/// Returns a watch receiver that fires with the exit status, plus the
-/// background task handle.
 pub(crate) fn spawn_exit_monitor(
     child: &tokio::process::Child,
 ) -> (watch::Receiver<Option<ExitStatus>>, TaskHandle<()>) {
@@ -272,7 +270,6 @@ pub(crate) fn spawn_exit_monitor(
     (exit_rx, handle)
 }
 
-/// Spawn a task that line-logs child stdout at debug level.
 pub(crate) fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHandle<()> {
     TaskHandle::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -283,10 +280,6 @@ pub(crate) fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHand
     })
 }
 
-/// Send an HTTP request to a VMM API over a Unix socket.
-///
-/// Uses raw HTTP/1.1 — each request uses a fresh connection (both Firecracker
-/// and Cloud Hypervisor are one-request-per-connection).
 pub(crate) async fn api_request(
     method: &str,
     socket_path: &Path,
@@ -322,7 +315,6 @@ pub(crate) async fn api_request(
     }
     stream.flush().await?;
 
-    // Read the response with a timeout.
     let mut response = Vec::new();
     let read_result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut buf = [0u8; 4096];
@@ -331,7 +323,6 @@ pub(crate) async fn api_request(
                 Ok(0) => break,
                 Ok(n) => {
                     response.extend_from_slice(&buf[..n]);
-                    // Check if we have a complete response.
                     if let Ok(s) = std::str::from_utf8(&response) {
                         if s.contains("\r\n\r\n") {
                             if let Some(cl) = parse_content_length(s) {
@@ -404,10 +395,6 @@ fn parse_content_length(headers: &str) -> Option<usize> {
     None
 }
 
-/// Connect to a guest vsock listener via a VMM's UDS proxy.
-///
-/// Both Firecracker and Cloud Hypervisor use the same protocol:
-/// send `CONNECT <port>\n`, expect `OK <id>\n` in response.
 pub(crate) async fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Result<UnixStream> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -420,7 +407,6 @@ pub(crate) async fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Re
 
     let mut reader = BufReader::new(reader);
     let mut response = String::new();
-    // Use tokio::time::timeout to avoid hanging forever.
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut response))
         .await
         .context("timeout reading vsock CONNECT response")?
@@ -430,6 +416,5 @@ pub(crate) async fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Re
         anyhow::bail!("vsock CONNECT failed: {}", response.trim());
     }
 
-    // Reunite the split halves.
     Ok(reader.into_inner().reunite(writer)?)
 }

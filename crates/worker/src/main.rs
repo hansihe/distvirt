@@ -19,7 +19,7 @@ struct Cli {
     containerd_socket: String,
 
     /// Containerd namespace
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value = "distvirt")]
     containerd_namespace: String,
 
     /// Orchestrator address (host:port) to connect to via TCP
@@ -55,11 +55,19 @@ async fn main() -> anyhow::Result<()> {
 
     let image_provider =
         distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider::new(
-            cli.containerd_socket,
-            cli.containerd_namespace,
+            &cli.containerd_socket,
+            &cli.containerd_namespace,
             Some(cli.docker_config),
         )
         .await?;
+
+    // Share the containerd connection with the VMM for unpack/view operations.
+    let containerd_config = distvirt_worker::vmm::cloud_hypervisor::ContainerdConfig {
+        channel: image_provider.channel().clone(),
+        namespace: image_provider.namespace().to_string(),
+        unpack_coordinator:
+            distvirt_worker::image_provider::UnpackCoordinator::default(),
+    };
 
     log::info!("connecting to orchestrator at {}", cli.orchestrator);
     let stream = tokio::net::TcpStream::connect(&cli.orchestrator).await?;
@@ -90,16 +98,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.vmm.as_str() {
-        // "firecracker" => {
-        //     log::info!("using Firecracker VMM backend");
-        //     let vmm = distvirt_worker::vmm::firecracker::Firecracker::new("firecracker");
-        //     run_worker!(vmm)
-        // }
         "cloud-hypervisor" => {
             log::info!("using Cloud Hypervisor VMM backend");
             let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(
                 "cloud-hypervisor",
                 "virtiofsd",
+                Some(containerd_config),
             );
             run_worker!(vmm)
         }

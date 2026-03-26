@@ -6,34 +6,31 @@ use tonic::transport::Channel;
 use super::containerd;
 use super::containerd::image::ResolvedImage;
 use super::containerd::lease::LeaseManager;
-use super::containerd::unpack::UnpackCoordinator;
 use super::{ImageProvider, PreparedArtifact};
 use crate::linux::mount;
 
-const OVERLAYFS_SNAPSHOTTER: &str = "overlayfs";
+pub(crate) const OVERLAYFS_SNAPSHOTTER: &str = "overlayfs";
 
-/// Provides a container filesystem by pulling an OCI image via containerd
-/// with the overlayfs snapshotter, creating a read-only View, and mounting
-/// the merged overlay on a temp directory.
+/// Provides a prepared container image by pulling an OCI image via containerd.
 ///
-/// The returned `PreparedArtifact` holds the mounted directory and an RAII
-/// cleanup handle that unmounts, removes the containerd view, and drops the
-/// lease when the artifact is dropped.
+/// Returns a `PreparedArtifact::Containerd` with the resolved image metadata
+/// and a lease. The VMM handles unpacking, view creation, and mounting.
 pub struct ContainerdOverlayfsProvider {
     channel: Channel,
     docker_config: Option<PathBuf>,
-    unpack_coordinator: UnpackCoordinator,
     lease_manager: LeaseManager,
 }
 
 impl ContainerdOverlayfsProvider {
     pub async fn new(
-        socket: String,
-        namespace: String,
+        socket: impl Into<String>,
+        namespace: impl Into<String>,
         docker_config: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
+        let socket = socket.into();
+        let namespace = namespace.into();
         let channel = containerd::connect(&socket).await?;
-        let lease_manager = LeaseManager::new(channel.clone(), namespace.clone());
+        let lease_manager = LeaseManager::new(channel.clone(), namespace);
 
         // Clean up leases orphaned by a previous crash before we start
         // creating new ones. This makes any resources held only by those
@@ -43,9 +40,18 @@ impl ContainerdOverlayfsProvider {
         Ok(Self {
             channel,
             docker_config,
-            unpack_coordinator: UnpackCoordinator::default(),
             lease_manager,
         })
+    }
+
+    /// Get the containerd channel for sharing with other components.
+    pub fn channel(&self) -> &Channel {
+        &self.channel
+    }
+
+    /// Get the containerd namespace.
+    pub fn namespace(&self) -> &str {
+        self.lease_manager.namespace()
     }
 }
 
@@ -70,32 +76,6 @@ impl ImageProvider for ContainerdOverlayfsProvider {
         let resolved = ResolvedImage::resolve(&self.channel, lease.namespace(), image_ref)
             .await
             .context("resolving image metadata")?;
-        let final_chain_id = resolved
-            .final_chain_id()
-            .context("image has no layers")?
-            .to_string();
-
-        // Unpack layers with the overlayfs snapshotter.
-        containerd::ensure_unpacked(
-            &self.channel,
-            &lease,
-            &resolved,
-            OVERLAYFS_SNAPSHOTTER,
-            &self.unpack_coordinator,
-        )
-        .await
-        .context("unpacking image with overlayfs snapshotter")?;
-
-        // Set permanent GC protection for committed snapshots.
-        containerd::content::set_snapshot_gc_label(
-            &self.channel,
-            lease.namespace(),
-            resolved.config_digest(),
-            &final_chain_id,
-            OVERLAYFS_SNAPSHOTTER,
-        )
-        .await
-        .context("setting snapshot GC ref label")?;
 
         // Extract OCI config + passwd/group from layer tarballs.
         let mut config = resolved.image_config();
@@ -119,47 +99,19 @@ impl ImageProvider for ContainerdOverlayfsProvider {
             }
         }
 
-        // Create a read-only view of the final snapshot.
-        let (mounts, view_key) = containerd::snapshot::create_overlayfs_view(
-            &self.channel,
-            &lease,
-            OVERLAYFS_SNAPSHOTTER,
-            &final_chain_id,
-        )
-        .await
-        .context("creating overlayfs view")?;
-
-        // Mount the view on a temp directory.
-        let mountpoint = tempfile::tempdir().context("creating temp mountpoint")?;
-        mount_containerd_mounts(&mounts, mountpoint.path())
-            .context("mounting overlayfs snapshot view")?;
-
-        let rootfs_dir = mountpoint.path().to_path_buf();
-        log::info!(
-            "overlayfs view mounted at {} (view={})",
-            rootfs_dir.display(),
-            view_key,
-        );
-
-        // Build cleanup handle that unmounts, removes the view, and drops the lease.
-        let cleanup = OverlayfsCleanup {
-            mountpoint,
-            view_key,
-            channel: self.channel.clone(),
-            namespace: lease.namespace().to_string(),
-            // Lease is moved into the cleanup handle — it stays alive as long
-            // as the PreparedArtifact, and gets dropped (deleted) on cleanup.
-            _lease: lease,
-        };
-
-        Ok(PreparedArtifact::new(rootfs_dir, Some(config), cleanup))
+        Ok(PreparedArtifact::Containerd {
+            image_ref: image_ref.to_string(),
+            oci_config: Some(config),
+            resolved,
+            lease,
+        })
     }
 }
 
 /// Mount containerd snapshot mount descriptors onto a target directory.
 ///
 /// Handles both overlay mounts (multi-layer) and bind mounts (single-layer).
-fn mount_containerd_mounts(
+pub(crate) fn mount_containerd_mounts(
     mounts: &[containerd_client::types::Mount],
     target: &std::path::Path,
 ) -> anyhow::Result<()> {
@@ -183,7 +135,7 @@ fn mount_containerd_mounts(
 }
 
 /// Parse standard mount flag strings into libc flag bits.
-fn parse_mount_flags(options: &[String]) -> libc::c_ulong {
+pub(crate) fn parse_mount_flags(options: &[String]) -> libc::c_ulong {
     let mut flags: libc::c_ulong = 0;
     for opt in options {
         match opt.as_str() {
@@ -197,7 +149,7 @@ fn parse_mount_flags(options: &[String]) -> libc::c_ulong {
 }
 
 /// Collect non-flag options into a comma-separated data string for mount(2).
-fn data_options(options: &[String]) -> String {
+pub(crate) fn data_options(options: &[String]) -> String {
     options
         .iter()
         .filter(|o| !matches!(o.as_str(), "ro" | "rbind" | "bind" | "rw"))
@@ -210,15 +162,13 @@ fn data_options(options: &[String]) -> String {
 ///
 /// On drop: unmounts the overlay, removes the containerd view, and drops the
 /// lease (which triggers async deletion via LeaseManager).
-struct OverlayfsCleanup {
+pub(crate) struct OverlayfsCleanup {
     /// Temp directory used as the mountpoint. Must be unmounted before the
     /// TempDir is dropped (otherwise TempDir::drop fails to remove the dir).
-    mountpoint: tempfile::TempDir,
-    view_key: String,
-    channel: Channel,
-    namespace: String,
-    /// Lease kept alive for the artifact's lifetime. Dropped after view removal.
-    _lease: super::containerd::lease::ContainerdLease,
+    pub(crate) mountpoint: tempfile::TempDir,
+    pub(crate) view_key: String,
+    pub(crate) channel: Channel,
+    pub(crate) namespace: String,
 }
 
 impl Drop for OverlayfsCleanup {
@@ -233,8 +183,7 @@ impl Drop for OverlayfsCleanup {
         }
 
         // Remove the containerd view asynchronously. We can't .await in Drop,
-        // so spawn a task. The lease is still alive (dropped after this struct),
-        // protecting the snapshot from GC until the removal completes.
+        // so spawn a task.
         let channel = self.channel.clone();
         let namespace = self.namespace.clone();
         let view_key = self.view_key.clone();

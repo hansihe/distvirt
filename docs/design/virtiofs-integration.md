@@ -184,253 +184,201 @@ CONFIG_OVERLAY_FS=y
 
 ### 3. VMM Layer (`worker/vmm/`)
 
-#### VmConfig changes (`mod.rs`)
+> **Updated by Phase 5.5 refactoring.** The VMM now owns the entire rootfs
+> attachment pipeline: unpacking, view creation, mounting, virtiofsd, overlay
+> device creation, and device assignment. The supervisor passes a high-level
+> `VmConfig` and receives `LaunchResult` instructions for the guest.
+
+#### VmConfig (high-level, VMM-agnostic)
 
 ```rust
 pub struct VmConfig {
     pub kernel_path: PathBuf,
     pub rootfs_image_path: PathBuf,
-    /// Small ext4 image for container overlay upper/work dirs.
-    pub overlay_image_path: PathBuf,
     pub vcpu_count: u32,
     pub mem_size_mib: u32,
     pub net: Option<NetConfig>,
     pub serial_console: bool,
     pub balloon: Option<BalloonConfig>,
-    /// Block device volumes (EmptyDir only). Attached as virtio-blk.
-    pub additional_drives: Vec<AdditionalDrive>,
-    /// virtiofs shares (rootfs, ConfigData volumes).
-    /// Each entry spawns a virtiofsd process; socket created in tmpdir.
-    pub virtiofs_mounts: Vec<VirtiofsMount>,
+    /// Container image — VMM decides how to expose to guest.
+    pub container_image: PreparedArtifact,
+    /// Volumes — VMM decides attachment mechanism.
+    pub volumes: Vec<VmVolume>,
+    /// Context persisted by VMM in snapshot metadata.
+    pub snapshot_context: SnapshotContext,
 }
 
-pub struct VirtiofsMount {
-    /// Tag visible inside the guest (used in `mount -t virtiofs <tag> ...`).
-    pub tag: String,
-    /// Host directory to share.
-    pub source_dir: PathBuf,
+pub struct VmVolume {
+    pub name: String,
+    pub source: VmVolumeSource,
+    pub read_only: bool,
 }
-```
 
-#### Cloud Hypervisor VM config JSON (`cloud_hypervisor.rs`)
-
-Add an `fs` array alongside the existing `disks` array:
-
-```json
-{
-  "fs": [
-    {
-      "tag": "container-rootfs",
-      "socket": "/tmp/xxx/virtiofsd-rootfs.sock",
-      "num_queues": 1,
-      "queue_size": 1024
-    },
-    {
-      "tag": "configdata-myconfig",
-      "socket": "/tmp/xxx/virtiofsd-config-myconfig.sock",
-      "num_queues": 1,
-      "queue_size": 1024
-    }
-  ]
+pub enum VmVolumeSource {
+    BlockImage { image_path: PathBuf },
+    Directory { dir_path: PathBuf },
 }
 ```
 
-#### Block device assignment changes
+#### LaunchResult (VMM → supervisor)
 
-Current:
-- vda: guest OS rootfs
-- vdb: container image (full writable copy)
-- vdc: config drive (optional — shifts volume device letters when present)
-- vdd+: volumes (EmptyDir + ConfigData)
-
-New:
-- vda: guest OS rootfs (unchanged)
-- vdb: container overlay device (small empty ext4)
-- vdc+: EmptyDir volumes only
-
-No more conditional device offset — the config drive and ConfigData volumes
-move to virtiofs, so EmptyDir volumes always start at vdc.
-
-virtiofs tags:
-- `container-rootfs`: container image layers (read-only)
-- `configdata-<name>`: per-ConfigData-volume (read-only)
-
-#### Launch flow changes
-
-Current:
-1. Copy rootfs.ext4 to tmpdir
-2. Copy container.ext4 to tmpdir
-3. Copy volume images to tmpdir
-4. Spawn CH, create VM, boot
-
-New:
-1. Copy rootfs.ext4 to tmpdir (unchanged)
-2. Create small empty overlay.ext4 in tmpdir (new, replaces full image copy)
-3. Copy EmptyDir volume images to tmpdir (unchanged, but fewer now)
-4. **Start virtiofsd processes** — one per virtiofs mount (new):
-   - Container rootfs share
-   - ConfigData volume shares
-5. **Wait for virtiofsd sockets** to appear (new)
-6. Spawn CH, create VM with `fs` array, boot
-
-#### Snapshot flow changes
-
-Current snapshot saves:
-- `container.ext4` (full writable container image)
-- `vol-*.ext4` (all volumes)
-- CH state files
-
-New snapshot saves:
-- `overlay.ext4` (small overlay upper — replaces container.ext4)
-- `vol-*.ext4` (EmptyDir only — ConfigData and config drive no longer block devices)
-- CH state files (now includes virtiofsd state via vhost-user backend state)
-
-#### Restore flow changes
-
-Current:
-1. Copy rootfs from original source
-2. Copy container.ext4 from snapshot
-3. Copy volumes from snapshot
-4. Spawn CH, restore
-
-New:
-1. Copy rootfs from original source (unchanged)
-2. Copy overlay.ext4 from snapshot (replaces container.ext4)
-3. Copy EmptyDir volumes from snapshot (unchanged)
-4. **Prepare virtiofs shares on destination** (new):
-   - Container rootfs: ensure OCI image is unpacked, create containerd view, point virtiofsd at it
-   - ConfigData: recreate config directories from snapshot metadata, point virtiofsd at them
-5. **Start virtiofsd processes** (new)
-6. **Patch CH `config.json`** (new): rewrite `fs[].socket` paths to point at the
-   new virtiofsd sockets, similar to the existing `patch_snapshot_config_tap()`
-   that rewrites `net[].tap` for fresh TAP devices. This may be combined into a
-   single patching pass.
-7. Spawn CH, restore (CH reconnects to virtiofsd sockets)
-
-#### Snapshot metadata changes
+The VMM returns guest-facing instructions. The supervisor relays these to the
+guest without interpreting device names or tags:
 
 ```rust
-pub struct SnapshotMetadata {
-    pub kernel_path: PathBuf,
-    pub rootfs_source_path: PathBuf,
-    pub balloon_configured: bool,
-    pub serial_console: bool,
-    pub volume_drives: Vec<SnapshotVolumeDrive>,
-    // NEW: information needed to reconstruct virtiofs shares on restore
-    pub container_image_ref: String,
-    pub virtiofs_config_volumes: Vec<SnapshotConfigVolume>,
-}
-
-pub struct SnapshotConfigVolume {
-    pub name: String,
-    pub files: Vec<ConfigDataFile>,
+pub struct LaunchResult {
+    pub container_rootfs: ContainerRootfs,
+    pub volume_mounts: Vec<VolumeMountInstruction>,
 }
 ```
+
+#### RestoreContext (supervisor → VMM)
+
+```rust
+pub struct RestoreContext {
+    pub net: Option<NetConfig>,
+    pub container_image: Option<PreparedArtifact>,
+    pub config_volumes: Vec<SnapshotConfigVolume>,
+}
+```
+
+#### Vmm trait
+
+```rust
+pub trait Vmm: Send + Sync {
+    type Instance: VmInstance;
+    fn launch(&self, config: VmConfig)
+        -> impl Future<Output = Result<(Self::Instance, LaunchResult)>> + Send;
+    fn restore(&self, snapshot: &SnapshotArtifacts, ctx: RestoreContext)
+        -> impl Future<Output = Result<Self::Instance>> + Send;
+}
+```
+
+`launch` takes `VmConfig` by value — owns `PreparedArtifact` (which contains
+the containerd lease for the `Containerd` variant).
+
+#### Cloud Hypervisor launch pipeline (internal)
+
+Cloud Hypervisor's `launch()` handles the full pipeline internally:
+
+1. Match on `PreparedArtifact::Containerd` / `Directory`
+2. For Containerd: `ensure_unpacked_with_gc_labels()` → `create_overlayfs_view()`
+   → `mount_containerd_mounts()` → `spawn_virtiofsd("container-rootfs", ...)`
+3. For Directory: `spawn_virtiofsd("container-rootfs", path)`
+4. Create overlay.ext4 (256 MB) in tmpdir
+5. Process volumes: BlockImage → copy + disk, Directory → virtiofsd
+6. Assign devices internally: vda=rootfs, vdb=overlay, vdc+=block volumes
+7. Build CH config JSON with `fs` array, create+boot VM
+8. Return `LaunchResult` with guest-facing device names and tags
+
+#### Cloud Hypervisor restore pipeline (internal)
+
+1. If `ctx.container_image` is `Some(Containerd)`: unpack, view, mount, virtiofsd
+2. Recreate ConfigData volumes from `ctx.config_volumes` (calls
+   `volume::prepare_config_volumes_from_snapshot()` internally, owns TempDirs)
+3. Spawn virtiofsd for each config volume
+4. Patch CH config.json socket paths + TAP name
+5. Restore CH
+
+#### CloudHypervisorInstance cleanup
+
+```rust
+pub struct CloudHypervisorInstance {
+    child: tokio::process::Child,        // killed first (field order = drop order)
+    _virtiofsd_processes: Vec<VirtiofsdProcess>,
+    _overlayfs_cleanup: Option<OverlayfsCleanup>,  // unmount + remove view
+    _lease: Option<ContainerdLease>,                // keeps blobs alive
+    _config_vol_tmpdirs: Vec<TempDir>,              // config volume directories
+    // ... snapshot metadata fields, API socket, etc.
+}
+```
+
+Drop ordering ensures: CH killed → virtiofsd killed → overlayfs unmounted →
+view removed → lease dropped.
+
+#### Shared virtiofs module (`vmm/virtiofs.rs`)
+
+`VirtiofsdProcess` and `spawn_virtiofsd` are extracted into a shared module
+reusable by any VMM backend.
 
 ### 4. Image Provider (`image_provider/`)
 
-#### PreparedArtifact changes
+> **Updated by Phase 5.5 refactoring.** The image provider boundary is now
+> "image pulled" — it only pulls, resolves manifest, and extracts OCI config.
+> The VMM handles unpacking, view creation, and mounting.
+
+#### PreparedArtifact (enum)
 
 ```rust
-pub struct PreparedArtifact {
-    /// Directory to share via virtiofs (read-only merged view of OCI layers).
-    pub rootfs_dir: PathBuf,
-    /// OCI image config, if available.
-    pub oci_config: Option<ImageConfig>,
-    /// OCI image reference (needed for snapshot metadata).
-    pub image_ref: String,
-    /// RAII cleanup handle — keeps containerd view alive, unmounts on drop.
-    _cleanup: Box<dyn Any + Send>,
+pub enum PreparedArtifact {
+    /// Image pulled in containerd. VMM handles unpack + view + mount.
+    Containerd {
+        image_ref: String,
+        oci_config: Option<ImageConfig>,
+        resolved: ResolvedImage,
+        lease: ContainerdLease,
+    },
+    /// Local directory (testing, development, legacy blockfile).
+    Directory {
+        path: PathBuf,
+        oci_config: Option<ImageConfig>,
+        _cleanup: Option<Box<dyn Any + Send>>,
+    },
 }
 ```
 
-The `image_path` field (pointing to an ext4 file) is replaced by `rootfs_dir`
-(pointing to a directory).
+The `Containerd` variant carries the resolved image metadata and lease. The VMM
+calls utility functions (`ensure_unpacked_with_gc_labels()`,
+`create_overlayfs_view()`, `mount_containerd_mounts()`) to materialize the
+rootfs during launch. This allows future VMMs to choose different snapshotters
+(e.g. devmapper → block device, no virtiofsd needed).
 
-**Lifetime change:** The `PreparedArtifact` must now live for the **entire pod
-lifetime**, not just the launch phase. Currently the artifact is consumed during
-launch (the ext4 image is copied to tmpdir and the artifact can be dropped).
-With virtiofs, virtiofsd serves directly from the containerd snapshot directory,
-so the artifact (and its containerd lease) must remain alive as long as the pod
-is running. The supervisor must store the `PreparedArtifact` alongside the
-`ManagedVm`.
+**Lifetime:** The `ContainerdLease` is transferred into the VMM instance via
+`VmConfig`. The VMM holds it for the VM's lifetime. The containerd view cleanup
+(`OverlayfsCleanup`) also lives in the VMM instance.
 
-#### Containerd provider changes
+#### ContainerdOverlayfsProvider
 
-Switch from blockfile snapshotter to overlayfs snapshotter:
+`prepare()` now only:
+1. Creates a persistent lease
+2. Pulls image if not present locally (`ensure_image()`)
+3. Resolves manifest + config (`ResolvedImage::resolve()`)
+4. Extracts OCI config + passwd/group from layer tarballs
 
-1. Pull image and unpack layers (same as today, but with overlayfs snapshotter)
-2. Create a **View** of the final chain ID snapshot
-3. Mount the view's overlay on a temp mountpoint
-4. Return the mountpoint path as `rootfs_dir`
-5. On drop: unmount the overlay, remove the containerd view, drop lease
+It does NOT unpack layers, create views, or mount anything. Returns
+`PreparedArtifact::Containerd { image_ref, oci_config, resolved, lease }`.
 
-The `_cleanup` handle holds a struct that:
-- Stores the mountpoint path
-- Stores the view key (for containerd snapshot removal)
-- Holds a `ContainerdLease` (keeps snapshot + layers protected from GC)
-- On `Drop`: calls `umount()` then `snapshots.remove(view_key)`, then drops lease
+The `ContainerdOverlayfsProvider` shares its containerd channel with the VMM
+via `CloudHypervisor::ContainerdConfig`.
 
-#### LeaseManager changes
+#### Shared utility: `ensure_unpacked_with_gc_labels()`
 
-The existing `LeaseManager` creates leases with a 1-hour expiry as a crash
-safety net. With virtiofs, containerd leases must live for the entire pod
-lifetime, which can exceed 1 hour.
+Combines `ensure_unpacked()` + `set_snapshot_gc_label()` into a single utility
+called by the VMM during launch. Idempotent.
 
-**Persistent leases:** The containerd lease API has no `Update` RPC, so lease
-expiry labels cannot be renewed in-place. Instead of a complex
-delete-recreate-migrate renewal loop, long-lived leases are created **without**
-the `gc.expire` label via `create_persistent_lease()`.
+#### LeaseManager, RootfsDirProvider
 
-- **Normal operation:** Dropped cleanly on pod shutdown via RAII.
-- **Crash/SIGKILL:** No drop runs, lease persists until next worker startup.
-  `cleanup_stale_leases()` is called at worker startup (in the
-  `ContainerdOverlayfsProvider` constructor) and deletes all orphaned
-  `distvirt-*` leases, making their resources eligible for containerd GC.
-
-Short-lived leases (e.g. for the blockfile provider) retain the 1-hour expiry
-via the existing `create_lease()` method.
-
-#### RootfsDirProvider changes
-
-The existing `RootfsDirProvider` currently builds an ext4 image from a
-directory. With virtiofs, it can simply return the directory path directly
-(the directory *is* the rootfs). The ext4 build step is no longer needed.
+Unchanged from original design. `LeaseManager` still creates persistent leases
+(called by the image provider). `RootfsDirProvider` returns
+`PreparedArtifact::Directory`.
 
 ### 5. Volume Provisioning (`volume.rs`)
 
-#### ConfigData volumes
-
-No longer need ext4 images. Instead, create a temp directory with the config
-files and return its path for virtiofs sharing.
+#### PreparedVolume (updated)
 
 ```rust
 pub enum PreparedVolume {
-    /// Block device volume (EmptyDir, or future containerd-backed block volumes).
-    Block {
-        name: String,
-        image_path: PathBuf,
-        read_only: bool,
-        /// RAII cleanup handle. Holds temp file ownership, or a containerd
-        /// lease for containerd-backed block devices.
-        _cleanup: Box<dyn Any + Send>,
-    },
-    /// Directory to share via virtiofs (ConfigData).
-    VirtioFs {
-        name: String,
-        dir_path: PathBuf,
-        read_only: bool,
-        /// RAII cleanup handle. Holds TempDir ownership, or a containerd
-        /// lease if the directory is a containerd snapshot.
-        _cleanup: Box<dyn Any + Send>,
-    },
+    Block { name: String, image_path: PathBuf, read_only: bool },
+    Directory { name: String, dir_path: PathBuf, read_only: bool,
+                _cleanup: Box<dyn Any + Send + Sync> },
 }
 ```
 
-Both variants use `Box<dyn Any + Send>` for the cleanup handle, keeping the
-interface uniform. Today `Block._cleanup` holds a `NamedTempFile` or `()`, and
-`VirtioFs._cleanup` holds a `TempDir`. In the future, either variant could hold
-a `ContainerdLease` + view handle for containerd-backed resources.
+Renamed from `VirtioFs` to `Directory` — the volume layer doesn't know or care
+whether the directory becomes virtiofs or something else. The `tag` field was
+removed (VMM assigns tags internally).
+
+`to_vm_volume()` helper converts to `VmVolume` for passing to the VMM.
 
 #### EmptyDir volumes
 
@@ -438,113 +386,47 @@ Unchanged — still creates sparse ext4 images with `mkfs.ext4`.
 
 ### 6. Pod Supervisor (`worker/supervisor.rs`)
 
-#### virtiofsd process management
-
-The supervisor needs a new component: a `VirtiofsdManager` that:
-
-1. Starts a virtiofsd process for each virtiofs share
-2. Waits for the vhost-user socket to appear
-3. Returns socket paths for the VmConfig
-4. Kills all virtiofsd processes on pod cleanup
-
-```rust
-struct VirtiofsdProcess {
-    child: tokio::process::Child,
-    socket_path: PathBuf,
-}
-
-struct VirtiofsdManager {
-    processes: Vec<VirtiofsdProcess>,
-}
-
-impl VirtiofsdManager {
-    /// Start a virtiofsd for a read-only share.
-    async fn add_readonly(
-        &mut self,
-        virtiofsd_bin: &Path,
-        tag: &str,
-        shared_dir: &Path,
-        socket_dir: &Path,
-    ) -> anyhow::Result<VirtiofsMount>;
-
-    /// Kill all virtiofsd processes.
-    async fn shutdown(&mut self);
-}
-```
-
-virtiofsd invocation:
-```
-virtiofsd \
-  --socket-path=/tmp/xxx/virtiofsd-rootfs.sock \
-  --shared-dir=/path/to/containerd/snapshot/merged \
-  --readonly \
-  --sandbox=none \
-  --migration-mode=find-paths \
-  --migration-on-error=abort
-```
-
-Flags explained:
-- `--readonly`: Container rootfs and ConfigData are read-only
-- `--sandbox=none`: We're already in a confined environment, don't double sandbox
-- `--migration-mode=find-paths`: Good for read-only shares (no DAC_READ_SEARCH capability required)
-- `--migration-on-error=abort`: Fail loudly rather than silently presenting errors to guest
-
-#### Overlay device creation
-
-The supervisor creates a small empty ext4 image for the overlay device. This
-replaces the full container image copy:
-
-```rust
-// Create overlay device — small empty ext4
-let overlay_path = vol_tmpdir.path().join("overlay.ext4");
-create_empty_ext4(&overlay_path, overlay_size_mb).await?;
-```
-
-Default size: configurable, with a reasonable default (e.g. 256 MB). Most
-containers write very little at runtime (logs, tmp files, pid files).
+> **Updated by Phase 5.5 refactoring.** The supervisor no longer knows about
+> device names, virtiofs tags, overlay images, or volume categorization. It
+> builds a high-level `VmConfig` and follows the VMM's `LaunchResult`.
 
 #### Updated launch flow
 
 ```
 1. image_provider.prepare(image_ref)
-   → returns rootfs_dir (directory path), oci_config, image_ref
+   → returns PreparedArtifact (Containerd or Directory)
 
-2. Create overlay.ext4 (small empty ext4)
-
-3. Prepare volumes:
+2. Prepare volumes:
    - EmptyDir → ext4 image (unchanged)
-   - ConfigData → temp directory with files (new, no mkfs)
+   - ConfigData → temp directory with files
 
-4. Start virtiofsd processes:
-   - virtiofsd for rootfs_dir → socket path
-   - virtiofsd per ConfigData dir → socket paths
+3. Build VmConfig:
+   - container_image = artifact (moved into VmConfig)
+   - volumes = [VmVolume from each PreparedVolume]
+   - snapshot_context = { container_image_ref, config_volumes }
 
-5. Build VmConfig:
-   - overlay_image_path = overlay.ext4
-   - additional_drives = [EmptyDir volumes only]
-   - virtiofs_mounts = [rootfs, ConfigData sockets]
+4. vmm.launch(vm_config)
+   → VMM handles: unpack, view, mount, virtiofsd, overlay, device assignment
+   → returns (instance, LaunchResult)
 
-6. vmm.launch(&vm_config)
-
-7. Guest setup over vsock:
+5. Guest setup over vsock (following LaunchResult):
    - configure_network(...)
-   - mount_volume(EmptyDir volumes → Device source)
-   - mount_volume(ConfigData volumes → VirtioFs source)
-   - add_container(rootfs = VirtioFsOverlay { tag, overlay_device })
+   - for mount in launch_result.volume_mounts: mount_volume(...)
+   - add_container(launch_result.container_rootfs, ...)
    - start_container(...)
 ```
 
-The device offset calculation in supervisor.rs simplifies from:
+#### PodResources (unified)
+
 ```rust
-// Before: conditional offset
-let vol_device_offset: u8 = 2 + if vm_config.initial_commands.is_empty() { 0 } else { 1 };
-let device = format!("/dev/vd{}", (b'a' + vol_device_offset + i as u8) as char);
+struct PodResources {
+    _prepared_volumes: Vec<PreparedVolume>,
+    _vol_tmpdir: Option<TempDir>,
+}
 ```
-to:
-```rust
-// After: fixed offset (vda=rootfs, vdb=overlay, vdc+=EmptyDir)
-let device = format!("/dev/vd{}", (b'c' + i as u8) as char);
-```
+
+Used for both launch and resume paths. The artifact/lease is now owned by the
+VMM instance — no longer held in PodResources.
 
 ### 7. Snapshot/Restore with Cross-Host Migration
 
@@ -671,24 +553,62 @@ upstream docs.
   `config_volumes: Vec<SnapshotConfigVolume>` (with `#[serde(default)]` for
   backwards compat). New `SnapshotConfigVolume` struct stores name, tag, and
   `ConfigDataFile` list.
-- ✓ `VmConfig` extended with same fields, threaded through
-  `CloudHypervisorInstance` to `snapshot()` metadata.
+- ✓ Snapshot metadata populated from `VmConfig.snapshot_context` fields stored
+  in `CloudHypervisorInstance`.
 - ✓ Snapshot already saves `overlay.ext4` (done in Phase 2).
 - ✓ `patch_snapshot_config_fs()` rewrites `fs[].socket` paths in CH
   `config.json` on restore, deriving new socket paths from the `tag` field.
   Called in `restore()` after spawning virtiofsd.
-- ✓ `pod_resume_supervisor` now accepts `image_provider`, prepares container
-  rootfs via `image_provider.prepare()` and recreates ConfigData directories
-  from snapshot metadata. Updates `virtiofs_mounts` source_dirs before calling
-  `vmm.restore()`. Holds `ResumeResources` for pod lifetime.
-- ✓ `prepare_config_volumes_from_snapshot()` helper in `volume.rs`.
+- ✓ `pod_resume_supervisor` passes `RestoreContext` to `vmm.restore()`.
+  VMM handles virtiofs reconstruction (image unpack + view + mount) and
+  config volume recreation internally.
+- ✓ `prepare_config_volumes_from_snapshot()` helper in `volume.rs` (called
+  by VMM during restore).
 - **Test**: snapshot + cross-tmpdir restore, then full cross-host
 
+### Phase 5.5: VMM boundary refactoring ✓
+
+Moved rootfs/volume attachment responsibility from the supervisor into the VMM.
+The boundary between image provider and VMM is now "image pulled" — the image
+provider only pulls/resolves/extracts OCI config, the VMM handles everything
+else (unpack, view creation, mounting, virtiofsd, overlay, device assignment).
+
+- ✓ Extracted `VirtiofsdProcess` + `spawn_virtiofsd` into shared
+  `vmm/virtiofs.rs` module
+- ✓ Made containerd utility functions (`mount_containerd_mounts`,
+  `create_overlayfs_view`, etc.) accessible to VMM code
+- ✓ Created `ensure_unpacked_with_gc_labels()` shared utility
+- ✓ `PreparedArtifact` is now an enum (`Containerd` / `Directory`). The
+  `Containerd` variant carries `ResolvedImage` + `ContainerdLease`, not a
+  pre-materialized directory
+- ✓ `VmConfig` is high-level: `container_image: PreparedArtifact`,
+  `volumes: Vec<VmVolume>`, `snapshot_context: SnapshotContext`. No overlay
+  path, no drives list, no virtiofs mounts list
+- ✓ `Vmm::launch()` returns `(Instance, LaunchResult)` — VMM tells supervisor
+  how to configure the guest
+- ✓ `Vmm::restore()` takes `RestoreContext` — VMM handles virtiofs
+  reconstruction and config volume recreation internally
+- ✓ CloudHypervisor handles full pipeline: unpack → view → mount → virtiofsd →
+  overlay → device assignment → LaunchResult
+- ✓ Supervisor dramatically simplified: builds high-level VmConfig, follows
+  LaunchResult for guest setup
+- ✓ `PodResources` / `ResumeResources` unified into single `PodResources`
+- ✓ `PreparedVolume::VirtioFs` renamed to `Directory`, tag field removed (VMM
+  assigns tags)
+- ✓ `ContainerdOverlayfsProvider` simplified: only pulls + resolves + OCI
+  config extraction (no unpack, no view creation, no mounting)
+- ✓ Containerd connection shared between image provider and VMM via
+  `CloudHypervisor::ContainerdConfig`
+- **Test**: 584 workspace tests passing
+
 ### Phase 5: Cleanup
-- Remove blockfile snapshotter dependency
-- Remove ext4 image building for container rootfs (`image.rs`)
-- Remove `mke2fs`-based ConfigData image creation (already done)
-- Clean up dead code (`build_ext4_image`, `mount`/`umount_detach` in linux/mount.rs)
+- Remove `image_provider/image.rs` (`build_ext4_image` — dead code)
+- Remove blockfile snapshotter dependency (if no longer needed for e2e tests)
+- Clean up dead code
+- Consider removing `containerd_blockfile.rs` or migrating e2e tests to
+  overlayfs provider
+- Split `pod_launch()` / `pod_monitor()` into smaller functions (deferred from
+  Phase 5.5)
 
 ## Open Questions
 

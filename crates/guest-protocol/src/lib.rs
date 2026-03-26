@@ -10,7 +10,7 @@ pub struct VolumeMount {
 }
 
 /// How the guest should set up the container root filesystem.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 pub enum ContainerRootfs {
     /// Mount a block device directly as ext4 (writable).
@@ -26,7 +26,7 @@ pub enum ContainerRootfs {
 }
 
 /// Where volume data comes from inside the guest.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 pub enum VolumeSource {
     /// Block device (ext4).

@@ -11,7 +11,7 @@ use tonic::transport::Channel;
 
 // Re-export public items for use by provider implementations.
 pub use image::{ensure_image, extract_files_from_layers};
-pub use unpack::ensure_unpacked;
+pub use unpack::{ensure_unpacked, ensure_unpacked_with_gc_labels};
 
 pub(crate) fn generate_id() -> String {
     uuid::Uuid::new_v4().to_string()

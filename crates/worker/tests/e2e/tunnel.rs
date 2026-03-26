@@ -26,6 +26,23 @@ async fn setup_worker(
     assert!(kernel.exists(), "kernel not found at {}", kernel.display());
     assert!(rootfs.exists(), "rootfs not found at {}", rootfs.display());
 
+    let containerd_socket = std::env::var("CONTAINERD_SOCKET")
+        .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
+    let image_provider =
+        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider::new(
+            &containerd_socket,
+            "distvirt",
+            None,
+        )
+        .await
+        .expect("failed to create containerd overlayfs provider");
+
+    let containerd_config = distvirt_worker::vmm::cloud_hypervisor::ContainerdConfig {
+        channel: image_provider.channel().clone(),
+        namespace: image_provider.namespace().to_string(),
+        unpack_coordinator: distvirt_worker::image_provider::UnpackCoordinator::default(),
+    };
+
     // let firecracker_bin = std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".into());
     // let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker_bin);
     let cloud_hypervisor_bin =
@@ -35,18 +52,8 @@ async fn setup_worker(
     let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(
         cloud_hypervisor_bin,
         virtiofsd_bin,
+        Some(containerd_config),
     );
-
-    let containerd_socket = std::env::var("CONTAINERD_SOCKET")
-        .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
-    let image_provider =
-        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider::new(
-            containerd_socket,
-            "default".into(),
-            None,
-        )
-        .await
-        .expect("failed to create containerd blockfile provider");
 
     let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
 

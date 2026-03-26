@@ -145,20 +145,23 @@ async fn handle_container_started(
 /// Graceful shutdown: SIGTERM all containers, reactively wait for exits
 /// via pidfd-based container tasks, then SIGKILL any stragglers.
 async fn shutdown_containers(
-    containers: &mut ContainerManager,
+    containers: &Rc<RefCell<ContainerManager>>,
     container_tasks: &mut FuturesUnordered<TaggedTask>,
 ) {
-    if !containers.has_running_containers() {
+    if !containers.borrow().has_running_containers() {
         return;
     }
 
-    let running = containers.running_container_ids();
-    log::info!(
-        "sending SIGTERM to {} running containers: {:?}",
-        running.len(),
-        running
-    );
-    containers.signal_all_running(libc::SIGTERM);
+    {
+        let cm = containers.borrow();
+        let running = cm.running_container_ids();
+        log::info!(
+            "sending SIGTERM to {} running containers: {:?}",
+            running.len(),
+            running
+        );
+        cm.signal_all_running(libc::SIGTERM);
+    }
 
     // Reactively wait for container exits with a 2s timeout.
     // Containers are PID 1 in their own PID namespaces, so they only
@@ -167,7 +170,7 @@ async fn shutdown_containers(
     let deadline = async_io::Timer::after(std::time::Duration::from_secs(2));
     futures::pin_mut!(deadline);
 
-    while containers.has_running_containers() {
+    while containers.borrow().has_running_containers() {
         let next_exit = async {
             if container_tasks.is_empty() {
                 futures::future::pending::<(String, anyhow::Result<()>)>().await
@@ -188,28 +191,28 @@ async fn shutdown_containers(
                 }
                 log::info!(
                     "shutdown: {} containers still running",
-                    containers.running_container_ids().len()
+                    containers.borrow().running_container_ids().len()
                 );
             }
             futures::future::Either::Right(_) => {
                 log::warn!(
                     "shutdown: timed out (2s) waiting for containers to exit, {} still running: {:?}",
-                    containers.running_container_ids().len(),
-                    containers.running_container_ids(),
+                    containers.borrow().running_container_ids().len(),
+                    containers.borrow().running_container_ids(),
                 );
                 break;
             }
         }
     }
 
-    if containers.has_running_containers() {
+    if containers.borrow().has_running_containers() {
         log::warn!("sending SIGKILL to remaining containers");
-        containers.signal_all_running(libc::SIGKILL);
+        containers.borrow_mut().signal_all_running(libc::SIGKILL);
 
         // Brief poll for SIGKILL exits.
         let kill_deadline = async_io::Timer::after(std::time::Duration::from_millis(200));
         futures::pin_mut!(kill_deadline);
-        while containers.has_running_containers() {
+        while containers.borrow().has_running_containers() {
             let next_exit = async {
                 if container_tasks.is_empty() {
                     futures::future::pending::<(String, anyhow::Result<()>)>().await
@@ -702,7 +705,7 @@ fn run() -> anyhow::Result<()> {
                             log::info!("supervisor: connection loop returned shutdown, beginning container shutdown");
 
                             // Signal containers to exit, reactively waiting for pidfd exits.
-                            shutdown_containers(&mut containers.borrow_mut(), &mut container_tasks).await;
+                            shutdown_containers(&containers, &mut container_tasks).await;
                             log::info!("supervisor: shutdown_containers complete");
 
                             // container_task_tx was moved into connection_loop

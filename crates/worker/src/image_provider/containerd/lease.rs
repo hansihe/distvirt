@@ -56,6 +56,10 @@ impl LeaseManager {
         }
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     /// Create a new containerd lease with a 1-hour expiry safety net.
     ///
     /// Suitable for short-lived operations (e.g. image pull + copy). The

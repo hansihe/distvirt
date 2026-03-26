@@ -8,6 +8,10 @@ pub struct StubImageProvider;
 
 impl ImageProvider for StubImageProvider {
     async fn prepare(&self, _image_ref: &str) -> anyhow::Result<PreparedArtifact> {
-        Ok(PreparedArtifact::new(PathBuf::from("/dev/null"), None, ()))
+        Ok(PreparedArtifact::Directory {
+            path: PathBuf::from("/dev/null"),
+            oci_config: None,
+            _cleanup: None,
+        })
     }
 }

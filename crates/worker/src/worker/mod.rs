@@ -1279,7 +1279,7 @@ mod tests {
 
     use crate::fabric::{Fabric, FabricPort};
     use crate::image_provider::{ImageProvider, PreparedArtifact};
-    use crate::vmm::{VmConfig, VmInstance, Vmm};
+    use crate::vmm::{LaunchResult, VmConfig, VmInstance, Vmm};
 
     // -----------------------------------------------------------------------
     // Stubs (panic if called — for tests that don't launch pods)
@@ -1289,7 +1289,7 @@ mod tests {
 
     impl Vmm for StubVmm {
         type Instance = StubVmInstance;
-        async fn launch(&self, _config: &VmConfig) -> anyhow::Result<StubVmInstance> {
+        async fn launch(&self, _config: VmConfig) -> anyhow::Result<(StubVmInstance, LaunchResult)> {
             panic!("StubVmm::launch should not be called in state management tests");
         }
     }
@@ -1538,7 +1538,7 @@ mod tests {
 
     impl Vmm for MockVmm {
         type Instance = MockVmInstance;
-        async fn launch(&self, _config: &VmConfig) -> anyhow::Result<MockVmInstance> {
+        async fn launch(&self, _config: VmConfig) -> anyhow::Result<(MockVmInstance, LaunchResult)> {
             if let Some(ref err) = self.launch_error {
                 return Err(anyhow::anyhow!("{}", err));
             }
@@ -1548,10 +1548,17 @@ mod tests {
                 .await
                 .take()
                 .expect("MockVmm: socket already taken");
-            Ok(MockVmInstance {
+            let launch_result = LaunchResult {
+                container_rootfs: distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
+                    tag: "container-rootfs".to_string(),
+                    overlay_device: "/dev/vdb".to_string(),
+                },
+                volume_mounts: Vec::new(),
+            };
+            Ok((MockVmInstance {
                 vsock_socket: tokio::sync::Mutex::new(Some(socket)),
                 killed: tokio::sync::Mutex::new(false),
-            })
+            }, launch_result))
         }
     }
 

@@ -83,7 +83,8 @@
           };
 
           testContainerImage = pkgs.dockerTools.buildImage {
-            name = "distvirt-test-containers";
+            # name = "distvirt-test-containers";
+            name = "docker.io/library/distvirt-test-containers";
             tag = "latest";
             copyToRoot = pkgs.buildEnv {
               name = "test-containers-root";

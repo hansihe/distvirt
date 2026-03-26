@@ -5,6 +5,8 @@ use anyhow::Context;
 use distvirt_worker_protocol::{ConfigDataFile, VolumeSpec, VolumeType};
 use tokio::process::Command;
 
+use crate::vmm::{VmVolume, VmVolumeSource};
+
 /// A prepared volume ready to attach to a VM.
 pub enum PreparedVolume {
     /// Block device volume (EmptyDir).
@@ -13,15 +15,32 @@ pub enum PreparedVolume {
         image_path: PathBuf,
         read_only: bool,
     },
-    /// Directory to share via virtiofs (ConfigData).
-    VirtioFs {
+    /// Directory to share (ConfigData).
+    Directory {
         name: String,
-        tag: String,
         dir_path: PathBuf,
         read_only: bool,
         /// RAII cleanup handle — keeps temp directory alive.
         _cleanup: Box<dyn std::any::Any + Send + Sync>,
     },
+}
+
+impl PreparedVolume {
+    /// Convert to a `VmVolume` for passing to the VMM.
+    pub fn to_vm_volume(&self) -> VmVolume {
+        match self {
+            PreparedVolume::Block { name, image_path, read_only } => VmVolume {
+                name: name.clone(),
+                source: VmVolumeSource::BlockImage { image_path: image_path.clone() },
+                read_only: *read_only,
+            },
+            PreparedVolume::Directory { name, dir_path, read_only, .. } => VmVolume {
+                name: name.clone(),
+                source: VmVolumeSource::Directory { dir_path: dir_path.clone() },
+                read_only: *read_only,
+            },
+        }
+    }
 }
 
 /// Prepare volumes for a VM.
@@ -51,10 +70,8 @@ pub async fn prepare_volumes(
                     .await
                     .with_context(|| format!("create config_data volume '{}'", vol.name))?;
                 let dir_path = dir.path().to_path_buf();
-                let tag = format!("configdata-{}", vol.name);
-                prepared.push(PreparedVolume::VirtioFs {
+                prepared.push(PreparedVolume::Directory {
                     name: vol.name.clone(),
-                    tag,
                     dir_path,
                     read_only: true,
                     _cleanup: Box::new(dir),
@@ -96,7 +113,6 @@ pub async fn create_overlay_image(path: &Path, size_mb: u64) -> anyhow::Result<(
 async fn create_empty_dir_image(path: &Path, size_mb: u64) -> anyhow::Result<()> {
     anyhow::ensure!(size_mb > 0, "empty_dir size_mb must be greater than 0");
 
-    // Create a sparse file directly instead of spawning `truncate`.
     let file = tokio::fs::File::create(path)
         .await
         .context("create volume image file")?;
@@ -143,8 +159,6 @@ pub async fn prepare_config_volumes_from_snapshot(
 }
 
 /// Create a temporary directory populated with ConfigData files.
-///
-/// Returns the `TempDir` — the caller must keep it alive for the VM lifetime.
 async fn create_config_data_dir(
     files: &[ConfigDataFile],
 ) -> anyhow::Result<tempfile::TempDir> {
@@ -211,14 +225,13 @@ mod tests {
         let result = prepare_volumes(&volumes, tmp.path()).await.unwrap();
         assert_eq!(result.len(), 1);
         match &result[0] {
-            PreparedVolume::VirtioFs { name, read_only, dir_path, tag, .. } => {
+            PreparedVolume::Directory { name, read_only, dir_path, .. } => {
                 assert_eq!(name, "config");
                 assert!(read_only);
                 assert!(dir_path.exists());
-                assert_eq!(tag, "configdata-config");
                 assert!(dir_path.join("hello.txt").exists());
             }
-            _ => panic!("expected VirtioFs variant"),
+            _ => panic!("expected Directory variant"),
         }
     }
 }

@@ -11,6 +11,10 @@ impl ImageProvider for RootfsDirProvider {
     async fn prepare(&self, image_ref: &str) -> anyhow::Result<PreparedArtifact> {
         let rootfs_dir = PathBuf::from(image_ref);
         log::info!("rootfs directory: {}", rootfs_dir.display());
-        Ok(PreparedArtifact::new(rootfs_dir, None, ()))
+        Ok(PreparedArtifact::Directory {
+            path: rootfs_dir,
+            oci_config: None,
+            _cleanup: None,
+        })
     }
 }

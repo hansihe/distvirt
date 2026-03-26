@@ -136,14 +136,46 @@ pub async fn ensure_unpacked(
     Ok(())
 }
 
-/// Unpack a single image layer using the optimistic prepare-first pattern.
+/// Ensure layers are unpacked for the given snapshotter, and set permanent
+/// GC protection labels on committed snapshots. Idempotent.
 ///
-/// Does NOT Stat before Prepare — avoids TOCTOU races. Instead:
-/// - AlreadyExists on Prepare → Stat chainID: exists=skip, missing=retry
-/// - AlreadyExists on Commit  → concurrent unpack won, treat as success
-/// - Any failure after Prepare → remove active snapshot to prevent leaks
+/// This combines `ensure_unpacked` with `set_snapshot_gc_label` into a single
+/// utility for callers that want both (e.g., the VMM during launch).
+pub async fn ensure_unpacked_with_gc_labels(
+    channel: &Channel,
+    lease: &ContainerdLease,
+    resolved: &ResolvedImage,
+    snapshotter: &str,
+    coordinator: &UnpackCoordinator,
+) -> anyhow::Result<()> {
+    ensure_unpacked(channel, lease, resolved, snapshotter, coordinator).await?;
+
+    let final_chain_id = resolved
+        .final_chain_id()
+        .context("image has no layers")?;
+
+    super::content::set_snapshot_gc_label(
+        channel,
+        lease.namespace(),
+        resolved.config_digest(),
+        final_chain_id,
+        snapshotter,
+    )
+    .await
+    .context("setting snapshot GC ref label")?;
+
+    Ok(())
+}
+
+/// Unpack a single image layer using the client-side stat-first pattern.
 ///
-/// Retries Prepare up to 3 times with fresh random keys.
+/// Follows the recommended algorithm from containerd's Go client
+/// (`client/image.go:Unpack()` / `pkg/rootfs/apply.go`):
+/// 1. Stat(chainID) — skip if already committed
+/// 2. Prepare(random_key, parent) — create active snapshot
+/// 3. AlreadyExists on Prepare — key collision, retry with new key
+/// 4. Apply + Commit
+/// 5. Cleanup active snapshot on any error
 async fn unpack_layer(
     snapshots: &mut SnapshotsClient<Channel>,
     diff: &mut DiffClient<Channel>,
@@ -159,8 +191,18 @@ async fn unpack_layer(
 ) -> anyhow::Result<()> {
     let namespace = lease.namespace();
 
+    // Step 1: Stat first — skip if already unpacked.
+    if stat_snapshot(channel, namespace, snapshotter, chain_id).await? {
+        log::debug!(
+            "layer {}/{}: snapshot {} already committed, skipping",
+            layer_num, total_layers, chain_id,
+        );
+        return Ok(());
+    }
+
+    // Step 2: Prepare with retry loop.
     for attempt in 0..MAX_PREPARE_RETRIES {
-        let active_key = format!("extract-{}-{}", generate_id(), attempt);
+        let active_key = format!("extract-{}-{} {}", generate_id(), attempt, chain_id);
 
         log::debug!(
             "layer {}/{}: preparing snapshot (parent={}, attempt={})",
@@ -170,7 +212,6 @@ async fn unpack_layer(
             attempt + 1,
         );
 
-        // Optimistic: attempt Prepare directly, react to errors.
         let prepare_req = PrepareSnapshotRequest {
             snapshotter: snapshotter.to_string(),
             key: active_key.clone(),
@@ -180,15 +221,8 @@ async fn unpack_layer(
         let mounts = match snapshots.prepare(lease.request(prepare_req)).await {
             Ok(resp) => resp.into_inner().mounts,
             Err(e) if e.code() == tonic::Code::AlreadyExists => {
-                // Disambiguate: committed snapshot exists, or key collision?
-                if stat_snapshot(channel, namespace, snapshotter, chain_id).await? {
-                    log::debug!(
-                        "layer {}/{}: snapshot {} already exists, skipping",
-                        layer_num, total_layers, chain_id,
-                    );
-                    return Ok(());
-                }
-                // Key collision with another active snapshot — retry.
+                // Stat already confirmed the committed snapshot didn't exist,
+                // so this is a key collision — retry with a new key.
                 log::debug!(
                     "layer {}/{}: prepare key collision, retrying",
                     layer_num, total_layers,

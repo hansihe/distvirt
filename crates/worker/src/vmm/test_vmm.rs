@@ -14,7 +14,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
 use super::guest_sim::{ContainerBehavior, GuestSimConfig, SuspendBehavior, run_guest_sim};
-use super::{NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
+use super::{SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
 use crate::fabric::FabricPort;
 use crate::task_handle::TaskHandle;
 
@@ -144,25 +144,38 @@ fn spawn_guest_sim(
 impl Vmm for TestVmm {
     type Instance = TestVmInstance;
 
-    async fn launch(&self, _config: &VmConfig) -> anyhow::Result<TestVmInstance> {
+    async fn launch(
+        &self,
+        _config: VmConfig,
+    ) -> anyhow::Result<(TestVmInstance, super::LaunchResult)> {
         let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.make_config())?;
 
         if let Some(ref tx) = self.crash_handle_tx {
             let _ = tx.send(CrashHandle(exit_tx.clone()));
         }
 
-        Ok(TestVmInstance {
+        let instance = TestVmInstance {
             vsock_socket: Mutex::new(Some(host_socket)),
             fabric_port: None,
             sim_task: Some(sim_task),
             exit_tx,
-        })
+        };
+
+        let launch_result = super::LaunchResult {
+            container_rootfs: distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
+                tag: "container-rootfs".to_string(),
+                overlay_device: "/dev/vdb".to_string(),
+            },
+            volume_mounts: Vec::new(),
+        };
+
+        Ok((instance, launch_result))
     }
 
     async fn restore(
         &self,
         snapshot: &SnapshotArtifacts,
-        _net: Option<&NetConfig>,
+        _ctx: super::RestoreContext,
     ) -> anyhow::Result<TestVmInstance> {
         // Validate snapshot exists by reading metadata.json.
         // Uses std::fs instead of tokio::fs because tokio::fs dispatches to

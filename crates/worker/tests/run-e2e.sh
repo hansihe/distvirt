@@ -32,11 +32,11 @@ fi
 
 # Import the test container image into containerd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_IMAGE="$SCRIPT_DIR/../../guest-image/result-test-containers"
+TEST_IMAGE="$SCRIPT_DIR/../../../guest-image/result-test-containers"
 if [[ -f "$TEST_IMAGE" ]]; then
-    sudo "${SUDO_FLAGS[@]}" ctr image import "$TEST_IMAGE"
+    sudo "${SUDO_FLAGS[@]}" ctr -n distvirt image import "$TEST_IMAGE"
 else
     echo "warning: test container image not found at $TEST_IMAGE (run guest-image/build.sh first)" >&2
 fi
 
-exec sudo "${SUDO_FLAGS[@]}" env DISTVIRT_E2E=1 "$CARGO" test --package distvirt-worker --test e2e "$@"
+exec sudo "${SUDO_FLAGS[@]}" env DISTVIRT_E2E=1 PATH="$PATH:/usr/lib" "$CARGO" test --package distvirt-worker --test e2e "$@"

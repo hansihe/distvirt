@@ -146,9 +146,10 @@ impl ImageProvider for ContainerdBlockfileProvider {
         .await
         .context("removing blockfile view after copy")?;
 
-        // TODO: This provider still returns an ext4 block file, not a rootfs
-        // directory. It needs to be replaced with an overlayfs snapshotter-based
-        // provider that returns a merged directory for virtiofs (Phase 3).
-        Ok(PreparedArtifact::new(image_path, Some(config), temp_file))
+        Ok(PreparedArtifact::BlockDevice {
+            image_path,
+            oci_config: Some(config),
+            _cleanup: Some(Box::new(temp_file)),
+        })
     }
 }
