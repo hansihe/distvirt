@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
+use crate::task_handle::TaskHandle;
 
 use super::wait_for_file;
 
@@ -13,6 +14,7 @@ pub(crate) struct VirtiofsdProcess {
     child: tokio::process::Child,
     #[allow(dead_code)]
     socket_path: PathBuf,
+    _stderr_task: TaskHandle<()>,
 }
 
 impl Drop for VirtiofsdProcess {
@@ -33,7 +35,7 @@ pub(crate) async fn spawn_virtiofsd(
 ) -> anyhow::Result<VirtiofsdProcess> {
     let socket_path = working_dir.join(format!("virtiofs-{}.sock", tag));
 
-    let child = tokio::process::Command::new(bin)
+    let mut child = tokio::process::Command::new(bin)
         .arg(format!("--socket-path={}", socket_path.display()))
         .arg(format!("--shared-dir={}", source_dir.display()))
         .arg("--announce-submounts")
@@ -46,23 +48,22 @@ pub(crate) async fn spawn_virtiofsd(
         .spawn()
         .with_context(|| format!("spawn virtiofsd for tag '{}'", tag))?;
 
-    if let Err(e) = wait_for_file(&socket_path, Duration::from_secs(5)).await {
-        // Socket didn't appear — virtiofsd likely crashed. Try to grab stderr.
-        let output = child.wait_with_output().await;
-        let stderr = output
-            .as_ref()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stderr))
-            .unwrap_or_default();
-        if stderr.is_empty() {
-            return Err(e).context(format!("waiting for virtiofsd socket for tag '{}'", tag));
-        } else {
-            bail!(
-                "virtiofsd for tag '{}' failed to start: {}",
-                tag,
-                stderr.trim()
-            );
+    // Spawn a task to forward virtiofsd stderr to our logs.
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let tag_owned = tag.to_owned();
+    let _stderr_task = TaskHandle::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log::trace!("[virtiofsd:{}] {}", tag_owned, line);
         }
+    });
+
+    if let Err(e) = wait_for_file(&socket_path, Duration::from_secs(5)).await {
+        return Err(e).context(format!(
+            "waiting for virtiofsd socket for tag '{}' (check virtiofsd logs above)",
+            tag,
+        ));
     }
 
     log::info!(
@@ -74,5 +75,6 @@ pub(crate) async fn spawn_virtiofsd(
     Ok(VirtiofsdProcess {
         child,
         socket_path,
+        _stderr_task,
     })
 }

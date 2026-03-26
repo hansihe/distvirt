@@ -286,6 +286,16 @@ pub(crate) async fn api_request(
     path: &str,
     body: Option<&serde_json::Value>,
 ) -> anyhow::Result<()> {
+    api_request_with_timeout(method, socket_path, path, body, Duration::from_secs(30)).await
+}
+
+pub(crate) async fn api_request_with_timeout(
+    method: &str,
+    socket_path: &Path,
+    path: &str,
+    body: Option<&serde_json::Value>,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let start = std::time::Instant::now();
@@ -298,7 +308,7 @@ pub(crate) async fn api_request(
     if let Some(body) = body {
         let body_bytes = serde_json::to_vec(body)?;
         let request = format!(
-            "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             method,
             path,
             body_bytes.len()
@@ -307,7 +317,7 @@ pub(crate) async fn api_request(
         stream.write_all(&body_bytes).await?;
     } else {
         let request = format!(
-            "{} {} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             method,
             path,
         );
@@ -316,7 +326,7 @@ pub(crate) async fn api_request(
     stream.flush().await?;
 
     let mut response = Vec::new();
-    let read_result = tokio::time::timeout(Duration::from_secs(5), async {
+    let read_result = tokio::time::timeout(timeout, async {
         let mut buf = [0u8; 4096];
         loop {
             match stream.read(&mut buf).await {
@@ -349,10 +359,13 @@ pub(crate) async fn api_request(
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(e).context("read API response"),
         Err(_) => {
-            log::warn!(
-                "vmm API: read timeout on {} {}, checking partial response",
+            let partial = String::from_utf8_lossy(&response);
+            anyhow::bail!(
+                "vmm API timeout: {} {} did not respond within {:.1}s (partial response: {:?})",
                 method,
-                path
+                path,
+                timeout.as_secs_f64(),
+                if partial.is_empty() { "<empty>" } else { partial.as_ref() }
             );
         }
     }
@@ -366,6 +379,12 @@ pub(crate) async fn api_request(
         {
             anyhow::bail!("vmm API error on {} {}:\n{}", method, path, response_str);
         }
+    } else {
+        anyhow::bail!(
+            "vmm API: {} {} returned empty response",
+            method,
+            path,
+        );
     }
 
     let elapsed = start.elapsed();

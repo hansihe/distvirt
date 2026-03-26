@@ -35,7 +35,11 @@ impl ContainerdOverlayfsProvider {
         // Clean up leases orphaned by a previous crash before we start
         // creating new ones. This makes any resources held only by those
         // leases eligible for containerd GC.
-        lease_manager.cleanup_stale_leases().await?;
+        // Skipped during parallel e2e tests to avoid deleting leases from
+        // concurrently running workers.
+        if std::env::var("DISTVIRT_SKIP_LEASE_CLEANUP").is_err() {
+            lease_manager.cleanup_stale_leases().await?;
+        }
 
         Ok(Self {
             channel,

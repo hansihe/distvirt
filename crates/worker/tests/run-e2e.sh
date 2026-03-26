@@ -39,4 +39,4 @@ else
     echo "warning: test container image not found at $TEST_IMAGE (run guest-image/build.sh first)" >&2
 fi
 
-exec sudo "${SUDO_FLAGS[@]}" env DISTVIRT_E2E=1 PATH="$PATH:/usr/lib" "$CARGO" test --package distvirt-worker --test e2e "$@"
+exec sudo "${SUDO_FLAGS[@]}" env DISTVIRT_E2E=1 DISTVIRT_SKIP_LEASE_CLEANUP=1 PATH="$PATH:/home/hansihe/.cargo/bin" "$CARGO" test --package distvirt-worker --test e2e "$@"
