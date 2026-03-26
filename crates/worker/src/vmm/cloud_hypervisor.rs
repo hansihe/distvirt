@@ -14,47 +14,47 @@ use crate::fabric::{FabricPort, Port};
 use crate::linux::net::PersistentTap;
 use crate::task_handle::TaskHandle;
 
-/// Firecracker VMM implementation.
-pub struct Firecracker {
-    pub firecracker_bin: PathBuf,
+/// Cloud Hypervisor VMM implementation.
+pub struct CloudHypervisor {
+    pub cloud_hypervisor_bin: PathBuf,
 }
 
-impl Firecracker {
-    pub fn new(firecracker_bin: impl Into<PathBuf>) -> Self {
-        Firecracker {
-            firecracker_bin: firecracker_bin.into(),
+impl CloudHypervisor {
+    pub fn new(cloud_hypervisor_bin: impl Into<PathBuf>) -> Self {
+        CloudHypervisor {
+            cloud_hypervisor_bin: cloud_hypervisor_bin.into(),
         }
     }
 }
 
-/// Result of spawning the Firecracker process (before any API calls).
-struct SpawnedFirecracker {
+/// Result of spawning the Cloud Hypervisor process (before any API calls).
+struct SpawnedCloudHypervisor {
     child: tokio::process::Child,
     serial_stdout: Option<tokio::process::ChildStdout>,
     api_socket: PathBuf,
     vsock_uds_path: PathBuf,
 }
 
-/// Spawn the Firecracker process with cwd = `working_dir`, wait for the API
-/// socket, and return the child + captured stdout (if serial console is on).
-async fn spawn_firecracker(
+/// Spawn the Cloud Hypervisor process with cwd = `working_dir`, wait for the
+/// API socket, and return the child + captured stdout (if serial console is on).
+async fn spawn_cloud_hypervisor(
     bin: &Path,
     working_dir: &Path,
     serial_console: bool,
-) -> anyhow::Result<SpawnedFirecracker> {
-    let api_socket = working_dir.join("firecracker.sock");
+) -> anyhow::Result<SpawnedCloudHypervisor> {
+    let api_socket = working_dir.join("ch-api.sock");
     let vsock_uds_path = working_dir.join("vsock.sock");
 
     let mut cmd = tokio::process::Command::new(bin);
     cmd.current_dir(working_dir);
-    cmd.arg("--api-sock").arg("./firecracker.sock");
+    cmd.arg("--api-socket").arg(&api_socket);
     if serial_console {
         cmd.stdout(Stdio::piped());
     } else {
         cmd.stdout(Stdio::null());
     }
     cmd.stderr(Stdio::null());
-    let mut child = cmd.spawn().context("spawn firecracker")?;
+    let mut child = cmd.spawn().context("spawn cloud-hypervisor")?;
 
     let serial_stdout = if serial_console {
         child.stdout.take()
@@ -64,9 +64,9 @@ async fn spawn_firecracker(
 
     wait_for_file(&api_socket, Duration::from_secs(5))
         .await
-        .context("waiting for firecracker API socket")?;
+        .context("waiting for cloud-hypervisor API socket")?;
 
-    Ok(SpawnedFirecracker {
+    Ok(SpawnedCloudHypervisor {
         child,
         serial_stdout,
         api_socket,
@@ -74,49 +74,30 @@ async fn spawn_firecracker(
     })
 }
 
+impl Vmm for CloudHypervisor {
+    type Instance = CloudHypervisorInstance;
 
-impl Vmm for Firecracker {
-    type Instance = FirecrackerInstance;
-
-    async fn launch(&self, config: &VmConfig) -> anyhow::Result<FirecrackerInstance> {
+    async fn launch(&self, config: &VmConfig) -> anyhow::Result<CloudHypervisorInstance> {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
         // Copy rootfs and container images into tmpdir (writable copies).
-        log::info!("firecracker: copying rootfs image to tmpdir");
+        log::info!("cloud-hypervisor: copying rootfs image to tmpdir");
         copy_file_writable(
             &config.rootfs_image_path,
             &tmpdir.path().join("rootfs.ext4"),
         )
         .await?;
-        log::info!("firecracker: copying container image to tmpdir");
+        log::info!("cloud-hypervisor: copying container image to tmpdir");
         copy_file_writable(
             &config.container_image_path,
             &tmpdir.path().join("container.ext4"),
         )
         .await?;
-        log::info!("firecracker: images copied, spawning firecracker");
+        log::info!("cloud-hypervisor: images copied, spawning cloud-hypervisor");
 
-        // Spawn Firecracker and wait for API socket.
-        let spawned =
-            spawn_firecracker(&self.firecracker_bin, tmpdir.path(), config.serial_console).await?;
-        log::info!("firecracker: process spawned, configuring VM");
-        let SpawnedFirecracker {
-            child,
-            serial_stdout,
-            api_socket,
-            vsock_uds_path,
-        } = spawned;
-
-        // Configure the VM via the API.
-        //
-        // Boot args for the microVM kernel:
-        //   console=ttyS0  — serial console for boot logs (captured via stdout)
-        //   reboot=k       — use keyboard controller reset (prevents triple-fault reboot loop)
-        //   panic=-1       — reboot immediately on kernel panic (no delay)
-        //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
-        //   init=/sbin/init — our custom init binary (not systemd)
-        // Firecracker uses an 8250 UART on both x86_64 and aarch64.
-        let mut boot_args = format!("console=ttyS0 reboot=k panic=-1 pci=off init=/sbin/init");
+        // Build boot args.
+        // Cloud Hypervisor uses PCI, so no `pci=off`.
+        let mut boot_args = format!("console=ttyS0 reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.shutdown=poweroff");
         if let Some(ref balloon) = config.balloon {
             boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
         }
@@ -135,64 +116,7 @@ impl Vmm for Firecracker {
             boot_args.push_str(" distvirt.config_device=/dev/vdc");
         }
 
-        api_request("PUT",
-            &api_socket,
-            "/boot-source",
-            Some(&serde_json::json!({
-                "kernel_image_path": config.kernel_path.to_str()
-                    .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8: {:?}", config.kernel_path))?,
-                "boot_args": boot_args
-            })),
-        )
-        .await
-        .context("configure boot-source")?;
-
-        api_request(
-            "PUT",
-            &api_socket,
-            "/drives/rootfs",
-            Some(&serde_json::json!({
-                "drive_id": "rootfs",
-                "path_on_host": "./rootfs.ext4",
-                "is_root_device": true,
-                "is_read_only": false
-            })),
-        )
-        .await
-        .context("configure rootfs drive")?;
-
-        api_request(
-            "PUT",
-            &api_socket,
-            "/drives/container",
-            Some(&serde_json::json!({
-                "drive_id": "container",
-                "path_on_host": "./container.ext4",
-                "is_root_device": false,
-                "is_read_only": false
-            })),
-        )
-        .await
-        .context("configure container drive")?;
-
-        // Register config drive if present.
-        if !config.initial_commands.is_empty() {
-            api_request(
-                "PUT",
-                &api_socket,
-                "/drives/config",
-                Some(&serde_json::json!({
-                    "drive_id": "config",
-                    "path_on_host": "./config.img",
-                    "is_root_device": false,
-                    "is_read_only": true
-                })),
-            )
-            .await
-            .context("configure config drive")?;
-        }
-
-        // Copy and register additional drives (volumes).
+        // Copy and prepare additional drives (volumes).
         for drive in &config.additional_drives {
             let filename = drive
                 .image_path
@@ -200,65 +124,80 @@ impl Vmm for Firecracker {
                 .context("additional drive has no filename")?
                 .to_str()
                 .context("additional drive filename is not valid UTF-8")?;
-            log::info!("firecracker: copying volume drive '{}' to tmpdir", drive.drive_id);
+            log::info!(
+                "cloud-hypervisor: copying volume drive '{}' to tmpdir",
+                drive.drive_id
+            );
             copy_file_writable(&drive.image_path, &tmpdir.path().join(filename)).await?;
-            api_request(
-                "PUT",
-                &api_socket,
-                &format!("/drives/{}", drive.drive_id),
-                Some(&serde_json::json!({
-                    "drive_id": &drive.drive_id,
-                    "path_on_host": format!("./{}", filename),
-                    "is_root_device": false,
-                    "is_read_only": drive.read_only,
-                })),
-            )
-            .await
-            .with_context(|| format!("configure additional drive '{}'", drive.drive_id))?;
         }
 
-        api_request(
-            "PUT",
-            &api_socket,
-            "/vsock",
-            Some(&serde_json::json!({
-                // CID 0 and 1 are reserved (hypervisor and host). CID 2 is
-                // conventionally the host in some setups. We use 3 as the
-                // guest CID — the exact value doesn't matter since we connect
-                // via the UDS path, not by CID.
-                "guest_cid": 3,
-                "uds_path": "./vsock.sock"
-            })),
+        // Spawn Cloud Hypervisor and wait for API socket.
+        let spawned = spawn_cloud_hypervisor(
+            &self.cloud_hypervisor_bin,
+            tmpdir.path(),
+            config.serial_console,
         )
-        .await
-        .context("configure vsock")?;
+        .await?;
+        log::info!("cloud-hypervisor: process spawned, configuring VM");
+        let SpawnedCloudHypervisor {
+            child,
+            serial_stdout,
+            api_socket,
+            vsock_uds_path,
+        } = spawned;
 
-        api_request(
-            "PUT",
-            &api_socket,
-            "/machine-config",
-            Some(&serde_json::json!({
-                "vcpu_count": config.vcpu_count,
-                "mem_size_mib": config.mem_size_mib
-            })),
-        )
-        .await
-        .context("configure machine")?;
+        // Build the full VmConfig JSON for vm.create.
+        let kernel_path_str = config
+            .kernel_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8"))?;
+
+        // Disks: rootfs (vda), container (vdb), optional config (vdc), then volumes.
+        let mut disks = vec![
+            serde_json::json!({"path": "./rootfs.ext4", "readonly": false}),
+            serde_json::json!({"path": "./container.ext4", "readonly": false}),
+        ];
+        if !config.initial_commands.is_empty() {
+            disks.push(serde_json::json!({"path": "./config.img", "readonly": true}));
+        }
+        for drive in &config.additional_drives {
+            let filename = drive.image_path.file_name().unwrap().to_str().unwrap();
+            disks.push(
+                serde_json::json!({"path": format!("./{}", filename), "readonly": drive.read_only}),
+            );
+        }
+
+        let mut vm_config = serde_json::json!({
+            "payload": {
+                "kernel": kernel_path_str,
+                "cmdline": boot_args,
+            },
+            "disks": disks,
+            "vsock": {
+                "cid": 3,
+                "socket": "./vsock.sock",
+            },
+            "cpus": {
+                "boot_vcpus": config.vcpu_count,
+                "max_vcpus": config.vcpu_count,
+            },
+            "memory": {
+                "size": (config.mem_size_mib as u64) * 1024 * 1024,
+            },
+            "serial": {
+                "mode": if config.serial_console { "Tty" } else { "Off" },
+            },
+            "console": {
+                "mode": "Off",
+            },
+        });
 
         // Configure balloon device if requested.
         if let Some(ref balloon) = config.balloon {
-            api_request(
-                "PUT",
-                &api_socket,
-                "/balloon",
-                Some(&serde_json::json!({
-                    "amount_mib": balloon.amount_mib,
-                    "deflate_on_oom": balloon.deflate_on_oom,
-                    "stats_polling_interval_s": balloon.stats_polling_interval_s
-                })),
-            )
-            .await
-            .context("configure balloon")?;
+            vm_config["balloon"] = serde_json::json!({
+                "size": (balloon.amount_mib as u64) * 1024 * 1024,
+                "deflate_on_oom": balloon.deflate_on_oom,
+            });
         }
 
         // Configure network interface if requested.
@@ -266,20 +205,26 @@ impl Vmm for Firecracker {
             let tap = PersistentTap::create().context("create TAP device")?;
             tap.bring_up().context("bring TAP interface up")?;
 
-            api_request(
-                "PUT",
-                &api_socket,
-                "/network-interfaces/eth0",
-                Some(&serde_json::json!({
-                    "iface_id": "eth0",
-                    "host_dev_name": tap.name(),
-                    "guest_mac": format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                        net.guest_mac[0], net.guest_mac[1], net.guest_mac[2],
-                        net.guest_mac[3], net.guest_mac[4], net.guest_mac[5])
-                })),
-            )
-            .await
-            .context("configure network interface")?;
+            let mac_str = format!(
+                "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                net.guest_mac[0],
+                net.guest_mac[1],
+                net.guest_mac[2],
+                net.guest_mac[3],
+                net.guest_mac[4],
+                net.guest_mac[5]
+            );
+
+            // Disable offloads — we do raw L2 injection via AF_PACKET on the
+            // TAP device. With offloads enabled the guest expects the hypervisor
+            // to handle segmentation, but our packet path doesn't do that.
+            vm_config["net"] = serde_json::json!([{
+                "tap": tap.name(),
+                "mac": mac_str,
+                "offload_tso": false,
+                "offload_ufo": false,
+                "offload_csum": false,
+            }]);
 
             log::info!(
                 "configured network: tap={}, guest_ip={}",
@@ -291,18 +236,14 @@ impl Vmm for Firecracker {
             None
         };
 
-        log::info!("firecracker: starting instance");
-        api_request(
-            "PUT",
-            &api_socket,
-            "/actions",
-            Some(&serde_json::json!({
-                "action_type": "InstanceStart"
-            })),
-        )
-        .await
-        .context("start instance")?;
-        log::info!("firecracker: instance started");
+        // Create and boot the VM.
+        api_request("PUT", &api_socket, "/api/v1/vm.create", Some(&vm_config))
+            .await
+            .context("vm.create")?;
+        api_request("PUT", &api_socket, "/api/v1/vm.boot", None)
+            .await
+            .context("vm.boot")?;
+        log::info!("cloud-hypervisor: instance started");
 
         // Open AF_PACKET socket on the TAP and wrap as FabricPort.
         let fabric_port = if let Some(tap) = tap {
@@ -333,7 +274,7 @@ impl Vmm for Firecracker {
             })
             .collect();
 
-        Ok(FirecrackerInstance {
+        Ok(CloudHypervisorInstance {
             child,
             vsock_uds_path,
             api_socket,
@@ -354,14 +295,13 @@ impl Vmm for Firecracker {
         &self,
         snapshot: &SnapshotArtifacts,
         net: Option<&NetConfig>,
-    ) -> anyhow::Result<FirecrackerInstance> {
+    ) -> anyhow::Result<CloudHypervisorInstance> {
         let metadata = &snapshot.metadata;
         let snapshot_dir = &snapshot.snapshot_dir;
 
-        // 1. Create new tmpdir.
         let tmpdir = tempfile::tempdir().context("create tmpdir for restore")?;
 
-        // 2. Copy rootfs from original source path and container.ext4 from snapshot.
+        // Copy rootfs from original source and container from snapshot.
         copy_file_writable(
             &metadata.rootfs_source_path,
             &tmpdir.path().join("rootfs.ext4"),
@@ -373,7 +313,7 @@ impl Vmm for Firecracker {
         )
         .await?;
 
-        // 2b. Copy volume images from snapshot.
+        // Copy volume images from snapshot.
         for vd in &metadata.volume_drives {
             copy_file_writable(
                 &snapshot_dir.join(&vd.filename),
@@ -383,67 +323,64 @@ impl Vmm for Firecracker {
             .with_context(|| format!("copy volume image '{}' from snapshot", vd.filename))?;
         }
 
-        // 3. Copy snapshot.bin and mem.bin from snapshot dir into tmpdir.
-        tokio::fs::copy(
-            snapshot_dir.join("snapshot.bin"),
-            tmpdir.path().join("snapshot.bin"),
-        )
-        .await
-        .context("copy snapshot.bin from snapshot")?;
-        tokio::fs::copy(snapshot_dir.join("mem.bin"), tmpdir.path().join("mem.bin"))
+        // Copy CH snapshot files (config.json, state.json, memory-ranges).
+        for filename in &["config.json", "state.json", "memory-ranges"] {
+            tokio::fs::copy(
+                snapshot_dir.join(filename),
+                tmpdir.path().join(filename),
+            )
             .await
-            .context("copy mem.bin from snapshot")?;
+            .with_context(|| format!("copy {} from snapshot", filename))?;
+        }
 
-        // 4. Create fresh TAP if networking is configured.
+        // Create fresh TAP if networking is configured.
         let tap = if net.is_some() {
             let tap = PersistentTap::create().context("create TAP device for restore")?;
             tap.bring_up()
                 .context("bring TAP interface up for restore")?;
             log::info!("restore: created TAP {}", tap.name());
+
+            // Patch CH's config.json to use the new TAP device name.
+            patch_snapshot_config_tap(&tmpdir.path().join("config.json"), tap.name())
+                .await
+                .context("patch TAP name in snapshot config.json")?;
+
             Some(tap)
         } else {
             None
         };
 
-        // 5. Spawn Firecracker and wait for API socket.
-        let spawned = spawn_firecracker(
-            &self.firecracker_bin,
+        // Spawn Cloud Hypervisor and wait for API socket.
+        let spawned = spawn_cloud_hypervisor(
+            &self.cloud_hypervisor_bin,
             tmpdir.path(),
             metadata.serial_console,
         )
         .await?;
-        let SpawnedFirecracker {
+        let SpawnedCloudHypervisor {
             child,
             serial_stdout,
             api_socket,
             vsock_uds_path,
         } = spawned;
 
-        // 6. Load snapshot with network overrides.
-        let mut load_body = serde_json::json!({
-            "snapshot_path": "./snapshot.bin",
-            "mem_backend": {
-                "backend_path": "./mem.bin",
-                "backend_type": "File",
-            },
-            "resume_vm": true,
-        });
+        // Restore VM from snapshot.
+        let source_url = format!("file://{}", tmpdir.path().display());
+        api_request(
+            "PUT",
+            &api_socket,
+            "/api/v1/vm.restore",
+            Some(&serde_json::json!({"source_url": source_url})),
+        )
+        .await
+        .context("vm.restore")?;
 
-        // Add network overrides if we have a TAP.
-        if let Some(ref tap) = tap {
-            load_body["network_overrides"] = serde_json::json!([
-                {
-                    "iface_id": "eth0",
-                    "host_dev_name": tap.name(),
-                }
-            ]);
-        }
-
-        api_request("PUT", &api_socket, "/snapshot/load", Some(&load_body))
+        // CH leaves the VM paused after restore — resume it.
+        api_request("PUT", &api_socket, "/api/v1/vm.resume", None)
             .await
-            .context("load snapshot")?;
+            .context("vm.resume")?;
 
-        // 7. Open AF_PACKET socket on the new TAP and wrap as FabricPort.
+        // Open AF_PACKET socket on the new TAP and wrap as FabricPort.
         let fabric_port = if let (Some(tap), Some(net_cfg)) = (tap, net) {
             let socket = tap
                 .into_packet_socket()
@@ -458,7 +395,7 @@ impl Vmm for Firecracker {
 
         log::info!("VM restored from snapshot at {}", snapshot_dir.display());
 
-        Ok(FirecrackerInstance {
+        Ok(CloudHypervisorInstance {
             child,
             vsock_uds_path,
             api_socket,
@@ -476,46 +413,31 @@ impl Vmm for Firecracker {
     }
 }
 
-pub struct FirecrackerInstance {
+pub struct CloudHypervisorInstance {
     child: tokio::process::Child,
     vsock_uds_path: PathBuf,
     api_socket: PathBuf,
     fabric_port: Option<FabricPort>,
     _serial_task: Option<TaskHandle<()>>,
-    /// Watch channel that fires when the VM process exits (via pidfd).
     exit_rx: watch::Receiver<Option<ExitStatus>>,
-    /// Background task monitoring the process via pidfd.
     _exit_monitor: TaskHandle<()>,
+    /// Tmpdir holding disk images and sockets. Dropped after child is killed
+    /// (field order matters — child is declared first).
     _tmpdir: tempfile::TempDir,
-    /// Stored for snapshot metadata — needed to reconstruct the VM on restore.
     kernel_path: PathBuf,
-    /// Stored for snapshot metadata — the original rootfs image path (re-copied on restore).
     rootfs_source_path: PathBuf,
-    /// Whether a balloon device was configured at launch (needed for set_balloon/snapshot).
     balloon_configured: bool,
-    /// Whether serial console output is enabled.
     serial_console: bool,
-    /// Volume drives attached to the VM (for snapshot/restore).
     volume_drives: Vec<super::SnapshotVolumeDrive>,
 }
 
-impl Drop for FirecrackerInstance {
+impl Drop for CloudHypervisorInstance {
     fn drop(&mut self) {
-        // Safety net: if the instance is dropped without explicit cleanup
-        // (e.g., task abort, non-graceful stop), send SIGKILL to the process.
-        //
-        // We use `start_kill()` (not `kill().await`) because Drop is synchronous.
-        // start_kill() sends SIGKILL without awaiting — the OS will reap the zombie.
-        //
-        // IMPORTANT: Rust drops struct fields in declaration order. `child` is
-        // declared before `_tmpdir`, so the process is killed before the tmpdir
-        // is removed. Reordering the struct fields would cause Firecracker to
-        // lose its working directory while still running.
         let _ = self.child.start_kill();
     }
 }
 
-impl VmInstance for FirecrackerInstance {
+impl VmInstance for CloudHypervisorInstance {
     async fn connect_vsock(&self, port: u32) -> anyhow::Result<UnixStream> {
         let sock_path = self.vsock_uds_path.clone();
 
@@ -556,13 +478,19 @@ impl VmInstance for FirecrackerInstance {
             .wait_for(|s| s.is_some())
             .await
             .map_err(|_| anyhow::anyhow!("exit monitor task dropped"))?;
-        // Reap the child properly (should return immediately since process is dead).
-        let status = self.child.wait().await.context("wait for firecracker")?;
+        let status = self
+            .child
+            .wait()
+            .await
+            .context("wait for cloud-hypervisor")?;
         Ok(status)
     }
 
     async fn kill(&mut self) -> anyhow::Result<()> {
-        self.child.kill().await.context("kill firecracker")?;
+        self.child
+            .kill()
+            .await
+            .context("kill cloud-hypervisor")?;
         Ok(())
     }
 
@@ -574,11 +502,12 @@ impl VmInstance for FirecrackerInstance {
         if !self.balloon_configured {
             bail!("balloon device not configured for this VM");
         }
+        // Cloud Hypervisor uses vm.resize with desired_balloon in bytes.
         api_request(
-            "PATCH",
+            "PUT",
             &self.api_socket,
-            "/balloon",
-            Some(&serde_json::json!({"amount_mib": amount_mib})),
+            "/api/v1/vm.resize",
+            Some(&serde_json::json!({"desired_balloon": (amount_mib as u64) * 1024 * 1024})),
         )
         .await
         .context("set balloon size")?;
@@ -591,24 +520,18 @@ impl VmInstance for FirecrackerInstance {
             .with_context(|| format!("create snapshot dir {}", snapshot_dir.display()))?;
 
         // 1. Pause vCPUs.
-        api_request(
-            "PATCH",
-            &self.api_socket,
-            "/vm",
-            Some(&serde_json::json!({"state": "Paused"})),
-        )
-        .await
-        .context("pause VM")?;
+        api_request("PUT", &self.api_socket, "/api/v1/vm.pause", None)
+            .await
+            .context("pause VM")?;
 
-        // 2. Create snapshot — Firecracker writes to its cwd (tmpdir).
+        // 2. Create snapshot — CH writes config.json, state.json, memory-ranges
+        //    into the destination directory.
+        let destination_url = format!("file://{}", snapshot_dir.display());
         api_request(
             "PUT",
             &self.api_socket,
-            "/snapshot/create",
-            Some(&serde_json::json!({
-                "snapshot_path": "./snapshot.bin",
-                "mem_file_path": "./mem.bin",
-            })),
+            "/api/v1/vm.snapshot",
+            Some(&serde_json::json!({"destination_url": destination_url})),
         )
         .await
         .context("create snapshot")?;
@@ -633,18 +556,7 @@ impl VmInstance for FirecrackerInstance {
             .with_context(|| format!("copy volume '{}' to snapshot dir", vd.filename))?;
         }
 
-        // 4. Copy snapshot.bin and mem.bin from tmpdir into snapshot dir.
-        tokio::fs::copy(
-            tmpdir_path.join("snapshot.bin"),
-            snapshot_dir.join("snapshot.bin"),
-        )
-        .await
-        .context("copy snapshot.bin to snapshot dir")?;
-        tokio::fs::copy(tmpdir_path.join("mem.bin"), snapshot_dir.join("mem.bin"))
-            .await
-            .context("copy mem.bin to snapshot dir")?;
-
-        // 5. Write metadata.json.
+        // 4. Write metadata.json.
         let metadata = SnapshotMetadata {
             kernel_path: self.kernel_path.clone(),
             rootfs_source_path: self.rootfs_source_path.clone(),
@@ -667,4 +579,28 @@ impl VmInstance for FirecrackerInstance {
     }
 }
 
-
+/// Patch the TAP device name in a Cloud Hypervisor snapshot's config.json.
+///
+/// CH saves its full VM config as `config.json` in the snapshot directory and
+/// re-reads it on restore. By rewriting the `tap` field in the `net` array we
+/// can point the restored VM at a freshly created TAP device without needing
+/// FD passing (`net_fds` / `SCM_RIGHTS`).
+async fn patch_snapshot_config_tap(config_path: &Path, new_tap_name: &str) -> anyhow::Result<()> {
+    let data = tokio::fs::read_to_string(config_path)
+        .await
+        .context("read config.json")?;
+    let mut config: serde_json::Value =
+        serde_json::from_str(&data).context("parse config.json")?;
+    if let Some(nets) = config.get_mut("net").and_then(|n| n.as_array_mut()) {
+        for net in nets {
+            if let Some(obj) = net.as_object_mut() {
+                obj.insert("tap".to_string(), serde_json::json!(new_tap_name));
+            }
+        }
+    }
+    let patched = serde_json::to_string_pretty(&config).context("serialize patched config")?;
+    tokio::fs::write(config_path, patched)
+        .await
+        .context("write patched config.json")?;
+    Ok(())
+}

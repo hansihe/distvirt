@@ -795,11 +795,21 @@ fn main() {
     unsafe {
         libc::sync();
     }
-    // Use reboot (not power-off): Firecracker doesn't support ACPI power-off,
-    // so RB_POWER_OFF halts the vCPU but leaves the process running.
-    // RB_AUTOBOOT triggers a triple fault which causes KVM/Firecracker to exit.
+    // distvirt.shutdown=poweroff uses ACPI power-off (for VMMs that support it,
+    // e.g. Cloud Hypervisor). Default is RB_AUTOBOOT which triggers a triple
+    // fault — needed for Firecracker which doesn't support ACPI power-off.
+    let cmd = match memory::init::read_cmdline_param("distvirt.shutdown").as_deref() {
+        Some("poweroff") => {
+            log::info!("using ACPI power-off (distvirt.shutdown=poweroff)");
+            libc::RB_POWER_OFF
+        }
+        _ => {
+            log::info!("using reboot/triple-fault shutdown");
+            libc::RB_AUTOBOOT
+        }
+    };
     unsafe {
-        libc::reboot(libc::RB_AUTOBOOT);
+        libc::reboot(cmd);
     }
     loop {
         unsafe {

@@ -43,7 +43,7 @@ pub async fn setup_with_activators() -> anyhow::Result<(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 )> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let component_dir = manifest_dir.join("../activators/target/components");
+    let component_dir = manifest_dir.join("../../activators/target/components");
     assert!(
         component_dir.exists(),
         "WASM component directory not found at {}. Run activators/build.sh first.",
@@ -87,8 +87,11 @@ async fn setup_full(
     assert!(kernel.exists(), "kernel not found at {}", kernel.display());
     assert!(rootfs.exists(), "rootfs not found at {}", rootfs.display());
 
-    let firecracker_bin = std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".into());
-    let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker_bin);
+    // let firecracker_bin = std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".into());
+    // let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker_bin);
+    let cloud_hypervisor_bin =
+        std::env::var("CLOUD_HYPERVISOR_BIN").unwrap_or_else(|_| "cloud-hypervisor".into());
+    let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(cloud_hypervisor_bin);
 
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());
@@ -288,9 +291,7 @@ pub async fn register_pod_endpoint(
         upserted: vec![EndpointSpec {
             ip: pod_network.ip,
             kind: EndpointKind::Pod {
-                placement: Some(EndpointPlacement {
-                    worker_id,
-                }),
+                placement: Some(EndpointPlacement { worker_id }),
             },
         }],
         removed_ips: vec![],

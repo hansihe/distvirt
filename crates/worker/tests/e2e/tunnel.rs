@@ -20,14 +20,17 @@ async fn setup_worker(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 )> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let kernel = manifest_dir.join("../guest-image/result-kernel/vmlinux");
-    let rootfs = manifest_dir.join("../guest-image/result-rootfs");
+    let kernel = manifest_dir.join("../../guest-image/result-kernel/vmlinux");
+    let rootfs = manifest_dir.join("../../guest-image/result-rootfs");
 
     assert!(kernel.exists(), "kernel not found at {}", kernel.display());
     assert!(rootfs.exists(), "rootfs not found at {}", rootfs.display());
 
-    let firecracker_bin = std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".into());
-    let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker_bin);
+    // let firecracker_bin = std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".into());
+    // let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker_bin);
+    let cloud_hypervisor_bin =
+        std::env::var("CLOUD_HYPERVISOR_BIN").unwrap_or_else(|_| "cloud-hypervisor".into());
+    let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(cloud_hypervisor_bin);
 
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());

@@ -1,4 +1,5 @@
-pub mod firecracker;
+pub mod cloud_hypervisor;
+// pub mod firecracker;
 pub mod guest_sim;
 pub mod qemu;
 pub mod test_vmm;
@@ -235,4 +236,155 @@ pub(crate) fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHand
             log::debug!("[serial] {}", line);
         }
     })
+}
+
+/// Send an HTTP request to a VMM API over a Unix socket.
+///
+/// Uses raw HTTP/1.1 — each request uses a fresh connection (both Firecracker
+/// and Cloud Hypervisor are one-request-per-connection).
+pub(crate) async fn api_request(
+    method: &str,
+    socket_path: &Path,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let start = std::time::Instant::now();
+    log::info!("vmm API: {} {}", method, path);
+
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connect to API socket {}", socket_path.display()))?;
+
+    if let Some(body) = body {
+        let body_bytes = serde_json::to_vec(body)?;
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            method,
+            path,
+            body_bytes.len()
+        );
+        stream.write_all(request.as_bytes()).await?;
+        stream.write_all(&body_bytes).await?;
+    } else {
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            method,
+            path,
+        );
+        stream.write_all(request.as_bytes()).await?;
+    }
+    stream.flush().await?;
+
+    // Read the response with a timeout.
+    let mut response = Vec::new();
+    let read_result = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    response.extend_from_slice(&buf[..n]);
+                    // Check if we have a complete response.
+                    if let Ok(s) = std::str::from_utf8(&response) {
+                        if s.contains("\r\n\r\n") {
+                            if let Some(cl) = parse_content_length(s) {
+                                if let Some(body_start) = s.find("\r\n\r\n") {
+                                    let body_received = response.len() - body_start - 4;
+                                    if body_received >= cl {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    match read_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e).context("read API response"),
+        Err(_) => {
+            log::warn!(
+                "vmm API: read timeout on {} {}, checking partial response",
+                method,
+                path
+            );
+        }
+    }
+
+    let response_str = String::from_utf8_lossy(&response);
+
+    if let Some(status_line) = response_str.lines().next() {
+        if !status_line.contains("200")
+            && !status_line.contains("201")
+            && !status_line.contains("204")
+        {
+            anyhow::bail!("vmm API error on {} {}:\n{}", method, path, response_str);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > 500 {
+        log::warn!(
+            "vmm API: {} {} took {:.1}s",
+            method,
+            path,
+            elapsed.as_secs_f64()
+        );
+    } else {
+        log::info!("vmm API: {} {} completed in {:?}", method, path, elapsed);
+    }
+
+    Ok(())
+}
+
+fn parse_content_length(headers: &str) -> Option<usize> {
+    for line in headers.lines() {
+        if let Some(val) = line.strip_prefix("Content-Length: ") {
+            return val.trim().parse().ok();
+        }
+        if let Some(val) = line.strip_prefix("content-length: ") {
+            return val.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Connect to a guest vsock listener via a VMM's UDS proxy.
+///
+/// Both Firecracker and Cloud Hypervisor use the same protocol:
+/// send `CONNECT <port>\n`, expect `OK <id>\n` in response.
+pub(crate) async fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Result<UnixStream> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let stream = UnixStream::connect(sock_path).await?;
+
+    let connect_cmd = format!("CONNECT {}\n", port);
+    let (reader, mut writer) = stream.into_split();
+    writer.write_all(connect_cmd.as_bytes()).await?;
+    writer.flush().await?;
+
+    let mut reader = BufReader::new(reader);
+    let mut response = String::new();
+    // Use tokio::time::timeout to avoid hanging forever.
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut response))
+        .await
+        .context("timeout reading vsock CONNECT response")?
+        .context("read vsock CONNECT response")?;
+
+    if !response.starts_with("OK ") {
+        anyhow::bail!("vsock CONNECT failed: {}", response.trim());
+    }
+
+    // Reunite the split halves.
+    Ok(reader.into_inner().reunite(writer)?)
 }

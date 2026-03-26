@@ -41,6 +41,10 @@ struct Cli {
     /// Path to Docker config.json for registry auth
     #[arg(long, default_value = "/root/.docker/config.json")]
     docker_config: PathBuf,
+
+    /// VMM backend to use (firecracker or cloud-hypervisor)
+    #[arg(long, default_value = "cloud-hypervisor")]
+    vmm: String,
 }
 
 #[tokio::main]
@@ -49,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let vmm = distvirt_worker::vmm::firecracker::Firecracker::new("firecracker");
     let image_provider =
         distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider::new(
             cli.containerd_socket,
@@ -63,22 +66,41 @@ async fn main() -> anyhow::Result<()> {
     let conn = WorkerConnection::accept(stream).await?;
 
     let activity = std::sync::Arc::new(distvirt_common::ActivityTracker::new());
-    let worker = distvirt_worker::worker::Worker::<
-        _,
-        _,
-        _,
-        distvirt_worker::TokioFs,
-        distvirt_worker::HostResourceMonitor,
-    >::new(
-        cli.kernel,
-        cli.rootfs_image,
-        vmm,
-        image_provider,
-        cli.component_dir,
-        cli.public_endpoint,
-        distvirt_worker::TunGatewayProvider,
-        activity,
-    );
 
-    worker.run(conn, cli.worker_secret).await
+    macro_rules! run_worker {
+        ($vmm:expr) => {{
+            let worker = distvirt_worker::worker::Worker::<
+                _,
+                _,
+                _,
+                distvirt_worker::TokioFs,
+                distvirt_worker::HostResourceMonitor,
+            >::new(
+                cli.kernel,
+                cli.rootfs_image,
+                $vmm,
+                image_provider,
+                cli.component_dir,
+                cli.public_endpoint,
+                distvirt_worker::TunGatewayProvider,
+                activity,
+            );
+            worker.run(conn, cli.worker_secret).await
+        }};
+    }
+
+    match cli.vmm.as_str() {
+        // "firecracker" => {
+        //     log::info!("using Firecracker VMM backend");
+        //     let vmm = distvirt_worker::vmm::firecracker::Firecracker::new("firecracker");
+        //     run_worker!(vmm)
+        // }
+        "cloud-hypervisor" => {
+            log::info!("using Cloud Hypervisor VMM backend");
+            let vmm =
+                distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new("cloud-hypervisor");
+            run_worker!(vmm)
+        }
+        other => anyhow::bail!("unknown VMM backend: {}", other),
+    }
 }

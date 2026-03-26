@@ -119,7 +119,7 @@ impl<
             instance_id,
         ));
         let mut pools = HashMap::new();
-        let pool_id = PoolId::from(format!("local-{}", uuid::Uuid::new_v4()));
+        let pool_id = PoolId::from("local-default".to_string());
         pools.insert(pool_id, default_pool_path);
         Worker {
             kernel_path,
