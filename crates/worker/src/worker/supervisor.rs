@@ -362,6 +362,12 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     Option<TaskHandle<()>>,
     PodResources,
 )> {
+    if containers.len() > 1 {
+        anyhow::bail!(
+            "multi-container pods are not supported (got {} containers)",
+            containers.len()
+        );
+    }
     let container = containers
         .into_iter()
         .next()

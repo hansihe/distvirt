@@ -32,17 +32,22 @@ pub(crate) async fn spawn_virtiofsd(
     working_dir: &Path,
     tag: &str,
     source_dir: &Path,
+    read_only: bool,
 ) -> anyhow::Result<VirtiofsdProcess> {
     let socket_path = working_dir.join(format!("virtiofs-{}.sock", tag));
 
-    let mut child = tokio::process::Command::new(bin)
-        .arg(format!("--socket-path={}", socket_path.display()))
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg(format!("--socket-path={}", socket_path.display()))
         .arg(format!("--shared-dir={}", source_dir.display()))
         .arg("--announce-submounts")
         .arg("--sandbox=none")
-        .arg("--readonly")
         .arg("--migration-mode=find-paths")
-        .arg("--migration-on-error=abort")
+        .arg("--migration-on-error=abort");
+    if read_only {
+        cmd.arg("--readonly");
+    }
+
+    let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
