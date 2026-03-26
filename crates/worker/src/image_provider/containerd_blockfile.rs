@@ -146,10 +146,9 @@ impl ImageProvider for ContainerdBlockfileProvider {
         .await
         .context("removing blockfile view after copy")?;
 
-        // Lease is dropped here — committed snapshots are protected by GC
-        // ref labels, not the lease. The NamedTempFile is stored as the
-        // cleanup handle: deleted when PreparedArtifact drops. On Linux,
-        // Firecracker's open fd keeps the data alive even after unlink.
+        // TODO: This provider still returns an ext4 block file, not a rootfs
+        // directory. It needs to be replaced with an overlayfs snapshotter-based
+        // provider that returns a merged directory for virtiofs (Phase 3).
         Ok(PreparedArtifact::new(image_path, Some(config), temp_file))
     }
 }

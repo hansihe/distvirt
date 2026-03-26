@@ -1057,6 +1057,7 @@ impl<
         let pod_cancel = ns.token.child_token();
         let event_tx = self.bg_event_tx.clone();
         let vmm = Arc::clone(&self.vmm);
+        let image_provider = Arc::clone(&self.image_provider);
         let fabric = Arc::clone(&ns.fabric);
         let ns_id = namespace_id.clone();
         let pid = pod_id.clone();
@@ -1066,8 +1067,9 @@ impl<
         let (suspend_tx, suspend_rx) = mpsc::channel(1);
 
         let supervisor = TaskHandle::spawn(async move {
-            pod_resume_supervisor::<V, F>(
+            pod_resume_supervisor::<V, P, F>(
                 vmm,
+                image_provider,
                 fabric,
                 cancel_clone,
                 event_tx,

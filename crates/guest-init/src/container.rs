@@ -42,9 +42,20 @@ impl AsRawFd for PipeFd {
     }
 }
 
+/// Extra mount points created for a virtiofs overlay container.
+/// Tracked so they can be unmounted in reverse order on removal.
+struct OverlayMounts {
+    /// The virtiofs lower layer mount (e.g. /mnt/rootfs-<id>).
+    rootfs_mount: String,
+    /// The overlay device mount (e.g. /mnt/overlay-<id>).
+    overlay_device_mount: String,
+}
+
 struct Container {
     id: String,
     mount_point: String,
+    /// Extra mounts to clean up for virtiofs overlay containers.
+    overlay_mounts: Option<OverlayMounts>,
     pid: Option<libc::pid_t>,
     /// Write end of stdin pipe (when stdin forwarding is enabled).
     pub stdin_fd: Option<OwnedFd>,
@@ -77,12 +88,12 @@ impl ContainerManager {
         }
     }
 
-    /// Mount the block device as ext4 at /containers/<id>, write resolv.conf,
+    /// Set up the container rootfs at /containers/<id>, write resolv.conf,
     /// and bind-mount any volume mounts into the container rootfs.
     pub fn add(
         &mut self,
         id: String,
-        device: String,
+        rootfs: distvirt_guest_protocol::ContainerRootfs,
         dns_servers: &[String],
         volume_mounts: &[distvirt_guest_protocol::VolumeMount],
     ) -> anyhow::Result<()> {
@@ -91,9 +102,67 @@ impl ContainerManager {
         }
 
         let mount_point = format!("/containers/{}", id);
-        util::mount(&device, &mount_point, "ext4", 0, None)
-            .with_context(|| format!("mount {} on {}", device, mount_point))?;
-        log::info!("mounted {} at {}", device, mount_point);
+
+        let overlay_mounts = match rootfs {
+            distvirt_guest_protocol::ContainerRootfs::Device { device } => {
+                util::mount(&device, &mount_point, "ext4", 0, None)
+                    .with_context(|| format!("mount {} on {}", device, mount_point))?;
+                log::info!("mounted {} at {}", device, mount_point);
+                None
+            }
+            distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
+                tag,
+                overlay_device,
+            } => {
+                // 1. Mount virtiofs read-only lower layer.
+                let rootfs_mount = format!("/mnt/rootfs-{}", id);
+                util::mount(
+                    &tag,
+                    &rootfs_mount,
+                    "virtiofs",
+                    libc::MS_RDONLY as libc::c_ulong,
+                    None,
+                )
+                .with_context(|| format!("mount virtiofs tag '{}' on {}", tag, rootfs_mount))?;
+                log::info!("mounted virtiofs '{}' at {}", tag, rootfs_mount);
+
+                // 2. Mount overlay device for upper/work dirs.
+                let overlay_device_mount = format!("/mnt/overlay-{}", id);
+                util::mount(&overlay_device, &overlay_device_mount, "ext4", 0, None)
+                    .with_context(|| {
+                        format!(
+                            "mount overlay device {} on {}",
+                            overlay_device, overlay_device_mount
+                        )
+                    })?;
+
+                let upper = format!("{}/upper", overlay_device_mount);
+                let work = format!("{}/work", overlay_device_mount);
+                std::fs::create_dir_all(&upper).context("create overlay upper dir")?;
+                std::fs::create_dir_all(&work).context("create overlay work dir")?;
+
+                // 3. Mount overlayfs combining lower (virtiofs) + upper (block device).
+                let overlay_opts = format!(
+                    "lowerdir={},upperdir={},workdir={}",
+                    rootfs_mount, upper, work
+                );
+                util::mount("overlay", &mount_point, "overlay", 0, Some(&overlay_opts))
+                    .with_context(|| {
+                        format!("mount overlayfs on {}", mount_point)
+                    })?;
+                log::info!(
+                    "mounted overlayfs at {} (lower={}, overlay_device={})",
+                    mount_point,
+                    rootfs_mount,
+                    overlay_device
+                );
+
+                Some(OverlayMounts {
+                    rootfs_mount,
+                    overlay_device_mount,
+                })
+            }
+        };
 
         // Bind-mount volumes into the container rootfs.
         for vm in volume_mounts {
@@ -149,6 +218,7 @@ impl ContainerManager {
             Container {
                 id,
                 mount_point,
+                overlay_mounts,
                 pid: None,
                 stdin_fd: None,
                 cgroup_path: None,
@@ -399,22 +469,29 @@ impl ContainerManager {
         Ok(())
     }
 
-    /// Remove a container from the map and best-effort unmount its filesystem.
+    /// Remove a container from the map and best-effort unmount its filesystems.
     pub fn remove(&mut self, id: &str) {
         if let Some(container) = self.containers.remove(id) {
-            let mount_point_c = CString::new(container.mount_point.as_str()).ok();
-            if let Some(mp) = mount_point_c {
-                let ret = unsafe { libc::umount(mp.as_ptr()) };
-                if ret != 0 {
-                    log::warn!(
-                        "umount {}: {}",
-                        container.mount_point,
-                        std::io::Error::last_os_error()
-                    );
+            // Unmount in reverse order: overlay → overlay device → virtiofs.
+            if let Err(e) = util::umount(&container.mount_point) {
+                log::warn!("umount {}: {:#}", container.mount_point, e);
+            } else {
+                log::info!("unmounted {}", container.mount_point);
+            }
+
+            if let Some(overlay) = &container.overlay_mounts {
+                if let Err(e) = util::umount(&overlay.overlay_device_mount) {
+                    log::warn!("umount {}: {:#}", overlay.overlay_device_mount, e);
                 } else {
-                    log::info!("unmounted {}", container.mount_point);
+                    log::info!("unmounted {}", overlay.overlay_device_mount);
+                }
+                if let Err(e) = util::umount(&overlay.rootfs_mount) {
+                    log::warn!("umount {}: {:#}", overlay.rootfs_mount, e);
+                } else {
+                    log::info!("unmounted {}", overlay.rootfs_mount);
                 }
             }
+
             if container.cgroup_path.is_some() {
                 cgroup::remove_cgroup(&container.id);
             }

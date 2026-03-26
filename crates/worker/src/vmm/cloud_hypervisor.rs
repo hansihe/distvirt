@@ -7,8 +7,9 @@ use tokio::net::UnixStream;
 use tokio::sync::watch;
 
 use super::{
-    NetConfig, SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm, api_request,
-    copy_file_writable, spawn_exit_monitor, spawn_serial_task, try_vsock_connect, wait_for_file,
+    NetConfig, SnapshotArtifacts, SnapshotConfigVolume, SnapshotMetadata, SnapshotVirtiofsMount,
+    VmConfig, VmInstance, Vmm, api_request, copy_file_writable, spawn_exit_monitor,
+    spawn_serial_task, try_vsock_connect, wait_for_file,
 };
 use crate::fabric::{FabricPort, Port};
 use crate::linux::net::PersistentTap;
@@ -17,14 +18,90 @@ use crate::task_handle::TaskHandle;
 /// Cloud Hypervisor VMM implementation.
 pub struct CloudHypervisor {
     pub cloud_hypervisor_bin: PathBuf,
+    pub virtiofsd_bin: PathBuf,
 }
 
 impl CloudHypervisor {
-    pub fn new(cloud_hypervisor_bin: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        cloud_hypervisor_bin: impl Into<PathBuf>,
+        virtiofsd_bin: impl Into<PathBuf>,
+    ) -> Self {
         CloudHypervisor {
             cloud_hypervisor_bin: cloud_hypervisor_bin.into(),
+            virtiofsd_bin: virtiofsd_bin.into(),
         }
     }
+}
+
+/// A running virtiofsd process that shares a host directory with the guest.
+///
+/// Killed on drop, same as the CH process itself.
+struct VirtiofsdProcess {
+    child: tokio::process::Child,
+    #[allow(dead_code)]
+    socket_path: PathBuf,
+}
+
+impl Drop for VirtiofsdProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Spawn a virtiofsd process for a single virtiofs mount.
+///
+/// The socket is placed in `working_dir` and named `virtiofs-<tag>.sock`.
+/// Waits for the socket to appear before returning.
+async fn spawn_virtiofsd(
+    bin: &Path,
+    working_dir: &Path,
+    tag: &str,
+    source_dir: &Path,
+) -> anyhow::Result<VirtiofsdProcess> {
+    let socket_path = working_dir.join(format!("virtiofs-{}.sock", tag));
+
+    let child = tokio::process::Command::new(bin)
+        .arg(format!("--socket-path={}", socket_path.display()))
+        .arg(format!("--shared-dir={}", source_dir.display()))
+        .arg("--announce-submounts")
+        .arg("--sandbox=none")
+        .arg("--readonly")
+        .arg("--migration-mode=find-paths")
+        .arg("--migration-on-error=abort")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn virtiofsd for tag '{}'", tag))?;
+
+    if let Err(e) = wait_for_file(&socket_path, Duration::from_secs(5)).await {
+        // Socket didn't appear — virtiofsd likely crashed. Try to grab stderr.
+        let output = child.wait_with_output().await;
+        let stderr = output
+            .as_ref()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stderr))
+            .unwrap_or_default();
+        if stderr.is_empty() {
+            return Err(e).context(format!("waiting for virtiofsd socket for tag '{}'", tag));
+        } else {
+            bail!(
+                "virtiofsd for tag '{}' failed to start: {}",
+                tag,
+                stderr.trim()
+            );
+        }
+    }
+
+    log::info!(
+        "virtiofsd: started for tag '{}' (source={})",
+        tag,
+        source_dir.display()
+    );
+
+    Ok(VirtiofsdProcess {
+        child,
+        socket_path,
+    })
 }
 
 /// Result of spawning the Cloud Hypervisor process (before any API calls).
@@ -80,41 +157,30 @@ impl Vmm for CloudHypervisor {
     async fn launch(&self, config: &VmConfig) -> anyhow::Result<CloudHypervisorInstance> {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
-        // Copy rootfs and container images into tmpdir (writable copies).
+        // Copy rootfs and overlay images into tmpdir (writable copies).
         log::info!("cloud-hypervisor: copying rootfs image to tmpdir");
         copy_file_writable(
             &config.rootfs_image_path,
             &tmpdir.path().join("rootfs.ext4"),
         )
         .await?;
-        log::info!("cloud-hypervisor: copying container image to tmpdir");
+        log::info!("cloud-hypervisor: copying overlay image to tmpdir");
         copy_file_writable(
-            &config.container_image_path,
-            &tmpdir.path().join("container.ext4"),
+            &config.overlay_image_path,
+            &tmpdir.path().join("overlay.ext4"),
         )
         .await?;
         log::info!("cloud-hypervisor: images copied, spawning cloud-hypervisor");
 
         // Build boot args.
         // Cloud Hypervisor uses PCI, so no `pci=off`.
-        let mut boot_args = format!("console=ttyS0 reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.shutdown=poweroff");
-        if let Some(ref balloon) = config.balloon {
-            boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
-        }
-
-        // Write config drive if there are pre-vsock commands to bake in.
-        if !config.initial_commands.is_empty() {
-            let config_img_path = tmpdir.path().join("config.img");
-            let json_payload = serde_json::to_vec(&config.initial_commands)
-                .context("serialize initial_commands")?;
-            let mut img_data = Vec::with_capacity(4 + json_payload.len());
-            img_data.extend_from_slice(&(json_payload.len() as u32).to_le_bytes());
-            img_data.extend_from_slice(&json_payload);
-            tokio::fs::write(&config_img_path, &img_data)
-                .await
-                .context("write config.img")?;
-            boot_args.push_str(" distvirt.config_device=/dev/vdc");
-        }
+        let boot_args = {
+            let mut args = format!("console=ttyS0 reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.shutdown=poweroff");
+            if let Some(ref balloon) = config.balloon {
+                args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
+            }
+            args
+        };
 
         // Copy and prepare additional drives (volumes).
         for drive in &config.additional_drives {
@@ -129,6 +195,19 @@ impl Vmm for CloudHypervisor {
                 drive.drive_id
             );
             copy_file_writable(&drive.image_path, &tmpdir.path().join(filename)).await?;
+        }
+
+        // Spawn virtiofsd processes before CH — CH needs the sockets at vm.create time.
+        let mut virtiofsd_processes = Vec::new();
+        for vfs in &config.virtiofs_mounts {
+            let proc = spawn_virtiofsd(
+                &self.virtiofsd_bin,
+                tmpdir.path(),
+                &vfs.tag,
+                &vfs.source_dir,
+            )
+            .await?;
+            virtiofsd_processes.push(proc);
         }
 
         // Spawn Cloud Hypervisor and wait for API socket.
@@ -152,14 +231,11 @@ impl Vmm for CloudHypervisor {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8"))?;
 
-        // Disks: rootfs (vda), container (vdb), optional config (vdc), then volumes.
+        // Disks: rootfs (vda), overlay (vdb), then volume drives (vdc+).
         let mut disks = vec![
             serde_json::json!({"path": "./rootfs.ext4", "readonly": false}),
-            serde_json::json!({"path": "./container.ext4", "readonly": false}),
+            serde_json::json!({"path": "./overlay.ext4", "readonly": false}),
         ];
-        if !config.initial_commands.is_empty() {
-            disks.push(serde_json::json!({"path": "./config.img", "readonly": true}));
-        }
         for drive in &config.additional_drives {
             let filename = drive.image_path.file_name().unwrap().to_str().unwrap();
             disks.push(
@@ -198,6 +274,23 @@ impl Vmm for CloudHypervisor {
                 "size": (balloon.amount_mib as u64) * 1024 * 1024,
                 "deflate_on_oom": balloon.deflate_on_oom,
             });
+        }
+
+        // Configure virtiofs devices.
+        if !config.virtiofs_mounts.is_empty() {
+            let fs_array: Vec<serde_json::Value> = config
+                .virtiofs_mounts
+                .iter()
+                .map(|vfs| {
+                    serde_json::json!({
+                        "tag": vfs.tag,
+                        "socket": format!("./virtiofs-{}.sock", vfs.tag),
+                        "num_queues": 1,
+                        "queue_size": 1024,
+                    })
+                })
+                .collect();
+            vm_config["fs"] = serde_json::json!(fs_array);
         }
 
         // Configure network interface if requested.
@@ -274,8 +367,18 @@ impl Vmm for CloudHypervisor {
             })
             .collect();
 
+        let virtiofs_snapshot: Vec<SnapshotVirtiofsMount> = config
+            .virtiofs_mounts
+            .iter()
+            .map(|vfs| SnapshotVirtiofsMount {
+                tag: vfs.tag.clone(),
+                source_dir: vfs.source_dir.clone(),
+            })
+            .collect();
+
         Ok(CloudHypervisorInstance {
             child,
+            _virtiofsd_processes: virtiofsd_processes,
             vsock_uds_path,
             api_socket,
             fabric_port,
@@ -288,6 +391,9 @@ impl Vmm for CloudHypervisor {
             balloon_configured: config.balloon.is_some(),
             serial_console: config.serial_console,
             volume_drives,
+            virtiofs_mounts: virtiofs_snapshot,
+            container_image_ref: config.container_image_ref.clone(),
+            config_volumes: config.config_volumes.clone(),
         })
     }
 
@@ -308,8 +414,8 @@ impl Vmm for CloudHypervisor {
         )
         .await?;
         copy_file_writable(
-            &snapshot_dir.join("container.ext4"),
-            &tmpdir.path().join("container.ext4"),
+            &snapshot_dir.join("overlay.ext4"),
+            &tmpdir.path().join("overlay.ext4"),
         )
         .await?;
 
@@ -331,6 +437,26 @@ impl Vmm for CloudHypervisor {
             )
             .await
             .with_context(|| format!("copy {} from snapshot", filename))?;
+        }
+
+        // Restart virtiofsd processes for each virtiofs mount.
+        let mut virtiofsd_processes = Vec::new();
+        for vfs in &metadata.virtiofs_mounts {
+            let proc = spawn_virtiofsd(
+                &self.virtiofsd_bin,
+                tmpdir.path(),
+                &vfs.tag,
+                &vfs.source_dir,
+            )
+            .await?;
+            virtiofsd_processes.push(proc);
+        }
+
+        // Patch virtiofs socket paths in config.json to point at the new tmpdir.
+        if !metadata.virtiofs_mounts.is_empty() {
+            patch_snapshot_config_fs(&tmpdir.path().join("config.json"), tmpdir.path())
+                .await
+                .context("patch virtiofs socket paths in snapshot config.json")?;
         }
 
         // Create fresh TAP if networking is configured.
@@ -397,6 +523,7 @@ impl Vmm for CloudHypervisor {
 
         Ok(CloudHypervisorInstance {
             child,
+            _virtiofsd_processes: virtiofsd_processes,
             vsock_uds_path,
             api_socket,
             fabric_port,
@@ -409,12 +536,18 @@ impl Vmm for CloudHypervisor {
             balloon_configured: metadata.balloon_configured,
             serial_console: metadata.serial_console,
             volume_drives: metadata.volume_drives.clone(),
+            virtiofs_mounts: metadata.virtiofs_mounts.clone(),
+            container_image_ref: metadata.container_image_ref.clone(),
+            config_volumes: metadata.config_volumes.clone(),
         })
     }
 }
 
 pub struct CloudHypervisorInstance {
     child: tokio::process::Child,
+    /// virtiofsd processes sharing host directories with the guest.
+    /// Dropped after child (field order) — virtiofsd exit is harmless once CH is dead.
+    _virtiofsd_processes: Vec<VirtiofsdProcess>,
     vsock_uds_path: PathBuf,
     api_socket: PathBuf,
     fabric_port: Option<FabricPort>,
@@ -429,6 +562,9 @@ pub struct CloudHypervisorInstance {
     balloon_configured: bool,
     serial_console: bool,
     volume_drives: Vec<super::SnapshotVolumeDrive>,
+    virtiofs_mounts: Vec<SnapshotVirtiofsMount>,
+    container_image_ref: Option<String>,
+    config_volumes: Vec<SnapshotConfigVolume>,
 }
 
 impl Drop for CloudHypervisorInstance {
@@ -538,13 +674,13 @@ impl VmInstance for CloudHypervisorInstance {
 
         let tmpdir_path = self._tmpdir.path();
 
-        // 3. Copy container.ext4 from tmpdir into snapshot dir.
+        // 3. Copy overlay.ext4 from tmpdir into snapshot dir.
         tokio::fs::copy(
-            tmpdir_path.join("container.ext4"),
-            snapshot_dir.join("container.ext4"),
+            tmpdir_path.join("overlay.ext4"),
+            snapshot_dir.join("overlay.ext4"),
         )
         .await
-        .context("copy container.ext4 to snapshot dir")?;
+        .context("copy overlay.ext4 to snapshot dir")?;
 
         // 3b. Copy volume images from tmpdir into snapshot dir.
         for vd in &self.volume_drives {
@@ -563,6 +699,9 @@ impl VmInstance for CloudHypervisorInstance {
             balloon_configured: self.balloon_configured,
             serial_console: self.serial_console,
             volume_drives: self.volume_drives.clone(),
+            virtiofs_mounts: self.virtiofs_mounts.clone(),
+            container_image_ref: self.container_image_ref.clone(),
+            config_volumes: self.config_volumes.clone(),
         };
         let metadata_json =
             serde_json::to_vec_pretty(&metadata).context("serialize snapshot metadata")?;
@@ -577,6 +716,39 @@ impl VmInstance for CloudHypervisorInstance {
             metadata,
         })
     }
+}
+
+/// Patch virtiofs socket paths in a Cloud Hypervisor snapshot's config.json.
+///
+/// CH resolves relative socket paths to absolute at `vm.create` time and saves
+/// them in the snapshot `config.json`. On restore in a new tmpdir we need to
+/// rewrite each `fs[].socket` to point at the new virtiofsd sockets. The new
+/// path is derived from the `tag` field in the same object (matching the naming
+/// convention used by `spawn_virtiofsd`).
+async fn patch_snapshot_config_fs(config_path: &Path, tmpdir: &Path) -> anyhow::Result<()> {
+    let data = tokio::fs::read_to_string(config_path)
+        .await
+        .context("read config.json for fs patching")?;
+    let mut config: serde_json::Value =
+        serde_json::from_str(&data).context("parse config.json for fs patching")?;
+    if let Some(fs_array) = config.get_mut("fs").and_then(|f| f.as_array_mut()) {
+        for fs_entry in fs_array {
+            if let Some(obj) = fs_entry.as_object_mut() {
+                if let Some(tag) = obj.get("tag").and_then(|t| t.as_str()).map(String::from) {
+                    let new_socket = tmpdir.join(format!("virtiofs-{}.sock", tag));
+                    obj.insert(
+                        "socket".to_string(),
+                        serde_json::json!(new_socket.to_str().unwrap()),
+                    );
+                }
+            }
+        }
+    }
+    let patched = serde_json::to_string_pretty(&config).context("serialize patched config (fs)")?;
+    tokio::fs::write(config_path, patched)
+        .await
+        .context("write patched config.json (fs)")?;
+    Ok(())
 }
 
 /// Patch the TAP device name in a Cloud Hypervisor snapshot's config.json.

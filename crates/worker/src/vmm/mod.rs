@@ -10,7 +10,6 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use anyhow::Context;
-use distvirt_guest_protocol::HostMessage;
 use distvirt_worker_protocol::PodNetworkConfig;
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
@@ -58,11 +57,21 @@ pub struct AdditionalDrive {
     pub read_only: bool,
 }
 
+/// A virtiofs filesystem to share with the guest.
+#[derive(Clone, Debug)]
+pub struct VirtiofsMount {
+    /// Tag visible inside the guest (used as the "device" in mount -t virtiofs).
+    pub tag: String,
+    /// Host directory to share.
+    pub source_dir: PathBuf,
+}
+
 /// Configuration for launching a VM.
 pub struct VmConfig {
     pub kernel_path: PathBuf,
     pub rootfs_image_path: PathBuf,
-    pub container_image_path: PathBuf,
+    /// Small ext4 image for container overlay upper/work dirs.
+    pub overlay_image_path: PathBuf,
     pub vcpu_count: u32,
     pub mem_size_mib: u32,
     pub net: Option<NetConfig>,
@@ -70,11 +79,14 @@ pub struct VmConfig {
     pub serial_console: bool,
     /// Optional balloon device for memory overcommit.
     pub balloon: Option<BalloonConfig>,
-    /// Commands to bake into a config drive for pre-vsock execution.
-    /// When non-empty, a config drive image is created and attached to the VM.
-    pub initial_commands: Vec<HostMessage>,
     /// Additional block devices to attach (volume images).
     pub additional_drives: Vec<AdditionalDrive>,
+    /// virtiofs mounts to expose to the guest via virtiofsd.
+    pub virtiofs_mounts: Vec<VirtiofsMount>,
+    /// OCI image reference (stored in snapshot metadata for cross-host restore).
+    pub container_image_ref: Option<String>,
+    /// ConfigData volume specs (stored in snapshot metadata for cross-host restore).
+    pub config_volumes: Vec<SnapshotConfigVolume>,
 }
 
 /// Metadata persisted as `metadata.json` in a snapshot directory.
@@ -85,6 +97,30 @@ pub struct VmConfig {
 pub struct SnapshotVolumeDrive {
     pub filename: String,
     pub read_only: bool,
+}
+
+/// virtiofs mount info persisted in snapshot metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotVirtiofsMount {
+    /// Tag visible inside the guest.
+    pub tag: String,
+    /// Host directory shared via virtiofsd.
+    pub source_dir: PathBuf,
+}
+
+/// ConfigData volume info persisted in snapshot metadata.
+///
+/// Stores the file contents so the destination worker can recreate the
+/// config directory from scratch (the original temp directory won't exist
+/// on a different host).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotConfigVolume {
+    /// Volume name.
+    pub name: String,
+    /// virtiofs tag used inside the guest.
+    pub tag: String,
+    /// Files to write into the recreated config directory.
+    pub files: Vec<distvirt_worker_protocol::ConfigDataFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +138,15 @@ pub struct SnapshotMetadata {
     /// Volume drives attached to the VM (needed for snapshot/restore).
     #[serde(default)]
     pub volume_drives: Vec<SnapshotVolumeDrive>,
+    /// virtiofs mounts to re-create on restore.
+    #[serde(default)]
+    pub virtiofs_mounts: Vec<SnapshotVirtiofsMount>,
+    /// OCI image reference for restoring container rootfs on destination.
+    #[serde(default)]
+    pub container_image_ref: Option<String>,
+    /// ConfigData volume file contents for recreating on destination.
+    #[serde(default)]
+    pub config_volumes: Vec<SnapshotConfigVolume>,
 }
 
 /// Artifacts produced by a VM snapshot.

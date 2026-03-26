@@ -44,8 +44,8 @@ impl Vmm for Qemu {
         )
         .await?;
         copy_file_writable(
-            &config.container_image_path,
-            &tmpdir.path().join("container.ext4"),
+            &config.overlay_image_path,
+            &tmpdir.path().join("overlay.ext4"),
         )
         .await?;
 
@@ -84,26 +84,14 @@ impl Vmm for Qemu {
         // root=/dev/vda is needed because QEMU doesn't have a separate API to
         // designate the root device (unlike Firecracker).
         let console_dev = if cfg!(target_arch = "aarch64") { "ttyAMA0" } else { "ttyS0" };
-        let mut boot_args =
-            format!("console={console_dev} reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.transport=virtio-serial");
-        if let Some(ref balloon) = config.balloon {
-            boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
-        }
-
-        // Config drive.
-        if !config.initial_commands.is_empty() {
-            let config_img_path = tmpdir.path().join("config.img");
-            let json_payload = serde_json::to_vec(&config.initial_commands)
-                .context("serialize initial_commands")?;
-            let mut img_data = Vec::with_capacity(4 + json_payload.len());
-            img_data.extend_from_slice(&(json_payload.len() as u32).to_le_bytes());
-            img_data.extend_from_slice(&json_payload);
-            tokio::fs::write(&config_img_path, &img_data)
-                .await
-                .context("write config.img")?;
-            // TODO: verify device naming under QEMU virtio-blk matches Firecracker
-            boot_args.push_str(" distvirt.config_device=/dev/vdc");
-        }
+        let boot_args = {
+            let mut args =
+                format!("console={console_dev} reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.transport=virtio-serial");
+            if let Some(ref balloon) = config.balloon {
+                args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
+            }
+            args
+        };
 
         cmd.args([
             "-kernel",
@@ -115,28 +103,17 @@ impl Vmm for Qemu {
         cmd.args(["-append", &boot_args]);
 
         // Block devices as virtio-blk.
-        // index=0 → vda (rootfs), index=1 → vdb (container), etc.
+        // index=0 → vda (rootfs), index=1 → vdb (overlay), index=2+ → volumes.
         cmd.args([
             "-drive",
             "file=./rootfs.ext4,format=raw,if=virtio,index=0",
         ]);
         cmd.args([
             "-drive",
-            "file=./container.ext4,format=raw,if=virtio,index=1",
+            "file=./overlay.ext4,format=raw,if=virtio,index=1",
         ]);
 
-        if !config.initial_commands.is_empty() {
-            cmd.args([
-                "-drive",
-                "file=./config.img,format=raw,if=virtio,index=2,readonly=on",
-            ]);
-        }
-
-        let mut drive_index: u32 = if config.initial_commands.is_empty() {
-            2
-        } else {
-            3
-        };
+        let mut drive_index: u32 = 2;
         for drive in &config.additional_drives {
             let filename = drive
                 .image_path
@@ -462,8 +439,8 @@ mod tests {
         (kernel, rootfs)
     }
 
-    /// Create a minimal empty ext4 container image.
-    async fn create_empty_container_image(path: &std::path::Path) -> anyhow::Result<()> {
+    /// Create a minimal empty ext4 overlay image.
+    async fn create_empty_overlay_image(path: &std::path::Path) -> anyhow::Result<()> {
         // Create a 4MB sparse file and format as ext4.
         let f = std::fs::File::create(path)?;
         f.set_len(4 * 1024 * 1024)?;
@@ -489,22 +466,24 @@ mod tests {
         let (kernel, rootfs) = guest_paths();
         let qemu = Qemu::new(qemu_bin());
 
-        // Create a temporary empty container image.
+        // Create a temporary empty overlay image.
         let tmpdir = tempfile::tempdir().unwrap();
-        let container_img = tmpdir.path().join("container.ext4");
-        create_empty_container_image(&container_img).await.unwrap();
+        let overlay_img = tmpdir.path().join("overlay.ext4");
+        create_empty_overlay_image(&overlay_img).await.unwrap();
 
         let config = VmConfig {
             kernel_path: kernel,
             rootfs_image_path: rootfs,
-            container_image_path: container_img,
+            overlay_image_path: overlay_img,
             vcpu_count: 1,
             mem_size_mib: 128,
             net: None,
             serial_console: true,
             balloon: None,
-            initial_commands: vec![],
             additional_drives: vec![],
+            virtiofs_mounts: vec![],
+            container_image_ref: None,
+            config_volumes: vec![],
         };
 
         let mut instance = qemu.launch(&config).await.expect("QEMU launch failed");

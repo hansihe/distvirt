@@ -5,53 +5,91 @@ use anyhow::Context;
 use distvirt_worker_protocol::{ConfigDataFile, VolumeSpec, VolumeType};
 use tokio::process::Command;
 
-/// A volume whose image has been created and is ready to attach.
-pub struct PreparedVolume {
-    pub name: String,
-    pub image_path: PathBuf,
-    pub read_only: bool,
+/// A prepared volume ready to attach to a VM.
+pub enum PreparedVolume {
+    /// Block device volume (EmptyDir).
+    Block {
+        name: String,
+        image_path: PathBuf,
+        read_only: bool,
+    },
+    /// Directory to share via virtiofs (ConfigData).
+    VirtioFs {
+        name: String,
+        tag: String,
+        dir_path: PathBuf,
+        read_only: bool,
+        /// RAII cleanup handle — keeps temp directory alive.
+        _cleanup: Box<dyn std::any::Any + Send + Sync>,
+    },
 }
 
-/// Create ext4 images for all volumes in `work_dir`.
+/// Prepare volumes for a VM.
 ///
-/// Subprocess stdio is explicitly set to `Stdio::null()` to work around a
-/// suspected tokio bug: when the test binary's stderr is a TTY and multiple
-/// `current_thread` + `start_paused` runtimes run in parallel (as in
-/// `cargo test`), inheriting the TTY causes intermittent subprocess failures
-/// ("No such file or directory while setting up superblock" from mkfs.ext4).
-/// Suppressing stdio eliminates the issue. See also `TestVmm` in test_vmm.rs
-/// for a similar `std::fs` workaround.
+/// EmptyDir volumes produce ext4 block images. ConfigData volumes produce
+/// directories to share via virtiofs.
 pub async fn prepare_volumes(
     volumes: &[VolumeSpec],
     work_dir: &Path,
 ) -> anyhow::Result<Vec<PreparedVolume>> {
     let mut prepared = Vec::with_capacity(volumes.len());
     for vol in volumes {
-        let image_path = work_dir.join(format!("vol-{}.ext4", vol.name));
         match &vol.volume_type {
             VolumeType::EmptyDir { size_mb } => {
+                let image_path = work_dir.join(format!("vol-{}.ext4", vol.name));
                 create_empty_dir_image(&image_path, *size_mb)
                     .await
                     .with_context(|| format!("create empty_dir volume '{}'", vol.name))?;
-                prepared.push(PreparedVolume {
+                prepared.push(PreparedVolume::Block {
                     name: vol.name.clone(),
                     image_path,
                     read_only: false,
                 });
             }
             VolumeType::ConfigData { files } => {
-                create_config_data_image(&image_path, files)
+                let dir = create_config_data_dir(files)
                     .await
                     .with_context(|| format!("create config_data volume '{}'", vol.name))?;
-                prepared.push(PreparedVolume {
+                let dir_path = dir.path().to_path_buf();
+                let tag = format!("configdata-{}", vol.name);
+                prepared.push(PreparedVolume::VirtioFs {
                     name: vol.name.clone(),
-                    image_path,
+                    tag,
+                    dir_path,
                     read_only: true,
+                    _cleanup: Box::new(dir),
                 });
             }
         }
     }
     Ok(prepared)
+}
+
+/// Create overlay ext4 image of the given size in megabytes.
+pub async fn create_overlay_image(path: &Path, size_mb: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(size_mb > 0, "overlay size_mb must be greater than 0");
+    let file = tokio::fs::File::create(path)
+        .await
+        .context("create overlay image file")?;
+    file.set_len(size_mb * 1024 * 1024)
+        .await
+        .context("set overlay image file size")?;
+    drop(file);
+    let status = Command::new("mkfs.ext4")
+        .arg("-F")
+        .arg("-q")
+        .arg("-E")
+        .arg("lazy_itable_init=1,lazy_journal_init=1")
+        .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("run mkfs.ext4 for overlay")?;
+    if !status.success() {
+        anyhow::bail!("mkfs.ext4 for overlay failed with {}", status);
+    }
+    Ok(())
 }
 
 /// Create an empty ext4 image of the given size in megabytes.
@@ -85,11 +123,31 @@ async fn create_empty_dir_image(path: &Path, size_mb: u64) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Create an ext4 image populated with the given files using `mke2fs -d`.
-async fn create_config_data_image(
-    path: &Path,
+/// Recreate ConfigData volumes from snapshot metadata.
+///
+/// Each `SnapshotConfigVolume` produces a temp directory with the config files,
+/// suitable for passing to virtiofsd. Returns `(tag, dir_path, cleanup_handle)`
+/// triples — the caller must keep the cleanup handles alive for the VM lifetime.
+pub async fn prepare_config_volumes_from_snapshot(
+    config_volumes: &[crate::vmm::SnapshotConfigVolume],
+) -> anyhow::Result<Vec<(String, PathBuf, tempfile::TempDir)>> {
+    let mut result = Vec::with_capacity(config_volumes.len());
+    for cv in config_volumes {
+        let dir = create_config_data_dir(&cv.files)
+            .await
+            .with_context(|| format!("recreate config volume '{}' from snapshot", cv.name))?;
+        let dir_path = dir.path().to_path_buf();
+        result.push((cv.tag.clone(), dir_path, dir));
+    }
+    Ok(result)
+}
+
+/// Create a temporary directory populated with ConfigData files.
+///
+/// Returns the `TempDir` — the caller must keep it alive for the VM lifetime.
+async fn create_config_data_dir(
     files: &[ConfigDataFile],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<tempfile::TempDir> {
     let tmp_dir = tempfile::tempdir().context("create temp dir for config_data")?;
 
     for file in files {
@@ -110,42 +168,7 @@ async fn create_config_data_image(
         }
     }
 
-    // Calculate a reasonable image size: at least 1MB, or enough for the files + overhead.
-    let total_bytes: usize = files.iter().map(|f| f.content.len()).sum();
-    let size_kb = std::cmp::max(1024, (total_bytes / 1024) + 512);
-
-    // Create the image file first with the right size.
-    let status = Command::new("truncate")
-        .arg("-s")
-        .arg(format!("{}K", size_kb))
-        .arg(path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .context("run truncate for config_data")?;
-    if !status.success() {
-        anyhow::bail!("truncate failed with {}", status);
-    }
-
-    let status = Command::new("mke2fs")
-        .arg("-t")
-        .arg("ext4")
-        .arg("-d")
-        .arg(tmp_dir.path())
-        .arg("-F")
-        .arg("-q")
-        .arg(path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .context("run mke2fs")?;
-    if !status.success() {
-        anyhow::bail!("mke2fs failed with {}", status);
-    }
-
-    Ok(())
+    Ok(tmp_dir)
 }
 
 #[cfg(test)]
@@ -162,9 +185,14 @@ mod tests {
         }];
         let result = prepare_volumes(&volumes, tmp.path()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "data");
-        assert!(!result[0].read_only);
-        assert!(result[0].image_path.exists());
+        match &result[0] {
+            PreparedVolume::Block { name, read_only, image_path } => {
+                assert_eq!(name, "data");
+                assert!(!read_only);
+                assert!(image_path.exists());
+            }
+            _ => panic!("expected Block variant"),
+        }
     }
 
     #[tokio::test]
@@ -182,8 +210,15 @@ mod tests {
         }];
         let result = prepare_volumes(&volumes, tmp.path()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "config");
-        assert!(result[0].read_only);
-        assert!(result[0].image_path.exists());
+        match &result[0] {
+            PreparedVolume::VirtioFs { name, read_only, dir_path, tag, .. } => {
+                assert_eq!(name, "config");
+                assert!(read_only);
+                assert!(dir_path.exists());
+                assert_eq!(tag, "configdata-config");
+                assert!(dir_path.join("hello.txt").exists());
+            }
+            _ => panic!("expected VirtioFs variant"),
+        }
     }
 }

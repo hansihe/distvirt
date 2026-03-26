@@ -13,12 +13,25 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::fabric::{Fabric, FabricPort};
-use crate::image_provider::ImageProvider;
+use crate::image_provider::{ImageProvider, PreparedArtifact};
 use crate::io_session::IoEvent;
 use crate::managed_vm::ManagedVm;
 use crate::oci;
 use crate::task_handle::TaskHandle;
 use crate::vmm::{BalloonConfig, NetConfig, SnapshotArtifacts, VmConfig, VmInstance, Vmm};
+
+/// RAII handle for resources that must stay alive for the entire pod lifetime.
+///
+/// Holds the container image artifact (whose cleanup handle keeps the
+/// containerd snapshot view mounted and the lease alive), the prepared
+/// volume handles (whose cleanup handles keep ConfigData temp directories
+/// alive for virtiofsd), and the volume tmpdir (which holds the overlay
+/// image and block device volume images).
+struct PodResources {
+    _artifact: PreparedArtifact,
+    _prepared_volumes: Vec<crate::volume::PreparedVolume>,
+    _vol_tmpdir: tempfile::TempDir,
+}
 
 // Timeout escalation chain for pod shutdown. These must satisfy:
 //   GRACEFUL_SHUTDOWN_TIMEOUT < STOP_POD_TIMEOUT
@@ -106,8 +119,13 @@ pub(crate) async fn pod_supervisor<
         )
         .await
     };
+    let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) = match result {
+        Ok((vm, io, port, resources)) => (Ok((vm, io, port)), Box::new(resources)),
+        Err(e) => (Err(e), Box::new(())),
+    };
     run_pod_supervisor::<_, F>(
         result,
+        held_resources,
         cancel,
         event_tx,
         namespace_id,
@@ -121,8 +139,15 @@ pub(crate) async fn pod_supervisor<
 /// Top-level resume supervisor: restores a pod from a snapshot and monitors it.
 ///
 /// Similar to `pod_supervisor` but calls `vmm.restore()` instead of launching fresh.
-pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static, F: crate::fs::Fs>(
+/// Prepares virtiofs shares (container rootfs via image provider, ConfigData via
+/// snapshot metadata) so virtiofsd can serve them on the destination host.
+pub(crate) async fn pod_resume_supervisor<
+    V: Vmm + 'static,
+    P: ImageProvider + 'static,
+    F: crate::fs::Fs,
+>(
     vmm: Arc<V>,
+    image_provider: Arc<P>,
     fabric: Arc<Fabric<FabricPort>>,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<WorkerEvent>,
@@ -133,10 +158,11 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static, F: crate::fs::Fs>(
     suspend_rx: mpsc::Receiver<SuspendRequest>,
     activity: Arc<distvirt_common::ActivityTracker>,
 ) {
-    let result = {
+    let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) = {
         let _busy = activity.busy_guard();
-        pod_restore(
+        match prepare_and_restore(
             &*vmm,
+            &*image_provider,
             &fabric,
             &event_tx,
             &namespace_id,
@@ -146,10 +172,16 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static, F: crate::fs::Fs>(
             &cancel,
         )
         .await
-        .map(|(vm, port_task)| (vm, None, port_task))
+        {
+            Ok((vm, port_task, resources)) => {
+                (Ok((vm, None, port_task)), Box::new(resources))
+            }
+            Err(e) => (Err(e), Box::new(())),
+        }
     };
     run_pod_supervisor::<_, F>(
         result,
+        held_resources,
         cancel,
         event_tx,
         namespace_id,
@@ -162,12 +194,17 @@ pub(crate) async fn pod_resume_supervisor<V: Vmm + 'static, F: crate::fs::Fs>(
 
 /// Shared supervisor logic: on success emits `PodRunning` and delegates to `pod_monitor`;
 /// on failure emits `PodExited` (if cancelled) or `PodFailed`.
+///
+/// `_held_resources` keeps RAII handles alive for the pod's lifetime (e.g.
+/// `PodResources` from launch, which holds the containerd lease, overlay
+/// mount, and volume temp directories). For restore, pass `()`.
 async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
     setup_result: anyhow::Result<(
         ManagedVm<I>,
         Option<(crate::io_session::IoSession, yamux::Stream)>,
         Option<TaskHandle<()>>,
     )>,
+    _held_resources: Box<dyn std::any::Any + Send>,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<WorkerEvent>,
     namespace_id: NamespaceId,
@@ -225,6 +262,92 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
     }
 }
 
+/// Prepare virtiofs shares on the destination and restore the VM.
+///
+/// 1. If `container_image_ref` is in the snapshot metadata, prepare the image
+///    via the image provider to get a local rootfs directory.
+/// 2. Recreate ConfigData volumes from snapshot metadata.
+/// 3. Update virtiofs mount source_dirs to point at the new local paths.
+/// 4. Restore the VM.
+async fn prepare_and_restore<V: Vmm + 'static, P: ImageProvider + 'static>(
+    vmm: &V,
+    image_provider: &P,
+    fabric: &Fabric<FabricPort>,
+    event_tx: &mpsc::Sender<WorkerEvent>,
+    namespace_id: &NamespaceId,
+    pod_id: &PodId,
+    network: PodNetworkConfig,
+    mut snapshot: SnapshotArtifacts,
+    cancel: &CancellationToken,
+) -> anyhow::Result<(
+    ManagedVm<V::Instance>,
+    Option<TaskHandle<()>>,
+    ResumeResources,
+)> {
+    // Prepare container rootfs via image provider if we have an image ref.
+    let artifact = if let Some(ref image_ref) = snapshot.metadata.container_image_ref {
+        log::info!(
+            "pod '{}': preparing image '{}' for restore",
+            pod_id,
+            image_ref
+        );
+        let artifact = tokio::select! {
+            result = image_provider.prepare(image_ref) => {
+                result.context("preparing image for restore")?
+            }
+            _ = cancel.cancelled() => {
+                anyhow::bail!("cancelled during image prepare for restore");
+            }
+        };
+        // Update the container-rootfs virtiofs mount to point at the new local directory.
+        for vfs in &mut snapshot.metadata.virtiofs_mounts {
+            if vfs.tag == "container-rootfs" {
+                vfs.source_dir = artifact.rootfs_dir.clone();
+            }
+        }
+        Some(artifact)
+    } else {
+        None
+    };
+
+    // Recreate ConfigData volumes from snapshot metadata.
+    let config_vol_handles = crate::volume::prepare_config_volumes_from_snapshot(
+        &snapshot.metadata.config_volumes,
+    )
+    .await
+    .context("recreate config volumes for restore")?;
+
+    // Update virtiofs mounts for ConfigData volumes to point at the new local dirs.
+    for (tag, dir_path, _) in &config_vol_handles {
+        for vfs in &mut snapshot.metadata.virtiofs_mounts {
+            if vfs.tag == *tag {
+                vfs.source_dir = dir_path.clone();
+            }
+        }
+    }
+
+    let (vm, port_task) = pod_restore(
+        vmm, fabric, event_tx, namespace_id, pod_id, network, snapshot, cancel,
+    )
+    .await?;
+
+    let resources = ResumeResources {
+        _artifact: artifact,
+        _config_vol_dirs: config_vol_handles
+            .into_iter()
+            .map(|(_, _, dir)| dir)
+            .collect(),
+    };
+
+    Ok((vm, port_task, resources))
+}
+
+/// RAII handle for resources that must stay alive for the restored pod's lifetime.
+struct ResumeResources {
+    _artifact: Option<PreparedArtifact>,
+    _config_vol_dirs: Vec<tempfile::TempDir>,
+}
+
 /// Perform all fallible restore: restore VM from snapshot, vsock connect,
 /// add TAP to fabric. Containers are already running in the restored VM.
 async fn pod_restore<V: Vmm + 'static>(
@@ -275,6 +398,7 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     ManagedVm<V::Instance>,
     Option<(crate::io_session::IoSession, yamux::Stream)>,
     Option<TaskHandle<()>>,
+    PodResources,
 )> {
     let container = containers
         .into_iter()
@@ -357,27 +481,68 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         .context("prepare volumes")?;
     log::info!("pod '{}': volumes prepared", pod_id);
 
-    let additional_drives: Vec<crate::vmm::AdditionalDrive> = prepared_volumes
+    // Create small overlay ext4 image for container writable layer.
+    let overlay_path = vol_tmpdir.path().join("overlay.ext4");
+    crate::volume::create_overlay_image(&overlay_path, 256)
+        .await
+        .context("create overlay image")?;
+
+    // Build virtiofs mounts: container rootfs + any ConfigData volumes.
+    let mut virtiofs_mounts = vec![crate::vmm::VirtiofsMount {
+        tag: "container-rootfs".to_string(),
+        source_dir: artifact.rootfs_dir.clone(),
+    }];
+
+    // Separate volumes into block devices (additional_drives) and virtiofs mounts.
+    let mut additional_drives = Vec::new();
+    let mut block_idx = 0usize;
+    for pv in &prepared_volumes {
+        match pv {
+            crate::volume::PreparedVolume::Block { image_path, read_only, .. } => {
+                additional_drives.push(crate::vmm::AdditionalDrive {
+                    drive_id: format!("vol{}", block_idx),
+                    image_path: image_path.clone(),
+                    read_only: *read_only,
+                });
+                block_idx += 1;
+            }
+            crate::volume::PreparedVolume::VirtioFs { tag, dir_path, .. } => {
+                virtiofs_mounts.push(crate::vmm::VirtiofsMount {
+                    tag: tag.clone(),
+                    source_dir: dir_path.clone(),
+                });
+            }
+        }
+    }
+
+    // Build config volume metadata for snapshot/restore.
+    let config_volumes: Vec<crate::vmm::SnapshotConfigVolume> = volumes
         .iter()
-        .enumerate()
-        .map(|(i, pv)| crate::vmm::AdditionalDrive {
-            drive_id: format!("vol{}", i),
-            image_path: pv.image_path.clone(),
-            read_only: pv.read_only,
+        .filter_map(|v| match &v.volume_type {
+            distvirt_worker_protocol::VolumeType::ConfigData { files } => {
+                Some(crate::vmm::SnapshotConfigVolume {
+                    name: v.name.clone(),
+                    tag: format!("configdata-{}", v.name),
+                    files: files.clone(),
+                })
+            }
+            _ => None,
         })
         .collect();
 
     let vm_config = VmConfig {
         kernel_path: kernel_path.clone(),
         rootfs_image_path: rootfs_image_path.clone(),
-        container_image_path: artifact.image_path.clone(),
+        overlay_image_path: overlay_path,
         vcpu_count,
         mem_size_mib,
         net: Some(net_config.clone()),
         serial_console: true,
         balloon,
-        initial_commands: vec![],
         additional_drives,
+        virtiofs_mounts,
+        container_image_ref: Some(container.image_ref.clone()),
+        config_volumes,
     };
 
     log::info!("pod '{}': launching VM", pod_id);
@@ -406,13 +571,28 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
             vm.configure_network("eth0", &net_config).await?;
 
             // Mount pod-scoped volumes before adding containers.
-            // Device assignment: vda=rootfs, vdb=container, vdc=config (if present),
-            // then volumes start at the next available device letter.
-            let vol_device_offset: u8 = 2 + if vm_config.initial_commands.is_empty() { 0 } else { 1 };
-            for (i, pv) in prepared_volumes.iter().enumerate() {
-                let device = format!("/dev/vd{}", (b'a' + vol_device_offset + i as u8) as char);
-                log::info!("pod '{}': mounting volume '{}' at {}", pod_id, pv.name, device);
-                vm.mount_volume(&pv.name, &device, pv.read_only).await?;
+            // Device assignment: vda=rootfs, vdb=overlay, vdc+=EmptyDir volumes.
+            // ConfigData volumes use virtiofs (no block device).
+            let mut block_idx: u8 = 0;
+            for pv in &prepared_volumes {
+                match pv {
+                    crate::volume::PreparedVolume::Block { name, read_only, .. } => {
+                        let device = format!("/dev/vd{}", (b'c' + block_idx) as char);
+                        block_idx += 1;
+                        log::info!("pod '{}': mounting volume '{}' at {}", pod_id, name, device);
+                        let source = distvirt_guest_protocol::VolumeSource::Device {
+                            device: device.clone(),
+                        };
+                        vm.mount_volume(name, source, *read_only).await?;
+                    }
+                    crate::volume::PreparedVolume::VirtioFs { name, read_only, tag, .. } => {
+                        log::info!("pod '{}': mounting volume '{}' via virtiofs tag '{}'", pod_id, name, tag);
+                        let source = distvirt_guest_protocol::VolumeSource::VirtioFs {
+                            tag: tag.clone(),
+                        };
+                        vm.mount_volume(name, source, *read_only).await?;
+                    }
+                }
             }
 
             let dns_servers = vec![network.gateway.to_string()];
@@ -427,7 +607,11 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
                 .collect();
 
             log::info!("pod '{}': adding container '{}'", pod_id, container_id);
-            vm.add_container(&container_id, "/dev/vdb", &dns_servers, volume_mounts)
+            let rootfs = distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
+                tag: "container-rootfs".to_string(),
+                overlay_device: "/dev/vdb".to_string(),
+            };
+            vm.add_container(&container_id, rootfs, &dns_servers, volume_mounts)
                 .await?;
 
             log::info!("pod '{}': starting container '{}'", pod_id, container_id);
@@ -493,7 +677,13 @@ async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         }
     };
 
-    Ok((vm, io_session, port_task))
+    let resources = PodResources {
+        _artifact: artifact,
+        _prepared_volumes: prepared_volumes,
+        _vol_tmpdir: vol_tmpdir,
+    };
+
+    Ok((vm, io_session, port_task, resources))
 }
 
 /// Wire a freshly launched/restored VM instance into the fabric and establish

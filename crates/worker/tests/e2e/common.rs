@@ -91,7 +91,12 @@ async fn setup_full(
     // let vmm = distvirt_worker::vmm::firecracker::Firecracker::new(firecracker_bin);
     let cloud_hypervisor_bin =
         std::env::var("CLOUD_HYPERVISOR_BIN").unwrap_or_else(|_| "cloud-hypervisor".into());
-    let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(cloud_hypervisor_bin);
+    let virtiofsd_bin =
+        std::env::var("VIRTIOFSD_BIN").unwrap_or_else(|_| "virtiofsd".into());
+    let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(
+        cloud_hypervisor_bin,
+        virtiofsd_bin,
+    );
 
     let containerd_socket = std::env::var("CONTAINERD_SOCKET")
         .unwrap_or_else(|_| "/run/containerd/containerd.sock".into());

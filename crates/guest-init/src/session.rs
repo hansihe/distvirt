@@ -11,16 +11,28 @@ use crate::yamux_driver::YamuxHandle;
 use crate::{net, util, vsock};
 use distvirt_guest_protocol::{GuestMessage, HostMessage, StreamHeader};
 
-/// Mount a volume device at /volumes/<name>.
-fn mount_volume(name: &str, device: &str, read_only: bool) -> anyhow::Result<()> {
+/// Mount a volume at /volumes/<name>.
+fn mount_volume(
+    name: &str,
+    source: &distvirt_guest_protocol::VolumeSource,
+    read_only: bool,
+) -> anyhow::Result<()> {
     let mount_point = format!("/volumes/{}", name);
     let flags = if read_only {
         libc::MS_RDONLY as libc::c_ulong
     } else {
         0
     };
-    util::mount(device, &mount_point, "ext4", flags, None)?;
-    log::info!("mounted volume '{}' at {}", name, mount_point);
+    match source {
+        distvirt_guest_protocol::VolumeSource::Device { device } => {
+            util::mount(device, &mount_point, "ext4", flags, None)?;
+            log::info!("mounted volume '{}' (device {}) at {}", name, device, mount_point);
+        }
+        distvirt_guest_protocol::VolumeSource::VirtioFs { tag } => {
+            util::mount(tag, &mount_point, "virtiofs", flags, None)?;
+            log::info!("mounted volume '{}' (virtiofs '{}') at {}", name, tag, mount_point);
+        }
+    }
     Ok(())
 }
 
@@ -47,11 +59,11 @@ pub fn execute_command(
     match cmd {
         HostMessage::MountVolume {
             name,
-            device,
+            source,
             read_only,
         } => {
-            log::info!("MountVolume: name={}, device={}, read_only={}", name, device, read_only);
-            match mount_volume(&name, &device, read_only) {
+            log::info!("MountVolume: name={}, source={:?}, read_only={}", name, source, read_only);
+            match mount_volume(&name, &source, read_only) {
                 Ok(()) => CommandResult::Response(GuestMessage::VolumeMounted { name }),
                 Err(e) => {
                     log::error!("MountVolume failed: {:#}", e);
@@ -63,12 +75,12 @@ pub fn execute_command(
         }
         HostMessage::AddContainer {
             id,
-            device,
+            rootfs,
             dns_servers,
             volume_mounts,
         } => {
-            log::info!("AddContainer: id={}, device={}", id, device);
-            match containers.add(id.clone(), device, &dns_servers, &volume_mounts) {
+            log::info!("AddContainer: id={}, rootfs={:?}", id, rootfs);
+            match containers.add(id.clone(), rootfs, &dns_servers, &volume_mounts) {
                 Ok(()) => CommandResult::Response(GuestMessage::ContainerAdded { id }),
                 Err(e) => {
                     log::error!("AddContainer failed: {:#}", e);

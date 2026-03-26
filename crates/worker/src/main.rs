@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let image_provider =
-        distvirt_worker::image_provider::containerd_blockfile::ContainerdBlockfileProvider::new(
+        distvirt_worker::image_provider::containerd_overlayfs::ContainerdOverlayfsProvider::new(
             cli.containerd_socket,
             cli.containerd_namespace,
             Some(cli.docker_config),
@@ -97,8 +97,10 @@ async fn main() -> anyhow::Result<()> {
         // }
         "cloud-hypervisor" => {
             log::info!("using Cloud Hypervisor VMM backend");
-            let vmm =
-                distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new("cloud-hypervisor");
+            let vmm = distvirt_worker::vmm::cloud_hypervisor::CloudHypervisor::new(
+                "cloud-hypervisor",
+                "virtiofsd",
+            );
             run_worker!(vmm)
         }
         other => anyhow::bail!("unknown VMM backend: {}", other),

@@ -47,6 +47,16 @@ pub fn mount(
     Ok(())
 }
 
+/// Unmount a filesystem.
+pub fn umount(target: &str) -> anyhow::Result<()> {
+    let target_c = CString::new(target).context("invalid target string")?;
+    let ret = unsafe { libc::umount(target_c.as_ptr()) };
+    if ret != 0 {
+        bail!("umount {}: {}", target, io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Create a pipe with `O_CLOEXEC`. Returns `(read_end, write_end)`.
 pub fn create_pipe() -> anyhow::Result<(OwnedFd, OwnedFd)> {
     let mut fds: [libc::c_int; 2] = [-1, -1];

@@ -81,17 +81,17 @@ impl Vmm for Firecracker {
     async fn launch(&self, config: &VmConfig) -> anyhow::Result<FirecrackerInstance> {
         let tmpdir = tempfile::tempdir().context("create tmpdir")?;
 
-        // Copy rootfs and container images into tmpdir (writable copies).
+        // Copy rootfs and overlay images into tmpdir (writable copies).
         log::info!("firecracker: copying rootfs image to tmpdir");
         copy_file_writable(
             &config.rootfs_image_path,
             &tmpdir.path().join("rootfs.ext4"),
         )
         .await?;
-        log::info!("firecracker: copying container image to tmpdir");
+        log::info!("firecracker: copying overlay image to tmpdir");
         copy_file_writable(
-            &config.container_image_path,
-            &tmpdir.path().join("container.ext4"),
+            &config.overlay_image_path,
+            &tmpdir.path().join("overlay.ext4"),
         )
         .await?;
         log::info!("firecracker: images copied, spawning firecracker");
@@ -116,24 +116,13 @@ impl Vmm for Firecracker {
         //   pci=off        — disable PCI bus scanning (Firecracker has no PCI, saves boot time)
         //   init=/sbin/init — our custom init binary (not systemd)
         // Firecracker uses an 8250 UART on both x86_64 and aarch64.
-        let mut boot_args = format!("console=ttyS0 reboot=k panic=-1 pci=off init=/sbin/init");
-        if let Some(ref balloon) = config.balloon {
-            boot_args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
-        }
-
-        // Write config drive if there are pre-vsock commands to bake in.
-        if !config.initial_commands.is_empty() {
-            let config_img_path = tmpdir.path().join("config.img");
-            let json_payload = serde_json::to_vec(&config.initial_commands)
-                .context("serialize initial_commands")?;
-            let mut img_data = Vec::with_capacity(4 + json_payload.len());
-            img_data.extend_from_slice(&(json_payload.len() as u32).to_le_bytes());
-            img_data.extend_from_slice(&json_payload);
-            tokio::fs::write(&config_img_path, &img_data)
-                .await
-                .context("write config.img")?;
-            boot_args.push_str(" distvirt.config_device=/dev/vdc");
-        }
+        let boot_args = {
+            let mut args = format!("console=ttyS0 reboot=k panic=-1 pci=off init=/sbin/init");
+            if let Some(ref balloon) = config.balloon {
+                args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
+            }
+            args
+        };
 
         api_request("PUT",
             &api_socket,
@@ -164,33 +153,16 @@ impl Vmm for Firecracker {
         api_request(
             "PUT",
             &api_socket,
-            "/drives/container",
+            "/drives/overlay",
             Some(&serde_json::json!({
-                "drive_id": "container",
-                "path_on_host": "./container.ext4",
+                "drive_id": "overlay",
+                "path_on_host": "./overlay.ext4",
                 "is_root_device": false,
                 "is_read_only": false
             })),
         )
         .await
-        .context("configure container drive")?;
-
-        // Register config drive if present.
-        if !config.initial_commands.is_empty() {
-            api_request(
-                "PUT",
-                &api_socket,
-                "/drives/config",
-                Some(&serde_json::json!({
-                    "drive_id": "config",
-                    "path_on_host": "./config.img",
-                    "is_root_device": false,
-                    "is_read_only": true
-                })),
-            )
-            .await
-            .context("configure config drive")?;
-        }
+        .context("configure overlay drive")?;
 
         // Copy and register additional drives (volumes).
         for drive in &config.additional_drives {
@@ -361,15 +333,15 @@ impl Vmm for Firecracker {
         // 1. Create new tmpdir.
         let tmpdir = tempfile::tempdir().context("create tmpdir for restore")?;
 
-        // 2. Copy rootfs from original source path and container.ext4 from snapshot.
+        // 2. Copy rootfs from original source path and overlay.ext4 from snapshot.
         copy_file_writable(
             &metadata.rootfs_source_path,
             &tmpdir.path().join("rootfs.ext4"),
         )
         .await?;
         copy_file_writable(
-            &snapshot_dir.join("container.ext4"),
-            &tmpdir.path().join("container.ext4"),
+            &snapshot_dir.join("overlay.ext4"),
+            &tmpdir.path().join("overlay.ext4"),
         )
         .await?;
 
@@ -615,13 +587,13 @@ impl VmInstance for FirecrackerInstance {
 
         let tmpdir_path = self._tmpdir.path();
 
-        // 3. Copy container.ext4 from tmpdir into snapshot dir.
+        // 3. Copy overlay.ext4 from tmpdir into snapshot dir.
         tokio::fs::copy(
-            tmpdir_path.join("container.ext4"),
-            snapshot_dir.join("container.ext4"),
+            tmpdir_path.join("overlay.ext4"),
+            snapshot_dir.join("overlay.ext4"),
         )
         .await
-        .context("copy container.ext4 to snapshot dir")?;
+        .context("copy overlay.ext4 to snapshot dir")?;
 
         // 3b. Copy volume images from tmpdir into snapshot dir.
         for vd in &self.volume_drives {
@@ -651,6 +623,7 @@ impl VmInstance for FirecrackerInstance {
             balloon_configured: self.balloon_configured,
             serial_console: self.serial_console,
             volume_drives: self.volume_drives.clone(),
+            virtiofs_mounts: vec![],
         };
         let metadata_json =
             serde_json::to_vec_pretty(&metadata).context("serialize snapshot metadata")?;

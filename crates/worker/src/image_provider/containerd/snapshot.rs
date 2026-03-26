@@ -124,6 +124,48 @@ pub async fn create_blockfile_view(
     Ok((blockfile_path, view_key))
 }
 
+/// Create a snapshot view for the overlayfs snapshotter and return the mount
+/// descriptors and view key.
+///
+/// The returned mounts describe how to assemble the merged rootfs:
+/// - Multi-layer: `type="overlay"` with `lowerdir=...` in options
+/// - Single-layer: `type="bind"` with `source` pointing to the layer directory
+///
+/// The caller is responsible for mounting these and cleaning up (unmount +
+/// `remove_snapshot` of the view key) when done.
+pub async fn create_overlayfs_view(
+    channel: &Channel,
+    lease: &ContainerdLease,
+    snapshotter: &str,
+    final_chain_id: &str,
+) -> anyhow::Result<(Vec<containerd_client::types::Mount>, String)> {
+    let mut snapshots = SnapshotsClient::new(channel.clone());
+    let view_key = format!("distvirt-view-{}", generate_id());
+    let req = ViewSnapshotRequest {
+        snapshotter: snapshotter.to_string(),
+        key: view_key.clone(),
+        parent: final_chain_id.to_string(),
+        labels: Default::default(),
+    };
+    let resp = snapshots
+        .view(lease.request(req))
+        .await
+        .context("creating overlayfs snapshot view")?;
+    let mounts = resp.into_inner().mounts;
+
+    if mounts.is_empty() {
+        bail!("no mounts returned for overlayfs snapshot view");
+    }
+
+    log::info!(
+        "overlayfs snapshot view created (key={}, mounts={})",
+        view_key,
+        mounts.len()
+    );
+
+    Ok((mounts, view_key))
+}
+
 /// Compute OCI chain IDs from diff IDs.
 ///
 /// chain[0] = diff_ids[0]

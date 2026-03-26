@@ -233,6 +233,9 @@ impl VmInstance for TestVmInstance {
             balloon_configured: false,
             serial_console: false,
             volume_drives: vec![],
+            virtiofs_mounts: vec![],
+            container_image_ref: None,
+            config_volumes: vec![],
         };
 
         // Write metadata.json.

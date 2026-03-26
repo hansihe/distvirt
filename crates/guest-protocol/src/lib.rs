@@ -9,13 +9,39 @@ pub struct VolumeMount {
     pub mount_path: String,
 }
 
+/// How the guest should set up the container root filesystem.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "mode")]
+pub enum ContainerRootfs {
+    /// Mount a block device directly as ext4 (writable).
+    Device { device: String },
+    /// Mount a read-only virtiofs tag as lower layer, use a block device
+    /// for an overlayfs upper/work directory.
+    VirtioFsOverlay {
+        /// virtiofs tag to mount as read-only lower layer.
+        tag: String,
+        /// Block device for the overlay upper + work dirs.
+        overlay_device: String,
+    },
+}
+
+/// Where volume data comes from inside the guest.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "mode")]
+pub enum VolumeSource {
+    /// Block device (ext4).
+    Device { device: String },
+    /// virtiofs tag.
+    VirtioFs { tag: String },
+}
+
 /// Messages sent from host to guest over vsock.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum HostMessage {
     AddContainer {
         id: String,
-        device: String,
+        rootfs: ContainerRootfs,
         #[serde(default)]
         dns_servers: Vec<String>,
         #[serde(default)]
@@ -23,7 +49,7 @@ pub enum HostMessage {
     },
     MountVolume {
         name: String,
-        device: String,
+        source: VolumeSource,
         read_only: bool,
     },
     StartContainer {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::{ImageProvider, PreparedArtifact};
 
 /// Stub image provider that always returns `/dev/null`. For use with `TestVmm`
-/// which ignores the container image path entirely.
+/// which ignores the container rootfs directory entirely.
 pub struct StubImageProvider;
 
 impl ImageProvider for StubImageProvider {

@@ -166,15 +166,23 @@ async fn main() -> Result<()> {
         .prepare(&args.container_image)
         .await
         .context("prepare container image")?;
-    eprintln!("       -> image ready at {}", artifact.image_path.display());
+    eprintln!("       -> image ready at {}", artifact.rootfs_dir.display());
 
     // Launch VM.
     eprintln!("[2/5] Launching VM...");
     let vmm = Firecracker::new(&args.firecracker_bin);
+    // TODO: This testbench needs updating for virtiofs — currently creates a
+    // dummy overlay image. The Firecracker backend doesn't support virtiofs.
+    let overlay_tmpdir = tempfile::tempdir().context("create overlay tmpdir")?;
+    let overlay_path = overlay_tmpdir.path().join("overlay.ext4");
+    {
+        let f = std::fs::File::create(&overlay_path)?;
+        f.set_len(256 * 1024 * 1024)?;
+    }
     let config = VmConfig {
         kernel_path: kernel,
         rootfs_image_path: rootfs,
-        container_image_path: artifact.image_path.clone(),
+        overlay_image_path: overlay_path,
         vcpu_count: args.vcpu_count,
         mem_size_mib: args.mem_size_mib,
         net: None,
@@ -184,8 +192,8 @@ async fn main() -> Result<()> {
             deflate_on_oom: true,
             stats_polling_interval_s: 1,
         }),
-        initial_commands: vec![],
         additional_drives: vec![],
+        virtiofs_mounts: vec![],
     };
     let instance = vmm.launch(&config).await.context("launch VM")?;
     eprintln!("       -> VM process launched");
@@ -202,7 +210,10 @@ async fn main() -> Result<()> {
     let container_id = "mem-stress-0";
 
     eprintln!("       -> adding container filesystem (device=/dev/vdb)...");
-    vm.add_container(container_id, "/dev/vdb", &[], vec![])
+    let rootfs = distvirt_guest_protocol::ContainerRootfs::Device {
+        device: "/dev/vdb".to_string(),
+    };
+    vm.add_container(container_id, rootfs, &[], vec![])
         .await
         .context("add container")?;
     eprintln!("       -> container filesystem added");

@@ -311,17 +311,17 @@ impl<I: VmInstance> ManagedVm<I> {
         Ok(())
     }
 
-    /// Mount a volume device in the guest.
+    /// Mount a volume in the guest.
     pub async fn mount_volume(
         &mut self,
         name: &str,
-        device: &str,
+        source: distvirt_guest_protocol::VolumeSource,
         read_only: bool,
     ) -> anyhow::Result<()> {
         self.session
             .send(&HostMessage::MountVolume {
                 name: name.to_string(),
-                device: device.to_string(),
+                source,
                 read_only,
             })
             .await
@@ -345,14 +345,14 @@ impl<I: VmInstance> ManagedVm<I> {
     pub async fn add_container(
         &mut self,
         id: &str,
-        device: &str,
+        rootfs: distvirt_guest_protocol::ContainerRootfs,
         dns_servers: &[String],
         volume_mounts: Vec<distvirt_guest_protocol::VolumeMount>,
     ) -> anyhow::Result<()> {
         self.session
             .send(&HostMessage::AddContainer {
                 id: id.to_string(),
-                device: device.to_string(),
+                rootfs,
                 dns_servers: dns_servers.to_vec(),
                 volume_mounts,
             })

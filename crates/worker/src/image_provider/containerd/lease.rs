@@ -5,6 +5,7 @@ use containerd_client::services::v1::{
     AddResourceRequest,
     CreateRequest as LeaseCreateRequest,
     DeleteRequest as LeaseDeleteRequest,
+    ListRequest as LeaseListRequest,
     Resource as LeaseResourceProto,
     leases_client::LeasesClient,
 };
@@ -57,12 +58,12 @@ impl LeaseManager {
 
     /// Create a new containerd lease with a 1-hour expiry safety net.
     ///
-    /// The lease protects resources created under it from garbage collection.
+    /// Suitable for short-lived operations (e.g. image pull + copy). The
+    /// expiry label ensures leaked leases (from crashes) are eventually
+    /// cleaned up by containerd.
+    ///
     /// When the returned `ContainerdLease` is dropped, the lease is deleted
     /// asynchronously via the background cleanup task.
-    ///
-    /// The expiry label ensures leaked leases (from crashes) are eventually
-    /// cleaned up by containerd.
     pub async fn create_lease(&self) -> anyhow::Result<ContainerdLease> {
         let mut client = LeasesClient::new(self.channel.clone());
 
@@ -92,6 +93,83 @@ impl LeaseManager {
             namespace: self.namespace.clone(),
             cleanup_tx: self.cleanup_tx.clone(),
         })
+    }
+
+    /// Create a new containerd lease without an expiry.
+    ///
+    /// Suitable for long-lived resources (e.g. overlayfs snapshot views that
+    /// must stay alive for the entire pod lifetime). Since the containerd
+    /// lease API has no Update RPC, we cannot renew the `gc.expire` label.
+    /// Instead, persistent leases rely on:
+    /// - **Normal operation:** RAII drop deletes the lease on pod shutdown.
+    /// - **Crash recovery:** `cleanup_stale_leases()` at worker startup
+    ///   removes any orphaned `distvirt-*` leases.
+    pub async fn create_persistent_lease(&self) -> anyhow::Result<ContainerdLease> {
+        let mut client = LeasesClient::new(self.channel.clone());
+
+        let lease_id = format!("distvirt-{}", generate_id());
+        let req = LeaseCreateRequest {
+            id: lease_id.clone(),
+            labels: Default::default(),
+        };
+        client
+            .create(with_namespace!(req, &self.namespace))
+            .await
+            .with_context(|| format!("creating persistent lease {}", lease_id))?;
+
+        log::debug!("created persistent lease {}", lease_id);
+
+        Ok(ContainerdLease {
+            id: lease_id,
+            channel: self.channel.clone(),
+            namespace: self.namespace.clone(),
+            cleanup_tx: self.cleanup_tx.clone(),
+        })
+    }
+
+    /// Delete all `distvirt-*` leases in the namespace.
+    ///
+    /// Call at worker startup to clean up leases orphaned by a previous crash.
+    /// This makes any resources held only by those leases eligible for GC.
+    pub async fn cleanup_stale_leases(&self) -> anyhow::Result<usize> {
+        let mut client = LeasesClient::new(self.channel.clone());
+
+        let req = LeaseListRequest {
+            filters: vec![],
+        };
+        let resp = client
+            .list(with_namespace!(req, &self.namespace))
+            .await
+            .context("listing leases for cleanup")?;
+
+        let stale: Vec<_> = resp
+            .into_inner()
+            .leases
+            .into_iter()
+            .filter(|l| l.id.starts_with("distvirt-"))
+            .collect();
+
+        let count = stale.len();
+        for lease in &stale {
+            let req = LeaseDeleteRequest {
+                id: lease.id.clone(),
+                sync: false,
+            };
+            if let Err(e) = client
+                .delete(with_namespace!(req, &self.namespace))
+                .await
+            {
+                log::warn!("failed to delete stale lease {}: {}", lease.id, e);
+            } else {
+                log::debug!("deleted stale lease {}", lease.id);
+            }
+        }
+
+        if count > 0 {
+            log::info!("cleaned up {} stale distvirt lease(s)", count);
+        }
+
+        Ok(count)
     }
 }
 
