@@ -8,6 +8,7 @@ pub use instance::CloudHypervisorInstance;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -17,19 +18,25 @@ use instance::InstanceArgs;
 use vm_config::AdditionalDrive;
 
 use super::{
-    LaunchResult, RestoreContext, SnapshotArtifacts, SnapshotMetadata, SnapshotVirtiofsMount,
-    SnapshotVolumeDrive, VmConfig, VmVolumeSource, Vmm, VolumeMountInstruction,
-    copy_file_writable, spawn_exit_monitor, spawn_serial_task, wait_for_file,
+    BaseVmConfig, GuestDevice, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
+    ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, SnapshotMetadata,
+    SnapshotVirtiofsMount, SnapshotVolumeDrive, VmBuilder, VmMountSource, Vmm,
+    spawn_exit_monitor, spawn_serial_task, wait_for_file,
 };
-use super::virtiofs::spawn_virtiofsd;
 use crate::fabric::{FabricPort, Port};
+use crate::image_provider::{ContainerdLease, ResolvedImage};
+use crate::image_provider::containerd_overlayfs::OverlayfsCleanup;
 use crate::linux::net::PersistentTap;
+use crate::vmm::virtiofs::VirtiofsdProcess;
 
 /// Containerd connection config for the VMM.
+///
+/// Uses `Arc<UnpackCoordinator>` so the config can be cloned into builders
+/// without moving the coordinator out of `CloudHypervisor`.
 pub struct ContainerdConfig {
     pub channel: tonic::transport::Channel,
     pub namespace: String,
-    pub unpack_coordinator: crate::image_provider::containerd::unpack::UnpackCoordinator,
+    pub unpack_coordinator: Arc<crate::image_provider::containerd::unpack::UnpackCoordinator>,
 }
 
 /// Cloud Hypervisor VMM implementation.
@@ -106,115 +113,271 @@ fn tap_to_fabric_port(tap: PersistentTap, guest_mac: [u8; 6]) -> anyhow::Result<
     Ok(FabricPort::Tap(Port::new(socket, guest_mac)))
 }
 
-impl Vmm for CloudHypervisor {
+// ---------------------------------------------------------------------------
+// Deferred mount: recorded in add_mount(), executed in launch()
+// ---------------------------------------------------------------------------
+
+/// A mount request recorded by the builder, to be processed during launch().
+enum DeferredMount {
+    ContainerdImage {
+        tag: String,
+        resolved: ResolvedImage,
+        lease: ContainerdLease,
+    },
+    Directory {
+        tag: String,
+        path: PathBuf,
+    },
+    BlockImage {
+        tag: String,
+        path: PathBuf,
+        read_only: bool,
+    },
+}
+
+/// A scratch device request recorded by add_scratch_device().
+struct DeferredScratch {
+    tag: String,
+    size_mib: u32,
+}
+
+// ---------------------------------------------------------------------------
+// CloudHypervisorBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for configuring and launching a Cloud Hypervisor VM.
+///
+/// Created by `CloudHypervisor::builder()`. Accumulates mount requests
+/// synchronously; all async work (virtiofsd spawn, containerd materialize)
+/// happens in `launch()`.
+pub struct CloudHypervisorBuilder {
+    // VM configuration
+    base: BaseVmConfig,
+    cloud_hypervisor_bin: PathBuf,
+    virtiofsd_bin: PathBuf,
+    containerd: Option<ContainerdConfig>,
+    tmpdir: tempfile::TempDir,
+
+    // Deferred work
+    mounts: Vec<DeferredMount>,
+    scratches: Vec<DeferredScratch>,
+
+    // Snapshot context
+    mount_restore_info: Vec<MountRestoreInfo>,
+}
+
+impl CloudHypervisorBuilder {
+    /// Plan the access type for a mount source without doing async work.
+    fn plan_access(source: &VmMountSource) -> ProvidedAccess {
+        match source {
+            VmMountSource::ContainerdImage { .. } => ProvidedAccess::VirtioFs { read_only: true },
+            VmMountSource::Directory { .. } => ProvidedAccess::VirtioFs { read_only: true },
+            VmMountSource::BlockImage { read_only, .. } => {
+                ProvidedAccess::BlockDevice { read_only: *read_only }
+            }
+        }
+    }
+}
+
+impl VmBuilder for CloudHypervisorBuilder {
     type Instance = CloudHypervisorInstance;
 
-    async fn launch(
-        &self,
-        config: VmConfig,
-    ) -> anyhow::Result<(CloudHypervisorInstance, LaunchResult)> {
-        let tmpdir = tempfile::tempdir().context("create tmpdir")?;
+    fn add_mount(&mut self, request: MountRequest) -> anyhow::Result<PlannedMount> {
+        let provided = Self::plan_access(&request.source);
 
-        // Copy rootfs image into tmpdir (writable copy).
-        log::info!("cloud-hypervisor: copying rootfs image to tmpdir");
-        copy_file_writable(
-            &config.rootfs_image_path,
-            &tmpdir.path().join("rootfs.ext4"),
-        )
-        .await?;
+        let deferred = match request.source {
+            VmMountSource::ContainerdImage { resolved, lease } => {
+                // Validate that containerd config is available.
+                if self.containerd.is_none() {
+                    anyhow::bail!(
+                        "containerd connection required for ContainerdImage mount '{}'",
+                        request.tag
+                    );
+                }
+                DeferredMount::ContainerdImage {
+                    tag: request.tag.clone(),
+                    resolved,
+                    lease,
+                }
+            }
+            VmMountSource::Directory { path } => DeferredMount::Directory {
+                tag: request.tag.clone(),
+                path,
+            },
+            VmMountSource::BlockImage { path, read_only } => DeferredMount::BlockImage {
+                tag: request.tag.clone(),
+                path,
+                read_only,
+            },
+        };
 
-        // --- Materialize container rootfs ---
-        let rootfs = rootfs::materialize(
-            config.container_image,
-            self.containerd.as_ref(),
-            &self.virtiofsd_bin,
-            tmpdir.path(),
-        )
-        .await?;
+        self.mounts.push(deferred);
 
-        if !rootfs.use_block_container {
-            // Overlay ext4 for virtiofs upper/work dirs.
-            log::info!("cloud-hypervisor: creating overlay image");
-            let overlay_path = tmpdir.path().join("overlay.ext4");
-            crate::volume::create_overlay_image(&overlay_path, 256)
-                .await
-                .context("create overlay image")?;
-        }
+        Ok(PlannedMount {
+            tag: request.tag,
+            provided,
+        })
+    }
 
-        // --- Process volumes ---
-        let mut virtiofsd_processes = rootfs.virtiofsd_processes;
-        let mut virtiofs_tags = rootfs.virtiofs_tags;
-        let mut additional_drives = Vec::new();
-        let mut volume_mount_instructions = Vec::new();
+    fn add_scratch_device(&mut self, tag: &str, size_mib: u32) -> anyhow::Result<()> {
+        self.scratches.push(DeferredScratch {
+            tag: tag.to_string(),
+            size_mib,
+        });
+        Ok(())
+    }
+
+    fn set_snapshot_context(&mut self, mount_restore_info: Vec<MountRestoreInfo>) {
+        self.mount_restore_info = mount_restore_info;
+    }
+
+    async fn launch(self) -> anyhow::Result<(CloudHypervisorInstance, ResolvedMounts)> {
+        let CloudHypervisorBuilder {
+            base,
+            cloud_hypervisor_bin,
+            virtiofsd_bin,
+            containerd,
+            tmpdir,
+            mounts,
+            scratches,
+            mount_restore_info,
+        } = self;
+
+        // Accumulators for VM config and instance ownership.
+        let mut virtiofsd_processes: Vec<VirtiofsdProcess> = Vec::new();
+        let mut virtiofs_tags: Vec<String> = Vec::new();
+        let mut additional_drives: Vec<AdditionalDrive> = Vec::new();
+        let mut overlayfs_cleanup: Option<OverlayfsCleanup> = None;
+        let mut lease: Option<ContainerdLease> = None;
+        let mut resolved_entries: Vec<ResolvedEntry> = Vec::new();
+
+        // Block device index: /dev/vda = rootfs (always), /dev/vdb onwards.
+        // We start at 'b' because vda is always the rootfs disk.
         let mut block_idx: u8 = 0;
 
-        for vol in &config.volumes {
-            match &vol.source {
-                VmVolumeSource::BlockImage { image_path } => {
-                    let filename = image_path
+        // --- Process scratch devices first (they get sequential block device letters) ---
+        for scratch in &scratches {
+            let filename = format!("scratch-{}.ext4", scratch.tag);
+            let overlay_path = tmpdir.path().join(&filename);
+            crate::volume::create_overlay_image(&overlay_path, scratch.size_mib as u64)
+                .await
+                .with_context(|| {
+                    format!("create scratch device '{}' ({}MiB)", scratch.tag, scratch.size_mib)
+                })?;
+            additional_drives.push(AdditionalDrive {
+                filename: filename.clone(),
+                read_only: false,
+            });
+            let device_letter = (b'b' + block_idx) as char;
+            resolved_entries.push(ResolvedEntry {
+                tag: scratch.tag.clone(),
+                guest: GuestDevice::Device {
+                    path: format!("/dev/vd{}", device_letter),
+                },
+            });
+            block_idx += 1;
+        }
+
+        // --- Process deferred mounts ---
+        for deferred in mounts {
+            match deferred {
+                DeferredMount::ContainerdImage {
+                    tag,
+                    resolved,
+                    lease: mount_lease,
+                } => {
+                    let ctrd = containerd.as_ref().context(
+                        "containerd connection required for ContainerdImage mount",
+                    )?;
+                    let result = rootfs::materialize_containerd(
+                        &resolved,
+                        mount_lease,
+                        ctrd,
+                        &virtiofsd_bin,
+                        tmpdir.path(),
+                        &tag,
+                    )
+                    .await?;
+                    virtiofsd_processes.push(result.virtiofsd_process);
+                    virtiofs_tags.push(tag.clone());
+                    overlayfs_cleanup = Some(result.overlayfs_cleanup);
+                    lease = Some(result.lease);
+                    resolved_entries.push(ResolvedEntry {
+                        tag,
+                        guest: GuestDevice::VirtioFs {
+                            virtiofs_tag: virtiofs_tags.last().unwrap().clone(),
+                        },
+                    });
+                }
+                DeferredMount::Directory { tag, path } => {
+                    let proc = rootfs::materialize_directory(
+                        &path,
+                        &virtiofsd_bin,
+                        tmpdir.path(),
+                        &tag,
+                        true,
+                    )
+                    .await?;
+                    virtiofsd_processes.push(proc);
+                    virtiofs_tags.push(tag.clone());
+                    resolved_entries.push(ResolvedEntry {
+                        tag,
+                        guest: GuestDevice::VirtioFs {
+                            virtiofs_tag: virtiofs_tags.last().unwrap().clone(),
+                        },
+                    });
+                }
+                DeferredMount::BlockImage {
+                    tag,
+                    path,
+                    read_only,
+                } => {
+                    let filename = path
                         .file_name()
                         .context("block image has no filename")?
                         .to_str()
                         .context("block image filename is not valid UTF-8")?
                         .to_string();
-                    log::info!(
-                        "cloud-hypervisor: copying volume '{}' to tmpdir",
-                        vol.name
-                    );
-                    copy_file_writable(image_path, &tmpdir.path().join(&filename)).await?;
+                    rootfs::materialize_block(&path, tmpdir.path(), &filename).await?;
                     additional_drives.push(AdditionalDrive {
                         filename: filename.clone(),
-                        read_only: vol.read_only,
+                        read_only,
                     });
-                    let device = format!("/dev/vd{}", (b'c' + block_idx) as char);
-                    volume_mount_instructions.push(VolumeMountInstruction {
-                        name: vol.name.clone(),
-                        source: distvirt_guest_protocol::VolumeSource::Device { device },
-                        read_only: vol.read_only,
+                    let device_letter = (b'b' + block_idx) as char;
+                    resolved_entries.push(ResolvedEntry {
+                        tag,
+                        guest: GuestDevice::Device {
+                            path: format!("/dev/vd{}", device_letter),
+                        },
                     });
                     block_idx += 1;
-                }
-                VmVolumeSource::Directory { dir_path } => {
-                    let tag = format!("vol-{}", vol.name);
-                    let proc = spawn_virtiofsd(
-                        &self.virtiofsd_bin,
-                        tmpdir.path(),
-                        &tag,
-                        dir_path,
-                        vol.read_only,
-                    )
-                    .await?;
-                    virtiofsd_processes.push(proc);
-                    virtiofs_tags.push(tag.clone());
-                    volume_mount_instructions.push(VolumeMountInstruction {
-                        name: vol.name.clone(),
-                        source: distvirt_guest_protocol::VolumeSource::VirtioFs { tag },
-                        read_only: vol.read_only,
-                    });
                 }
             }
         }
 
+        // --- Determine if we need shared memory (virtiofs requires it) ---
+        let has_virtiofs = !virtiofs_tags.is_empty();
+
         // --- Spawn Cloud Hypervisor ---
         let spawned = spawn_cloud_hypervisor(
-            &self.cloud_hypervisor_bin,
+            &cloud_hypervisor_bin,
             tmpdir.path(),
-            config.serial_console,
+            base.serial_console,
         )
         .await?;
         log::info!("cloud-hypervisor: process spawned, configuring VM");
 
         // --- Build VM config JSON + TAP ---
         let built = vm_config::build(
-            &config.kernel_path,
-            config.vcpu_count,
-            config.mem_size_mib,
-            config.balloon.as_ref(),
-            config.serial_console,
-            rootfs.use_block_container,
+            &base.kernel_path,
+            base.vcpu_count,
+            base.mem_size_mib,
+            base.balloon.as_ref(),
+            base.serial_console,
+            !has_virtiofs, // use_block_container = no virtiofs means no shared memory needed
             &additional_drives,
             &virtiofs_tags,
-            config.net.as_ref(),
+            base.net.as_ref(),
         )?;
 
         // --- Create and boot VM ---
@@ -227,7 +390,7 @@ impl Vmm for CloudHypervisor {
             .context("vm.boot")?;
         log::info!("cloud-hypervisor: instance started");
 
-        let fabric_port = match (built.tap, config.net.as_ref()) {
+        let fabric_port = match (built.tap, base.net.as_ref()) {
             (Some(tap), Some(net)) => Some(tap_to_fabric_port(tap, net.guest_mac)?),
             _ => None,
         };
@@ -254,38 +417,27 @@ impl Vmm for CloudHypervisor {
             .collect();
 
         let snapshot_metadata = SnapshotMetadata {
-            kernel_path: config.kernel_path,
-            rootfs_source_path: config.rootfs_image_path,
-            balloon_configured: config.balloon.is_some(),
-            serial_console: config.serial_console,
+            kernel_path: base.kernel_path,
+            rootfs_source_path: base.rootfs_image_path,
+            balloon_configured: base.balloon.is_some(),
+            serial_console: base.serial_console,
             volume_drives,
             virtiofs_mounts: virtiofs_snapshot,
-            container_image_ref: config.snapshot_context.container_image_ref,
-            config_volumes: config.snapshot_context.config_volumes,
+            mount_restore_info,
+            // Deprecated fields — no longer populated by builder path.
+            container_image_ref: None,
+            config_volumes: vec![],
         };
 
-        // --- Build launch result ---
-        let container_rootfs = if rootfs.use_block_container {
-            distvirt_guest_protocol::ContainerRootfs::Device {
-                device: "/dev/vdb".to_string(),
-            }
-        } else {
-            distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
-                tag: "container-rootfs".to_string(),
-                overlay_device: "/dev/vdb".to_string(),
-            }
-        };
-
-        let launch_result = LaunchResult {
-            container_rootfs,
-            volume_mounts: volume_mount_instructions,
+        let resolved_mounts = ResolvedMounts {
+            entries: resolved_entries,
         };
 
         let instance = CloudHypervisorInstance::new(InstanceArgs {
             child: spawned.child,
             virtiofsd_processes,
-            overlayfs_cleanup: rootfs.overlayfs_cleanup,
-            lease: rootfs.lease,
+            overlayfs_cleanup,
+            lease,
             config_vol_tmpdirs: Vec::new(),
             serial_task,
             exit_monitor,
@@ -297,7 +449,57 @@ impl Vmm for CloudHypervisor {
             snapshot_metadata,
         });
 
-        Ok((instance, launch_result))
+        Ok((instance, resolved_mounts))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vmm implementation
+// ---------------------------------------------------------------------------
+
+impl Vmm for CloudHypervisor {
+    type Builder = CloudHypervisorBuilder;
+    type Instance = CloudHypervisorInstance;
+
+    fn builder(&self, base: BaseVmConfig) -> anyhow::Result<CloudHypervisorBuilder> {
+        let tmpdir = tempfile::tempdir().context("create tmpdir")?;
+
+        // Copy rootfs image into tmpdir (writable copy).
+        // This is synchronous because we use std::fs — the rootfs copy is
+        // fast for the small guest-init image and avoids making builder() async.
+        log::info!("cloud-hypervisor: copying rootfs image to tmpdir");
+        std::fs::copy(&base.rootfs_image_path, tmpdir.path().join("rootfs.ext4"))
+            .with_context(|| {
+                format!(
+                    "copy rootfs {} to {}",
+                    base.rootfs_image_path.display(),
+                    tmpdir.path().display()
+                )
+            })?;
+        // Make writable.
+        let mut perms = std::fs::metadata(tmpdir.path().join("rootfs.ext4"))?.permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(tmpdir.path().join("rootfs.ext4"), perms)?;
+
+        // Clone the containerd config for the builder. Channel and Arc are
+        // cheap to clone; the builder validates at add_mount() time if
+        // containerd is actually needed.
+        let containerd = self.containerd.as_ref().map(|c| ContainerdConfig {
+            channel: c.channel.clone(),
+            namespace: c.namespace.clone(),
+            unpack_coordinator: Arc::clone(&c.unpack_coordinator),
+        });
+
+        Ok(CloudHypervisorBuilder {
+            base,
+            cloud_hypervisor_bin: self.cloud_hypervisor_bin.clone(),
+            virtiofsd_bin: self.virtiofsd_bin.clone(),
+            containerd,
+            tmpdir,
+            mounts: Vec::new(),
+            scratches: Vec::new(),
+            mount_restore_info: Vec::new(),
+        })
     }
 
     async fn restore(
@@ -311,39 +513,52 @@ impl Vmm for CloudHypervisor {
         // --- Copy snapshot artifacts ---
         snapshot_patch::copy_snapshot_to_tmpdir(snapshot, tmpdir.path()).await?;
 
-        // --- Materialize container rootfs ---
-        let rootfs = if let Some(container_image) = ctx.container_image {
-            rootfs::materialize(
-                container_image,
-                self.containerd.as_ref(),
-                &self.virtiofsd_bin,
-                tmpdir.path(),
-            )
-            .await?
-        } else {
-            rootfs::MaterializedRootfs::empty()
-        };
+        // --- Process restore mounts ---
+        let mut virtiofsd_processes: Vec<VirtiofsdProcess> = Vec::new();
+        let mut overlayfs_cleanup: Option<OverlayfsCleanup> = None;
+        let mut lease: Option<ContainerdLease> = None;
+        let config_vol_tmpdirs: Vec<tempfile::TempDir> = Vec::new();
 
-        let mut virtiofsd_processes = rootfs.virtiofsd_processes;
-
-        // --- Recreate ConfigData volumes ---
-        let config_vol_handles =
-            crate::volume::prepare_config_volumes_from_snapshot(&ctx.config_volumes)
-                .await
-                .context("recreate config volumes for restore")?;
-
-        let mut config_vol_tmpdirs = Vec::new();
-        for (tag, dir_path, dir) in config_vol_handles {
-            let proc = spawn_virtiofsd(
-                &self.virtiofsd_bin,
-                tmpdir.path(),
-                &tag,
-                &dir_path,
-                true, // config volumes are always read-only
-            )
-            .await?;
-            virtiofsd_processes.push(proc);
-            config_vol_tmpdirs.push(dir);
+        for mount in ctx.mounts {
+            match mount.source {
+                VmMountSource::ContainerdImage {
+                    resolved,
+                    lease: mount_lease,
+                } => {
+                    let ctrd = self
+                        .containerd
+                        .as_ref()
+                        .context("containerd connection required for ContainerdImage restore")?;
+                    let result = rootfs::materialize_containerd(
+                        &resolved,
+                        mount_lease,
+                        ctrd,
+                        &self.virtiofsd_bin,
+                        tmpdir.path(),
+                        &mount.tag,
+                    )
+                    .await?;
+                    virtiofsd_processes.push(result.virtiofsd_process);
+                    overlayfs_cleanup = Some(result.overlayfs_cleanup);
+                    lease = Some(result.lease);
+                }
+                VmMountSource::Directory { path } => {
+                    let proc = rootfs::materialize_directory(
+                        &path,
+                        &self.virtiofsd_bin,
+                        tmpdir.path(),
+                        &mount.tag,
+                        true,
+                    )
+                    .await?;
+                    virtiofsd_processes.push(proc);
+                }
+                VmMountSource::BlockImage { .. } => {
+                    // Block images are persisted in the snapshot; no host-side
+                    // action needed on restore (already copied by
+                    // copy_snapshot_to_tmpdir).
+                }
+            }
         }
 
         // --- Create TAP if networking is configured ---
@@ -401,8 +616,8 @@ impl Vmm for CloudHypervisor {
         let instance = CloudHypervisorInstance::new(InstanceArgs {
             child: spawned.child,
             virtiofsd_processes,
-            overlayfs_cleanup: rootfs.overlayfs_cleanup,
-            lease: rootfs.lease,
+            overlayfs_cleanup,
+            lease,
             config_vol_tmpdirs,
             serial_task,
             exit_monitor,

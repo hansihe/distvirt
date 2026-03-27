@@ -40,7 +40,7 @@ async fn setup_worker(
     let containerd_config = distvirt_worker::vmm::cloud_hypervisor::ContainerdConfig {
         channel: image_provider.channel().clone(),
         namespace: image_provider.namespace().to_string(),
-        unpack_coordinator: distvirt_worker::image_provider::UnpackCoordinator::default(),
+        unpack_coordinator: std::sync::Arc::new(distvirt_worker::image_provider::UnpackCoordinator::default()),
     };
 
     // let firecracker_bin = std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".into());

@@ -7,6 +7,7 @@ pub(crate) mod linux;
 pub mod managed_vm;
 pub(crate) mod oci;
 pub mod packet;
+pub(crate) mod pod;
 pub mod resource_monitor;
 pub mod sim_traffic;
 pub mod task_handle;

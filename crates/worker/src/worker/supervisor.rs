@@ -1,39 +1,24 @@
 use std::path::PathBuf;
-use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use distvirt_worker_protocol::{
-    ArtifactId, ContainerSpec, LogStreamHeader, LogStreamOpener, NamespaceId, PodId,
+    ArtifactId, ContainerSpec, LogStreamOpener, NamespaceId, PodId,
     PodNetworkConfig, PoolId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::fabric::{Fabric, FabricPort};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
 use crate::managed_vm::ManagedVm;
-use crate::oci;
+use crate::pod::wait_for_vm_exit;
 use crate::task_handle::TaskHandle;
 use crate::vmm::{
-    BalloonConfig, NetConfig, RestoreContext, SnapshotArtifacts, SnapshotContext, VmConfig,
-    VmInstance, Vmm,
+    SnapshotArtifacts, VmInstance, Vmm,
 };
-
-/// RAII handle for resources that must stay alive for the entire pod lifetime.
-///
-/// Holds the container image artifact (whose cleanup handle keeps the
-/// containerd snapshot view mounted and the lease alive), the prepared
-/// volume handles (whose cleanup handles keep ConfigData temp directories
-/// alive for virtiofsd), and the volume tmpdir (which holds the overlay
-/// image and block device volume images).
-struct PodResources {
-    _prepared_volumes: Vec<crate::volume::PreparedVolume>,
-    _vol_tmpdir: Option<tempfile::TempDir>,
-}
 
 // Timeout escalation chain for pod shutdown. These must satisfy:
 //   GRACEFUL_SHUTDOWN_TIMEOUT < STOP_POD_TIMEOUT
@@ -103,7 +88,7 @@ pub(crate) async fn pod_supervisor<
 ) {
     let result = {
         let _busy = activity.busy_guard();
-        pod_launch(
+        crate::pod::pod_launch(
             &*vmm,
             &*image_provider,
             &fabric,
@@ -162,7 +147,7 @@ pub(crate) async fn pod_resume_supervisor<
 ) {
     let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) = {
         let _busy = activity.busy_guard();
-        match prepare_and_restore(
+        match crate::pod::pod_restore(
             &*vmm,
             &*image_provider,
             &fabric,
@@ -262,388 +247,6 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
             }
         }
     }
-}
-
-/// Prepare virtiofs shares on the destination and restore the VM.
-///
-/// 1. If `container_image_ref` is in the snapshot metadata, prepare the image
-///    via the image provider to get a local rootfs directory.
-/// 2. Recreate ConfigData volumes from snapshot metadata.
-/// 3. Update virtiofs mount source_dirs to point at the new local paths.
-/// 4. Restore the VM.
-async fn prepare_and_restore<V: Vmm + 'static, P: ImageProvider + 'static>(
-    vmm: &V,
-    image_provider: &P,
-    fabric: &Fabric<FabricPort>,
-    _event_tx: &mpsc::Sender<WorkerEvent>,
-    _namespace_id: &NamespaceId,
-    pod_id: &PodId,
-    network: PodNetworkConfig,
-    snapshot: SnapshotArtifacts,
-    cancel: &CancellationToken,
-) -> anyhow::Result<(
-    ManagedVm<V::Instance>,
-    Option<TaskHandle<()>>,
-    PodResources,
-)> {
-    // Prepare container image if we have an image ref in the snapshot.
-    let artifact = if let Some(ref image_ref) = snapshot.metadata.container_image_ref {
-        log::info!(
-            "pod '{}': preparing image '{}' for restore",
-            pod_id,
-            image_ref
-        );
-        let artifact = tokio::select! {
-            result = image_provider.prepare(image_ref) => {
-                result.context("preparing image for restore")?
-            }
-            _ = cancel.cancelled() => {
-                anyhow::bail!("cancelled during image prepare for restore");
-            }
-        };
-        Some(artifact)
-    } else {
-        None
-    };
-
-    // Build RestoreContext — VMM handles virtiofs reconstruction and
-    // config volume recreation internally.
-    let net_config = NetConfig::from(&network);
-    let ctx = RestoreContext {
-        net: Some(net_config.clone()),
-        container_image: artifact,
-        config_volumes: snapshot.metadata.config_volumes.clone(),
-    };
-
-    let instance = tokio::select! {
-        result = vmm.restore(&snapshot, ctx) => {
-            result.context("restore VM from snapshot")?
-        }
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during VM restore");
-        }
-    };
-    log::info!("worker: pod '{}' VM restored from snapshot", pod_id);
-
-    let (vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
-
-    let resources = PodResources {
-        _prepared_volumes: Vec::new(),
-        _vol_tmpdir: None,
-    };
-
-    Ok((vm, port_task, resources))
-}
-
-/// RAII handle for resources that must stay alive for the restored pod's lifetime.
-// ResumeResources is no longer needed — VMM owns all restore resources.
-// PodResources is used for both launch and resume paths.
-
-/// Perform all fallible pod setup: image prep, VM launch, vsock connect,
-/// network config, container start, log stream setup.
-async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
-    vmm: &V,
-    image_provider: &P,
-    fabric: &Fabric<FabricPort>,
-    kernel_path: &PathBuf,
-    rootfs_image_path: &PathBuf,
-    log_opener: &LogStreamOpener,
-    event_tx: &mpsc::Sender<WorkerEvent>,
-    namespace_id: &NamespaceId,
-    pod_id: &PodId,
-    network: PodNetworkConfig,
-    containers: Vec<ContainerSpec>,
-    resources: Option<distvirt_worker_protocol::ResourceRequirements>,
-    volumes: Vec<distvirt_worker_protocol::VolumeSpec>,
-    cancel: &CancellationToken,
-) -> anyhow::Result<(
-    ManagedVm<V::Instance>,
-    Option<(crate::io_session::IoSession, yamux::Stream)>,
-    Option<TaskHandle<()>>,
-    PodResources,
-)> {
-    if containers.len() > 1 {
-        anyhow::bail!(
-            "multi-container pods are not supported (got {} containers)",
-            containers.len()
-        );
-    }
-    let container = containers
-        .into_iter()
-        .next()
-        .context("pod must have at least one container")?;
-
-    log::info!("pod '{}': preparing image {}", pod_id, container.image_ref);
-    let artifact = tokio::select! {
-        result = image_provider.prepare(&container.image_ref) => {
-            result.context("preparing image")?
-        }
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during image prepare");
-        }
-    };
-    log::info!("pod '{}': image prepared", pod_id);
-
-    let container_id = container.container_id.clone();
-    let container_volume_mounts = container.config.volume_mounts.clone();
-    let config = if let Some(oci_config) = artifact.oci_config() {
-        oci::merge_config(oci_config, &container.config)?
-    } else {
-        container.config
-    };
-
-    // Resolve user string to numeric uid/gid using the image's /etc/passwd.
-    let (resolved_uid, resolved_gid) = if let Some(ref user) = config.user {
-        let passwd = artifact
-            .oci_config()
-            .map(|c| c.passwd_entries.as_slice())
-            .unwrap_or(&[]);
-        let groups = artifact
-            .oci_config()
-            .map(|c| c.group_entries.as_slice())
-            .unwrap_or(&[]);
-        let (uid, gid) = oci::resolve_user(user, passwd, groups)?;
-        (Some(uid), gid)
-    } else {
-        (None, None)
-    };
-
-    let net_config = NetConfig::from(&network);
-
-    let (vcpu_count, mem_size_mib) = resources
-        .as_ref()
-        .and_then(|r| r.limits.as_ref())
-        .map(|l| {
-            (
-                if l.vcpus > 0 { l.vcpus } else { 1 },
-                if l.memory_mib > 0 {
-                    l.memory_mib as u32
-                } else {
-                    128u32
-                },
-            )
-        })
-        .unwrap_or((1, 128));
-
-    let balloon = resources.as_ref().and_then(|r| {
-        let limits = r.limits.as_ref()?;
-        let requests = r.requests.as_ref()?;
-        if requests.memory_mib < limits.memory_mib && limits.memory_mib > 0 {
-            Some(BalloonConfig {
-                amount_mib: (limits.memory_mib - requests.memory_mib) as u32,
-                deflate_on_oom: true,
-                stats_polling_interval_s: 1,
-            })
-        } else {
-            None
-        }
-    });
-
-    // Prepare volume images in a temp directory.
-    log::info!("pod '{}': preparing {} volume(s)", pod_id, volumes.len());
-    let vol_tmpdir = tempfile::tempdir().context("create tmpdir for volumes")?;
-    let prepared_volumes = crate::volume::prepare_volumes(&volumes, vol_tmpdir.path())
-        .await
-        .context("prepare volumes")?;
-    log::info!("pod '{}': volumes prepared", pod_id);
-
-    // Build config volume metadata for snapshot/restore.
-    let config_volumes: Vec<crate::vmm::SnapshotConfigVolume> = volumes
-        .iter()
-        .filter_map(|v| match &v.volume_type {
-            distvirt_worker_protocol::VolumeType::ConfigData { files } => {
-                Some(crate::vmm::SnapshotConfigVolume {
-                    name: v.name.clone(),
-                    tag: format!("configdata-{}", v.name),
-                    files: files.clone(),
-                })
-            }
-            _ => None,
-        })
-        .collect();
-
-    // Build high-level VmConfig — the VMM decides how to expose the
-    // container image and volumes to the guest.
-    let vm_config = VmConfig {
-        kernel_path: kernel_path.clone(),
-        rootfs_image_path: rootfs_image_path.clone(),
-        vcpu_count,
-        mem_size_mib,
-        net: Some(net_config.clone()),
-        serial_console: true,
-        balloon,
-        container_image: artifact,
-        volumes: prepared_volumes.iter().map(|pv| pv.to_vm_volume()).collect(),
-        snapshot_context: SnapshotContext {
-            container_image_ref: Some(container.image_ref.clone()),
-            config_volumes,
-        },
-    };
-
-    log::info!("pod '{}': launching VM", pod_id);
-    let (instance, launch_result) = tokio::select! {
-        result = vmm.launch(vm_config) => {
-            result.context("launch VM")?
-        }
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during VM launch");
-        }
-    };
-    log::info!("pod '{}': VM launched", pod_id);
-
-    log::info!("pod '{}': setting up instance (fabric + vsock connect)", pod_id);
-    let (mut vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
-    log::info!("pod '{}': instance setup complete", pod_id);
-
-    // Take exit signal again for the setup phase below (setup_instance consumed
-    // the first one for the connect phase).
-    let mut vm_exit_rx = vm.take_exit_signal();
-    let mut vm_died = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
-
-    let io_session = tokio::select! {
-        result = async {
-            log::info!("pod '{}': configuring guest network", pod_id);
-            vm.configure_network("eth0", &net_config).await?;
-
-            // Mount pod-scoped volumes — follow the VMM's instructions.
-            for mount in &launch_result.volume_mounts {
-                log::info!("pod '{}': mounting volume '{}'", pod_id, mount.name);
-                vm.mount_volume(&mount.name, mount.source.clone(), mount.read_only).await?;
-            }
-
-            let dns_servers = vec![network.gateway.to_string()];
-
-            // Build volume mounts for this container from the container's config.
-            let volume_mounts: Vec<distvirt_guest_protocol::VolumeMount> = container_volume_mounts
-                .iter()
-                .map(|vm| distvirt_guest_protocol::VolumeMount {
-                    name: vm.name.clone(),
-                    mount_path: vm.mount_path.clone(),
-                })
-                .collect();
-
-            log::info!("pod '{}': adding container '{}'", pod_id, container_id);
-            vm.add_container(&container_id, launch_result.container_rootfs, &dns_servers, volume_mounts)
-                .await?;
-
-            log::info!("pod '{}': starting container '{}'", pod_id, container_id);
-            vm.start_container(&container_id, &config, resolved_uid, resolved_gid)
-                .await?;
-
-            // Set up log streaming via yamux log streams.
-            let io_session = if config.capture_output {
-                log::info!("pod '{}': accepting output stream", pod_id);
-                match vm.accept_output_stream().await {
-                    Ok((_cid, session)) => {
-                        let header = LogStreamHeader {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            container_id: container_id.to_string(),
-                        };
-                        match log_opener.open_log_stream(&header).await {
-                            Ok(log_stream) => Some((session, log_stream)),
-                            Err(e) => {
-                                log::error!("pod '{}': failed to open log stream: {:#}", pod_id, e);
-                                send_event(
-                                    event_tx,
-                                    WorkerEvent::PodLogStreamError {
-                                        namespace_id: namespace_id.clone(),
-                                        pod_id: pod_id.clone(),
-                                        container_id: container_id.to_string(),
-                                        phase: "open_stream".to_string(),
-                                        error: format!("{:#}", e),
-                                    },
-                                )
-                                .await;
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("pod '{}': failed to accept output stream: {:#}", pod_id, e);
-                        send_event(
-                            event_tx,
-                            WorkerEvent::PodLogStreamError {
-                                namespace_id: namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                container_id: container_id.to_string(),
-                                phase: "connect".to_string(),
-                                error: format!("{:#}", e),
-                            },
-                        )
-                        .await;
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            Ok::<_, anyhow::Error>(io_session)
-        } => { result? }
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during VM setup");
-        }
-        _ = &mut vm_died => {
-            anyhow::bail!("VM process exited during setup");
-        }
-    };
-
-    let resources = PodResources {
-        _prepared_volumes: prepared_volumes,
-        _vol_tmpdir: Some(vol_tmpdir),
-    };
-
-    Ok((vm, io_session, port_task, resources))
-}
-
-/// Wire a freshly launched/restored VM instance into the fabric and establish
-/// the yamux control connection.
-///
-/// Create a future that resolves when the VM process exits, or pends forever if no signal available.
-async fn wait_for_vm_exit(rx: &mut Option<watch::Receiver<Option<ExitStatus>>>) {
-    match rx.as_mut() {
-        Some(rx) => {
-            let _ = rx.wait_for(|s| s.is_some()).await;
-        }
-        None => std::future::pending::<()>().await,
-    }
-}
-
-/// Shared between `pod_launch` and `pod_restore`: takes the TAP, adds it to
-/// the fabric, then connects `ManagedVm` while racing against cancellation
-/// and unexpected VM death.
-async fn setup_instance<I: VmInstance>(
-    mut instance: I,
-    fabric: &Fabric<FabricPort>,
-    pod_id: &PodId,
-    network: &PodNetworkConfig,
-    cancel: &CancellationToken,
-) -> anyhow::Result<(ManagedVm<I>, Option<TaskHandle<()>>)> {
-    let port_task = if let Some(port) = instance.take_fabric_port() {
-        let (_port_id, task) = fabric.add_port_raw_with_ip(port, network.ip);
-        log::info!("worker: pod '{}' network port added to fabric", pod_id);
-        Some(task)
-    } else {
-        None
-    };
-
-    // Take exit signal before instance is moved into ManagedVm::connect,
-    // so we can detect VM death during setup immediately.
-    let mut vm_exit_rx = instance.take_exit_signal();
-    let mut vm_died = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
-
-    let vm = tokio::select! {
-        result = ManagedVm::connect(instance) => { result? }
-        _ = cancel.cancelled() => {
-            anyhow::bail!("cancelled during VM connect");
-        }
-        _ = &mut vm_died => {
-            anyhow::bail!("VM process exited during setup");
-        }
-    };
-
-    Ok((vm, port_task))
 }
 
 /// Timeout for suspend handshake with guest.
@@ -1064,7 +667,10 @@ mod tests {
 
     use crate::fabric::{Fabric, FabricPort};
     use crate::image_provider::{ImageProvider, PreparedArtifact};
-    use crate::vmm::{LaunchResult, VmConfig, VmInstance, Vmm};
+    use crate::vmm::{
+        BaseVmConfig, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
+        ResolvedEntry, ResolvedMounts, GuestDevice, VmBuilder, VmInstance, Vmm,
+    };
 
     // -----------------------------------------------------------------------
     // Stubs & Mocks
@@ -1072,13 +678,29 @@ mod tests {
 
     struct StubVmm;
 
-    impl Vmm for StubVmm {
+    struct StubVmmBuilder;
+
+    impl VmBuilder for StubVmmBuilder {
         type Instance = StubVmInstance;
-        async fn launch(
-            &self,
-            _config: VmConfig,
-        ) -> anyhow::Result<(StubVmInstance, LaunchResult)> {
-            panic!("StubVmm::launch should not be called");
+        fn add_mount(&mut self, _request: MountRequest) -> anyhow::Result<PlannedMount> {
+            panic!("StubVmmBuilder::add_mount should not be called");
+        }
+        fn add_scratch_device(&mut self, _tag: &str, _size_mib: u32) -> anyhow::Result<()> {
+            panic!("StubVmmBuilder::add_scratch_device should not be called");
+        }
+        fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {
+            panic!("StubVmmBuilder::set_snapshot_context should not be called");
+        }
+        async fn launch(self) -> anyhow::Result<(StubVmInstance, ResolvedMounts)> {
+            panic!("StubVmmBuilder::launch should not be called");
+        }
+    }
+
+    impl Vmm for StubVmm {
+        type Builder = StubVmmBuilder;
+        type Instance = StubVmInstance;
+        fn builder(&self, _base: BaseVmConfig) -> anyhow::Result<StubVmmBuilder> {
+            Ok(StubVmmBuilder)
         }
     }
 
@@ -1100,10 +722,64 @@ mod tests {
     }
 
     struct MockVmm {
-        /// If Some, launch() returns this error.
+        /// If Some, builder/launch returns this error.
         launch_error: Option<String>,
         /// The mock VM's vsock socket (worker side).
         vm_socket: tokio::sync::Mutex<Option<UnixStream>>,
+    }
+
+    struct MockVmmBuilder {
+        launch_error: Option<String>,
+        vm_socket: Option<UnixStream>,
+    }
+
+    impl VmBuilder for MockVmmBuilder {
+        type Instance = MockVmInstance;
+        fn add_mount(&mut self, request: MountRequest) -> anyhow::Result<PlannedMount> {
+            // Return a VirtioFs read-only plan for "container", BlockDevice for volumes.
+            let provided = if request.tag == "container" {
+                ProvidedAccess::VirtioFs { read_only: true }
+            } else {
+                ProvidedAccess::BlockDevice { read_only: false }
+            };
+            Ok(PlannedMount {
+                tag: request.tag,
+                provided,
+            })
+        }
+        fn add_scratch_device(&mut self, _tag: &str, _size_mib: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {}
+        async fn launch(self) -> anyhow::Result<(MockVmInstance, ResolvedMounts)> {
+            if let Some(ref err) = self.launch_error {
+                return Err(anyhow::anyhow!("{}", err));
+            }
+            let socket = self
+                .vm_socket
+                .expect("MockVmmBuilder: socket already taken");
+            let instance = MockVmInstance {
+                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
+                killed: tokio::sync::Mutex::new(false),
+            };
+            let resolved = ResolvedMounts {
+                entries: vec![
+                    ResolvedEntry {
+                        tag: "container".to_string(),
+                        guest: GuestDevice::VirtioFs {
+                            virtiofs_tag: "container-rootfs".to_string(),
+                        },
+                    },
+                    ResolvedEntry {
+                        tag: "container-overlay".to_string(),
+                        guest: GuestDevice::Device {
+                            path: "/dev/vdb".to_string(),
+                        },
+                    },
+                ],
+            };
+            Ok((instance, resolved))
+        }
     }
 
     struct MockVmInstance {
@@ -1112,32 +788,20 @@ mod tests {
     }
 
     impl Vmm for MockVmm {
+        type Builder = MockVmmBuilder;
         type Instance = MockVmInstance;
-        async fn launch(
-            &self,
-            _config: VmConfig,
-        ) -> anyhow::Result<(MockVmInstance, LaunchResult)> {
-            if let Some(ref err) = self.launch_error {
-                return Err(anyhow::anyhow!("{}", err));
-            }
+        fn builder(&self, _base: BaseVmConfig) -> anyhow::Result<MockVmmBuilder> {
+            // We need to take the socket synchronously. Use try_lock since
+            // we know no contention exists in tests.
             let socket = self
                 .vm_socket
-                .lock()
-                .await
-                .take()
-                .expect("MockVmm: socket already taken");
-            let instance = MockVmInstance {
-                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
-                killed: tokio::sync::Mutex::new(false),
-            };
-            let launch_result = LaunchResult {
-                container_rootfs: distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
-                    tag: "container-rootfs".to_string(),
-                    overlay_device: "/dev/vdb".to_string(),
-                },
-                volume_mounts: Vec::new(),
-            };
-            Ok((instance, launch_result))
+                .try_lock()
+                .expect("MockVmm: lock contention")
+                .take();
+            Ok(MockVmmBuilder {
+                launch_error: self.launch_error.clone(),
+                vm_socket: socket,
+            })
         }
     }
 

@@ -14,7 +14,11 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
 use super::guest_sim::{ContainerBehavior, GuestSimConfig, SuspendBehavior, run_guest_sim};
-use super::{SnapshotArtifacts, SnapshotMetadata, VmConfig, VmInstance, Vmm};
+use super::{
+    BaseVmConfig, GuestDevice, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
+    ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, SnapshotMetadata, VmBuilder,
+    VmInstance, Vmm,
+};
 use crate::fabric::FabricPort;
 use crate::task_handle::TaskHandle;
 
@@ -141,14 +145,47 @@ fn spawn_guest_sim(
     Ok((host_socket, sim_task, exit_tx))
 }
 
-impl Vmm for TestVmm {
+/// Builder for the test VMM.
+pub struct TestVmmBuilder {
+    config: GuestSimConfig,
+    crash_handle_tx: Option<mpsc::UnboundedSender<CrashHandle>>,
+    mount_plans: Vec<(String, ProvidedAccess)>,
+    scratch_plans: Vec<String>,
+    mount_restore_info: Vec<MountRestoreInfo>,
+}
+
+impl VmBuilder for TestVmmBuilder {
     type Instance = TestVmInstance;
 
-    async fn launch(
-        &self,
-        _config: VmConfig,
-    ) -> anyhow::Result<(TestVmInstance, super::LaunchResult)> {
-        let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.make_config())?;
+    fn add_mount(&mut self, request: MountRequest) -> anyhow::Result<PlannedMount> {
+        let provided = match &request.source {
+            super::VmMountSource::ContainerdImage { .. } | super::VmMountSource::Directory { .. } => {
+                ProvidedAccess::VirtioFs { read_only: true }
+            }
+            super::VmMountSource::BlockImage { read_only, .. } => {
+                ProvidedAccess::BlockDevice {
+                    read_only: *read_only,
+                }
+            }
+        };
+        self.mount_plans.push((request.tag.clone(), provided.clone()));
+        Ok(PlannedMount {
+            tag: request.tag,
+            provided,
+        })
+    }
+
+    fn add_scratch_device(&mut self, tag: &str, _size_mib: u32) -> anyhow::Result<()> {
+        self.scratch_plans.push(tag.to_string());
+        Ok(())
+    }
+
+    fn set_snapshot_context(&mut self, mount_restore_info: Vec<MountRestoreInfo>) {
+        self.mount_restore_info = mount_restore_info;
+    }
+
+    async fn launch(self) -> anyhow::Result<(TestVmInstance, ResolvedMounts)> {
+        let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.config)?;
 
         if let Some(ref tx) = self.crash_handle_tx {
             let _ = tx.send(CrashHandle(exit_tx.clone()));
@@ -161,27 +198,66 @@ impl Vmm for TestVmm {
             exit_tx,
         };
 
-        let launch_result = super::LaunchResult {
-            container_rootfs: distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
-                tag: "container-rootfs".to_string(),
-                overlay_device: "/dev/vdb".to_string(),
-            },
-            volume_mounts: Vec::new(),
-        };
+        // Build resolved mounts — test VMM uses simple sequential assignment.
+        let mut entries = Vec::new();
+        let mut block_idx: u8 = 1; // vda = rootfs
 
-        Ok((instance, launch_result))
+        // Scratch devices first.
+        for tag in &self.scratch_plans {
+            let device = format!("/dev/vd{}", (b'a' + block_idx) as char);
+            entries.push(ResolvedEntry {
+                tag: tag.clone(),
+                guest: GuestDevice::Device { path: device },
+            });
+            block_idx += 1;
+        }
+
+        // Then mounts.
+        for (tag, provided) in &self.mount_plans {
+            match provided {
+                ProvidedAccess::VirtioFs { .. } => {
+                    entries.push(ResolvedEntry {
+                        tag: tag.clone(),
+                        guest: GuestDevice::VirtioFs {
+                            virtiofs_tag: tag.clone(),
+                        },
+                    });
+                }
+                ProvidedAccess::BlockDevice { .. } => {
+                    let device = format!("/dev/vd{}", (b'a' + block_idx) as char);
+                    entries.push(ResolvedEntry {
+                        tag: tag.clone(),
+                        guest: GuestDevice::Device { path: device },
+                    });
+                    block_idx += 1;
+                }
+            }
+        }
+
+        Ok((instance, ResolvedMounts { entries }))
+    }
+}
+
+impl Vmm for TestVmm {
+    type Builder = TestVmmBuilder;
+    type Instance = TestVmInstance;
+
+    fn builder(&self, _base: BaseVmConfig) -> anyhow::Result<TestVmmBuilder> {
+        Ok(TestVmmBuilder {
+            config: self.make_config(),
+            crash_handle_tx: self.crash_handle_tx.clone(),
+            mount_plans: Vec::new(),
+            scratch_plans: Vec::new(),
+            mount_restore_info: Vec::new(),
+        })
     }
 
     async fn restore(
         &self,
         snapshot: &SnapshotArtifacts,
-        _ctx: super::RestoreContext,
+        _ctx: RestoreContext,
     ) -> anyhow::Result<TestVmInstance> {
         // Validate snapshot exists by reading metadata.json.
-        // Uses std::fs instead of tokio::fs because tokio::fs dispatches to
-        // spawn_blocking, which causes flaky tests under `current_thread` +
-        // `start_paused` (the blocking pool is shared across test runtimes and
-        // doesn't advance with fake time).
         let metadata_path = snapshot.snapshot_dir.join("metadata.json");
         let _bytes =
             std::fs::read(&metadata_path).context("read metadata.json from snapshot dir")?;
@@ -234,10 +310,6 @@ impl VmInstance for TestVmInstance {
     }
 
     async fn snapshot(&mut self, snapshot_dir: &Path) -> anyhow::Result<SnapshotArtifacts> {
-        // Uses std::fs instead of tokio::fs because tokio::fs dispatches to
-        // spawn_blocking, which causes flaky tests under `current_thread` +
-        // `start_paused` (the blocking pool is shared across test runtimes and
-        // doesn't advance with fake time).
         std::fs::create_dir_all(snapshot_dir).context("create snapshot dir")?;
 
         let metadata = SnapshotMetadata {
@@ -247,16 +319,15 @@ impl VmInstance for TestVmInstance {
             serial_console: false,
             volume_drives: vec![],
             virtiofs_mounts: vec![],
+            mount_restore_info: vec![],
             container_image_ref: None,
             config_volumes: vec![],
         };
 
-        // Write metadata.json.
         let metadata_json = serde_json::to_vec_pretty(&metadata).context("serialize metadata")?;
         std::fs::write(snapshot_dir.join("metadata.json"), &metadata_json)
             .context("write metadata.json")?;
 
-        // Write a small dummy snapshot.bin so dir_size() returns non-zero.
         std::fs::write(snapshot_dir.join("snapshot.bin"), b"test-snapshot")
             .context("write snapshot.bin")?;
 

@@ -55,6 +55,27 @@ impl PreparedArtifact {
         }
     }
 
+    /// Convert this artifact into a `VmMountSource` for the builder-based VMM interface.
+    ///
+    /// Consumes `self` because `ContainerdImage` takes ownership of the
+    /// resolved image and lease.
+    pub fn into_mount_source(self) -> crate::vmm::VmMountSource {
+        match self {
+            PreparedArtifact::Containerd {
+                resolved, lease, ..
+            } => crate::vmm::VmMountSource::ContainerdImage { resolved, lease },
+            PreparedArtifact::Directory { path, .. } => {
+                crate::vmm::VmMountSource::Directory { path }
+            }
+            PreparedArtifact::BlockDevice { image_path, .. } => {
+                crate::vmm::VmMountSource::BlockImage {
+                    path: image_path,
+                    read_only: false,
+                }
+            }
+        }
+    }
+
     /// Get the image reference string (for snapshot metadata).
     pub fn image_ref_str(&self) -> &str {
         match self {

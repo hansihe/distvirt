@@ -1279,7 +1279,10 @@ mod tests {
 
     use crate::fabric::{Fabric, FabricPort};
     use crate::image_provider::{ImageProvider, PreparedArtifact};
-    use crate::vmm::{LaunchResult, VmConfig, VmInstance, Vmm};
+    use crate::vmm::{
+        BaseVmConfig, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
+        ResolvedEntry, ResolvedMounts, GuestDevice, VmBuilder, VmInstance, Vmm,
+    };
 
     // -----------------------------------------------------------------------
     // Stubs (panic if called — for tests that don't launch pods)
@@ -1287,10 +1290,29 @@ mod tests {
 
     struct StubVmm;
 
-    impl Vmm for StubVmm {
+    struct StubVmmBuilder;
+
+    impl VmBuilder for StubVmmBuilder {
         type Instance = StubVmInstance;
-        async fn launch(&self, _config: VmConfig) -> anyhow::Result<(StubVmInstance, LaunchResult)> {
-            panic!("StubVmm::launch should not be called in state management tests");
+        fn add_mount(&mut self, _request: MountRequest) -> anyhow::Result<PlannedMount> {
+            panic!("StubVmmBuilder::add_mount should not be called");
+        }
+        fn add_scratch_device(&mut self, _tag: &str, _size_mib: u32) -> anyhow::Result<()> {
+            panic!("StubVmmBuilder::add_scratch_device should not be called");
+        }
+        fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {
+            panic!("StubVmmBuilder::set_snapshot_context should not be called");
+        }
+        async fn launch(self) -> anyhow::Result<(StubVmInstance, ResolvedMounts)> {
+            panic!("StubVmmBuilder::launch should not be called");
+        }
+    }
+
+    impl Vmm for StubVmm {
+        type Builder = StubVmmBuilder;
+        type Instance = StubVmInstance;
+        fn builder(&self, _base: BaseVmConfig) -> anyhow::Result<StubVmmBuilder> {
+            Ok(StubVmmBuilder)
         }
     }
 
@@ -1525,10 +1547,63 @@ mod tests {
     }
 
     struct MockVmm {
-        /// If Some, launch() returns this error.
+        /// If Some, builder/launch returns this error.
         launch_error: Option<String>,
         /// The mock VM's vsock socket (worker side).
         vm_socket: tokio::sync::Mutex<Option<UnixStream>>,
+    }
+
+    struct MockVmmBuilder {
+        launch_error: Option<String>,
+        vm_socket: Option<UnixStream>,
+    }
+
+    impl VmBuilder for MockVmmBuilder {
+        type Instance = MockVmInstance;
+        fn add_mount(&mut self, request: MountRequest) -> anyhow::Result<PlannedMount> {
+            let provided = if request.tag == "container" {
+                ProvidedAccess::VirtioFs { read_only: true }
+            } else {
+                ProvidedAccess::BlockDevice { read_only: false }
+            };
+            Ok(PlannedMount {
+                tag: request.tag,
+                provided,
+            })
+        }
+        fn add_scratch_device(&mut self, _tag: &str, _size_mib: u32) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {}
+        async fn launch(self) -> anyhow::Result<(MockVmInstance, ResolvedMounts)> {
+            if let Some(ref err) = self.launch_error {
+                return Err(anyhow::anyhow!("{}", err));
+            }
+            let socket = self
+                .vm_socket
+                .expect("MockVmmBuilder: socket already taken");
+            let instance = MockVmInstance {
+                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
+                killed: tokio::sync::Mutex::new(false),
+            };
+            let resolved = ResolvedMounts {
+                entries: vec![
+                    ResolvedEntry {
+                        tag: "container".to_string(),
+                        guest: GuestDevice::VirtioFs {
+                            virtiofs_tag: "container-rootfs".to_string(),
+                        },
+                    },
+                    ResolvedEntry {
+                        tag: "container-overlay".to_string(),
+                        guest: GuestDevice::Device {
+                            path: "/dev/vdb".to_string(),
+                        },
+                    },
+                ],
+            };
+            Ok((instance, resolved))
+        }
     }
 
     struct MockVmInstance {
@@ -1537,28 +1612,18 @@ mod tests {
     }
 
     impl Vmm for MockVmm {
+        type Builder = MockVmmBuilder;
         type Instance = MockVmInstance;
-        async fn launch(&self, _config: VmConfig) -> anyhow::Result<(MockVmInstance, LaunchResult)> {
-            if let Some(ref err) = self.launch_error {
-                return Err(anyhow::anyhow!("{}", err));
-            }
+        fn builder(&self, _base: BaseVmConfig) -> anyhow::Result<MockVmmBuilder> {
             let socket = self
                 .vm_socket
-                .lock()
-                .await
-                .take()
-                .expect("MockVmm: socket already taken");
-            let launch_result = LaunchResult {
-                container_rootfs: distvirt_guest_protocol::ContainerRootfs::VirtioFsOverlay {
-                    tag: "container-rootfs".to_string(),
-                    overlay_device: "/dev/vdb".to_string(),
-                },
-                volume_mounts: Vec::new(),
-            };
-            Ok((MockVmInstance {
-                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
-                killed: tokio::sync::Mutex::new(false),
-            }, launch_result))
+                .try_lock()
+                .expect("MockVmm: lock contention")
+                .take();
+            Ok(MockVmmBuilder {
+                launch_error: self.launch_error.clone(),
+                vm_socket: socket,
+            })
         }
     }
 

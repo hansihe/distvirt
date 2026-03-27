@@ -5,8 +5,6 @@ use anyhow::Context;
 use distvirt_worker_protocol::{ConfigDataFile, VolumeSpec, VolumeType};
 use tokio::process::Command;
 
-use crate::vmm::{VmVolume, VmVolumeSource};
-
 /// A prepared volume ready to attach to a VM.
 pub enum PreparedVolume {
     /// Block device volume (EmptyDir).
@@ -26,19 +24,46 @@ pub enum PreparedVolume {
 }
 
 impl PreparedVolume {
-    /// Convert to a `VmVolume` for passing to the VMM.
-    pub fn to_vm_volume(&self) -> VmVolume {
+    /// Convert to a `MountRequest` for the VMM builder interface.
+    pub fn to_mount_request(&self) -> crate::vmm::MountRequest {
         match self {
-            PreparedVolume::Block { name, image_path, read_only } => VmVolume {
-                name: name.clone(),
-                source: VmVolumeSource::BlockImage { image_path: image_path.clone() },
-                read_only: *read_only,
+            PreparedVolume::Block {
+                name,
+                image_path,
+                read_only,
+            } => crate::vmm::MountRequest {
+                tag: format!("vol-{}", name),
+                source: crate::vmm::VmMountSource::BlockImage {
+                    path: image_path.clone(),
+                    read_only: *read_only,
+                },
             },
-            PreparedVolume::Directory { name, dir_path, read_only, .. } => VmVolume {
-                name: name.clone(),
-                source: VmVolumeSource::Directory { dir_path: dir_path.clone() },
-                read_only: *read_only,
+            PreparedVolume::Directory {
+                name,
+                dir_path,
+                read_only: _,
+                ..
+            } => crate::vmm::MountRequest {
+                tag: format!("vol-{}", name),
+                source: crate::vmm::VmMountSource::Directory {
+                    path: dir_path.clone(),
+                },
             },
+        }
+    }
+
+    /// Get the volume name.
+    pub fn name(&self) -> &str {
+        match self {
+            PreparedVolume::Block { name, .. } | PreparedVolume::Directory { name, .. } => name,
+        }
+    }
+
+    /// Get the read-only flag.
+    pub fn read_only(&self) -> bool {
+        match self {
+            PreparedVolume::Block { read_only, .. }
+            | PreparedVolume::Directory { read_only, .. } => *read_only,
         }
     }
 }
@@ -159,7 +184,7 @@ pub async fn prepare_config_volumes_from_snapshot(
 }
 
 /// Create a temporary directory populated with ConfigData files.
-async fn create_config_data_dir(
+pub(crate) async fn create_config_data_dir(
     files: &[ConfigDataFile],
 ) -> anyhow::Result<tempfile::TempDir> {
     let tmp_dir = tempfile::tempdir().context("create temp dir for config_data")?;

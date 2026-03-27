@@ -17,7 +17,7 @@ use tokio::net::UnixStream;
 use tokio::sync::watch;
 
 use crate::fabric::FabricPort;
-use crate::image_provider::PreparedArtifact;
+use crate::image_provider::{ContainerdLease, ResolvedImage};
 use crate::task_handle::TaskHandle;
 
 // ---------------------------------------------------------------------------
@@ -52,65 +52,11 @@ pub struct BalloonConfig {
     pub stats_polling_interval_s: u32,
 }
 
-/// High-level VM configuration.
+/// Context the pod layer persists in snapshot metadata for cross-host restore.
 ///
-/// The VMM decides how to expose the container image and volumes to the guest
-/// (device assignment, virtiofs, overlay, etc).
-pub struct VmConfig {
-    pub kernel_path: PathBuf,
-    pub rootfs_image_path: PathBuf,
-    pub vcpu_count: u32,
-    pub mem_size_mib: u32,
-    pub net: Option<NetConfig>,
-    pub serial_console: bool,
-    pub balloon: Option<BalloonConfig>,
-    /// Container image — the VMM decides how to expose this to the guest.
-    pub container_image: PreparedArtifact,
-    /// Volumes to attach — the VMM decides the attachment mechanism.
-    pub volumes: Vec<VmVolume>,
-    /// Context persisted by the VMM in snapshot metadata.
-    pub snapshot_context: SnapshotContext,
-}
-
-/// A volume to attach to the VM.
-pub struct VmVolume {
-    pub name: String,
-    pub source: VmVolumeSource,
-    pub read_only: bool,
-}
-
-/// How the volume data is available on the host.
-pub enum VmVolumeSource {
-    /// Block device image file (e.g. EmptyDir ext4).
-    BlockImage { image_path: PathBuf },
-    /// Directory to share (e.g. ConfigData).
-    Directory { dir_path: PathBuf },
-}
-
-/// Context the VMM persists in snapshot metadata for cross-host restore.
+/// The VMM stores this in snapshot metadata but does not interpret it.
 pub struct SnapshotContext {
-    pub container_image_ref: Option<String>,
-    pub config_volumes: Vec<SnapshotConfigVolume>,
-}
-
-// ---------------------------------------------------------------------------
-// Launch result types (VMM -> supervisor)
-// ---------------------------------------------------------------------------
-
-/// Instructions from the VMM to the supervisor for guest setup.
-///
-/// The supervisor relays these to the guest via the control protocol
-/// without interpreting device names or tags.
-pub struct LaunchResult {
-    pub container_rootfs: distvirt_guest_protocol::ContainerRootfs,
-    pub volume_mounts: Vec<VolumeMountInstruction>,
-}
-
-/// How the supervisor should tell the guest to mount a volume.
-pub struct VolumeMountInstruction {
-    pub name: String,
-    pub source: distvirt_guest_protocol::VolumeSource,
-    pub read_only: bool,
+    pub mount_restore_info: Vec<MountRestoreInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,10 +66,8 @@ pub struct VolumeMountInstruction {
 /// Context for restoring a VM from a snapshot.
 pub struct RestoreContext {
     pub net: Option<NetConfig>,
-    /// Re-prepared container image on the destination host.
-    pub container_image: Option<PreparedArtifact>,
-    /// ConfigData volume specs for recreation on the destination.
-    pub config_volumes: Vec<SnapshotConfigVolume>,
+    /// Mount sources to re-establish on the destination host.
+    pub mounts: Vec<RestoreMount>,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +109,11 @@ pub struct SnapshotMetadata {
     pub volume_drives: Vec<SnapshotVolumeDrive>,
     #[serde(default)]
     pub virtiofs_mounts: Vec<SnapshotVirtiofsMount>,
+    /// Pod-layer mount restore info (new field).
+    #[serde(default)]
+    pub mount_restore_info: Vec<MountRestoreInfo>,
+
+    // --- Deprecated fields kept for backward compat with old snapshots ---
     #[serde(default)]
     pub container_image_ref: Option<String>,
     #[serde(default)]
@@ -178,24 +127,155 @@ pub struct SnapshotArtifacts {
 }
 
 // ---------------------------------------------------------------------------
+// Builder-based VMM types (mount-centric interface)
+// ---------------------------------------------------------------------------
+
+/// Base VM configuration (VMM-agnostic, no mount/container specifics).
+pub struct BaseVmConfig {
+    pub kernel_path: PathBuf,
+    pub rootfs_image_path: PathBuf,
+    pub vcpu_count: u32,
+    pub mem_size_mib: u32,
+    pub net: Option<NetConfig>,
+    pub serial_console: bool,
+    pub balloon: Option<BalloonConfig>,
+}
+
+/// A request to mount a source into the guest VM.
+pub struct MountRequest {
+    /// Opaque tag identifying this mount. Used as join key between request and result.
+    pub tag: String,
+    /// The host-side source to expose to the guest.
+    pub source: VmMountSource,
+}
+
+/// How the mount source is available on the host.
+pub enum VmMountSource {
+    /// A containerd image — VMM decides strategy (virtiofs+overlayfs, block, etc.)
+    ContainerdImage {
+        resolved: ResolvedImage,
+        lease: ContainerdLease,
+    },
+    /// A host directory to share with the guest.
+    Directory { path: PathBuf },
+    /// A block device image file.
+    BlockImage { path: PathBuf, read_only: bool },
+}
+
+/// VMM's response to a mount request: what it will actually provide.
+pub struct PlannedMount {
+    pub tag: String,
+    pub provided: ProvidedAccess,
+}
+
+/// How the VMM will expose a requested mount to the guest.
+#[derive(Clone, Debug)]
+pub enum ProvidedAccess {
+    /// The mount will be available as a virtiofs share.
+    VirtioFs { read_only: bool },
+    /// The mount will be available as a block device.
+    BlockDevice { read_only: bool },
+}
+
+/// Final device assignments after VM launch.
+pub struct ResolvedMounts {
+    pub entries: Vec<ResolvedEntry>,
+}
+
+impl ResolvedMounts {
+    /// Look up a resolved mount by tag.
+    pub fn get(&self, tag: &str) -> Option<&ResolvedEntry> {
+        self.entries.iter().find(|e| e.tag == tag)
+    }
+}
+
+/// A single resolved mount: tag mapped to guest-visible device.
+pub struct ResolvedEntry {
+    pub tag: String,
+    pub guest: GuestDevice,
+}
+
+/// How a mount is accessible from inside the guest.
+pub enum GuestDevice {
+    /// Accessible as a virtiofs filesystem with this tag.
+    VirtioFs { virtiofs_tag: String },
+    /// Accessible as a block device at this path.
+    Device { path: String },
+}
+
+/// A mount source to re-establish during VM restore.
+pub struct RestoreMount {
+    /// Tag matching the original mount (from snapshot metadata).
+    pub tag: String,
+    /// The host-side source on the destination host.
+    pub source: VmMountSource,
+}
+
+/// Information needed by the pod layer to rebuild a mount on restore.
+/// Stored in snapshot metadata, interpreted by the pod layer (not the VMM).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountRestoreInfo {
+    pub tag: String,
+    pub kind: MountRestoreKind,
+}
+
+/// How to restore a specific mount on the destination host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MountRestoreKind {
+    /// Re-prepare the container image via the image provider.
+    ImageRef { image_ref: String },
+    /// Recreate a config directory from file specs.
+    ConfigData {
+        files: Vec<distvirt_worker_protocol::ConfigDataFile>,
+    },
+    /// Data is persisted in the snapshot directory; no host-side action needed.
+    Persisted,
+}
+
+// ---------------------------------------------------------------------------
+// VmBuilder trait
+// ---------------------------------------------------------------------------
+
+/// A builder for configuring and launching a VM.
+///
+/// The builder negotiates mount strategy: each `add_mount` call returns
+/// what the VMM will provide, allowing the caller to adapt (e.g., request
+/// a scratch device for overlay if the VMM gives a read-only virtiofs share).
+pub trait VmBuilder: Send {
+    type Instance: VmInstance;
+
+    /// Register a mount source. Returns what the VMM will provide.
+    fn add_mount(&mut self, request: MountRequest) -> anyhow::Result<PlannedMount>;
+
+    /// Request a scratch block device (e.g., for overlay upper/work dirs).
+    fn add_scratch_device(&mut self, tag: &str, size_mib: u32) -> anyhow::Result<()>;
+
+    /// Set the snapshot context (pod-layer metadata to persist in snapshots).
+    fn set_snapshot_context(&mut self, mount_restore_info: Vec<MountRestoreInfo>);
+
+    /// Finalize configuration and launch the VM.
+    fn launch(self) -> impl Future<Output = anyhow::Result<(Self::Instance, ResolvedMounts)>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // VMM traits
 // ---------------------------------------------------------------------------
 
 /// A VMM implementation that can launch and restore VMs.
 pub trait Vmm: Send + Sync {
+    type Builder: VmBuilder<Instance = Self::Instance>;
     type Instance: VmInstance;
 
-    /// Launch a VM with the given configuration.
+    /// Create a builder for configuring and launching a new VM.
     ///
-    /// Takes `VmConfig` by value because it owns the `PreparedArtifact`
-    /// (including the containerd lease for the `Containerd` variant).
-    /// Returns the VM instance and instructions for guest setup.
-    fn launch(
-        &self,
-        config: VmConfig,
-    ) -> impl Future<Output = anyhow::Result<(Self::Instance, LaunchResult)>> + Send;
+    /// The builder negotiates mount strategy: each `add_mount` call returns
+    /// what the VMM will provide, allowing the caller to adapt.
+    fn builder(&self, base: BaseVmConfig) -> anyhow::Result<Self::Builder>;
 
     /// Restore a VM from a snapshot.
+    ///
+    /// The caller provides mount sources to re-establish on the destination
+    /// host. No negotiation — decisions are already baked into the snapshot.
     fn restore(
         &self,
         snapshot: &SnapshotArtifacts,
