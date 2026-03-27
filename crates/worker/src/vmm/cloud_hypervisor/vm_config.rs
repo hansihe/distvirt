@@ -37,12 +37,14 @@ pub(super) fn build(
         .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8"))?;
 
     // Disks: vda = rootfs, vdb+ = additional drives (scratch, volumes, etc.)
+    // image_type must be set explicitly — CH v51+ autodetects raw images and
+    // silently disables sector 0 writes, which breaks ext4 superblock updates.
     let mut disks = vec![
-        serde_json::json!({"path": "./rootfs.ext4", "readonly": false}),
+        serde_json::json!({"path": "./rootfs.ext4", "readonly": false, "image_type": "raw"}),
     ];
     for drive in additional_drives {
         disks.push(
-            serde_json::json!({"path": format!("./{}", drive.filename), "readonly": drive.read_only}),
+            serde_json::json!({"path": format!("./{}", drive.filename), "readonly": drive.read_only, "image_type": "raw"}),
         );
     }
 
