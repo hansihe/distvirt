@@ -61,17 +61,21 @@
           kernel-olddefconfig = pkgs.writeShellScriptBin "kernel-olddefconfig" ''
             set -euo pipefail
             export PATH="${pkgs.lib.makeBinPath [ pkgs.gnumake pkgs.gcc pkgs.flex pkgs.bison pkgs.pkg-config pkgs.bc ]}:$PATH"
-            CONFIG="''${1:-$(pwd)/${if system == "aarch64-linux" then "guest-kernel-aarch64.config" else "guest-kernel.config"}}"
-            if [ ! -f "$CONFIG" ]; then
-              echo "error: config not found: $CONFIG" >&2
-              exit 1
-            fi
+            BASE="''${1:-$(pwd)}"
             TMPDIR=$(mktemp -d)
             trap 'rm -rf "$TMPDIR"' EXIT
-            cp "$CONFIG" "$TMPDIR/.config"
-            make -C ${kernelSrc} O="$TMPDIR" olddefconfig
-            cp "$TMPDIR/.config" "$CONFIG"
-            echo "updated $CONFIG"
+            for pair in "x86:guest-kernel.config" "arm64:guest-kernel-aarch64.config"; do
+              ARCH="''${pair%%:*}"
+              CONFIG="$BASE/''${pair#*:}"
+              if [ ! -f "$CONFIG" ]; then
+                echo "skipping $CONFIG (not found)"
+                continue
+              fi
+              cp "$CONFIG" "$TMPDIR/.config"
+              ARCH="$ARCH" make -C ${kernelSrc} O="$TMPDIR" olddefconfig
+              cp "$TMPDIR/.config" "$CONFIG"
+              echo "updated $CONFIG"
+            done
           '';
 
           testContainers = pkgs.pkgsStatic.rustPlatform.buildRustPackage {

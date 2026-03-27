@@ -374,7 +374,7 @@ impl<P: FramePort> Fabric<P> {
                         break;
                     }
                     Ok(n) => {
-                        log::debug!("fabric: flush_service_frames: sent {} bytes", n);
+                        log::trace!("fabric: flush_service_frames: sent {} bytes", n);
                     }
                 }
             }

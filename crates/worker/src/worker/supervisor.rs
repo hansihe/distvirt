@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,13 +8,13 @@ use distvirt_worker_protocol::{
     PodNetworkConfig, PoolId, WorkerEvent,
 };
 use futures_lite::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::fabric::{Fabric, FabricPort};
 use crate::image_provider::ImageProvider;
 use crate::io_session::IoEvent;
-use crate::managed_vm::ManagedVm;
+use crate::managed_vm::{EventDispatchState, ManagedVm};
 use crate::pod::wait_for_vm_exit;
 use crate::task_handle::TaskHandle;
 use crate::vmm::{
@@ -285,10 +286,157 @@ async fn await_log_drain(pod_id: &PodId, log_task: &mut Option<TaskHandle<bool>>
     }
 }
 
+
+/// Outcome from processing guest state changes.
+enum MonitorOutcome {
+    /// A container exited normally.
+    ContainerExited { exit_code: i32 },
+    /// A fatal error occurred (task error or stream closed).
+    Fatal { error: String },
+}
+
+/// Events that the pod monitor loop reacts to.
+enum PodEvent {
+    GuestStateChanged,
+    DriverExited(Result<Result<(), String>, oneshot::error::RecvError>),
+    PortTaskExited,
+    VmExited,
+    SuspendRequested(SuspendRequest),
+    Cancelled,
+}
+
+/// What caused the monitor loop to exit.
+enum LoopOutcome {
+    ContainerExited { exit_code: i32 },
+    Fatal { error: String },
+    VmExited,
+    SuspendRequested(SuspendRequest),
+    Cancelled,
+}
+
+/// Tracks guest state changes and detects transitions for telemetry events.
+#[derive(Default)]
+struct StateTracker {
+    last_balloon: Option<u32>,
+    last_memory_constrained: bool,
+    last_oom_kill_count: u64,
+}
+
+impl StateTracker {
+    /// Process a guest state snapshot. Returns `Some` if the pod should exit,
+    /// `None` if the pod should keep running (non-fatal telemetry was handled).
+    async fn process<I: VmInstance>(
+        &mut self,
+        state: &EventDispatchState,
+        vm: &mut ManagedVm<I>,
+        event_tx: &mpsc::Sender<WorkerEvent>,
+        namespace_id: &NamespaceId,
+        pod_id: &PodId,
+    ) -> Option<MonitorOutcome> {
+        // 1. Fatal task error.
+        if let Some((ref task, ref message)) = state.task_error {
+            log::error!(
+                "pod '{}': guest task error: task={}, message={}",
+                pod_id, task, message
+            );
+            return Some(MonitorOutcome::Fatal {
+                error: format!("guest task error: task={}, message={}", task, message),
+            });
+        }
+
+        // 2. Container exit.
+        if !state.exited.is_empty() {
+            let (id, code) = state.exited.iter().next().unwrap();
+            let code = *code;
+            log::info!("pod '{}': container {} exited with code {}", pod_id, id, code);
+            return Some(MonitorOutcome::ContainerExited { exit_code: code });
+        }
+
+        // 3. Balloon adjustment.
+        if state.balloon_mib != self.last_balloon {
+            if let Some(amount_mib) = state.balloon_mib {
+                log::info!("pod '{}': guest requests balloon={} MiB", pod_id, amount_mib);
+                if let Err(e) = vm.set_balloon(amount_mib).await {
+                    log::warn!("pod '{}': set_balloon failed: {:#}", pod_id, e);
+                }
+            }
+            self.last_balloon = state.balloon_mib;
+        }
+
+        // 4. Memory constraint transitions.
+        if state.memory_constrained && !self.last_memory_constrained {
+            let reason = state
+                .memory_constraint_reason
+                .map(|r| match r {
+                    distvirt_guest_protocol::ConstraintReason::BalloonExhausted => {
+                        distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted
+                    }
+                    distvirt_guest_protocol::ConstraintReason::DeflationStalled => {
+                        distvirt_worker_protocol::MemoryConstraintReason::DeflationStalled
+                    }
+                })
+                .unwrap_or(distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted);
+            send_event(
+                event_tx,
+                WorkerEvent::PodMemoryConstrained {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    reason,
+                },
+            )
+            .await;
+        } else if !state.memory_constrained && self.last_memory_constrained {
+            send_event(
+                event_tx,
+                WorkerEvent::PodMemoryConstraintCleared {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                },
+            )
+            .await;
+        }
+        self.last_memory_constrained = state.memory_constrained;
+
+        // 5. OOM kill count increase.
+        if state.oom_kill_count > self.last_oom_kill_count {
+            let delta = state.oom_kill_count - self.last_oom_kill_count;
+            send_event(
+                event_tx,
+                WorkerEvent::PodOomKill {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    count: delta,
+                },
+            )
+            .await;
+            self.last_oom_kill_count = state.oom_kill_count;
+        }
+
+        // 6. Stream closed.
+        if state.stream_closed {
+            let error = state
+                .stream_error
+                .clone()
+                .unwrap_or_else(|| "event stream closed unexpectedly".to_string());
+            log::error!("pod '{}': {}", pod_id, error);
+            return Some(MonitorOutcome::Fatal { error });
+        }
+
+        None
+    }
+}
+
 /// Pod monitor: watches a running pod's sub-tasks and handles cleanup.
 ///
 /// This owns the `ManagedVm` and coordinates between container exit,
 /// yamux driver health, log streaming, suspend requests, and cancellation.
+///
+/// Structured in two phases:
+/// 1. **Event loop** — multiplexes all signal sources into `PodEvent`, dispatches
+///    through `StateTracker` for guest state, and breaks with a `LoopOutcome`.
+/// 2. **Outcome handling** — each outcome delegates to a focused handler that
+///    manages the multi-step cleanup (drain, shutdown, snapshot, etc.), racing
+///    against unexpected VM death where appropriate.
 async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
     mut vm: ManagedVm<I>,
     io_session: Option<(crate::io_session::IoSession, yamux::Stream)>,
@@ -301,9 +449,6 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
 ) {
     // Spawn log streaming as a sub-task. Returns whether output was fully
     // drained (EOF received) or incomplete (I/O error / log write failure).
-    // On the normal and cancel exit paths we await this task before shutting
-    // down the VM so all output is flushed. On fatal paths (VM crash, yamux
-    // driver death) the task is dropped and aborted via TaskHandle.
     let mut log_task: Option<TaskHandle<bool>> = io_session.map(|(mut session, mut log_stream)| {
         let log_pod_id = pod_id.clone();
         TaskHandle::spawn(async move {
@@ -339,7 +484,6 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
     let mut rx = match _dispatch {
         Some(ref d) => d.subscribe(),
         None => {
-            // This shouldn't happen, but handle gracefully.
             log::error!("pod '{}': no event dispatch available", pod_id);
             let _ = vm.force_kill().await;
             send_event(
@@ -354,288 +498,339 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
             return;
         }
     };
-    let mut last_balloon: Option<u32> = None;
-    let mut last_memory_constrained: bool = false;
-    let mut last_oom_kill_count: u64 = 0;
 
-    // Take the driver exit signal so we can select on driver death without
-    // moving the TaskHandle out of vm. drain_yamux_driver() still works.
+    // Take signals out of vm so we can select on them without borrowing vm.
+    // Declared outside the loop scope so handlers can reuse them after the
+    // pinned futures are dropped.
     let mut driver_exit = vm.take_driver_exit_signal();
-    let mut driver_exit_fut = std::pin::pin!(async {
-        match driver_exit.as_mut() {
-            Some(rx) => rx.await,
-            None => std::future::pending().await,
-        }
-    });
-
-    // Take the VM process exit signal so we can detect unexpected VM death.
     let mut vm_exit_rx = vm.take_exit_signal();
-    let mut vm_exit_fut = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
-
-    // Create a future that completes when the port task exits, or pends forever if there is none.
     let mut port_task = port_task;
-    let mut port_task_fut = std::pin::pin!(async {
-        match port_task.as_mut() {
-            Some(task) => {
-                let _ = task.await;
+    let mut tracker = StateTracker::default();
+
+    // Phase 1: Event loop — determine what happened.
+    //
+    // Pinned one-shot futures are scoped in a block so they're dropped when
+    // the loop breaks, freeing the underlying receivers for the exit handlers.
+    let outcome = {
+        let mut driver_exit_fut = std::pin::pin!(async {
+            match driver_exit.as_mut() {
+                Some(rx) => rx.await,
+                None => std::future::pending().await,
             }
-            None => std::future::pending::<()>().await,
-        }
-    });
-
-    let event = loop {
-        tokio::select! {
-            // Event-driven path: react to state changes from EventDispatch.
-            _ = rx.changed() => {
-                let state = rx.borrow().clone();
-
-                // 1. Fatal task error → force kill.
-                if let Some((ref task, ref message)) = state.task_error {
-                    log::error!("pod '{}': guest task error: task={}, message={}", pod_id, task, message);
-                    let _ = vm.force_kill().await;
-                    break WorkerEvent::PodFailed {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        error: format!("guest task error: task={}, message={}", task, message),
-                    };
+        });
+        let mut vm_exit_fut = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
+        let mut port_task_fut = std::pin::pin!(async {
+            match port_task.as_mut() {
+                Some(task) => {
+                    let _ = task.await;
                 }
+                None => std::future::pending::<()>().await,
+            }
+        });
 
-                // 2. Container exit → drain output, then graceful shutdown.
-                if !state.exited.is_empty() {
-                    // Use the first exited container's code as the pod exit code.
-                    let (id, code) = state.exited.iter().next().unwrap();
-                    let code = *code;
-                    log::info!("pod '{}': container {} exited with code {}", pod_id, id, code);
-                    drop(state);
+        loop {
+            let pod_event = tokio::select! {
+                _ = rx.changed() => PodEvent::GuestStateChanged,
+                result = &mut driver_exit_fut => PodEvent::DriverExited(result),
+                _ = &mut port_task_fut => PodEvent::PortTaskExited,
+                _ = &mut vm_exit_fut => PodEvent::VmExited,
+                Some(req) = suspend_rx.recv() => PodEvent::SuspendRequested(req),
+                _ = cancel.cancelled() => PodEvent::Cancelled,
+            };
 
-                    // Wait for the output stream to drain (EOF) before tearing
-                    // down the VM. This ensures all container output is delivered.
-                    await_log_drain(&pod_id, &mut log_task).await;
-
-                    match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.graceful_shutdown(Duration::from_secs(8), &mut rx)).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
-                            let _ = vm.force_kill().await;
+            match pod_event {
+                PodEvent::GuestStateChanged => {
+                    let state = rx.borrow().clone();
+                    match tracker
+                        .process(&state, &mut vm, &event_tx, &namespace_id, &pod_id)
+                        .await
+                    {
+                        Some(MonitorOutcome::ContainerExited { exit_code }) => {
+                            break LoopOutcome::ContainerExited { exit_code };
                         }
-                        Err(_) => {
-                            log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
-                            let _ = vm.force_kill().await;
+                        Some(MonitorOutcome::Fatal { error }) => {
+                            break LoopOutcome::Fatal { error };
                         }
+                        None => {}
                     }
-                    break WorkerEvent::PodExited {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        exit_code: code,
+                }
+                PodEvent::DriverExited(result) => {
+                    let error = match result {
+                        Ok(Ok(())) => "yamux driver exited unexpectedly".to_string(),
+                        Ok(Err(msg)) => format!("yamux driver error: {}", msg),
+                        Err(_) => "yamux driver task dropped exit signal".to_string(),
                     };
-                }
-
-                // 3. Balloon adjustment.
-                if state.balloon_mib != last_balloon {
-                    if let Some(amount_mib) = state.balloon_mib {
-                        log::info!("pod '{}': guest requests balloon={} MiB", pod_id, amount_mib);
-                        if let Err(e) = vm.set_balloon(amount_mib).await {
-                            log::warn!("pod '{}': set_balloon failed: {:#}", pod_id, e);
-                        }
-                    }
-                    last_balloon = state.balloon_mib;
-                }
-
-                // 3b. Memory constraint transitions.
-                if state.memory_constrained && !last_memory_constrained {
-                    let reason = state.memory_constraint_reason
-                        .map(|r| match r {
-                            distvirt_guest_protocol::ConstraintReason::BalloonExhausted =>
-                                distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted,
-                            distvirt_guest_protocol::ConstraintReason::DeflationStalled =>
-                                distvirt_worker_protocol::MemoryConstraintReason::DeflationStalled,
-                        })
-                        .unwrap_or(distvirt_worker_protocol::MemoryConstraintReason::BalloonExhausted);
-                    send_event(
-                        &event_tx,
-                        WorkerEvent::PodMemoryConstrained {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            reason,
-                        },
-                    ).await;
-                } else if !state.memory_constrained && last_memory_constrained {
-                    send_event(
-                        &event_tx,
-                        WorkerEvent::PodMemoryConstraintCleared {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                        },
-                    ).await;
-                }
-                last_memory_constrained = state.memory_constrained;
-
-                // 3c. OOM kill count increase.
-                if state.oom_kill_count > last_oom_kill_count {
-                    let delta = state.oom_kill_count - last_oom_kill_count;
-                    send_event(
-                        &event_tx,
-                        WorkerEvent::PodOomKill {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            count: delta,
-                        },
-                    ).await;
-                    last_oom_kill_count = state.oom_kill_count;
-                }
-
-                // 4. Stream closed → force kill.
-                if state.stream_closed {
-                    let error = state.stream_error.clone()
-                        .unwrap_or_else(|| "event stream closed unexpectedly".to_string());
                     log::error!("pod '{}': {}", pod_id, error);
-                    let _ = vm.force_kill().await;
-                    break WorkerEvent::PodFailed {
-                        namespace_id: namespace_id.clone(),
-                        pod_id: pod_id.clone(),
-                        error,
+                    break LoopOutcome::Fatal { error };
+                }
+                PodEvent::PortTaskExited => {
+                    log::error!(
+                        "pod '{}': port task exited, network dead — force killing VM",
+                        pod_id
+                    );
+                    break LoopOutcome::Fatal {
+                        error: "port task exited unexpectedly".to_string(),
                     };
                 }
-            }
-
-            // Fatal: yamux driver died unexpectedly.
-            result = &mut driver_exit_fut => {
-                let error = match result {
-                    Ok(Ok(())) => "yamux driver exited unexpectedly".to_string(),
-                    Ok(Err(msg)) => format!("yamux driver error: {}", msg),
-                    Err(_) => "yamux driver task dropped exit signal".to_string(),
-                };
-                log::error!("pod '{}': {}", pod_id, error);
-                let _ = vm.force_kill().await;
-                break WorkerEvent::PodFailed {
-                    namespace_id: namespace_id.clone(),
-                    pod_id: pod_id.clone(),
-                    error,
-                };
-            }
-
-            // Fatal: port read task died (TAP error, etc.).
-            _ = &mut port_task_fut => {
-                log::error!("pod '{}': port task exited, network dead — force killing VM", pod_id);
-                let _ = vm.force_kill().await;
-                break WorkerEvent::PodFailed {
-                    namespace_id: namespace_id.clone(),
-                    pod_id: pod_id.clone(),
-                    error: "port task exited unexpectedly".to_string(),
-                };
-            }
-
-            // Fatal: VM process exited unexpectedly.
-            _ = &mut vm_exit_fut => {
-                log::error!("pod '{}': VM process exited unexpectedly", pod_id);
-                vm.drain_yamux_driver();
-                break WorkerEvent::PodFailed {
-                    namespace_id: namespace_id.clone(),
-                    pod_id: pod_id.clone(),
-                    error: "VM process exited unexpectedly".to_string(),
-                };
-            }
-
-            // Suspend request: snapshot the VM and exit.
-            Some(req) = suspend_rx.recv() => {
-                log::info!("pod '{}': suspend requested, artifact_id={}", pod_id, req.artifact_id);
-                // Emit ArtifactWriteStarted before beginning the snapshot write.
-                send_event(
-                    &event_tx,
-                    WorkerEvent::ArtifactWriteStarted {
-                        namespace_id: namespace_id.clone(),
-                        artifact_id: req.artifact_id.clone(),
-                        pool_id: req.pool_id.clone(),
-                    },
-                )
-                .await;
-                match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
-                    Ok(artifacts) => {
-                        // Calculate snapshot size.
-                        let artifact_size_bytes = match F::dir_size(&req.snapshot_dir).await {
-                            Ok(size) => size,
-                            Err(e) => {
-                                log::warn!("pod '{}': failed to calculate artifact size: {:#}", pod_id, e);
-                                0
-                            }
-                        };
-                        let _ = req.reply.send(Ok(artifacts));
-                        // Emit ArtifactWriteCommitted now that snapshot is durable.
-                        send_event(
-                            &event_tx,
-                            WorkerEvent::ArtifactWriteCommitted {
-                                namespace_id: namespace_id.clone(),
-                                artifact_id: req.artifact_id.clone(),
-                                pool_id: req.pool_id.clone(),
-                                size_bytes: artifact_size_bytes,
-                            },
-                        )
-                        .await;
-                        send_event(
-                            &event_tx,
-                            WorkerEvent::PodSuspended {
-                                namespace_id: namespace_id.clone(),
-                                pod_id: pod_id.clone(),
-                                artifact_id: req.artifact_id,
-                                artifact_size_bytes,
-                                pool_id: req.pool_id,
-                            },
-                        )
-                        .await;
-                        return; // VM is dead after suspend, exit monitor.
-                    }
-                    Err(e) => {
-                        let err_msg = format!("{:#}", e);
-                        log::error!("pod '{}': suspend failed: {}", pod_id, err_msg);
-                        let _ = req.reply.send(Err(err_msg.clone()));
-                        let _ = vm.force_kill().await;
-                        break WorkerEvent::PodSuspendFailed {
-                            namespace_id: namespace_id.clone(),
-                            pod_id: pod_id.clone(),
-                            error: err_msg,
-                        };
-                    }
+                PodEvent::VmExited => {
+                    log::error!("pod '{}': VM process exited unexpectedly", pod_id);
+                    break LoopOutcome::VmExited;
                 }
-            }
-
-            // Cancellation: stop containers, drain output, then shutdown VM.
-            _ = cancel.cancelled() => {
-                log::info!("pod '{}': cancellation received, shutting down gracefully", pod_id);
-
-                // Phase 1: SIGTERM containers and wait for them to exit.
-                vm.stop_containers(Duration::from_secs(8), &mut rx).await;
-
-                // Phase 2: Wait for output stream to drain.
-                await_log_drain(&pod_id, &mut log_task).await;
-
-                // Phase 3: Shutdown VM.
-                match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.shutdown()).await {
-                    Ok(Ok(())) => {
-                        log::info!("pod '{}': graceful shutdown complete", pod_id);
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
-                        let _ = vm.force_kill().await;
-                    }
-                    Err(_) => {
-                        log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
-                        let _ = vm.force_kill().await;
-                    }
+                PodEvent::SuspendRequested(req) => {
+                    break LoopOutcome::SuspendRequested(req);
                 }
-                break WorkerEvent::PodExited {
-                    namespace_id: namespace_id.clone(),
-                    pod_id: pod_id.clone(),
-                    exit_code: -1,
-                };
+                PodEvent::Cancelled => {
+                    break LoopOutcome::Cancelled;
+                }
             }
         }
     };
 
-    // log_task is dropped here. On normal/cancel paths it was already awaited
-    // (and is None). On fatal paths it's aborted via TaskHandle::drop.
+    // Phase 2: Handle the outcome. Each arm either produces a WorkerEvent
+    // to send, or returns early (suspend success sends its own events).
+    let event = match outcome {
+        LoopOutcome::ContainerExited { exit_code } => {
+            handle_container_exit(
+                &mut vm,
+                exit_code,
+                &mut log_task,
+                &mut vm_exit_rx,
+                &pod_id,
+                &namespace_id,
+                &mut rx,
+            )
+            .await
+        }
+        LoopOutcome::Fatal { error } => {
+            let _ = vm.force_kill().await;
+            WorkerEvent::PodFailed {
+                namespace_id: namespace_id.clone(),
+                pod_id: pod_id.clone(),
+                error,
+            }
+        }
+        LoopOutcome::VmExited => {
+            vm.drain_yamux_driver();
+            WorkerEvent::PodFailed {
+                namespace_id: namespace_id.clone(),
+                pod_id: pod_id.clone(),
+                error: "VM process exited unexpectedly".to_string(),
+            }
+        }
+        LoopOutcome::SuspendRequested(req) => {
+            match handle_suspend::<_, F>(&mut vm, req, &event_tx, &namespace_id, &pod_id).await {
+                Some(event) => event,
+                None => return, // Successful suspend, events already sent.
+            }
+        }
+        LoopOutcome::Cancelled => {
+            handle_cancel(
+                &mut vm,
+                &mut rx,
+                &mut log_task,
+                &mut vm_exit_rx,
+                &pod_id,
+                &namespace_id,
+            )
+            .await
+        }
+    };
 
-    // Send the event back to the main loop.
     send_event(&event_tx, event).await;
+}
+
+/// Handle container exit: drain output and gracefully shut down the VM,
+/// racing each phase against unexpected VM death.
+async fn handle_container_exit<I: VmInstance>(
+    vm: &mut ManagedVm<I>,
+    exit_code: i32,
+    log_task: &mut Option<TaskHandle<bool>>,
+    vm_exit_rx: &mut Option<watch::Receiver<Option<ExitStatus>>>,
+    pod_id: &PodId,
+    namespace_id: &NamespaceId,
+    rx: &mut watch::Receiver<EventDispatchState>,
+) -> WorkerEvent {
+    // Drain output, racing against VM death.
+    let vm_died = tokio::select! {
+        _ = await_log_drain(pod_id, log_task) => false,
+        _ = wait_for_vm_exit(vm_exit_rx) => true,
+    };
+    if vm_died {
+        log::warn!("pod '{}': VM exited during log drain", pod_id);
+        vm.drain_yamux_driver();
+        return WorkerEvent::PodExited {
+            namespace_id: namespace_id.clone(),
+            pod_id: pod_id.clone(),
+            exit_code,
+        };
+    }
+
+    // Graceful shutdown, racing against VM death.
+    let result = tokio::select! {
+        result = tokio::time::timeout(
+            GRACEFUL_SHUTDOWN_TIMEOUT,
+            vm.graceful_shutdown(Duration::from_secs(8), rx),
+        ) => Some(result),
+        _ = wait_for_vm_exit(vm_exit_rx) => None,
+    };
+    match result {
+        Some(Ok(Ok(()))) => {}
+        Some(Ok(Err(e))) => {
+            log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
+            let _ = vm.force_kill().await;
+        }
+        Some(Err(_)) => {
+            log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
+            let _ = vm.force_kill().await;
+        }
+        None => {
+            log::warn!("pod '{}': VM exited during graceful shutdown", pod_id);
+            vm.drain_yamux_driver();
+        }
+    }
+
+    WorkerEvent::PodExited {
+        namespace_id: namespace_id.clone(),
+        pod_id: pod_id.clone(),
+        exit_code,
+    }
+}
+
+/// Handle cancellation: stop containers, drain output, then shut down the VM.
+/// Each phase races against unexpected VM death.
+async fn handle_cancel<I: VmInstance>(
+    vm: &mut ManagedVm<I>,
+    rx: &mut watch::Receiver<EventDispatchState>,
+    log_task: &mut Option<TaskHandle<bool>>,
+    vm_exit_rx: &mut Option<watch::Receiver<Option<ExitStatus>>>,
+    pod_id: &PodId,
+    namespace_id: &NamespaceId,
+) -> WorkerEvent {
+    log::info!(
+        "pod '{}': cancellation received, shutting down gracefully",
+        pod_id
+    );
+
+    // Phase 1: SIGTERM containers and wait for exit.
+    vm.stop_containers(Duration::from_secs(8), rx).await;
+
+    // Phase 2: Drain output, racing against VM death.
+    let vm_died = tokio::select! {
+        _ = await_log_drain(pod_id, log_task) => false,
+        _ = wait_for_vm_exit(vm_exit_rx) => true,
+    };
+    if vm_died {
+        log::warn!("pod '{}': VM exited during log drain", pod_id);
+        vm.drain_yamux_driver();
+        return WorkerEvent::PodExited {
+            namespace_id: namespace_id.clone(),
+            pod_id: pod_id.clone(),
+            exit_code: -1,
+        };
+    }
+
+    // Phase 3: Shutdown VM, racing against VM death.
+    let result = tokio::select! {
+        result = tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, vm.shutdown()) => Some(result),
+        _ = wait_for_vm_exit(vm_exit_rx) => None,
+    };
+    match result {
+        Some(Ok(Ok(()))) => {
+            log::info!("pod '{}': graceful shutdown complete", pod_id);
+        }
+        Some(Ok(Err(e))) => {
+            log::warn!("pod '{}': shutdown error: {:#}, force killing", pod_id, e);
+            let _ = vm.force_kill().await;
+        }
+        Some(Err(_)) => {
+            log::warn!("pod '{}': shutdown timed out, force killing", pod_id);
+            let _ = vm.force_kill().await;
+        }
+        None => {
+            log::warn!("pod '{}': VM exited during shutdown", pod_id);
+            vm.drain_yamux_driver();
+        }
+    }
+
+    WorkerEvent::PodExited {
+        namespace_id: namespace_id.clone(),
+        pod_id: pod_id.clone(),
+        exit_code: -1,
+    }
+}
+
+/// Handle suspend request: snapshot the VM and emit artifact events.
+/// Returns `None` on success (events sent inline), or `Some(event)` on failure.
+async fn handle_suspend<I: VmInstance, F: crate::fs::Fs>(
+    vm: &mut ManagedVm<I>,
+    req: SuspendRequest,
+    event_tx: &mpsc::Sender<WorkerEvent>,
+    namespace_id: &NamespaceId,
+    pod_id: &PodId,
+) -> Option<WorkerEvent> {
+    log::info!(
+        "pod '{}': suspend requested, artifact_id={}",
+        pod_id, req.artifact_id
+    );
+
+    send_event(
+        event_tx,
+        WorkerEvent::ArtifactWriteStarted {
+            namespace_id: namespace_id.clone(),
+            artifact_id: req.artifact_id.clone(),
+            pool_id: req.pool_id.clone(),
+        },
+    )
+    .await;
+
+    match vm.suspend(&req.snapshot_dir, SUSPEND_TIMEOUT).await {
+        Ok(artifacts) => {
+            let artifact_size_bytes = match F::dir_size(&req.snapshot_dir).await {
+                Ok(size) => size,
+                Err(e) => {
+                    log::warn!(
+                        "pod '{}': failed to calculate artifact size: {:#}",
+                        pod_id, e
+                    );
+                    0
+                }
+            };
+            let _ = req.reply.send(Ok(artifacts));
+            send_event(
+                event_tx,
+                WorkerEvent::ArtifactWriteCommitted {
+                    namespace_id: namespace_id.clone(),
+                    artifact_id: req.artifact_id.clone(),
+                    pool_id: req.pool_id.clone(),
+                    size_bytes: artifact_size_bytes,
+                },
+            )
+            .await;
+            send_event(
+                event_tx,
+                WorkerEvent::PodSuspended {
+                    namespace_id: namespace_id.clone(),
+                    pod_id: pod_id.clone(),
+                    artifact_id: req.artifact_id,
+                    artifact_size_bytes,
+                    pool_id: req.pool_id,
+                },
+            )
+            .await;
+            None
+        }
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            log::error!("pod '{}': suspend failed: {}", pod_id, err_msg);
+            let _ = req.reply.send(Err(err_msg.clone()));
+            let _ = vm.force_kill().await;
+            Some(WorkerEvent::PodSuspendFailed {
+                namespace_id: namespace_id.clone(),
+                pod_id: pod_id.clone(),
+                error: err_msg,
+            })
+        }
+    }
 }
 
 /// Calculate the total size of files in a directory (recursive).

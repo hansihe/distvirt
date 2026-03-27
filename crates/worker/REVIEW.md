@@ -4,14 +4,16 @@ Findings from code review of VMM, pod, supervisor, volume, and image provider co
 
 ## Architectural Issues
 
-### 1. `pod_monitor()` is a 17-branch `select!` — hard to reason about
+### 1. ~~`pod_monitor()` is a 17-branch `select!` — hard to reason about~~ DONE
 **File:** `src/worker/supervisor.rs`
 
-The monitor loop handles event state changes (balloon, memory constraints, OOM, container exit), fatal error paths (driver, port task, VM, stream close), suspend, and cancellation all in one giant select. Adding/removing branches risks subtle race conditions in the state machine (balloon, memory_constrained, oom_kill_count interactions).
+**Refactored** into a two-phase structure:
+1. **Event loop** — a flat `select!` → `match` mapping each signal source to a `PodEvent` enum. Guest state processing delegated to `StateTracker::process()`. Loop breaks with a typed `LoopOutcome`.
+2. **Outcome handling** — each outcome delegates to a focused handler (`handle_container_exit`, `handle_cancel`, `handle_suspend`).
 
-**Suggestion:** Extract into an explicit state machine with typed transitions.
+New types: `PodEvent`, `LoopOutcome`, `MonitorOutcome`, `StateTracker`. Exit paths (container exit, cancel) now race drain/shutdown against VM death via nested `select!`, preventing hangs if the VM crashes mid-shutdown.
 
-- [ ] Refactor pod_monitor into state machine
+- [x] Refactor pod_monitor into state machine
 
 ### 2. Containerd types leak through VMM boundary
 `VmMountSource::ContainerdImage` carries `ResolvedImage` + `ContainerdLease` — the VMM layer is coupled to containerd internals.

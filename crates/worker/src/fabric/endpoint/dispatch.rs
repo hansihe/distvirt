@@ -241,7 +241,7 @@ impl EndpointTable {
                     );
                 }
 
-                log::debug!(
+                log::trace!(
                     "service endpoint {}: ready but backend IP {} not reachable, falling through to buffer",
                     dst_ip,
                     pod_ip

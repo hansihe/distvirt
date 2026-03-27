@@ -202,7 +202,7 @@ impl EndpointTable {
         };
         endpoint.state = EndpointState::Ready;
 
-        log::debug!(
+        log::trace!(
             "service '{}': mark_ready: buffer_len={}, has_stream_manager={}",
             svc_id,
             endpoint.buffer.len(),
@@ -222,7 +222,7 @@ impl EndpointTable {
                 _ => Vec::new(),
             };
 
-            log::debug!(
+            log::trace!(
                 "service '{}': mark_ready produced {} frames, {} actions",
                 svc_id,
                 frames.len(),
@@ -245,7 +245,7 @@ impl EndpointTable {
             endpoint.flow_tracker = Some(FlowTracker::new());
         }
 
-        log::debug!(
+        log::trace!(
             "service '{}': mark_ready produced {} frames, 0 actions",
             svc_id,
             frames.len()
@@ -346,7 +346,7 @@ impl EndpointTable {
             }
         }
         if result.is_empty() {
-            log::debug!(
+            log::trace!(
                 "flush_by_backend_ip: no ready endpoints with buffer for IP {}",
                 target_ip
             );
