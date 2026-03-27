@@ -44,7 +44,7 @@ pub(super) fn build(
     ];
     for drive in additional_drives {
         disks.push(
-            serde_json::json!({"path": format!("./{}", drive.filename), "readonly": drive.read_only, "image_type": "raw"}),
+            serde_json::json!({"path": format!("./{}", drive.filename), "readonly": drive.read_only, "image_type": "Raw"}),
         );
     }
 
