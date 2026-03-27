@@ -21,7 +21,7 @@ use super::{
     BaseVmConfig, GuestDevice, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
     ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, SnapshotMetadata,
     SnapshotVirtiofsMount, SnapshotVolumeDrive, VmBuilder, VmMountSource, Vmm,
-    spawn_exit_monitor, spawn_serial_task, wait_for_file,
+    spawn_exit_monitor, spawn_serial_task, spawn_stderr_task, wait_for_file,
 };
 use crate::fabric::{FabricPort, Port};
 use crate::image_provider::{ContainerdLease, ResolvedImage};
@@ -64,6 +64,7 @@ impl CloudHypervisor {
 struct SpawnedCloudHypervisor {
     child: tokio::process::Child,
     serial_stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
     api_socket: PathBuf,
     vsock_uds_path: PathBuf,
 }
@@ -84,7 +85,7 @@ async fn spawn_cloud_hypervisor(
     } else {
         cmd.stdout(Stdio::null());
     }
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().context("spawn cloud-hypervisor")?;
 
     let serial_stdout = if serial_console {
@@ -92,6 +93,7 @@ async fn spawn_cloud_hypervisor(
     } else {
         None
     };
+    let stderr = child.stderr.take();
 
     wait_for_file(&api_socket, Duration::from_secs(5))
         .await
@@ -100,6 +102,7 @@ async fn spawn_cloud_hypervisor(
     Ok(SpawnedCloudHypervisor {
         child,
         serial_stdout,
+        stderr,
         api_socket,
         vsock_uds_path,
     })
@@ -402,6 +405,7 @@ impl VmBuilder for CloudHypervisorBuilder {
 
         let (exit_rx, exit_monitor) = spawn_exit_monitor(&spawned.child);
         let serial_task = spawned.serial_stdout.map(spawn_serial_task);
+        let stderr_task = spawned.stderr.map(spawn_stderr_task);
 
         // --- Build snapshot metadata ---
         let volume_drives: Vec<SnapshotVolumeDrive> = additional_drives
@@ -445,6 +449,7 @@ impl VmBuilder for CloudHypervisorBuilder {
             lease,
             config_vol_tmpdirs: Vec::new(),
             serial_task,
+            stderr_task,
             exit_monitor,
             tmpdir,
             vsock_uds_path: spawned.vsock_uds_path,
@@ -612,6 +617,7 @@ impl Vmm for CloudHypervisor {
 
         let (exit_rx, exit_monitor) = spawn_exit_monitor(&spawned.child);
         let serial_task = spawned.serial_stdout.map(spawn_serial_task);
+        let stderr_task = spawned.stderr.map(spawn_stderr_task);
 
         log::info!(
             "VM restored from snapshot at {}",
@@ -625,6 +631,7 @@ impl Vmm for CloudHypervisor {
             lease,
             config_vol_tmpdirs,
             serial_task,
+            stderr_task,
             exit_monitor,
             tmpdir,
             vsock_uds_path: spawned.vsock_uds_path,

@@ -360,6 +360,16 @@ pub(crate) fn spawn_serial_task(stdout: tokio::process::ChildStdout) -> TaskHand
     })
 }
 
+pub(crate) fn spawn_stderr_task(stderr: tokio::process::ChildStderr) -> TaskHandle<()> {
+    TaskHandle::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log::warn!("[cloud-hypervisor stderr] {}", line);
+        }
+    })
+}
+
 pub(crate) async fn api_request(
     method: &str,
     socket_path: &Path,

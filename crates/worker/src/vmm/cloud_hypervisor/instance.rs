@@ -28,6 +28,7 @@ pub struct CloudHypervisorInstance {
     /// Config volume temp directories — kept alive for virtiofsd.
     _config_vol_tmpdirs: Vec<tempfile::TempDir>,
     _serial_task: Option<TaskHandle<()>>,
+    _stderr_task: Option<TaskHandle<()>>,
     _exit_monitor: TaskHandle<()>,
     _tmpdir: tempfile::TempDir,
 
@@ -52,6 +53,7 @@ pub(super) struct InstanceArgs {
     pub lease: Option<crate::image_provider::ContainerdLease>,
     pub config_vol_tmpdirs: Vec<tempfile::TempDir>,
     pub serial_task: Option<TaskHandle<()>>,
+    pub stderr_task: Option<TaskHandle<()>>,
     pub exit_monitor: TaskHandle<()>,
     pub tmpdir: tempfile::TempDir,
     pub vsock_uds_path: PathBuf,
@@ -70,6 +72,7 @@ impl CloudHypervisorInstance {
             _lease: args.lease,
             _config_vol_tmpdirs: args.config_vol_tmpdirs,
             _serial_task: args.serial_task,
+            _stderr_task: args.stderr_task,
             _exit_monitor: args.exit_monitor,
             _tmpdir: args.tmpdir,
             vsock_uds_path: args.vsock_uds_path,
