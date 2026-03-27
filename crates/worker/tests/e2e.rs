@@ -23,3 +23,5 @@ mod services;
 mod suspend_resume;
 #[path = "e2e/tunnel.rs"]
 mod tunnel;
+#[path = "e2e/volumes.rs"]
+mod volumes;

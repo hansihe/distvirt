@@ -86,6 +86,15 @@ enum Command {
         #[arg(long)]
         host: String,
     },
+    /// Write a file to a path and read it back, printing the result. Used for volume mount tests.
+    VolumeCheck {
+        /// Path to write the test file to (e.g. /mnt/data/test.txt)
+        #[arg(long)]
+        path: String,
+        /// Data to write
+        #[arg(long, default_value = "volume-ok")]
+        data: String,
+    },
 }
 
 fn main() {
@@ -119,6 +128,7 @@ fn main() {
         Command::ExitCode { code } => process::exit(code),
         Command::EnvCheck { var, pwd } => cmd_env_check(&var, pwd),
         Command::DnsLookup { host } => cmd_dns_lookup(&host),
+        Command::VolumeCheck { path, data } => cmd_volume_check(&path, &data),
     }
 }
 
@@ -346,6 +356,38 @@ fn cmd_dns_lookup(host: &str) {
         Err(e) => {
             eprintln!("dns lookup failed for {host}: {e}");
             // Exit 0 like the original `nslookup ... || true`
+        }
+    }
+}
+
+fn cmd_volume_check(path: &str, data: &str) {
+    // Create parent directories if needed.
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("mkdir failed for {}: {e}", parent.display());
+            process::exit(1);
+        }
+    }
+
+    // Write data.
+    if let Err(e) = std::fs::write(path, data) {
+        eprintln!("write failed: {e}");
+        process::exit(1);
+    }
+
+    // Read it back.
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            if contents == data {
+                println!("volume-check: {contents}");
+            } else {
+                eprintln!("data mismatch: wrote {data:?}, read {contents:?}");
+                process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("read failed: {e}");
+            process::exit(1);
         }
     }
 }

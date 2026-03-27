@@ -126,6 +126,23 @@ pub(crate) async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
     let prepared_volumes = crate::volume::prepare_volumes(&volumes, vol_tmpdir.path())
         .await
         .context("prepare volumes")?;
+    for pv in &prepared_volumes {
+        match pv {
+            crate::volume::PreparedVolume::Block { name, image_path, read_only } => {
+                let size = std::fs::metadata(image_path).map(|m| m.len()).unwrap_or(0);
+                log::info!(
+                    "pod '{}': prepared volume '{}': block image at {}, size={} bytes, read_only={}",
+                    pod_id, name, image_path.display(), size, read_only
+                );
+            }
+            crate::volume::PreparedVolume::Directory { name, dir_path, read_only, .. } => {
+                log::info!(
+                    "pod '{}': prepared volume '{}': directory at {}, read_only={}",
+                    pod_id, name, dir_path.display(), read_only
+                );
+            }
+        }
+    }
     log::info!("pod '{}': volumes prepared", pod_id);
 
     // Extract image_ref before consuming the artifact.

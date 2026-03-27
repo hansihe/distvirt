@@ -380,6 +380,11 @@ impl VmBuilder for CloudHypervisorBuilder {
             base.net.as_ref(),
         )?;
 
+        // Log disk configuration before creating VM.
+        if let Some(disks) = built.config_json.get("disks") {
+            log::info!("cloud-hypervisor: disk config: {}", disks);
+        }
+
         // --- Create and boot VM ---
         let api = ApiClient::new(spawned.api_socket.clone());
         api.request("PUT", "/api/v1/vm.create", Some(&built.config_json))
