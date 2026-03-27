@@ -103,7 +103,7 @@
           guestRootfsImage = pkgs.runCommand "guest-rootfs.ext4" {
             nativeBuildInputs = [ pkgs.e2fsprogs ];
           } ''
-            mkdir -p rootfs/sbin rootfs/dev rootfs/proc rootfs/sys rootfs/tmp
+            mkdir -p rootfs/sbin rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/volumes rootfs/containers rootfs/mnt
 
             cp ${guestInit}/bin/init rootfs/sbin/init
 
