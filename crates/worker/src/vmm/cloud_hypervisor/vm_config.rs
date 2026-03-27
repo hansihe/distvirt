@@ -40,7 +40,7 @@ pub(super) fn build(
     // image_type must be set explicitly — CH v51+ autodetects raw images and
     // silently disables sector 0 writes, which breaks ext4 superblock updates.
     let mut disks = vec![
-        serde_json::json!({"path": "./rootfs.ext4", "readonly": false, "image_type": "raw"}),
+        serde_json::json!({"path": "./rootfs.ext4", "readonly": false, "image_type": "Raw"}),
     ];
     for drive in additional_drives {
         disks.push(
