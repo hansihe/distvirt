@@ -47,7 +47,7 @@ pub(super) fn build(
     }
 
     let boot_args = {
-        let mut args = "console=ttyS0 reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.shutdown=poweroff".to_string();
+        let mut args = "console=hvc0 reboot=k panic=-1 root=/dev/vda init=/sbin/init distvirt.shutdown=poweroff".to_string();
         if let Some(balloon) = balloon {
             args.push_str(&format!(" distvirt.balloon_mib={}", balloon.amount_mib));
         }
@@ -73,10 +73,10 @@ pub(super) fn build(
             "shared": shared_memory,
         },
         "serial": {
-            "mode": if serial_console { "Tty" } else { "Off" },
+            "mode": "Off",
         },
         "console": {
-            "mode": "Off",
+            "mode": if serial_console { "Tty" } else { "Off" },
         },
     });
 
