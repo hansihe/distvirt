@@ -47,6 +47,29 @@ pub fn mount(
     Ok(())
 }
 
+/// Recursively make all mounts under `target` private, preventing
+/// mount event propagation to/from the parent namespace.
+pub fn remount_private(target: &str) -> anyhow::Result<()> {
+    let target_c = CString::new(target).context("invalid target string")?;
+    let ret = unsafe {
+        libc::mount(
+            ptr::null(),
+            target_c.as_ptr(),
+            ptr::null(),
+            libc::MS_PRIVATE | libc::MS_REC,
+            ptr::null(),
+        )
+    };
+    if ret != 0 {
+        bail!(
+            "mount --make-rprivate {}: {}",
+            target,
+            io::Error::last_os_error(),
+        );
+    }
+    Ok(())
+}
+
 /// Unmount a filesystem.
 pub fn umount(target: &str) -> anyhow::Result<()> {
     let target_c = CString::new(target).context("invalid target string")?;

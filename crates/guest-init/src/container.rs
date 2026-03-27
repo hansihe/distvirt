@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::rc::Rc;
 
@@ -11,6 +11,7 @@ use async_io::Async;
 
 use crate::buffer::OutputBuffer;
 use crate::cgroup;
+use crate::container_init::ContainerInitConfig;
 use crate::output::{self, FillTaskHandle};
 use crate::util;
 use distvirt_guest_protocol::GuestEvent;
@@ -295,30 +296,73 @@ impl ContainerManager {
         // Ensure the fd is closed in the parent even on error paths.
         let cgroup_dir_fd_owned = unsafe { OwnedFd::from_raw_fd(cgroup_dir_fd) };
 
+        // Create a pipe to pass config to the child after exec.
+        let (config_read, config_write) =
+            util::create_pipe().context("create config pipe")?;
+
+        // Build the config that the child will read after exec.
+        let init_config = ContainerInitConfig {
+            mount_point: container.mount_point.clone(),
+            program: program.to_string(),
+            args: args.to_vec(),
+            env: env.to_vec(),
+            working_dir: working_dir.map(|s| s.to_string()),
+            uid,
+            gid,
+            hostname: hostname.map(|s| s.to_string()),
+            domainname: None,
+            stdout_write_fd: stdout_pipe.as_ref().map(|(_, w)| w.as_raw_fd()),
+            stderr_write_fd: stderr_pipe.as_ref().map(|(_, w)| w.as_raw_fd()),
+            stdin_read_fd: stdin_pipe.as_ref().map(|(r, _)| r.as_raw_fd()),
+        };
+
+        // Serialize config before fork so we don't allocate in the child.
+        let config_json =
+            serde_json::to_vec(&init_config).context("serialize container init config")?;
+
         // clone3 with CLONE_NEWPID | CLONE_INTO_CGROUP: the child is born
         // into a new PID namespace (PID 1) and directly into its cgroup.
         let pid = clone3_into_cgroup(cgroup_dir_fd_owned.as_raw_fd())?;
 
         if pid == 0 {
-            // Child process — pass write-end raw fds to child_exec.
-            // The child will dup2 them onto stdout/stderr and close the originals.
-            // We must not run OwnedFd destructors in the child (we're about to exec).
-            let stdout_write_fd = stdout_pipe.as_ref().map(|(_, w)| w.as_raw_fd());
-            let stderr_write_fd = stderr_pipe.as_ref().map(|(_, w)| w.as_raw_fd());
-            let stdin_read_fd = stdin_pipe.as_ref().map(|(r, _)| r.as_raw_fd());
-            child_exec(
-                &container.mount_point,
-                program,
-                args,
-                env,
-                working_dir,
-                uid,
-                gid,
-                hostname,
-                stdout_write_fd,
-                stderr_write_fd,
-                stdin_read_fd,
-            );
+            // Child process — exec self as container init.
+            // Clear O_CLOEXEC on fds the child needs to inherit across exec.
+            clear_cloexec(config_read.as_raw_fd());
+            if let Some(fd) = init_config.stdout_write_fd {
+                clear_cloexec(fd);
+            }
+            if let Some(fd) = init_config.stderr_write_fd {
+                clear_cloexec(fd);
+            }
+            if let Some(fd) = init_config.stdin_read_fd {
+                clear_cloexec(fd);
+            }
+
+            // Exec ourselves with --container-init <pipe-fd>.
+            let exe = CString::new("/proc/self/exe").unwrap();
+            let arg0 = CString::new("init").unwrap();
+            let arg1 = CString::new("--container-init").unwrap();
+            let arg2 = CString::new(config_read.as_raw_fd().to_string()).unwrap();
+            let argv: [*const libc::c_char; 4] =
+                [arg0.as_ptr(), arg1.as_ptr(), arg2.as_ptr(), ptr::null()];
+            // Empty environment — the container-init process doesn't need
+            // guest-init's env; the container's env is in the config.
+            let envp: [*const libc::c_char; 1] = [ptr::null()];
+            unsafe { libc::execve(exe.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+            // If execve fails, exit immediately.
+            unsafe { libc::_exit(127) }
+        }
+
+        // Parent — close the read end and write config to the child.
+        drop(config_read);
+        {
+            use std::io::Write;
+            let mut config_file =
+                unsafe { std::fs::File::from_raw_fd(config_write.into_raw_fd()) };
+            config_file
+                .write_all(&config_json)
+                .context("write config to child pipe")?;
+            // config_file dropped here, closing the write end (child sees EOF).
         }
 
         // Parent — keep read ends, drop write ends (via destructuring).
@@ -522,7 +566,7 @@ fn clone3_into_cgroup(cgroup_fd: RawFd) -> anyhow::Result<libc::pid_t> {
     const CLONE_INTO_CGROUP: u64 = 0x200000000;
 
     let mut args: libc::clone_args = unsafe { std::mem::zeroed() };
-    args.flags = (libc::CLONE_NEWPID as u64) | CLONE_INTO_CGROUP;
+    args.flags = (libc::CLONE_NEWPID as u64) | (libc::CLONE_NEWIPC as u64) | CLONE_INTO_CGROUP;
     args.exit_signal = libc::SIGCHLD as u64;
     args.cgroup = cgroup_fd as u64;
     let ret = unsafe {
@@ -632,297 +676,12 @@ pub async fn container_task(
     Ok(())
 }
 
-/// Runs in the child process after fork. Never returns.
-fn child_exec(
-    mount_point: &str,
-    program: &str,
-    args: &[String],
-    env: &[String],
-    working_dir: Option<&str>,
-    uid: Option<u32>,
-    gid: Option<u32>,
-    hostname: Option<&str>,
-    stdout_write_fd: Option<RawFd>,
-    stderr_write_fd: Option<RawFd>,
-    stdin_read_fd: Option<RawFd>,
-) -> ! {
-    let result = child_exec_inner(
-        mount_point,
-        program,
-        args,
-        env,
-        working_dir,
-        uid,
-        gid,
-        hostname,
-        stdout_write_fd,
-        stderr_write_fd,
-        stdin_read_fd,
-    );
-    if let Err(e) = result {
-        eprintln!("container child exec failed: {:#}", e);
-    }
-    unsafe { libc::_exit(127) }
-}
-
-fn child_exec_inner(
-    mount_point: &str,
-    program: &str,
-    args: &[String],
-    env: &[String],
-    working_dir: Option<&str>,
-    uid: Option<u32>,
-    gid: Option<u32>,
-    hostname: Option<&str>,
-    stdout_write_fd: Option<RawFd>,
-    stderr_write_fd: Option<RawFd>,
-    stdin_read_fd: Option<RawFd>,
-) -> anyhow::Result<()> {
-    // New session so the container process is a session leader.
-    if unsafe { libc::setsid() } < 0 {
-        bail!("setsid: {}", std::io::Error::last_os_error());
-    }
-
-    // Isolate mount and UTS namespaces so mounts and hostname changes are
-    // scoped to this container and don't affect other containers or guest-init.
-    if unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWUTS) } != 0 {
-        bail!(
-            "unshare(CLONE_NEWNS|CLONE_NEWUTS): {}",
-            std::io::Error::last_os_error()
-        );
-    }
-
-    // Set hostname (now scoped to this container's UTS namespace).
-    if let Some(name) = hostname {
-        let name_c = CString::new(name)?;
-        if unsafe { libc::sethostname(name_c.as_ptr(), name.len()) } != 0 {
-            bail!("sethostname: {}", std::io::Error::last_os_error());
-        }
-    }
-
-    // Chroot into the container rootfs.
-    let mount_point_c = CString::new(mount_point)?;
-    if unsafe { libc::chroot(mount_point_c.as_ptr()) } != 0 {
-        bail!("chroot: {}", std::io::Error::last_os_error());
-    }
-
-    // Change to working directory (default /).
-    let wd = working_dir.unwrap_or("/");
-    let wd_c = CString::new(wd)?;
-    if unsafe { libc::chdir(wd_c.as_ptr()) } != 0 {
-        bail!("chdir {}: {}", wd, std::io::Error::last_os_error());
-    }
-
-    // Mount essential filesystems inside the container.
-    util::mount(
-        "proc",
-        "/proc",
-        "proc",
-        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-        None,
-    )?;
-    util::mount(
-        "sysfs",
-        "/sys",
-        "sysfs",
-        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-        None,
-    )?;
-    util::mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, None)?;
-    // Use mode=666 so non-root containers can allocate PTYs without being in
-    // group 5 (tty). The proper fix is to support supplementary groups via
-    // setgroups()/initgroups() and use gid=5,mode=620 instead.
-    util::mount(
-        "devpts",
-        "/dev/pts",
-        "devpts",
-        libc::MS_NOSUID | libc::MS_NOEXEC,
-        Some("mode=666"),
-    )?;
-
-    // Create standard /dev symlinks expected by userspace tools.
-    std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd")?;
-    std::os::unix::fs::symlink("/proc/self/fd/0", "/dev/stdin")?;
-    std::os::unix::fs::symlink("/proc/self/fd/1", "/dev/stdout")?;
-    std::os::unix::fs::symlink("/proc/self/fd/2", "/dev/stderr")?;
-
-    // Replace /dev/ptmx device node with symlink for proper PTY namespace isolation.
-    let _ = std::fs::remove_file("/dev/ptmx");
-    std::os::unix::fs::symlink("pts/ptmx", "/dev/ptmx")?;
-
-    util::mount(
-        "tmpfs",
-        "/dev/shm",
-        "tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        None,
-    )?;
-    util::mount(
-        "tmpfs",
-        "/tmp",
-        "tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        None,
-    )?;
-
-    // Set up controlling terminal from /dev/console (separate from stdin).
-    let console = CString::new("/dev/console").unwrap();
-    let console_fd = unsafe { libc::open(console.as_ptr(), libc::O_RDWR) };
-    if console_fd >= 0 {
-        unsafe { libc::ioctl(console_fd, libc::TIOCSCTTY as _, 0) };
-    }
-
-    // Set up stdin: pipe from host if requested, otherwise console or /dev/null.
-    if let Some(fd) = stdin_read_fd {
-        unsafe {
-            libc::dup2(fd, 0);
-            if fd > 2 {
-                libc::close(fd);
-            }
-        }
-    } else if console_fd >= 0 {
-        unsafe {
-            libc::dup2(console_fd, 0); // stdin = console
-        }
-    } else {
-        // Fallback: /dev/null for stdin if console unavailable.
-        let devnull = CString::new("/dev/null").unwrap();
-        let null_fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY) };
-        if null_fd >= 0 {
-            unsafe {
-                libc::dup2(null_fd, 0);
-                if null_fd > 2 {
-                    libc::close(null_fd);
-                }
-            }
-        }
-    }
-
-    if let (Some(stdout_fd), Some(stderr_fd)) = (stdout_write_fd, stderr_write_fd) {
-        // Capture mode: redirect stdout/stderr to pipes.
-        unsafe {
-            libc::dup2(stdout_fd, 1);
-            libc::dup2(stderr_fd, 2);
-            if stdout_fd > 2 {
-                libc::close(stdout_fd);
-            }
-            if stderr_fd > 2 {
-                libc::close(stderr_fd);
-            }
-        }
-    } else {
-        // Legacy mode: use console for stdout/stderr too.
-        if console_fd >= 0 {
-            unsafe {
-                libc::dup2(console_fd, 1);
-                libc::dup2(console_fd, 2);
-            }
-        }
-    }
-
-    if console_fd >= 0 && console_fd > 2 {
-        unsafe {
-            libc::close(console_fd);
-        }
-    }
-
-    // Close all fds > 2 that aren't stdin/stdout/stderr.
-    // O_CLOEXEC handles most, but this catches any leaks from the parent
-    // (vsock listener, epoll, inotify, other containers' pipe write-ends).
-    //
-    // Uses raw libc opendir/readdir to avoid std::fs::ReadDir, whose Drop
-    // impl calls closedir and panics if the underlying fd was already closed.
+/// Clear the O_CLOEXEC flag on a file descriptor so it survives across exec.
+fn clear_cloexec(fd: RawFd) {
     unsafe {
-        let path = b"/proc/self/fd\0";
-        let dir = libc::opendir(path.as_ptr() as *const libc::c_char);
-        if !dir.is_null() {
-            let dir_fd = libc::dirfd(dir);
-            loop {
-                let entry = libc::readdir(dir);
-                if entry.is_null() {
-                    break;
-                }
-                let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
-                if let Ok(fd) = name.to_str().unwrap_or("").parse::<i32>() {
-                    if fd > 2 && fd != dir_fd {
-                        libc::close(fd);
-                    }
-                }
-            }
-            libc::closedir(dir);
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
         }
     }
-
-    // Set gid before uid (after setuid we may lack permission for setgid).
-    // Use raw syscalls instead of glibc wrappers: glibc's setgid/setuid use
-    // nptl_setxid to synchronize credentials across all threads, but after
-    // clone3 the parent's thread bookkeeping is stale (the async-io reactor
-    // thread no longer exists), causing EAGAIN.
-    if let Some(g) = gid {
-        let ret = unsafe { libc::syscall(libc::SYS_setgid, g as libc::c_ulong) };
-        if ret != 0 {
-            bail!("setgid({}): {}", g, std::io::Error::last_os_error());
-        }
-    }
-    if let Some(u) = uid {
-        let ret = unsafe { libc::syscall(libc::SYS_setuid, u as libc::c_ulong) };
-        if ret != 0 {
-            bail!("setuid({}): {}", u, std::io::Error::last_os_error());
-        }
-    }
-
-    // Resolve program via PATH if it's not an absolute/relative path.
-    let resolved_program = if program.contains('/') {
-        program.to_string()
-    } else {
-        resolve_in_path(program, env).unwrap_or_else(|| program.to_string())
-    };
-
-    // Build argv for execve.
-    let program_c = CString::new(resolved_program.as_str())?;
-    let args_c: Vec<CString> = std::iter::once(CString::new(program)?)
-        .chain(
-            args.iter()
-                .map(|a| CString::new(a.as_str()).context("invalid argument"))
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .collect();
-    let mut argv: Vec<*const libc::c_char> = args_c.iter().map(|a| a.as_ptr()).collect();
-    argv.push(ptr::null());
-
-    // Build envp for execve — explicit env, no leaking guest-init env.
-    let env_c: Vec<CString> = env
-        .iter()
-        .map(|e| CString::new(e.as_str()).context("invalid env var"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut envp: Vec<*const libc::c_char> = env_c.iter().map(|e| e.as_ptr()).collect();
-    envp.push(ptr::null());
-
-    unsafe { libc::execve(program_c.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-    bail!(
-        "execve {}: {}",
-        resolved_program,
-        std::io::Error::last_os_error()
-    );
-}
-
-/// Resolve a bare command name by searching PATH from the provided env list.
-///
-/// Looks for `PATH=...` in `env`, splits on ':', and checks each directory
-/// for an executable file with the given name. Returns the first match.
-fn resolve_in_path(name: &str, env: &[String]) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let path_val = env.iter().find_map(|e| e.strip_prefix("PATH="))?;
-    for dir in path_val.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let candidate = format!("{}/{}", dir, name);
-        if let Ok(meta) = std::fs::metadata(&candidate) {
-            if meta.is_file() && (meta.permissions().mode() & 0o111) != 0 {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }

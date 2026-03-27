@@ -2,6 +2,7 @@ mod buffer;
 mod cgroup;
 mod config_drive;
 mod container;
+mod container_init;
 mod init;
 mod memory;
 mod net;
@@ -783,6 +784,17 @@ fn run() -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Check for --container-init before any runtime setup.
+    // When exec'd as a container init process, we must not start the async
+    // runtime, logger, etc. — just read config and exec the workload.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "--container-init" {
+        let pipe_fd: i32 = args[2]
+            .parse()
+            .expect("--container-init: invalid pipe fd");
+        container_init::container_init_main(pipe_fd);
+    }
+
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
