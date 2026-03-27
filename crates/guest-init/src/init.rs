@@ -44,6 +44,27 @@ pub fn mount_essential_filesystems() {
             libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
             None,
         ),
+        (
+            "tmpfs",
+            "/volumes",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            None,
+        ),
+        (
+            "tmpfs",
+            "/containers",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            None,
+        ),
+        (
+            "tmpfs",
+            "/mnt",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            None,
+        ),
     ];
 
     for &(source, target, fstype, flags, data) in mounts {
