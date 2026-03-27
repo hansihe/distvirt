@@ -42,6 +42,9 @@ snow = "0.10"
 flate2 = "1"
 tar = "0.4"
 uuid = { version = "1.22.0", features = ["v4"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 env_logger.workspace = true

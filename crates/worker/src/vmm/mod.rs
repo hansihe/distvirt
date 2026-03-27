@@ -376,94 +376,67 @@ pub(crate) async fn api_request_with_timeout(
     body: Option<&serde_json::Value>,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use http_body_util::{BodyExt, Empty, Full};
+    use hyper::body::Bytes;
+    use hyper::Request;
 
     let start = std::time::Instant::now();
     log::info!("vmm API: {} {}", method, path);
 
-    let mut stream = UnixStream::connect(socket_path)
+    let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect to API socket {}", socket_path.display()))?;
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .context("HTTP handshake with VMM API")?;
+    tokio::spawn(conn);
 
-    if let Some(body) = body {
+    let request = if let Some(body) = body {
         let body_bytes = serde_json::to_vec(body)?;
-        let request = format!(
-            "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            method,
-            path,
-            body_bytes.len()
-        );
-        stream.write_all(request.as_bytes()).await?;
-        stream.write_all(&body_bytes).await?;
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Host", "localhost")
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)).map_err(|e| match e {}).boxed())
+            .context("build request")?
     } else {
-        let request = format!(
-            "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            method,
-            path,
-        );
-        stream.write_all(request.as_bytes()).await?;
-    }
-    stream.flush().await?;
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Host", "localhost")
+            .body(Empty::<Bytes>::new().map_err(|e| match e {}).boxed())
+            .context("build request")?
+    };
 
-    let mut response = Vec::new();
-    let read_result = tokio::time::timeout(timeout, async {
-        let mut buf = [0u8; 4096];
-        loop {
-            match stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    response.extend_from_slice(&buf[..n]);
-                    if let Ok(s) = std::str::from_utf8(&response) {
-                        if s.contains("\r\n\r\n") {
-                            if let Some(cl) = parse_content_length(s) {
-                                if let Some(body_start) = s.find("\r\n\r\n") {
-                                    let body_received = response.len() - body_start - 4;
-                                    if body_received >= cl {
-                                        break;
-                                    }
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    })
-    .await;
-
-    match read_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(e).context("read API response"),
-        Err(_) => {
-            let partial = String::from_utf8_lossy(&response);
-            anyhow::bail!(
-                "vmm API timeout: {} {} did not respond within {:.1}s (partial response: {:?})",
+    let response = tokio::time::timeout(timeout, sender.send_request(request))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "vmm API timeout: {} {} did not respond within {:.1}s",
                 method,
                 path,
                 timeout.as_secs_f64(),
-                if partial.is_empty() { "<empty>" } else { partial.as_ref() }
-            );
-        }
-    }
+            )
+        })?
+        .with_context(|| format!("vmm API request {} {}", method, path))?;
 
-    let response_str = String::from_utf8_lossy(&response);
-
-    if let Some(status_line) = response_str.lines().next() {
-        if !status_line.contains("200")
-            && !status_line.contains("201")
-            && !status_line.contains("204")
-        {
-            anyhow::bail!("vmm API error on {} {}:\n{}", method, path, response_str);
-        }
-    } else {
+    let status = response.status();
+    if !status.is_success() {
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .map(|c| c.to_bytes())
+            .unwrap_or_default();
+        let body_str = String::from_utf8_lossy(&body_bytes);
         anyhow::bail!(
-            "vmm API: {} {} returned empty response",
+            "vmm API error on {} {}: {} {}",
             method,
             path,
+            status,
+            body_str.trim(),
         );
     }
 
@@ -480,18 +453,6 @@ pub(crate) async fn api_request_with_timeout(
     }
 
     Ok(())
-}
-
-fn parse_content_length(headers: &str) -> Option<usize> {
-    for line in headers.lines() {
-        if let Some(val) = line.strip_prefix("Content-Length: ") {
-            return val.trim().parse().ok();
-        }
-        if let Some(val) = line.strip_prefix("content-length: ") {
-            return val.trim().parse().ok();
-        }
-    }
-    None
 }
 
 pub(crate) async fn try_vsock_connect(sock_path: &Path, port: u32) -> anyhow::Result<UnixStream> {
