@@ -374,7 +374,7 @@ impl VmBuilder for CloudHypervisorBuilder {
             base.mem_size_mib,
             base.balloon.as_ref(),
             base.serial_console,
-            !has_virtiofs, // use_block_container = no virtiofs means no shared memory needed
+            has_virtiofs, // virtiofs requires shared memory
             &additional_drives,
             &virtiofs_tags,
             base.net.as_ref(),

@@ -27,7 +27,7 @@ pub(super) fn build(
     mem_size_mib: u32,
     balloon: Option<&BalloonConfig>,
     serial_console: bool,
-    use_block_container: bool,
+    shared_memory: bool,
     additional_drives: &[AdditionalDrive],
     virtiofs_tags: &[String],
     net: Option<&NetConfig>,
@@ -36,15 +36,10 @@ pub(super) fn build(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("kernel_path is not valid UTF-8"))?;
 
-    // Disks: vda = rootfs, vdb = overlay or container block image, vdc+ = volumes.
+    // Disks: vda = rootfs, vdb+ = additional drives (scratch, volumes, etc.)
     let mut disks = vec![
         serde_json::json!({"path": "./rootfs.ext4", "readonly": false}),
     ];
-    if use_block_container {
-        disks.push(serde_json::json!({"path": "./container.ext4", "readonly": false}));
-    } else {
-        disks.push(serde_json::json!({"path": "./overlay.ext4", "readonly": false}));
-    }
     for drive in additional_drives {
         disks.push(
             serde_json::json!({"path": format!("./{}", drive.filename), "readonly": drive.read_only}),
@@ -75,7 +70,7 @@ pub(super) fn build(
         },
         "memory": {
             "size": (mem_size_mib as u64) * 1024 * 1024,
-            "shared": !use_block_container,
+            "shared": shared_memory,
         },
         "serial": {
             "mode": if serial_console { "Tty" } else { "Off" },

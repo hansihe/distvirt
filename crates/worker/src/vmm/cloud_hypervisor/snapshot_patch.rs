@@ -20,14 +20,7 @@ pub(super) async fn copy_snapshot_to_tmpdir(
     )
     .await?;
 
-    // Copy overlay image from snapshot.
-    copy_file_writable(
-        &snapshot_dir.join("overlay.ext4"),
-        &working_dir.join("overlay.ext4"),
-    )
-    .await?;
-
-    // Copy volume images from snapshot.
+    // Copy volume/scratch drive images from snapshot.
     for vd in &metadata.volume_drives {
         copy_file_writable(
             &snapshot_dir.join(&vd.filename),

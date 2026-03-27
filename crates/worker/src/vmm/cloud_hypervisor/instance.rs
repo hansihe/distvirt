@@ -182,13 +182,6 @@ impl VmInstance for CloudHypervisorInstance {
 
         let tmpdir_path = self._tmpdir.path();
 
-        tokio::fs::copy(
-            tmpdir_path.join("overlay.ext4"),
-            snapshot_dir.join("overlay.ext4"),
-        )
-        .await
-        .context("copy overlay.ext4 to snapshot dir")?;
-
         for vd in &self.snapshot_metadata.volume_drives {
             tokio::fs::copy(
                 tmpdir_path.join(&vd.filename),
