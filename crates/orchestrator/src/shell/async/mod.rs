@@ -825,6 +825,11 @@ impl Shell {
         for (worker_id, cmd) in output.worker_commands {
             if let Some(slot) = self.workers.get(&worker_id) {
                 slot.writer.send(cmd).await;
+            } else {
+                log::warn!(
+                    "namespace {:?}: targeted command for worker {:?} dropped (no slot): {:?}",
+                    namespace_id, worker_id, std::mem::discriminant(&cmd)
+                );
             }
         }
 
@@ -890,6 +895,11 @@ impl Shell {
                 for (worker_id, cmd) in ns_output.worker_commands {
                     if let Some(slot) = self.workers.get(&worker_id) {
                         slot.writer.send(cmd).await;
+                    } else {
+                        log::warn!(
+                            "namespace {:?}: targeted command (inline) for worker {:?} dropped (no slot): {:?}",
+                            ns_id, worker_id, std::mem::discriminant(&cmd)
+                        );
                     }
                 }
                 if !ns_output.observability_events.is_empty() {

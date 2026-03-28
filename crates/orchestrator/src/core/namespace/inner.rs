@@ -277,8 +277,16 @@ impl Namespace {
                     worker_id,
                 } => {
                     if self.active_workers.contains_key(&worker_id) {
+                        log::info!(
+                            "namespace {:?}: grant pod={:?} worker={:?} (worker active, applying immediately)",
+                            self.namespace_id, pod_id, worker_id
+                        );
                         self.apply_grant(worker_id, pod_id);
                     } else {
+                        log::info!(
+                            "namespace {:?}: grant pod={:?} worker={:?} (worker not active, deferring)",
+                            self.namespace_id, pod_id, worker_id
+                        );
                         self.deferred_grants.push((pod_id, worker_id));
                     }
                 }
@@ -428,6 +436,10 @@ impl Namespace {
             .map(|(p, _)| *p)
             .collect();
         self.deferred_grants.retain(|(_, w)| *w != worker_id);
+        log::info!(
+            "namespace {:?}: handle_namespace_created worker={:?}, deferred_grants={:?}",
+            self.namespace_id, worker_id, deferred
+        );
         for pod_id in deferred {
             self.apply_grant(worker_id, pod_id);
         }
@@ -858,8 +870,16 @@ impl Namespace {
     /// Apply a scheduler grant: create a lease for the pod on the given worker.
     fn apply_grant(&mut self, worker_id: WorkerId, pod_id: PodId) -> bool {
         if self.router.get_pod(&pod_id).is_none() {
+            log::warn!(
+                "namespace {:?}: apply_grant: pod {:?} not found in router, dropping grant for worker {:?}",
+                self.namespace_id, pod_id, worker_id
+            );
             return false;
         }
+        log::info!(
+            "namespace {:?}: apply_grant: pod={:?} worker={:?}",
+            self.namespace_id, pod_id, worker_id
+        );
         let lease_id = self.router.create_schedule_lease();
         self.router.set_schedule_lease_lease(
             lease_id,
@@ -959,6 +979,12 @@ impl Namespace {
         }
 
         // Pod assignment actions → worker commands.
+        for action in &actions.pod_actions {
+            log::info!(
+                "namespace {:?}: pod_action: {:?}",
+                self.namespace_id, action
+            );
+        }
         for action in actions.pod_actions {
             match action {
                 PodAssignmentAction::Launch {
@@ -967,6 +993,10 @@ impl Namespace {
                     spec,
                     ..
                 } => {
+                    log::info!(
+                        "namespace {:?}: emit LaunchPod: pod={:?} target_worker={:?}",
+                        self.namespace_id, pod_id, worker_id
+                    );
                     let cmd = self.build_launch_command(&proto_pod_id(pod_id), &spec);
                     effects.worker_commands.push((worker_id, cmd));
                 }
