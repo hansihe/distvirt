@@ -233,6 +233,21 @@ pub enum MountRestoreKind {
 }
 
 // ---------------------------------------------------------------------------
+// VmArtifacts — one-time artifacts produced alongside a VM instance
+// ---------------------------------------------------------------------------
+
+/// One-time artifacts produced when a VM is launched or restored.
+///
+/// These are setup-time values that should be consumed exactly once,
+/// rather than living on the `VmInstance` trait behind `Option::take` patterns.
+pub struct VmArtifacts<I> {
+    pub instance: I,
+    pub vsock_stream: UnixStream,
+    pub fabric_port: Option<FabricPort>,
+    pub exit_signal: watch::Receiver<Option<ExitStatus>>,
+}
+
+// ---------------------------------------------------------------------------
 // VmBuilder trait
 // ---------------------------------------------------------------------------
 
@@ -254,7 +269,7 @@ pub trait VmBuilder: Send {
     fn set_snapshot_context(&mut self, mount_restore_info: Vec<MountRestoreInfo>);
 
     /// Finalize configuration and launch the VM.
-    fn launch(self) -> impl Future<Output = anyhow::Result<(Self::Instance, ResolvedMounts)>> + Send;
+    fn launch(self) -> impl Future<Output = anyhow::Result<(VmArtifacts<Self::Instance>, ResolvedMounts)>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +295,7 @@ pub trait Vmm: Send + Sync {
         &self,
         snapshot: &SnapshotArtifacts,
         ctx: RestoreContext,
-    ) -> impl Future<Output = anyhow::Result<Self::Instance>> + Send {
+    ) -> impl Future<Output = anyhow::Result<VmArtifacts<Self::Instance>>> + Send {
         let _ = (snapshot, ctx);
         async { anyhow::bail!("snapshot restore not supported by this VMM") }
     }
@@ -288,21 +303,31 @@ pub trait Vmm: Send + Sync {
 
 /// A running VM instance.
 pub trait VmInstance: Send + 'static {
-    fn connect_vsock(&self, port: u32) -> impl Future<Output = anyhow::Result<UnixStream>> + Send;
-    fn take_fabric_port(&mut self) -> Option<FabricPort>;
     fn wait(&mut self) -> impl Future<Output = anyhow::Result<ExitStatus>> + Send;
     fn kill(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
 
-    fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
-        None
-    }
-
+    /// Clone-snapshot: pause, snapshot, resume. VM keeps running afterward.
     fn snapshot(
         &mut self,
         snapshot_dir: &Path,
     ) -> impl Future<Output = anyhow::Result<SnapshotArtifacts>> + Send {
         let _ = snapshot_dir;
         async { anyhow::bail!("snapshot not supported by this VM instance") }
+    }
+
+    /// Suspend: pause, snapshot, teardown. Consumes the instance.
+    ///
+    /// The instance is dropped after the snapshot is written. The `Drop` impl
+    /// on the underlying VMM process handle kills the child.
+    fn suspend(
+        self,
+        snapshot_dir: &Path,
+    ) -> impl Future<Output = anyhow::Result<SnapshotArtifacts>> + Send
+    where
+        Self: Sized,
+    {
+        let _ = snapshot_dir;
+        async { anyhow::bail!("suspend not supported by this VM instance") }
     }
 
     fn set_balloon(&mut self, amount_mib: u32) -> impl Future<Output = anyhow::Result<()>> + Send {

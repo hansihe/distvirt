@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::fabric::{Fabric, FabricPort};
 use crate::managed_vm::ManagedVm;
 use crate::task_handle::TaskHandle;
-use crate::vmm::VmInstance;
+use crate::vmm::{VmArtifacts, VmInstance};
 
 /// RAII handle for resources that must stay alive for the entire pod lifetime.
 ///
@@ -30,13 +30,20 @@ pub(crate) struct PodResources {
 /// Wire a freshly launched/restored VM instance into the fabric and establish
 /// the yamux control connection.
 pub(crate) async fn setup_instance<I: VmInstance>(
-    mut instance: I,
+    artifacts: VmArtifacts<I>,
     fabric: &Fabric<FabricPort>,
     pod_id: &distvirt_worker_protocol::PodId,
     network: &PodNetworkConfig,
     cancel: &CancellationToken,
 ) -> anyhow::Result<(ManagedVm<I>, Option<TaskHandle<()>>)> {
-    let port_task = if let Some(port) = instance.take_fabric_port() {
+    let VmArtifacts {
+        instance,
+        vsock_stream,
+        fabric_port,
+        exit_signal,
+    } = artifacts;
+
+    let port_task = if let Some(port) = fabric_port {
         let (_port_id, task) = fabric.add_port_raw_with_ip(port, network.ip);
         log::info!("worker: pod '{}' network port added to fabric", pod_id);
         Some(task)
@@ -44,13 +51,14 @@ pub(crate) async fn setup_instance<I: VmInstance>(
         None
     };
 
-    // Take exit signal before instance is moved into ManagedVm::connect,
-    // so we can detect VM death during setup immediately.
-    let mut vm_exit_rx = instance.take_exit_signal();
+    // Clone exit signal so we can detect VM death during connect,
+    // while still passing the original into ManagedVm.
+    let mut vm_exit_rx = exit_signal.clone();
     let mut vm_died = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
 
+
     let vm = tokio::select! {
-        result = ManagedVm::connect(instance) => { result? }
+        result = ManagedVm::connect(instance, vsock_stream, exit_signal) => { result? }
         _ = cancel.cancelled() => {
             anyhow::bail!("cancelled during VM connect");
         }
@@ -62,12 +70,7 @@ pub(crate) async fn setup_instance<I: VmInstance>(
     Ok((vm, port_task))
 }
 
-/// Create a future that resolves when the VM process exits, or pends forever if no signal available.
-pub(crate) async fn wait_for_vm_exit(rx: &mut Option<watch::Receiver<Option<ExitStatus>>>) {
-    match rx.as_mut() {
-        Some(rx) => {
-            let _ = rx.wait_for(|s| s.is_some()).await;
-        }
-        None => std::future::pending::<()>().await,
-    }
+/// Create a future that resolves when the VM process exits.
+pub(crate) async fn wait_for_vm_exit(rx: &mut watch::Receiver<Option<ExitStatus>>) {
+    let _ = rx.wait_for(|s| s.is_some()).await;
 }

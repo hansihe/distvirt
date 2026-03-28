@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::net::UnixStream;
@@ -16,10 +16,9 @@ use tokio::sync::{mpsc, watch};
 use super::guest_sim::{ContainerBehavior, GuestSimConfig, SuspendBehavior, run_guest_sim};
 use super::{
     BaseVmConfig, GuestDevice, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
-    ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, SnapshotMetadata, VmBuilder,
-    VmInstance, Vmm,
+    ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, SnapshotMetadata, VmArtifacts,
+    VmBuilder, VmInstance, Vmm,
 };
-use crate::fabric::FabricPort;
 use crate::task_handle::TaskHandle;
 
 /// Handle that allows test code to simulate a VM crash.
@@ -109,8 +108,6 @@ impl TestVmm {
 
 /// A running test VM instance backed by a guest simulator task.
 pub struct TestVmInstance {
-    vsock_socket: Mutex<Option<UnixStream>>,
-    fabric_port: Option<FabricPort>,
     sim_task: Option<TaskHandle<anyhow::Result<()>>>,
     exit_tx: watch::Sender<Option<ExitStatus>>,
 }
@@ -184,16 +181,15 @@ impl VmBuilder for TestVmmBuilder {
         self.mount_restore_info = mount_restore_info;
     }
 
-    async fn launch(self) -> anyhow::Result<(TestVmInstance, ResolvedMounts)> {
+    async fn launch(self) -> anyhow::Result<(VmArtifacts<TestVmInstance>, ResolvedMounts)> {
         let (host_socket, sim_task, exit_tx) = spawn_guest_sim(self.config)?;
 
         if let Some(ref tx) = self.crash_handle_tx {
             let _ = tx.send(CrashHandle(exit_tx.clone()));
         }
 
+        let exit_signal = exit_tx.subscribe();
         let instance = TestVmInstance {
-            vsock_socket: Mutex::new(Some(host_socket)),
-            fabric_port: None,
             sim_task: Some(sim_task),
             exit_tx,
         };
@@ -234,7 +230,14 @@ impl VmBuilder for TestVmmBuilder {
             }
         }
 
-        Ok((instance, ResolvedMounts { entries }))
+        let artifacts = VmArtifacts {
+            instance,
+            vsock_stream: host_socket,
+            fabric_port: None,
+            exit_signal,
+        };
+
+        Ok((artifacts, ResolvedMounts { entries }))
     }
 }
 
@@ -256,7 +259,7 @@ impl Vmm for TestVmm {
         &self,
         snapshot: &SnapshotArtifacts,
         _ctx: RestoreContext,
-    ) -> anyhow::Result<TestVmInstance> {
+    ) -> anyhow::Result<VmArtifacts<TestVmInstance>> {
         // Validate snapshot exists by reading metadata.json.
         let metadata_path = snapshot.snapshot_dir.join("metadata.json");
         let _bytes =
@@ -268,28 +271,20 @@ impl Vmm for TestVmm {
             let _ = tx.send(CrashHandle(exit_tx.clone()));
         }
 
-        Ok(TestVmInstance {
-            vsock_socket: Mutex::new(Some(host_socket)),
+        let exit_signal = exit_tx.subscribe();
+        Ok(VmArtifacts {
+            instance: TestVmInstance {
+                sim_task: Some(sim_task),
+                exit_tx,
+            },
+            vsock_stream: host_socket,
             fabric_port: None,
-            sim_task: Some(sim_task),
-            exit_tx,
+            exit_signal,
         })
     }
 }
 
 impl VmInstance for TestVmInstance {
-    async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
-        self.vsock_socket
-            .lock()
-            .expect("poisoned")
-            .take()
-            .context("TestVmInstance: vsock socket already taken")
-    }
-
-    fn take_fabric_port(&mut self) -> Option<FabricPort> {
-        self.fabric_port.take()
-    }
-
     async fn wait(&mut self) -> anyhow::Result<ExitStatus> {
         if let Some(task) = self.sim_task.take() {
             let _ = task.await;
@@ -305,35 +300,41 @@ impl VmInstance for TestVmInstance {
         Ok(())
     }
 
-    fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
-        Some(self.exit_tx.subscribe())
-    }
-
     async fn snapshot(&mut self, snapshot_dir: &Path) -> anyhow::Result<SnapshotArtifacts> {
-        std::fs::create_dir_all(snapshot_dir).context("create snapshot dir")?;
-
-        let metadata = SnapshotMetadata {
-            kernel_path: "/dev/null".into(),
-            rootfs_source_path: "/dev/null".into(),
-            balloon_configured: false,
-            serial_console: false,
-            volume_drives: vec![],
-            virtiofs_mounts: vec![],
-            mount_restore_info: vec![],
-            container_image_ref: None,
-            config_volumes: vec![],
-        };
-
-        let metadata_json = serde_json::to_vec_pretty(&metadata).context("serialize metadata")?;
-        std::fs::write(snapshot_dir.join("metadata.json"), &metadata_json)
-            .context("write metadata.json")?;
-
-        std::fs::write(snapshot_dir.join("snapshot.bin"), b"test-snapshot")
-            .context("write snapshot.bin")?;
-
-        Ok(SnapshotArtifacts {
-            snapshot_dir: snapshot_dir.to_path_buf(),
-            metadata,
-        })
+        write_test_snapshot(snapshot_dir)
     }
+
+    async fn suspend(self, snapshot_dir: &Path) -> anyhow::Result<SnapshotArtifacts> {
+        let artifacts = write_test_snapshot(snapshot_dir)?;
+        // `self` is dropped here — TaskHandle aborts the sim task.
+        Ok(artifacts)
+    }
+}
+
+fn write_test_snapshot(snapshot_dir: &Path) -> anyhow::Result<SnapshotArtifacts> {
+    std::fs::create_dir_all(snapshot_dir).context("create snapshot dir")?;
+
+    let metadata = SnapshotMetadata {
+        kernel_path: "/dev/null".into(),
+        rootfs_source_path: "/dev/null".into(),
+        balloon_configured: false,
+        serial_console: false,
+        volume_drives: vec![],
+        virtiofs_mounts: vec![],
+        mount_restore_info: vec![],
+        container_image_ref: None,
+        config_volumes: vec![],
+    };
+
+    let metadata_json = serde_json::to_vec_pretty(&metadata).context("serialize metadata")?;
+    std::fs::write(snapshot_dir.join("metadata.json"), &metadata_json)
+        .context("write metadata.json")?;
+
+    std::fs::write(snapshot_dir.join("snapshot.bin"), b"test-snapshot")
+        .context("write snapshot.bin")?;
+
+    Ok(SnapshotArtifacts {
+        snapshot_dir: snapshot_dir.to_path_buf(),
+        metadata,
+    })
 }

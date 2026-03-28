@@ -1,5 +1,8 @@
 use std::io;
+use std::net::Ipv4Addr;
+use std::process::Command;
 
+use anyhow::Context;
 use tokio::sync::mpsc;
 
 use crate::linux::net::TunDevice;
@@ -22,12 +25,25 @@ use std::future::Future;
 /// TUN-based internet egress/ingress component.
 ///
 /// Manages a TUN device for routing pod traffic to the host network.
+/// Sets up iptables MASQUERADE for the pod subnet on creation and
+/// removes the rule on drop.
 pub struct TunEgress {
     tun: TunDevice,
+    /// The MASQUERADE rule parameters, kept for cleanup on drop.
+    /// Held purely for its `Drop` impl — removing the iptables rule when the
+    /// TUN device is destroyed.
+    _masquerade_rule: Option<MasqueradeRule>,
+}
+
+/// Parameters for an iptables MASQUERADE rule so we can remove it on drop.
+struct MasqueradeRule {
+    subnet: String,
+    out_iface: String,
 }
 
 impl TunEgress {
-    /// Create a new TUN egress: create TUN device, configure IP, set non-blocking.
+    /// Create a new TUN egress: create TUN device, configure IP, set non-blocking,
+    /// and set up iptables MASQUERADE for the pod subnet.
     pub fn new(gateway_ip: [u8; 4], netmask: [u8; 4]) -> anyhow::Result<Self> {
         let tun = TunDevice::create()?;
         tun.configure_ip(gateway_ip, netmask)?;
@@ -46,9 +62,19 @@ impl TunEgress {
             _ => {}
         }
 
+        // Set up iptables MASQUERADE so egress traffic from the pod subnet
+        // gets SNATted to the host's IP on the outgoing interface.
+        let masquerade_rule = match setup_masquerade(gateway_ip, netmask) {
+            Ok(rule) => Some(rule),
+            Err(e) => {
+                log::warn!("gateway: failed to set up MASQUERADE: {:#}", e);
+                None
+            }
+        };
+
         log::info!("gateway: created TUN device {}", tun.name());
 
-        Ok(TunEgress { tun })
+        Ok(TunEgress { tun, _masquerade_rule: masquerade_rule })
     }
 
     /// Size of the kernel virtio-net header used by TUN devices.
@@ -180,5 +206,102 @@ impl EgressPort for ChannelEgress {
 
     fn name(&self) -> &str {
         "channel-egress"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// iptables MASQUERADE helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the network address from a gateway IP and netmask, returning a
+/// CIDR string like "172.16.0.0/16".
+fn subnet_cidr(gateway_ip: [u8; 4], netmask: [u8; 4]) -> String {
+    let ip = u32::from_be_bytes(gateway_ip);
+    let mask = u32::from_be_bytes(netmask);
+    let network = ip & mask;
+    let prefix_len = mask.count_ones();
+    let net_addr = Ipv4Addr::from(network);
+    format!("{}/{}", net_addr, prefix_len)
+}
+
+/// Determine the default-route output interface by reading `/proc/net/route`.
+fn default_route_interface() -> anyhow::Result<String> {
+    let contents = std::fs::read_to_string("/proc/net/route")
+        .context("read /proc/net/route")?;
+    for line in contents.lines().skip(1) {
+        let mut fields = line.split_whitespace();
+        let iface = fields.next().unwrap_or("");
+        let dest = fields.next().unwrap_or("");
+        // Default route has destination 00000000.
+        if dest == "00000000" {
+            return Ok(iface.to_string());
+        }
+    }
+    anyhow::bail!("no default route found in /proc/net/route")
+}
+
+/// Add an iptables MASQUERADE rule for the pod subnet.
+fn setup_masquerade(gateway_ip: [u8; 4], netmask: [u8; 4]) -> anyhow::Result<MasqueradeRule> {
+    let subnet = subnet_cidr(gateway_ip, netmask);
+    let out_iface = default_route_interface()?;
+
+    // Check if the rule already exists to avoid duplicates.
+    let check = Command::new("iptables")
+        .args(["-t", "nat", "-C", "POSTROUTING",
+               "-s", &subnet, "-o", &out_iface, "-j", "MASQUERADE"])
+        .output()
+        .context("run iptables -C")?;
+
+    if check.status.success() {
+        log::info!(
+            "gateway: MASQUERADE rule already exists for {} via {}",
+            subnet, out_iface
+        );
+        return Ok(MasqueradeRule { subnet, out_iface });
+    }
+
+    let output = Command::new("iptables")
+        .args(["-t", "nat", "-A", "POSTROUTING",
+               "-s", &subnet, "-o", &out_iface, "-j", "MASQUERADE"])
+        .output()
+        .context("run iptables -A")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("iptables MASQUERADE add failed: {}", stderr.trim());
+    }
+
+    log::info!(
+        "gateway: added MASQUERADE rule: -s {} -o {} -j MASQUERADE",
+        subnet, out_iface
+    );
+    Ok(MasqueradeRule { subnet, out_iface })
+}
+
+impl Drop for MasqueradeRule {
+    fn drop(&mut self) {
+        let result = Command::new("iptables")
+            .args(["-t", "nat", "-D", "POSTROUTING",
+                   "-s", &self.subnet, "-o", &self.out_iface, "-j", "MASQUERADE"])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                log::info!(
+                    "gateway: removed MASQUERADE rule for {} via {}",
+                    self.subnet, self.out_iface
+                );
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!(
+                    "gateway: failed to remove MASQUERADE rule: {}",
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                log::warn!("gateway: failed to run iptables -D: {}", e);
+            }
+        }
     }
 }

@@ -1281,7 +1281,7 @@ mod tests {
     use crate::image_provider::{ImageProvider, PreparedArtifact};
     use crate::vmm::{
         BaseVmConfig, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
-        ResolvedEntry, ResolvedMounts, GuestDevice, VmBuilder, VmInstance, Vmm,
+        ResolvedEntry, ResolvedMounts, GuestDevice, VmArtifacts, VmBuilder, VmInstance, Vmm,
     };
 
     // -----------------------------------------------------------------------
@@ -1303,7 +1303,7 @@ mod tests {
         fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {
             panic!("StubVmmBuilder::set_snapshot_context should not be called");
         }
-        async fn launch(self) -> anyhow::Result<(StubVmInstance, ResolvedMounts)> {
+        async fn launch(self) -> anyhow::Result<(VmArtifacts<StubVmInstance>, ResolvedMounts)> {
             panic!("StubVmmBuilder::launch should not be called");
         }
     }
@@ -1319,12 +1319,6 @@ mod tests {
     struct StubVmInstance;
 
     impl VmInstance for StubVmInstance {
-        async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
-            panic!("StubVmInstance::connect_vsock called");
-        }
-        fn take_fabric_port(&mut self) -> Option<FabricPort> {
-            None
-        }
         async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }
@@ -1575,7 +1569,7 @@ mod tests {
             Ok(())
         }
         fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {}
-        async fn launch(self) -> anyhow::Result<(MockVmInstance, ResolvedMounts)> {
+        async fn launch(self) -> anyhow::Result<(VmArtifacts<MockVmInstance>, ResolvedMounts)> {
             if let Some(ref err) = self.launch_error {
                 return Err(anyhow::anyhow!("{}", err));
             }
@@ -1583,7 +1577,6 @@ mod tests {
                 .vm_socket
                 .expect("MockVmmBuilder: socket already taken");
             let instance = MockVmInstance {
-                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
                 killed: tokio::sync::Mutex::new(false),
             };
             let resolved = ResolvedMounts {
@@ -1602,12 +1595,16 @@ mod tests {
                     },
                 ],
             };
-            Ok((instance, resolved))
+            Ok((VmArtifacts {
+                instance,
+                vsock_stream: socket,
+                fabric_port: None,
+                exit_signal: tokio::sync::watch::channel(None).1,
+            }, resolved))
         }
     }
 
     struct MockVmInstance {
-        vsock_socket: tokio::sync::Mutex<Option<UnixStream>>,
         killed: tokio::sync::Mutex<bool>,
     }
 
@@ -1628,16 +1625,6 @@ mod tests {
     }
 
     impl VmInstance for MockVmInstance {
-        async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
-            self.vsock_socket
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("MockVmInstance: vsock already connected"))
-        }
-        fn take_fabric_port(&mut self) -> Option<FabricPort> {
-            None
-        }
         async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }

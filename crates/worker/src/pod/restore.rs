@@ -111,7 +111,7 @@ pub(crate) async fn pod_restore<V: Vmm + 'static, P: ImageProvider + 'static>(
         mounts: restore_mounts,
     };
 
-    let instance = tokio::select! {
+    let artifacts = tokio::select! {
         result = vmm.restore(&snapshot, ctx) => {
             result.context("restore VM from snapshot")?
         }
@@ -121,7 +121,7 @@ pub(crate) async fn pod_restore<V: Vmm + 'static, P: ImageProvider + 'static>(
     };
     log::info!("worker: pod '{}' VM restored from snapshot", pod_id);
 
-    let (vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
+    let (vm, port_task) = setup_instance(artifacts, fabric, pod_id, &network, cancel).await?;
 
     let resources = PodResources {
         _prepared_volumes: Vec::new(),

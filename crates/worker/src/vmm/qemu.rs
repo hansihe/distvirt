@@ -9,10 +9,9 @@ use tokio::sync::watch;
 
 use super::{
     BaseVmConfig, GuestDevice, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
-    ResolvedEntry, ResolvedMounts, VmBuilder, VmInstance, VmMountSource, Vmm,
+    ResolvedEntry, ResolvedMounts, VmArtifacts, VmBuilder, VmInstance, VmMountSource, Vmm,
     copy_file_writable, spawn_exit_monitor, spawn_serial_task, wait_for_file,
 };
-use crate::fabric::FabricPort;
 use crate::task_handle::TaskHandle;
 
 /// QEMU VMM implementation.
@@ -92,7 +91,7 @@ impl VmBuilder for QemuBuilder {
         self.mount_restore_info = mount_restore_info;
     }
 
-    async fn launch(self) -> anyhow::Result<(QemuInstance, ResolvedMounts)> {
+    async fn launch(self) -> anyhow::Result<(VmArtifacts<QemuInstance>, ResolvedMounts)> {
         let base = self.base;
         let tmpdir = self.tmpdir;
 
@@ -249,17 +248,26 @@ impl VmBuilder for QemuBuilder {
 
         log::info!("QEMU launched (TCG, pid={})", child.id().unwrap_or(0));
 
+        let vsock_stream =
+            connect_virtio_serial(&transport_socket_path).await?;
+
         let instance = QemuInstance {
             child,
             _qmp: qmp,
-            transport_socket_path,
             _serial_task,
-            exit_rx,
+            exit_rx: exit_rx.clone(),
             _exit_monitor,
             _tmpdir: tmpdir,
         };
 
-        Ok((instance, ResolvedMounts { entries: resolved }))
+        let artifacts = VmArtifacts {
+            instance,
+            vsock_stream,
+            fabric_port: None,
+            exit_signal: exit_rx,
+        };
+
+        Ok((artifacts, ResolvedMounts { entries: resolved }))
     }
 }
 
@@ -295,7 +303,6 @@ impl Vmm for Qemu {
 pub struct QemuInstance {
     child: tokio::process::Child,
     _qmp: QmpConnection,
-    transport_socket_path: PathBuf,
     _serial_task: Option<TaskHandle<()>>,
     exit_rx: watch::Receiver<Option<ExitStatus>>,
     _exit_monitor: TaskHandle<()>,
@@ -311,76 +318,6 @@ impl Drop for QemuInstance {
 }
 
 impl VmInstance for QemuInstance {
-    async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
-        let sock_path = &self.transport_socket_path;
-        log::info!(
-            "connecting to guest via virtio-serial at {}",
-            sock_path.display()
-        );
-
-        // Retry loop — the QEMU chardev socket exists immediately, but the
-        // guest needs time to boot and open the virtio-serial port. If the
-        // guest port isn't open yet, QEMU accepts the connection but closes
-        // it immediately (EOF). We detect this with a non-blocking read:
-        // EOF means the guest isn't ready, WouldBlock means it is.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            match UnixStream::connect(sock_path).await {
-                Ok(stream) => {
-                    match tokio::time::timeout(
-                        Duration::from_millis(100),
-                        stream.readable(),
-                    )
-                    .await
-                    {
-                        // Timeout — socket stayed open with no EOF. Good.
-                        Err(_) => {
-                            log::info!("virtio-serial transport connected");
-                            return Ok(stream);
-                        }
-                        // Became readable quickly — check if it's EOF.
-                        Ok(Ok(())) => {
-                            let mut probe = [0u8; 1];
-                            match stream.try_read(&mut probe) {
-                                Ok(0) => {
-                                    log::debug!("virtio-serial: got EOF, guest not ready yet");
-                                }
-                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    log::info!("virtio-serial transport connected");
-                                    return Ok(stream);
-                                }
-                                Ok(_) => {
-                                    log::debug!("virtio-serial: unexpected data before handshake");
-                                }
-                                Err(e) => {
-                                    log::debug!("virtio-serial: probe error: {}, retrying", e);
-                                }
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            log::debug!("virtio-serial: readable error: {}, retrying", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::debug!("virtio-serial: connect error: {}, retrying", e);
-                }
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                bail!(
-                    "timeout connecting to guest via virtio-serial at {}",
-                    sock_path.display()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    fn take_fabric_port(&mut self) -> Option<FabricPort> {
-        None // No fabric support yet.
-    }
-
     async fn wait(&mut self) -> anyhow::Result<ExitStatus> {
         self.exit_rx
             .wait_for(|s| s.is_some())
@@ -395,8 +332,74 @@ impl VmInstance for QemuInstance {
         Ok(())
     }
 
-    fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
-        Some(self.exit_rx.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Virtio-serial transport connection
+// ---------------------------------------------------------------------------
+
+/// Connect to the guest via virtio-serial with retry.
+///
+/// The QEMU chardev socket exists immediately, but the guest needs time to
+/// boot and open the virtio-serial port. If the guest port isn't open yet,
+/// QEMU accepts the connection but closes it immediately (EOF).
+async fn connect_virtio_serial(
+    sock_path: &std::path::Path,
+) -> anyhow::Result<UnixStream> {
+    log::info!(
+        "connecting to guest via virtio-serial at {}",
+        sock_path.display()
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match UnixStream::connect(sock_path).await {
+            Ok(stream) => {
+                match tokio::time::timeout(
+                    Duration::from_millis(100),
+                    stream.readable(),
+                )
+                .await
+                {
+                    Err(_) => {
+                        log::info!("virtio-serial transport connected");
+                        return Ok(stream);
+                    }
+                    Ok(Ok(())) => {
+                        let mut probe = [0u8; 1];
+                        match stream.try_read(&mut probe) {
+                            Ok(0) => {
+                                log::debug!("virtio-serial: got EOF, guest not ready yet");
+                            }
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                log::info!("virtio-serial transport connected");
+                                return Ok(stream);
+                            }
+                            Ok(_) => {
+                                log::debug!("virtio-serial: unexpected data before handshake");
+                            }
+                            Err(e) => {
+                                log::debug!("virtio-serial: probe error: {}, retrying", e);
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        log::debug!("virtio-serial: readable error: {}, retrying", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!("virtio-serial: connect error: {}, retrying", e);
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "timeout connecting to guest via virtio-serial at {}",
+                sock_path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -504,7 +507,7 @@ impl QmpConnection {
 mod tests {
     use super::*;
     use crate::vmm::Vmm;
-    use distvirt_guest_protocol::{GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
+    use distvirt_guest_protocol::{GuestMessage, HostMessage};
 
     /// Returns true if we have the QEMU binary and guest images available.
     fn should_run() -> bool {
@@ -559,17 +562,12 @@ mod tests {
             .add_scratch_device("overlay", 256)
             .expect("add_scratch_device failed");
 
-        let (mut instance, _resolved) = builder.launch().await.expect("QEMU launch failed");
-
-        // Connect to guest-init via virtio-serial transport.
-        let socket = instance
-            .connect_vsock(VSOCK_CONTROL_PORT)
-            .await
-            .expect("connect_vsock failed");
+        let (artifacts, _resolved) = builder.launch().await.expect("QEMU launch failed");
+        let mut instance = artifacts.instance;
 
         // Set up yamux session (host is client).
         let (mut session, _yamux_driver, _exit_signal) =
-            crate::vsock_client::GuestSession::new(socket)
+            crate::vsock_client::GuestSession::new(artifacts.vsock_stream)
                 .await
                 .expect("GuestSession setup failed");
 

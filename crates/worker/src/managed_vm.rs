@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, bail};
 use tokio::sync::watch;
 
-use distvirt_guest_protocol::{GuestEvent, GuestMessage, HostMessage, VSOCK_CONTROL_PORT};
+use distvirt_guest_protocol::{GuestEvent, GuestMessage, HostMessage};
 use distvirt_worker_protocol::ContainerConfig;
 
 use crate::io_session::IoSession;
@@ -161,6 +161,7 @@ pub struct ManagedVm<I> {
     session: GuestSession,
     yamux_driver: Option<TaskHandle<anyhow::Result<()>>>,
     driver_exit_signal: Option<DriverExitSignal>,
+    exit_signal: watch::Receiver<Option<ExitStatus>>,
     started_containers: Vec<String>,
     event_dispatch: Option<EventDispatch>,
 }
@@ -170,13 +171,11 @@ impl<I: VmInstance> ManagedVm<I> {
     ///
     /// Connects to the guest over vsock, establishes a yamux session,
     /// and waits for the Ready message.
-    pub async fn connect(instance: I) -> anyhow::Result<Self> {
-        log::info!("connecting vsock");
-        let stream = instance
-            .connect_vsock(VSOCK_CONTROL_PORT)
-            .await
-            .context("connect vsock")?;
-
+    pub async fn connect(
+        instance: I,
+        stream: tokio::net::UnixStream,
+        exit_signal: watch::Receiver<Option<ExitStatus>>,
+    ) -> anyhow::Result<Self> {
         let (mut session, yamux_driver, driver_exit_signal) = GuestSession::new(stream)
             .await
             .context("establish yamux session")?;
@@ -225,6 +224,7 @@ impl<I: VmInstance> ManagedVm<I> {
             session,
             yamux_driver: Some(yamux_driver),
             driver_exit_signal: Some(driver_exit_signal),
+            exit_signal,
             started_containers,
             event_dispatch: Some(event_dispatch),
         };
@@ -249,12 +249,12 @@ impl<I: VmInstance> ManagedVm<I> {
         self.event_dispatch.take()
     }
 
-    /// Take the VM process exit signal.
+    /// Clone the VM process exit signal receiver.
     ///
     /// Used by callers (e.g. pod_monitor) that need to `select!` on
     /// unexpected VM process death.
-    pub fn take_exit_signal(&mut self) -> Option<watch::Receiver<Option<ExitStatus>>> {
-        self.instance.take_exit_signal()
+    pub fn exit_signal(&self) -> watch::Receiver<Option<ExitStatus>> {
+        self.exit_signal.clone()
     }
 
     /// Set the guest's system clock to the host's current wall-clock time.
@@ -460,14 +460,17 @@ impl<I: VmInstance> ManagedVm<I> {
         self.instance.set_balloon(amount_mib).await
     }
 
-    /// Suspend the VM: handshake with guest, snapshot, then kill.
+    /// Suspend the VM: handshake with guest, snapshot, tear down.
     ///
     /// Sends `PrepareSuspend` to the guest, waits for `SuspendReady` (with
-    /// timeout), takes a Firecracker snapshot, and kills the VM process.
+    /// timeout), then suspends the VM instance (which consumes it).
     /// Returns the snapshot artifacts for later restore via `Vmm::restore()`
     /// + `ManagedVm::connect()`.
+    ///
+    /// Consumes `self` — the VM instance is torn down and the yamux driver
+    /// is aborted when the remaining fields are dropped.
     pub async fn suspend(
-        &mut self,
+        mut self,
         snapshot_dir: &std::path::Path,
         timeout: Duration,
     ) -> anyhow::Result<SnapshotArtifacts> {
@@ -487,21 +490,15 @@ impl<I: VmInstance> ManagedVm<I> {
             other => bail!("expected SuspendReady, got {:?}", other),
         }
 
-        // 3. Snapshot the VM (pauses vCPUs, writes files).
+        // 3. Suspend the VM (pauses vCPUs, writes snapshot, consumes instance).
+        //    Drop on the instance kills the child process.
+        //    Remaining ManagedVm fields (yamux_driver, session, etc.) are dropped
+        //    at function end — TaskHandle aborts on drop.
         let artifacts = self
             .instance
-            .snapshot(snapshot_dir)
+            .suspend(snapshot_dir)
             .await
-            .context("snapshot VM")?;
-
-        // 4. Kill the VM process.
-        self.instance
-            .kill()
-            .await
-            .context("kill VM after snapshot")?;
-
-        // 5. Abort the yamux driver now that the VM is dead.
-        self.drain_yamux_driver();
+            .context("suspend VM")?;
 
         Ok(artifacts)
     }

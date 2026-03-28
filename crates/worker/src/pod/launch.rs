@@ -214,7 +214,7 @@ pub(crate) async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
 
     // Launch the VM.
     log::info!("pod '{}': launching VM", pod_id);
-    let (instance, resolved_mounts) = tokio::select! {
+    let (artifacts, resolved_mounts) = tokio::select! {
         result = builder.launch() => {
             result.context("launch VM")?
         }
@@ -228,11 +228,11 @@ pub(crate) async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         "pod '{}': setting up instance (fabric + vsock connect)",
         pod_id
     );
-    let (mut vm, port_task) = setup_instance(instance, fabric, pod_id, &network, cancel).await?;
+    let (mut vm, port_task) = setup_instance(artifacts, fabric, pod_id, &network, cancel).await?;
     log::info!("pod '{}': instance setup complete", pod_id);
 
     // Take exit signal for the setup phase below.
-    let mut vm_exit_rx = vm.take_exit_signal();
+    let mut vm_exit_rx = vm.exit_signal();
     let mut vm_died = std::pin::pin!(wait_for_vm_exit(&mut vm_exit_rx));
 
     let io_session = tokio::select! {

@@ -503,7 +503,7 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
     // Declared outside the loop scope so handlers can reuse them after the
     // pinned futures are dropped.
     let mut driver_exit = vm.take_driver_exit_signal();
-    let mut vm_exit_rx = vm.take_exit_signal();
+    let mut vm_exit_rx = vm.exit_signal();
     let mut port_task = port_task;
     let mut tracker = StateTracker::default();
 
@@ -588,6 +588,19 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
 
     // Phase 2: Handle the outcome. Each arm either produces a WorkerEvent
     // to send, or returns early (suspend success sends its own events).
+    //
+    // Suspend is handled first because it consumes `vm`. The remaining arms
+    // borrow `vm` mutably.
+    if let LoopOutcome::SuspendRequested(req) = outcome {
+        match handle_suspend::<_, F>(vm, req, &event_tx, &namespace_id, &pod_id).await {
+            Some(event) => {
+                send_event(&event_tx, event).await;
+            }
+            None => {} // Successful suspend, events already sent.
+        }
+        return;
+    }
+
     let event = match outcome {
         LoopOutcome::ContainerExited { exit_code } => {
             handle_container_exit(
@@ -617,12 +630,7 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
                 error: "VM process exited unexpectedly".to_string(),
             }
         }
-        LoopOutcome::SuspendRequested(req) => {
-            match handle_suspend::<_, F>(&mut vm, req, &event_tx, &namespace_id, &pod_id).await {
-                Some(event) => event,
-                None => return, // Successful suspend, events already sent.
-            }
-        }
+        LoopOutcome::SuspendRequested(_) => unreachable!(),
         LoopOutcome::Cancelled => {
             handle_cancel(
                 &mut vm,
@@ -645,7 +653,7 @@ async fn handle_container_exit<I: VmInstance>(
     vm: &mut ManagedVm<I>,
     exit_code: i32,
     log_task: &mut Option<TaskHandle<bool>>,
-    vm_exit_rx: &mut Option<watch::Receiver<Option<ExitStatus>>>,
+    vm_exit_rx: &mut watch::Receiver<Option<ExitStatus>>,
     pod_id: &PodId,
     namespace_id: &NamespaceId,
     rx: &mut watch::Receiver<EventDispatchState>,
@@ -702,7 +710,7 @@ async fn handle_cancel<I: VmInstance>(
     vm: &mut ManagedVm<I>,
     rx: &mut watch::Receiver<EventDispatchState>,
     log_task: &mut Option<TaskHandle<bool>>,
-    vm_exit_rx: &mut Option<watch::Receiver<Option<ExitStatus>>>,
+    vm_exit_rx: &mut watch::Receiver<Option<ExitStatus>>,
     pod_id: &PodId,
     namespace_id: &NamespaceId,
 ) -> WorkerEvent {
@@ -761,8 +769,11 @@ async fn handle_cancel<I: VmInstance>(
 
 /// Handle suspend request: snapshot the VM and emit artifact events.
 /// Returns `None` on success (events sent inline), or `Some(event)` on failure.
+///
+/// Takes `vm` by value — on success the VM is consumed by `suspend()`.
+/// On failure, `vm` is dropped, which kills the child process via `Drop`.
 async fn handle_suspend<I: VmInstance, F: crate::fs::Fs>(
-    vm: &mut ManagedVm<I>,
+    vm: ManagedVm<I>,
     req: SuspendRequest,
     event_tx: &mpsc::Sender<WorkerEvent>,
     namespace_id: &NamespaceId,
@@ -823,7 +834,7 @@ async fn handle_suspend<I: VmInstance, F: crate::fs::Fs>(
             let err_msg = format!("{:#}", e);
             log::error!("pod '{}': suspend failed: {}", pod_id, err_msg);
             let _ = req.reply.send(Err(err_msg.clone()));
-            let _ = vm.force_kill().await;
+            // vm is dropped here — Drop on instance kills the child process.
             Some(WorkerEvent::PodSuspendFailed {
                 namespace_id: namespace_id.clone(),
                 pod_id: pod_id.clone(),
@@ -864,7 +875,7 @@ mod tests {
     use crate::image_provider::{ImageProvider, PreparedArtifact};
     use crate::vmm::{
         BaseVmConfig, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
-        ResolvedEntry, ResolvedMounts, GuestDevice, VmBuilder, VmInstance, Vmm,
+        ResolvedEntry, ResolvedMounts, GuestDevice, VmArtifacts, VmBuilder, VmInstance, Vmm,
     };
 
     // -----------------------------------------------------------------------
@@ -886,7 +897,7 @@ mod tests {
         fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {
             panic!("StubVmmBuilder::set_snapshot_context should not be called");
         }
-        async fn launch(self) -> anyhow::Result<(StubVmInstance, ResolvedMounts)> {
+        async fn launch(self) -> anyhow::Result<(VmArtifacts<StubVmInstance>, ResolvedMounts)> {
             panic!("StubVmmBuilder::launch should not be called");
         }
     }
@@ -902,12 +913,6 @@ mod tests {
     struct StubVmInstance;
 
     impl VmInstance for StubVmInstance {
-        async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
-            panic!("StubVmInstance::connect_vsock called");
-        }
-        fn take_fabric_port(&mut self) -> Option<FabricPort> {
-            None
-        }
         async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }
@@ -946,7 +951,7 @@ mod tests {
             Ok(())
         }
         fn set_snapshot_context(&mut self, _mount_restore_info: Vec<MountRestoreInfo>) {}
-        async fn launch(self) -> anyhow::Result<(MockVmInstance, ResolvedMounts)> {
+        async fn launch(self) -> anyhow::Result<(VmArtifacts<MockVmInstance>, ResolvedMounts)> {
             if let Some(ref err) = self.launch_error {
                 return Err(anyhow::anyhow!("{}", err));
             }
@@ -954,7 +959,6 @@ mod tests {
                 .vm_socket
                 .expect("MockVmmBuilder: socket already taken");
             let instance = MockVmInstance {
-                vsock_socket: tokio::sync::Mutex::new(Some(socket)),
                 killed: tokio::sync::Mutex::new(false),
             };
             let resolved = ResolvedMounts {
@@ -973,12 +977,16 @@ mod tests {
                     },
                 ],
             };
-            Ok((instance, resolved))
+            Ok((VmArtifacts {
+                instance,
+                vsock_stream: socket,
+                fabric_port: None,
+                exit_signal: tokio::sync::watch::channel(None).1,
+            }, resolved))
         }
     }
 
     struct MockVmInstance {
-        vsock_socket: tokio::sync::Mutex<Option<UnixStream>>,
         killed: tokio::sync::Mutex<bool>,
     }
 
@@ -1001,16 +1009,6 @@ mod tests {
     }
 
     impl VmInstance for MockVmInstance {
-        async fn connect_vsock(&self, _port: u32) -> anyhow::Result<UnixStream> {
-            self.vsock_socket
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("MockVmInstance: vsock already connected"))
-        }
-        fn take_fabric_port(&mut self) -> Option<FabricPort> {
-            None
-        }
         async fn wait(&mut self) -> anyhow::Result<std::process::ExitStatus> {
             std::future::pending().await
         }

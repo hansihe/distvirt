@@ -17,11 +17,13 @@ use api_client::ApiClient;
 use instance::InstanceArgs;
 use vm_config::AdditionalDrive;
 
+use distvirt_guest_protocol::VSOCK_CONTROL_PORT;
+
 use super::{
     BaseVmConfig, GuestDevice, MountRequest, MountRestoreInfo, PlannedMount, ProvidedAccess,
     ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, SnapshotMetadata,
-    SnapshotVirtiofsMount, SnapshotVolumeDrive, VmBuilder, VmMountSource, Vmm,
-    spawn_exit_monitor, spawn_serial_task, spawn_stderr_task, wait_for_file,
+    SnapshotVirtiofsMount, SnapshotVolumeDrive, VmArtifacts, VmBuilder, VmMountSource, Vmm,
+    spawn_exit_monitor, spawn_serial_task, spawn_stderr_task, try_vsock_connect, wait_for_file,
 };
 use crate::fabric::{FabricPort, Port};
 use crate::image_provider::{ContainerdLease, ResolvedImage};
@@ -234,7 +236,7 @@ impl VmBuilder for CloudHypervisorBuilder {
         self.mount_restore_info = mount_restore_info;
     }
 
-    async fn launch(self) -> anyhow::Result<(CloudHypervisorInstance, ResolvedMounts)> {
+    async fn launch(self) -> anyhow::Result<(VmArtifacts<CloudHypervisorInstance>, ResolvedMounts)> {
         let CloudHypervisorBuilder {
             base,
             cloud_hypervisor_bin,
@@ -442,6 +444,8 @@ impl VmBuilder for CloudHypervisorBuilder {
             entries: resolved_entries,
         };
 
+        let vsock_stream = connect_vsock_retry(&spawned.vsock_uds_path, VSOCK_CONTROL_PORT).await?;
+
         let instance = CloudHypervisorInstance::new(InstanceArgs {
             child: spawned.child,
             virtiofsd_processes,
@@ -452,14 +456,19 @@ impl VmBuilder for CloudHypervisorBuilder {
             stderr_task,
             exit_monitor,
             tmpdir,
-            vsock_uds_path: spawned.vsock_uds_path,
             api,
-            fabric_port,
-            exit_rx,
+            exit_rx: exit_rx.clone(),
             snapshot_metadata,
         });
 
-        Ok((instance, resolved_mounts))
+        let artifacts = VmArtifacts {
+            instance,
+            vsock_stream,
+            fabric_port,
+            exit_signal: exit_rx,
+        };
+
+        Ok((artifacts, resolved_mounts))
     }
 }
 
@@ -516,7 +525,7 @@ impl Vmm for CloudHypervisor {
         &self,
         snapshot: &SnapshotArtifacts,
         ctx: RestoreContext,
-    ) -> anyhow::Result<CloudHypervisorInstance> {
+    ) -> anyhow::Result<VmArtifacts<CloudHypervisorInstance>> {
         let metadata = &snapshot.metadata;
         let tmpdir = tempfile::tempdir().context("create tmpdir for restore")?;
 
@@ -624,6 +633,8 @@ impl Vmm for CloudHypervisor {
             snapshot.snapshot_dir.display()
         );
 
+        let vsock_stream = connect_vsock_retry(&spawned.vsock_uds_path, VSOCK_CONTROL_PORT).await?;
+
         let instance = CloudHypervisorInstance::new(InstanceArgs {
             child: spawned.child,
             virtiofsd_processes,
@@ -634,13 +645,46 @@ impl Vmm for CloudHypervisor {
             stderr_task,
             exit_monitor,
             tmpdir,
-            vsock_uds_path: spawned.vsock_uds_path,
             api,
-            fabric_port,
-            exit_rx,
+            exit_rx: exit_rx.clone(),
             snapshot_metadata: metadata.clone(),
         });
 
-        Ok(instance)
+        Ok(VmArtifacts {
+            instance,
+            vsock_stream,
+            fabric_port,
+            exit_signal: exit_rx,
+        })
+    }
+}
+
+async fn connect_vsock_retry(
+    sock_path: &Path,
+    port: u32,
+) -> anyhow::Result<tokio::net::UnixStream> {
+    log::info!(
+        "connecting to guest vsock port {} via {}",
+        port,
+        sock_path.display()
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match try_vsock_connect(sock_path, port).await {
+            Ok(stream) => {
+                log::info!("vsock connected");
+                return Ok(stream);
+            }
+            Err(_) => {
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "timeout connecting to guest vsock port {} via {}",
+                        port,
+                        sock_path.display()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
     }
 }
