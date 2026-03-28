@@ -17,7 +17,7 @@ pub fn setup_tun(
     let send_error = |msg: &str| -> anyhow::Result<()> {
         if let Ok(conn) = fd_pass::connect(&socket_path) {
             let payload = format!("ERR:{}:{}", nonce, msg);
-            let _ = fd_pass::send_msg(&conn, payload.as_bytes());
+            let _ = fd_pass::send_msg(&conn, None, payload.as_bytes());
         }
         Ok(())
     };
@@ -51,7 +51,7 @@ pub fn setup_tun(
         .context("connect to parent socket")?;
 
     let payload = format!("OK:{}:{}", nonce, tun.name);
-    fd_pass::send_fd(&conn, tun.into_raw_fd(), payload.as_bytes())
+    fd_pass::send_msg(&conn, Some(tun.into_raw_fd()), payload.as_bytes())
         .context("send TUN fd to parent")?;
 
     Ok(())
