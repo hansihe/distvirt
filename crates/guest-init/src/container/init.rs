@@ -405,7 +405,7 @@ fn set_default_rlimits() -> anyhow::Result<()> {
         ),
     ];
     for &(resource, ref limit) in defaults {
-        if unsafe { libc::setrlimit(resource, limit) } != 0 {
+        if unsafe { libc::setrlimit(resource as _, limit) } != 0 {
             bail!(
                 "setrlimit({}): {}",
                 resource,

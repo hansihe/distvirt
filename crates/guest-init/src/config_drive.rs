@@ -1,35 +1,40 @@
-use async_executor::LocalExecutor;
+use std::path::Path;
+
 use distvirt_guest_protocol::{GuestMessage, HostMessage};
 
-use crate::container::ContainerManager;
-use crate::memory::init::read_cmdline_param;
+use crate::container::{ContainerBackend, ContainerManager};
+use crate::spawner::LocalSpawner;
+use crate::platform::Platform;
 use crate::session::{self, CommandResult};
 
-/// Read and execute config drive commands, if a config device is specified on the kernel cmdline.
+/// Read and execute config drive commands, if a config device path is provided.
 ///
 /// The config device contains a 4-byte LE length prefix followed by JSON-encoded `Vec<HostMessage>`.
 /// Returns the corresponding `GuestMessage` responses for each successfully executed command.
 /// Errors are logged and treated as non-fatal — the guest will still boot and connect via vsock.
-pub fn execute_pre_config(
-    containers: &mut ContainerManager,
-    ex: &LocalExecutor<'_>,
+pub fn execute_pre_config<B: ContainerBackend, S: LocalSpawner>(
+    config_device: Option<&Path>,
+    containers: &mut ContainerManager<B>,
+    platform: &impl Platform,
+    spawner: &S,
 ) -> Vec<GuestMessage> {
     let mut responses = Vec::new();
 
-    let device = match read_cmdline_param("distvirt.config_device") {
+    let device = match config_device {
         Some(dev) => dev,
         None => {
-            log::info!("no distvirt.config_device on cmdline, skipping config drive");
+            log::info!("no config device configured, skipping config drive");
             return responses;
         }
     };
 
-    log::info!("reading config drive from {}", device);
+    let device_str = device.display().to_string();
+    log::info!("reading config drive from {}", device_str);
 
-    let commands = match read_config_device(&device) {
+    let commands = match read_config_device(&device_str) {
         Ok(cmds) => cmds,
         Err(e) => {
-            log::warn!("failed to read config drive {}: {:#}", device, e);
+            log::warn!("failed to read config drive {}: {:#}", device_str, e);
             return responses;
         }
     };
@@ -37,7 +42,7 @@ pub fn execute_pre_config(
     log::info!("config drive: {} command(s) to execute", commands.len());
 
     for cmd in commands {
-        match session::execute_command(cmd, containers, ex) {
+        match session::execute_command(cmd, containers, platform, spawner) {
             CommandResult::Response(msg) => {
                 responses.push(msg);
             }

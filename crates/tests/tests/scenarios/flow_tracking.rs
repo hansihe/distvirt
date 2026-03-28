@@ -108,8 +108,8 @@ async fn test_flow_end_triggers_idle_timeout() {
 /// The orchestrator should treat all demand from a disconnected worker as dead,
 /// otherwise stale demand state could keep a workload alive indefinitely after
 /// rescheduling to a new worker.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
 #[should_panic(expected = "demand should be cleared after worker disconnect")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_flow_status_cleared_on_worker_disconnect() {
     eprintln!(
         "BROKEN: demand not cleared on worker disconnect — orchestrator needs to clear demand for workloads hosted on disconnected workers"

@@ -2,39 +2,15 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use anyhow::Context;
-use async_executor::LocalExecutor;
-use async_io::Async;
 use futures::io::AsyncRead;
 
+use crate::container::ContainerBackend;
+use crate::spawner::{LocalSpawner, TaskHandle};
+use crate::platform::Platform;
 use crate::transport::TransportListener;
 use crate::yamux_driver::YamuxHandle;
-use crate::{net, util, vsock};
+use crate::vsock;
 use distvirt_guest_protocol::{GuestMessage, HostMessage, StreamHeader};
-
-/// Mount a volume at /volumes/<name>.
-fn mount_volume(
-    name: &str,
-    source: &distvirt_guest_protocol::VolumeSource,
-    read_only: bool,
-) -> anyhow::Result<()> {
-    let mount_point = format!("/volumes/{}", name);
-    let flags = if read_only {
-        libc::MS_RDONLY as libc::c_ulong
-    } else {
-        0
-    };
-    match source {
-        distvirt_guest_protocol::VolumeSource::Device { device } => {
-            util::mount(device, &mount_point, "ext4", flags, None)?;
-            log::info!("mounted volume '{}' (device {}) at {}", name, device, mount_point);
-        }
-        distvirt_guest_protocol::VolumeSource::VirtioFs { tag } => {
-            util::mount(tag, &mount_point, "virtiofs", flags, None)?;
-            log::info!("mounted volume '{}' (virtiofs '{}') at {}", name, tag, mount_point);
-        }
-    }
-    Ok(())
-}
 
 /// Result of executing a host command.
 pub enum CommandResult {
@@ -51,10 +27,11 @@ pub enum CommandResult {
 /// This is the unified command handler used by both the vsock event loop and
 /// the config drive. Commands that previously needed yamux (like StartContainer
 /// opening output streams) now just set up local buffers and fill tasks.
-pub fn execute_command(
+pub fn execute_command<B: ContainerBackend, S: LocalSpawner>(
     cmd: HostMessage,
-    containers: &mut crate::container::ContainerManager,
-    ex: &LocalExecutor<'_>,
+    containers: &mut crate::container::ContainerManager<B>,
+    platform: &impl Platform,
+    spawner: &S,
 ) -> CommandResult {
     match cmd {
         HostMessage::MountVolume {
@@ -63,7 +40,7 @@ pub fn execute_command(
             read_only,
         } => {
             log::info!("MountVolume: name={}, source={:?}, read_only={}", name, source, read_only);
-            match mount_volume(&name, &source, read_only) {
+            match platform.mount_volume(&name, &source, read_only) {
                 Ok(()) => CommandResult::Response(GuestMessage::VolumeMounted { name }),
                 Err(e) => {
                     log::error!("MountVolume failed: {:#}", e);
@@ -127,7 +104,7 @@ pub fn execute_command(
                 hostname.as_deref(),
                 capture_output,
                 stdin,
-                ex,
+                spawner,
             ) {
                 Ok(pid) => CommandResult::Response(GuestMessage::ContainerStarted { id, pid }),
                 Err(e) => {
@@ -151,7 +128,7 @@ pub fn execute_command(
                 netmask,
                 gateway
             );
-            match net::configure_network(&interface, &ip, &netmask, &gateway) {
+            match platform.configure_network(&interface, &ip, &netmask, &gateway) {
                 Ok(()) => CommandResult::Response(GuestMessage::NetworkConfigured),
                 Err(e) => {
                     log::error!("ConfigureNetwork failed: {:#}", e);
@@ -182,28 +159,18 @@ pub fn execute_command(
                 epoch_secs,
                 epoch_nanos
             );
-            let ts = libc::timespec {
-                tv_sec: epoch_secs as libc::time_t,
-                tv_nsec: epoch_nanos as libc::c_long,
-            };
-            let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
-            if ret == 0 {
-                log::info!("system clock set successfully");
-                CommandResult::Response(GuestMessage::ClockSet)
-            } else {
-                let e = std::io::Error::last_os_error();
-                log::error!("clock_settime failed: {}", e);
-                CommandResult::Response(GuestMessage::Error {
-                    message: format!("clock_settime failed: {}", e),
-                })
+            match platform.set_clock(epoch_secs, epoch_nanos) {
+                Ok(()) => CommandResult::Response(GuestMessage::ClockSet),
+                Err(e) => {
+                    log::error!("SetClock failed: {:#}", e);
+                    CommandResult::Response(GuestMessage::Error {
+                        message: format!("{:#}", e),
+                    })
+                }
             }
         }
         HostMessage::PrepareSuspend => {
             log::info!("PrepareSuspend received");
-            // Install a plug qdisc to buffer outbound packets in the kernel.
-            if let Err(e) = net::suspend() {
-                log::warn!("failed to install plug qdisc: {:#}", e);
-            }
             CommandResult::PrepareSuspend
         }
         HostMessage::Shutdown => {
@@ -287,7 +254,7 @@ pub enum LoopExit {
 /// Result of the 3-phase yamux handshake.
 pub struct Session {
     pub handle: YamuxHandle,
-    pub yamux_task: async_executor::Task<()>,
+    pub yamux_task: TaskHandle,
     pub control: ControlReader,
     pub event_stream: yamux::Stream,
 }
@@ -301,16 +268,14 @@ impl Session {
     pub async fn connect(
         listener: &TransportListener,
         running_containers: Vec<String>,
-        pre_config_responses: &[GuestMessage],
-        ex: &LocalExecutor<'_>,
+        spawner: &impl LocalSpawner,
     ) -> anyhow::Result<Session> {
-        let accepted = listener.accept().await?;
-        let async_socket = Async::new(accepted).context("wrap transport fd in Async")?;
+        let stream = listener.accept().await?;
 
         let conn =
-            yamux::Connection::new(async_socket, yamux::Config::default(), yamux::Mode::Server);
+            yamux::Connection::new(stream, yamux::Config::default(), yamux::Mode::Server);
 
-        let (handle, yamux_task) = YamuxHandle::spawn(conn, ex);
+        let (handle, yamux_task) = YamuxHandle::spawn(conn, spawner);
 
         // Phase 1: Accept the control inbound stream.
         let mut control_stream = handle
@@ -350,7 +315,7 @@ impl Session {
             &mut control_stream,
             &GuestMessage::Ready {
                 running_containers,
-                pre_config_responses: pre_config_responses.to_vec(),
+                pre_config_responses: vec![],
             },
         )
         .await?;

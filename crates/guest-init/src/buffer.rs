@@ -34,6 +34,24 @@ impl EventBuffer {
     pub fn sender(&self) -> async_channel::Sender<GuestEvent> {
         self.tx.clone()
     }
+
+    /// Drain all buffered events (non-blocking). For test snapshot support.
+    #[cfg(feature = "test-support")]
+    pub fn drain(&self) -> Vec<GuestEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Re-populate the buffer from a list of events. For test restore.
+    #[cfg(feature = "test-support")]
+    pub fn repopulate(&self, events: Vec<GuestEvent>) {
+        for event in events {
+            let _ = self.tx.try_send(event);
+        }
+    }
 }
 
 /// Bounded buffer for pre-framed container output chunks.

@@ -8,7 +8,14 @@ distvirt-common = { path = "../common" }
 distvirt-orchestrator = { path = "../orchestrator", features = ["test-trace"] }
 distvirt-worker = { path = "../worker" }
 distvirt-worker-protocol = { path = "../worker-protocol" }
+distvirt-guest-protocol = { path = "../guest-protocol" }
+guest-init = { path = "../guest-init", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "io-util", "test-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+async-channel = "2"
+futures = { workspace = true }
+serde_json.workspace = true
+parking_lot = { version = "0.12", features = ["send_guard"] }
 anyhow.workspace = true
 etherparse.workspace = true
 env_logger.workspace = true

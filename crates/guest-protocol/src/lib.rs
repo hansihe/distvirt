@@ -149,7 +149,7 @@ pub enum ConstraintReason {
 }
 
 /// Async events sent from guest to host on the dedicated event stream.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GuestEvent {
     ContainerExited {

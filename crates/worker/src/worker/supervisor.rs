@@ -87,26 +87,24 @@ pub(crate) async fn pod_supervisor<
     suspend_rx: mpsc::Receiver<SuspendRequest>,
     activity: Arc<distvirt_common::ActivityTracker>,
 ) {
-    let result = {
-        let _busy = activity.busy_guard();
-        crate::pod::pod_launch(
-            &*vmm,
-            &*image_provider,
-            &fabric,
-            &kernel_path,
-            &rootfs_image_path,
-            &log_opener,
-            &event_tx,
-            &namespace_id,
-            &pod_id,
-            network,
-            containers,
-            resources,
-            volumes,
-            &cancel,
-        )
-        .await
-    };
+    let busy = activity.busy_guard();
+    let result = crate::pod::pod_launch(
+        &*vmm,
+        &*image_provider,
+        &fabric,
+        &kernel_path,
+        &rootfs_image_path,
+        &log_opener,
+        &event_tx,
+        &namespace_id,
+        &pod_id,
+        network,
+        containers,
+        resources,
+        volumes,
+        &cancel,
+    )
+    .await;
     let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) = match result {
         Ok((vm, io, port, resources)) => (Ok((vm, io, port)), Box::new(resources)),
         Err(e) => (Err(e), Box::new(())),
@@ -114,6 +112,7 @@ pub(crate) async fn pod_supervisor<
     run_pod_supervisor::<_, F>(
         result,
         held_resources,
+        busy,
         cancel,
         event_tx,
         namespace_id,
@@ -146,8 +145,8 @@ pub(crate) async fn pod_resume_supervisor<
     suspend_rx: mpsc::Receiver<SuspendRequest>,
     activity: Arc<distvirt_common::ActivityTracker>,
 ) {
-    let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) = {
-        let _busy = activity.busy_guard();
+    let busy = activity.busy_guard();
+    let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) =
         match crate::pod::pod_restore(
             &*vmm,
             &*image_provider,
@@ -165,11 +164,11 @@ pub(crate) async fn pod_resume_supervisor<
                 (Ok((vm, None, port_task)), Box::new(resources))
             }
             Err(e) => (Err(e), Box::new(())),
-        }
-    };
+        };
     run_pod_supervisor::<_, F>(
         result,
         held_resources,
+        busy,
         cancel,
         event_tx,
         namespace_id,
@@ -193,6 +192,7 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
         Option<TaskHandle<()>>,
     )>,
     _held_resources: Box<dyn std::any::Any + Send>,
+    launch_busy: distvirt_common::BusyGuard<'_>,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<WorkerEvent>,
     namespace_id: NamespaceId,
@@ -210,6 +210,7 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
                 },
             )
             .await;
+            drop(launch_busy);
             pod_monitor::<_, F>(
                 vm,
                 io_session,

@@ -2,30 +2,51 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
+use async_io::Async;
 
 use crate::vsock::VsockListener;
 
-/// Abstraction over the host↔guest transport.
+/// Combined trait for a bidirectional async stream.
+pub trait AsyncStream: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send {}
+
+/// Blanket impl: anything that is AsyncRead + AsyncWrite + Unpin + Send is an AsyncStream.
+impl<T: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send> AsyncStream for T {}
+
+/// A boxed async stream suitable for yamux.
 ///
-/// With Firecracker, guest-init listens on a vsock port and the host connects.
-/// With QEMU (virtio-serial), guest-init opens a virtio-serial port device
-/// and the host connects to the corresponding QEMU chardev unix socket.
+/// All transport variants produce this type. Production variants wrap the raw
+/// fd in `Async` inside `accept()` and box the result. The test variant
+/// receives pre-wrapped streams from a channel.
+pub type BoxedStream = Box<dyn AsyncStream>;
+
+/// Abstraction over the host<->guest transport.
 ///
-/// In both cases, `accept()` returns a file descriptor suitable for yamux.
+/// With Cloud Hypervisor, guest-init listens on a vsock port and the host
+/// connects. With QEMU (virtio-serial), guest-init opens a virtio-serial port
+/// device and the host connects to the corresponding QEMU chardev unix socket.
+/// In tests, pre-connected streams are provided via a channel.
+///
+/// In all cases, `accept()` returns an `AsyncStream` ready for yamux.
 pub enum TransportListener {
     Vsock(VsockListener),
     VirtioSerial { path: PathBuf },
+    /// Channel of pre-connected streams for testing.
+    /// Supports multiple `accept()` calls for reconnection testing.
+    Test(async_channel::Receiver<BoxedStream>),
 }
 
 impl TransportListener {
-    /// Wait for a host connection and return the connected stream as a File.
+    /// Wait for a host connection and return an async stream ready for yamux.
     ///
-    /// For vsock, this blocks until a new connection arrives (supports
-    /// reconnect after suspend/resume). For virtio-serial, this opens the
-    /// device file (the host connects to the QEMU chardev socket).
-    pub async fn accept(&self) -> anyhow::Result<std::fs::File> {
+    /// Production variants open the fd, wrap it in `Async`, and box the result.
+    /// The test variant receives pre-wrapped streams from the channel.
+    pub async fn accept(&self) -> anyhow::Result<BoxedStream> {
         match self {
-            TransportListener::Vsock(listener) => listener.accept().await,
+            TransportListener::Vsock(listener) => {
+                let file = listener.accept().await?;
+                let async_file = Async::new(file).context("wrap vsock fd in Async")?;
+                Ok(Box::new(async_file) as BoxedStream)
+            }
             TransportListener::VirtioSerial { path } => {
                 let file = std::fs::OpenOptions::new()
                     .read(true)
@@ -47,7 +68,13 @@ impl TransportListener {
                 }
 
                 log::info!("opened virtio-serial port {}", path.display());
-                Ok(file)
+                let async_file = Async::new(file).context("wrap virtio-serial fd in Async")?;
+                Ok(Box::new(async_file))
+            }
+            TransportListener::Test(rx) => {
+                rx.recv()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("test transport channel closed"))
             }
         }
     }

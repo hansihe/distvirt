@@ -11,6 +11,8 @@
 //! incrementing.
 
 #[allow(dead_code)]
+pub mod guest_init_vmm;
+#[allow(dead_code)]
 pub mod spec_builders;
 
 use std::collections::BTreeMap;
@@ -33,8 +35,11 @@ use distvirt_worker::image_provider::stub::StubImageProvider;
 use distvirt_worker::sim_traffic::SimGatewayProvider;
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::TestVmm;
+use distvirt_worker::vmm::Vmm;
 use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
 use tokio::task::JoinHandle;
+
+use guest_init_vmm::GuestInitVmm;
 
 /// Craft a TCP SYN packet wrapped in a fabric header.
 ///
@@ -99,16 +104,20 @@ impl TestCluster {
     // Worker management
     // -------------------------------------------------------------------------
 
+    /// Add a worker with a real guest-init supervisor (default).
     pub async fn add_worker(&mut self) -> GlobalWorkerId {
-        self.add_worker_with(ContainerBehavior::RunUntilSignaled)
-            .await
+        let vmm = GuestInitVmm::new();
+        self.add_worker_with_vmm(vmm).await
     }
 
+    /// Add a worker with `TestVmm` configured with a specific container behavior.
+    /// Use this for tests that need `ExitImmediately` or other guest_sim behaviors.
     pub async fn add_worker_with(&mut self, behavior: ContainerBehavior) -> GlobalWorkerId {
         self.add_worker_with_vmm(TestVmm::new(behavior)).await
     }
 
-    pub async fn add_worker_with_vmm(&mut self, vmm: TestVmm) -> GlobalWorkerId {
+    /// Add a worker with an arbitrary VMM implementation.
+    pub async fn add_worker_with_vmm<V: Vmm + 'static>(&mut self, vmm: V) -> GlobalWorkerId {
         let image_provider = StubImageProvider;
         let gateway_provider = self.gateway_provider.clone();
 

@@ -850,6 +850,7 @@ impl<
         let ns = self.get_namespace_mut(namespace_id)?;
 
         if let Some(mut pod) = ns.pods.remove(pod_id) {
+            let _busy = self.activity.busy_guard();
             if graceful {
                 // Cancel the pod's token to trigger graceful shutdown in supervisor.
                 // The supervisor will SIGTERM containers, wait for exit, then shut

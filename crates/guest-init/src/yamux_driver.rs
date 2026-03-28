@@ -1,7 +1,8 @@
 use std::task::Poll;
 
-use async_executor::LocalExecutor;
-use async_io::Async;
+use futures::io::{AsyncRead, AsyncWrite};
+
+use crate::spawner::{LocalSpawner, TaskHandle};
 
 enum DriverRequest {
     OpenStream(async_channel::Sender<anyhow::Result<yamux::Stream>>),
@@ -14,14 +15,21 @@ pub struct YamuxHandle {
 }
 
 impl YamuxHandle {
-    pub fn spawn(
-        conn: yamux::Connection<Async<std::fs::File>>,
-        ex: &LocalExecutor<'_>,
-    ) -> (Self, async_executor::Task<()>) {
+    /// Spawn a yamux driver task for the given connection.
+    ///
+    /// Generic over the transport stream type — production uses
+    /// `Async<std::fs::File>`, tests can use any `AsyncRead + AsyncWrite`.
+    pub fn spawn<T>(
+        conn: yamux::Connection<T>,
+        spawner: &impl LocalSpawner,
+    ) -> (Self, TaskHandle)
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let (inbound_tx, inbound_rx) = async_channel::bounded(16);
         let (request_tx, request_rx) = async_channel::bounded(4);
 
-        let task = ex.spawn(driver_loop(conn, inbound_tx, request_rx));
+        let task = spawner.spawn_local(driver_loop(conn, inbound_tx, request_rx));
 
         (
             YamuxHandle {
@@ -59,11 +67,14 @@ impl YamuxHandle {
     }
 }
 
-async fn driver_loop(
-    mut conn: yamux::Connection<Async<std::fs::File>>,
+async fn driver_loop<T>(
+    mut conn: yamux::Connection<T>,
     inbound_tx: async_channel::Sender<yamux::Stream>,
     request_rx: async_channel::Receiver<DriverRequest>,
-) {
+)
+where
+    T: AsyncRead + AsyncWrite + Unpin + 'static,
+{
     loop {
         let drive_and_inbound = async {
             match std::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
@@ -126,10 +137,13 @@ enum DriveResult {
 ///
 /// Any inbound streams that arrive while waiting for the outbound stream
 /// are queued into `inbound_tx` instead of being dropped.
-async fn open_outbound(
-    conn: &mut yamux::Connection<Async<std::fs::File>>,
+async fn open_outbound<T>(
+    conn: &mut yamux::Connection<T>,
     inbound_tx: &async_channel::Sender<yamux::Stream>,
-) -> anyhow::Result<yamux::Stream> {
+) -> anyhow::Result<yamux::Stream>
+where
+    T: AsyncRead + AsyncWrite + Unpin + 'static,
+{
     let mut stream_opt: Option<yamux::Stream> = None;
     std::future::poll_fn(|cx| {
         // Drive inbound to process yamux bookkeeping frames.

@@ -242,8 +242,8 @@ async fn test_preemption_is_namespace_scoped() {
 /// schedule_waiting_pods() may only reschedule a limited number per pressure
 /// update cycle, leaving some workloads stuck in WaitingForCapacity.
 #[ignore = "feature not yet implemented after orchestrator refactor"]
-#[tokio::test(flavor = "current_thread", start_paused = true)]
 #[should_panic(expected = "expected Running")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_many_namespaces_competing_for_capacity() {
     eprintln!(
         "BROKEN: not all WaitingForCapacity workloads rescheduled after pressure drop — schedule_waiting_pods() may need to iterate all waiting namespaces"
