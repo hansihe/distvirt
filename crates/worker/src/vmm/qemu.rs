@@ -553,6 +553,7 @@ mod tests {
             net: None,
             serial_console: true,
             balloon: None,
+            pod_id: None,
         };
 
         let mut builder = qemu.builder(base).expect("builder creation failed");

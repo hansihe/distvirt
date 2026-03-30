@@ -29,6 +29,9 @@ use distvirt_worker::vmm::{
     ResolvedEntry, ResolvedMounts, RestoreContext, SnapshotArtifacts, VmArtifacts, VmBuilder,
     VmInstance, Vmm,
 };
+use distvirt_worker_protocol::PodId;
+
+use super::container_registry::ContainerRegistry;
 
 use guest_init::buffer::{EventBuffer, OutputBuffer};
 use guest_init::config::{GuestConfig, ShutdownMode, TransportConfig};
@@ -74,6 +77,9 @@ struct SupervisorSnapshot {
 pub struct GuestInitVmm {
     handle_slot: HandleSlot,
     snapshot_slot: SnapshotSlot,
+    registry: Option<ContainerRegistry>,
+    /// Last pod_id seen from builder(), used for restore registration.
+    last_pod_id: Arc<Mutex<Option<PodId>>>,
 }
 
 impl GuestInitVmm {
@@ -81,6 +87,17 @@ impl GuestInitVmm {
         GuestInitVmm {
             handle_slot: Arc::new(Mutex::new(None)),
             snapshot_slot: Arc::new(Mutex::new(None)),
+            registry: None,
+            last_pod_id: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn with_registry(registry: ContainerRegistry) -> Self {
+        GuestInitVmm {
+            handle_slot: Arc::new(Mutex::new(None)),
+            snapshot_slot: Arc::new(Mutex::new(None)),
+            registry: Some(registry),
+            last_pod_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,6 +117,8 @@ pub struct GuestInitVmmBuilder {
     _mount_restore_info: Vec<MountRestoreInfo>,
     handle_slot: HandleSlot,
     snapshot_slot: SnapshotSlot,
+    pod_id: Option<PodId>,
+    registry: Option<ContainerRegistry>,
 }
 
 impl VmBuilder for GuestInitVmmBuilder {
@@ -140,6 +159,8 @@ impl VmBuilder for GuestInitVmmBuilder {
             &self.handle_slot,
             &self.snapshot_slot,
             None,
+            self.pod_id,
+            self.registry.as_ref(),
         )?;
 
         // Build resolved mounts (same logic as TestVmm).
@@ -196,6 +217,8 @@ fn spawn_guest_init_supervisor(
     handle_slot: &HandleSlot,
     snapshot_slot: &SnapshotSlot,
     restore_from: Option<SupervisorSnapshot>,
+    pod_id: Option<PodId>,
+    registry: Option<&ContainerRegistry>,
 ) -> anyhow::Result<(GuestInitVmInstance, tokio::net::UnixStream, watch::Receiver<Option<ExitStatus>>)> {
     let (host_socket, guest_socket) = tokio::net::UnixStream::pair()?;
     let (exit_tx, exit_rx) = watch::channel(None);
@@ -238,6 +261,11 @@ fn spawn_guest_init_supervisor(
             )
         }
     };
+
+    // Register into the container registry if available.
+    if let (Some(registry), Some(pod_id)) = (registry, pod_id) {
+        registry.register(pod_id, backend_handle.clone());
+    }
 
     {
         let mut slot = handle_slot.lock();
@@ -306,13 +334,18 @@ fn spawn_guest_init_supervisor(
 impl Vmm for GuestInitVmm {
     type Builder = GuestInitVmmBuilder;
     type Instance = GuestInitVmInstance;
-    fn builder(&self, _base: BaseVmConfig) -> anyhow::Result<GuestInitVmmBuilder> {
+    fn builder(&self, base: BaseVmConfig) -> anyhow::Result<GuestInitVmmBuilder> {
+        let pod_id = base.pod_id;
+        // Stash pod_id for restore registration.
+        *self.last_pod_id.lock() = pod_id;
         Ok(GuestInitVmmBuilder {
             mount_plans: Vec::new(),
             scratch_plans: Vec::new(),
             _mount_restore_info: Vec::new(),
             handle_slot: Arc::clone(&self.handle_slot),
             snapshot_slot: Arc::clone(&self.snapshot_slot),
+            pod_id,
+            registry: self.registry.clone(),
         })
     }
 
@@ -332,10 +365,14 @@ impl Vmm for GuestInitVmm {
             .clone()
             .context("no supervisor snapshot available for restore")?;
 
+        let pod_id = *self.last_pod_id.lock();
+
         let (instance, host_socket, exit_rx) = spawn_guest_init_supervisor(
             &self.handle_slot,
             &self.snapshot_slot,
             Some(supervisor_snapshot),
+            pod_id,
+            self.registry.as_ref(),
         )?;
 
         Ok(VmArtifacts {

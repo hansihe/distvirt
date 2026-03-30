@@ -4,10 +4,12 @@
 //! window), then drives the model from the stream.
 
 use tonic::Streaming;
+use tonic::codegen::{Body, Bytes, StdError};
 
 use distvirt_client_protocol as proto;
+use distvirt_client_protocol::DistvirtClientClient;
 
-use crate::connection::{handle_grpc_error, Client};
+use crate::connection::handle_grpc_error;
 use crate::errors::ApiError;
 use crate::model::{NamespaceModel, StateChange};
 
@@ -22,7 +24,13 @@ impl NamespaceWatcher {
     ///
     /// Events are subscribed *before* the status fetch so that no events are
     /// lost between the snapshot and the stream.
-    pub async fn start(client: &mut Client, namespace_id: &str) -> Result<Self, ApiError> {
+    pub async fn start<T>(client: &mut DistvirtClientClient<T>, namespace_id: &str) -> Result<Self, ApiError>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+    {
         // Subscribe first
         let events = client
             .stream_events(proto::StreamEventsRequest {

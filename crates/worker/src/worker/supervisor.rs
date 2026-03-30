@@ -87,6 +87,7 @@ pub(crate) async fn pod_supervisor<
     suspend_rx: mpsc::Receiver<SuspendRequest>,
     activity: Arc<distvirt_common::ActivityTracker>,
 ) {
+    let activity_for_monitor = Arc::clone(&activity);
     let busy = activity.busy_guard();
     let result = crate::pod::pod_launch(
         &*vmm,
@@ -119,6 +120,7 @@ pub(crate) async fn pod_supervisor<
         pod_id,
         suspend_rx,
         "launch",
+        activity_for_monitor,
     )
     .await;
 }
@@ -145,6 +147,7 @@ pub(crate) async fn pod_resume_supervisor<
     suspend_rx: mpsc::Receiver<SuspendRequest>,
     activity: Arc<distvirt_common::ActivityTracker>,
 ) {
+    let activity_for_monitor = Arc::clone(&activity);
     let busy = activity.busy_guard();
     let (result, held_resources): (anyhow::Result<_>, Box<dyn std::any::Any + Send>) =
         match crate::pod::pod_restore(
@@ -175,6 +178,7 @@ pub(crate) async fn pod_resume_supervisor<
         pod_id,
         suspend_rx,
         "resume",
+        activity_for_monitor,
     )
     .await;
 }
@@ -199,6 +203,7 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
     pod_id: PodId,
     suspend_rx: mpsc::Receiver<SuspendRequest>,
     phase: &str,
+    activity: Arc<distvirt_common::ActivityTracker>,
 ) {
     match setup_result {
         Ok((vm, io_session, port_task)) => {
@@ -220,6 +225,7 @@ async fn run_pod_supervisor<I: VmInstance, F: crate::fs::Fs>(
                 namespace_id,
                 pod_id,
                 suspend_rx,
+                activity,
             )
             .await;
         }
@@ -447,6 +453,7 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
     namespace_id: NamespaceId,
     pod_id: PodId,
     mut suspend_rx: mpsc::Receiver<SuspendRequest>,
+    activity: Arc<distvirt_common::ActivityTracker>,
 ) {
     // Spawn log streaming as a sub-task. Returns whether output was fully
     // drained (EOF received) or incomplete (I/O error / log write failure).
@@ -538,6 +545,8 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
                 Some(req) = suspend_rx.recv() => PodEvent::SuspendRequested(req),
                 _ = cancel.cancelled() => PodEvent::Cancelled,
             };
+
+            activity.tick();
 
             match pod_event {
                 PodEvent::GuestStateChanged => {
@@ -645,6 +654,7 @@ async fn pod_monitor<I: VmInstance, F: crate::fs::Fs>(
         }
     };
 
+    activity.tick();
     send_event(&event_tx, event).await;
 }
 

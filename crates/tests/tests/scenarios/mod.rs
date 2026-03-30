@@ -1,4 +1,5 @@
 mod activation_lifecycle;
+mod client_lifecycle;
 mod drain;
 mod edge_cases;
 mod fabric_routing;

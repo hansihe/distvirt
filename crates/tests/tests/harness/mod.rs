@@ -11,6 +11,8 @@
 //! incrementing.
 
 #[allow(dead_code)]
+pub mod container_registry;
+#[allow(dead_code)]
 pub mod guest_init_vmm;
 #[allow(dead_code)]
 pub mod spec_builders;
@@ -28,8 +30,12 @@ use distvirt_orchestrator::core::GlobalWorkerId;
 use distvirt_orchestrator::core::WorkerNamespaceEventKind;
 use distvirt_orchestrator::core::types::WorkerStateCoreEvent;
 use distvirt_orchestrator::event_bus::EventBusHandle;
+use distvirt_orchestrator::grpc::DistvirtClientService;
 use distvirt_orchestrator::id_registry::IdRegistryMap;
+use distvirt_orchestrator::log_bus::LogBusHandle;
 use distvirt_orchestrator::shell::r#async::{self, ShellHandle};
+
+use distvirt_client_protocol::{DistvirtClientClient, DistvirtClientServer};
 use distvirt_orchestrator::types::*;
 use distvirt_worker::image_provider::stub::StubImageProvider;
 use distvirt_worker::sim_traffic::SimGatewayProvider;
@@ -39,6 +45,8 @@ use distvirt_worker::vmm::Vmm;
 use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
 use tokio::task::JoinHandle;
 
+use container_registry::ContainerRegistry;
+use guest_init::test_support::BackendHandle;
 use guest_init_vmm::GuestInitVmm;
 
 /// Craft a TCP SYN packet wrapped in a fabric header.
@@ -70,8 +78,10 @@ fn test_timer_config() -> TimerConfig {
 
 pub struct TestCluster {
     pub shell: ShellHandle,
+    pub log_bus: LogBusHandle,
     pub event_bus: EventBusHandle,
     pub id_registry_map: IdRegistryMap,
+    pub container_registry: ContainerRegistry,
     activity: Arc<ActivityTracker>,
     _shell_task: JoinHandle<()>,
     worker_handles: Vec<(GlobalWorkerId, JoinHandle<anyhow::Result<()>>)>,
@@ -86,11 +96,13 @@ impl TestCluster {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
         let activity = Arc::new(ActivityTracker::new());
-        let (shell, _log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true, 51820, Arc::clone(&activity));
+        let (shell, log_bus, event_bus, id_registry_map, shell_task) = r#async::spawn("test-secret".to_string(), test_timer_config(), true, 51820, Arc::clone(&activity));
         TestCluster {
             shell,
+            log_bus,
             event_bus,
             id_registry_map,
+            container_registry: ContainerRegistry::new(),
             activity,
             _shell_task: shell_task,
             worker_handles: Vec::new(),
@@ -101,12 +113,30 @@ impl TestCluster {
     }
 
     // -------------------------------------------------------------------------
+    // Client
+    // -------------------------------------------------------------------------
+
+    /// Create an in-process gRPC client backed by the orchestrator's service.
+    /// This exercises the same code path as a real network client without TCP.
+    pub fn client(
+        &self,
+    ) -> DistvirtClientClient<DistvirtClientServer<DistvirtClientService>> {
+        let svc = DistvirtClientService::new(
+            self.shell.clone(),
+            self.log_bus.clone(),
+            self.event_bus.clone(),
+            self.id_registry_map.clone(),
+        );
+        DistvirtClientClient::new(DistvirtClientServer::new(svc))
+    }
+
+    // -------------------------------------------------------------------------
     // Worker management
     // -------------------------------------------------------------------------
 
     /// Add a worker with a real guest-init supervisor (default).
     pub async fn add_worker(&mut self) -> GlobalWorkerId {
-        let vmm = GuestInitVmm::new();
+        let vmm = GuestInitVmm::with_registry(self.container_registry.clone());
         self.add_worker_with_vmm(vmm).await
     }
 
@@ -361,6 +391,31 @@ impl TestCluster {
     }
 
     // -------------------------------------------------------------------------
+    // Pod control handles
+    // -------------------------------------------------------------------------
+
+    /// Get a BackendHandle for a workload's pod, resolving ns+workload -> PodId.
+    /// Waits for the pod to be registered in the container registry.
+    pub async fn pod_handle(&self, ns_id: &str, wl_id: &str) -> BackendHandle {
+        let status = self.namespace_status(ns_id).await;
+        let wl = status
+            .workloads
+            .get(&WorkloadName(wl_id.to_string()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "workload '{}' not found in namespace '{}' (have: {:?})",
+                    wl_id,
+                    ns_id,
+                    status.workloads.keys().collect::<Vec<_>>()
+                )
+            });
+        let pod_id = wl
+            .pod_id
+            .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_id));
+        self.container_registry.wait_for(&pod_id).await
+    }
+
+    // -------------------------------------------------------------------------
     // Traffic / event injection
     // -------------------------------------------------------------------------
 
@@ -558,6 +613,31 @@ impl TestCluster {
             result.is_err(),
             "namespace '{}' should be absent but still exists",
             ns_id
+        );
+    }
+
+    /// Wait for a workload to reach a target state, advancing time in 1s steps.
+    ///
+    /// Useful after `trigger_exit` where the exit event must propagate through
+    /// guest-init → worker → orchestrator, involving async hops invisible to
+    /// the ActivityTracker.
+    pub async fn wait_workload_status(
+        &mut self,
+        ns_id: &str,
+        wl_id: &str,
+        target: WorkloadStatus,
+    ) {
+        for _ in 0..30 {
+            let state = self.workload_status(ns_id, wl_id).await;
+            if state == target {
+                return;
+            }
+            self.advance_time(Duration::from_secs(1)).await;
+        }
+        let final_state = self.workload_status(ns_id, wl_id).await;
+        panic!(
+            "workload '{}/{}' did not reach {} after retries (still {})",
+            ns_id, wl_id, target, final_state
         );
     }
 

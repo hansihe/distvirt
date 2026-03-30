@@ -1,35 +1,44 @@
 use std::time::Duration;
 
-use distvirt_worker::vmm::guest_sim::ContainerBehavior;
+use distvirt_orchestrator::types::WorkloadStatus;
 use distvirt_worker::vmm::test_vmm::TestVmm;
 
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::always_on_spec;
 
-/// Worker with ExitImmediately(1) causes rapid exit. Tests the retry loop.
+/// Pod crashes after starting with exit code 1. Tests the retry loop.
 ///
-/// ExitImmediately(1) produces PodRunning then PodExited(1). Since PodRunning
-/// resets consecutive_failures, failures never accumulate past 1. This tests
-/// the "pod crashes after starting" retry loop (pod keeps getting relaunched).
+/// Uses the container registry to trigger exits dynamically via pod handles,
+/// exercising the real guest-init supervisor path.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_pod_exit_retry_loop_e2e() {
     let mut cluster = TestCluster::new();
-    let _w1 = cluster
-        .add_worker_with(ContainerBehavior::ExitImmediately(1))
-        .await;
+    let _w1 = cluster.add_worker().await;
 
     cluster.create_namespace("ns", always_on_spec()).await;
     cluster.converge().await;
 
-    // Pod launches, runs briefly, exits(1) -> RetryBackoff.
-    cluster.assert_workload_retry_backoff("ns", "echo").await;
+    // Pod is now running. Trigger exit(1) via the handle.
+    cluster.assert_workload_running("ns", "echo").await;
+    let handle = cluster.pod_handle("ns", "echo").await;
+    handle.trigger_exit("main", 1).await;
+    // After trigger_exit, the pod supervisor drains output and performs graceful
+    // shutdown (with timeouts), then sends PodExited. wait_workload_status
+    // advances time in 1s steps to drive through these timeouts.
+    cluster
+        .wait_workload_status("ns", "echo", WorkloadStatus::RetryBackoff)
+        .await;
 
-    // Advance time to let the retry fire -> pod relaunches, exits again.
-    cluster.advance_time(Duration::from_secs(2)).await;
+    // Advance past the retry backoff (5s configured in test harness) -> pod relaunches.
+    cluster.advance_time(Duration::from_secs(6)).await;
+    cluster.assert_workload_running("ns", "echo").await;
 
-    // The workload should be back in RetryBackoff (not stuck in Failed or Dormant),
-    // verifying the retry cycle continues.
-    cluster.assert_workload_retry_backoff("ns", "echo").await;
+    // Trigger exit again on the relaunched pod.
+    let handle = cluster.pod_handle("ns", "echo").await;
+    handle.trigger_exit("main", 1).await;
+    cluster
+        .wait_workload_status("ns", "echo", WorkloadStatus::RetryBackoff)
+        .await;
 }
 
 /// VM fails to start (guest dies before Ready) twice, then succeeds on the third attempt.

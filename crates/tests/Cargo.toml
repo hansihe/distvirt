@@ -9,9 +9,12 @@ distvirt-orchestrator = { path = "../orchestrator", features = ["test-trace"] }
 distvirt-worker = { path = "../worker" }
 distvirt-worker-protocol = { path = "../worker-protocol" }
 distvirt-guest-protocol = { path = "../guest-protocol" }
+distvirt-client = { path = "../client" }
+distvirt-client-protocol = { path = "../client-protocol" }
 guest-init = { path = "../guest-init", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "io-util", "test-util"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+tonic.workspace = true
 async-channel = "2"
 futures = { workspace = true }
 serde_json.workspace = true

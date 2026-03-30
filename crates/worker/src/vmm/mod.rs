@@ -11,7 +11,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use anyhow::Context;
-use distvirt_worker_protocol::PodNetworkConfig;
+use distvirt_worker_protocol::{PodId, PodNetworkConfig};
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
@@ -139,6 +139,8 @@ pub struct BaseVmConfig {
     pub net: Option<NetConfig>,
     pub serial_console: bool,
     pub balloon: Option<BalloonConfig>,
+    /// Pod identity. Used by test VMMs for registry keying; production VMMs ignore this.
+    pub pod_id: Option<PodId>,
 }
 
 /// A request to mount a source into the guest VM.

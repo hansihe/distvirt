@@ -1,9 +1,25 @@
 use distvirt_client_protocol::*;
+use distvirt_client_protocol::DistvirtClientClient;
 use distvirt_client_protocol::selector::Selector;
 use tonic::Streaming;
+use tonic::codegen::{Body, Bytes, StdError};
 
-use crate::connection::{handle_grpc_error, Client};
+use crate::connection::handle_grpc_error;
 use crate::errors::ApiError;
+
+/// Trait alias for the tonic transport bounds required by `DistvirtClientClient<T>`.
+///
+/// Any type that satisfies these bounds can be used as the transport for a
+/// `DistvirtClientClient`. This includes `tonic::transport::Channel` (for network
+/// connections) and `DistvirtClientServer<S>` (for in-process testing).
+pub trait ClientTransport:
+    tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static
+{
+}
+impl<T> ClientTransport for T where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static
+{
+}
 
 pub enum ApplyOutcome {
     Created,
@@ -38,11 +54,17 @@ pub fn filter_spec(spec: &NamespaceSpec, selector: &Selector) -> NamespaceSpec {
 
 /// Patch a namespace with the given spec (upsert workloads/services, no removals).
 /// Used for filtered/partial applies where we only want to update a subset.
-pub async fn apply_patch(
-    client: &mut Client,
+pub async fn apply_patch<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
     spec: &NamespaceSpec,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     client
         .patch_namespace(PatchNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -57,11 +79,17 @@ pub async fn apply_patch(
 }
 
 /// Apply a spec: create the namespace if new, patch (upsert) workloads/services if it exists.
-pub async fn apply(
-    client: &mut Client,
+pub async fn apply<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
     spec: &NamespaceSpec,
-) -> Result<ApplyOutcome, ApiError> {
+) -> Result<ApplyOutcome, ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     let result = client
         .create_namespace(CreateNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -94,11 +122,17 @@ pub enum SyncOutcome {
 }
 
 /// Sync a spec: create the namespace if new, fully replace the spec if it exists.
-pub async fn sync(
-    client: &mut Client,
+pub async fn sync<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
     spec: &NamespaceSpec,
-) -> Result<SyncOutcome, ApiError> {
+) -> Result<SyncOutcome, ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     let result = client
         .create_namespace(CreateNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -123,7 +157,16 @@ pub async fn sync(
 }
 
 /// Delete a namespace.
-pub async fn down(client: &mut Client, namespace_id: &str) -> Result<(), ApiError> {
+pub async fn down<T>(
+    client: &mut DistvirtClientClient<T>,
+    namespace_id: &str,
+) -> Result<(), ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     client
         .delete_namespace(DeleteNamespaceRequest {
             namespace_id: namespace_id.to_string(),
@@ -134,11 +177,17 @@ pub async fn down(client: &mut Client, namespace_id: &str) -> Result<(), ApiErro
 }
 
 /// Clone a namespace.
-pub async fn clone_namespace(
-    client: &mut Client,
+pub async fn clone_namespace<T>(
+    client: &mut DistvirtClientClient<T>,
     source: &str,
     target: &str,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     client
         .clone_namespace(CloneNamespaceRequest {
             source_namespace_id: source.to_string(),
@@ -156,11 +205,17 @@ pub struct DeactivateOutcome {
 }
 
 /// Hint the orchestrator to deactivate a workload.
-pub async fn deactivate(
-    client: &mut Client,
+pub async fn deactivate<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
     workload_id: &str,
-) -> Result<DeactivateOutcome, ApiError> {
+) -> Result<DeactivateOutcome, ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     let resp = client
         .deactivate_workload(DeactivateWorkloadRequest {
             namespace_id: namespace_id.to_string(),
@@ -177,11 +232,17 @@ pub async fn deactivate(
 }
 
 /// Stream log output from a namespace, optionally filtered to a workload.
-pub async fn stream_logs(
-    client: &mut Client,
+pub async fn stream_logs<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
     workload_name: Option<&str>,
-) -> Result<Streaming<StreamLogsResponse>, ApiError> {
+) -> Result<Streaming<StreamLogsResponse>, ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     let stream = client
         .stream_logs(StreamLogsRequest {
             namespace_id: namespace_id.to_string(),
@@ -196,12 +257,18 @@ pub async fn stream_logs(
 }
 
 /// Stream events from a namespace, optionally filtered to specific workloads/services.
-pub async fn stream_events(
-    client: &mut Client,
+pub async fn stream_events<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
     workload_ids: &[String],
     service_ids: &[String],
-) -> Result<Streaming<NamespaceEvent>, ApiError> {
+) -> Result<Streaming<NamespaceEvent>, ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     let stream = client
         .stream_events(StreamEventsRequest {
             namespace_id: namespace_id.to_string(),
@@ -215,10 +282,16 @@ pub async fn stream_events(
 }
 
 /// Fetch the current status of a namespace.
-pub async fn get_status(
-    client: &mut Client,
+pub async fn get_status<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
-) -> Result<NamespaceStatusReport, ApiError> {
+) -> Result<NamespaceStatusReport, ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     let resp = client
         .get_namespace_status(GetNamespaceStatusRequest {
             namespace_id: namespace_id.to_string(),
@@ -233,10 +306,16 @@ pub async fn get_status(
 
 /// Subscribe to events then fetch status, ensuring no events are missed.
 /// Returns the status report and the event stream.
-pub async fn watch_status(
-    client: &mut Client,
+pub async fn watch_status<T>(
+    client: &mut DistvirtClientClient<T>,
     namespace_id: &str,
-) -> Result<(NamespaceStatusReport, Streaming<NamespaceEvent>), ApiError> {
+) -> Result<(NamespaceStatusReport, Streaming<NamespaceEvent>), ApiError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Clone + Send + 'static,
+    T::Error: Into<StdError>,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
     // Subscribe to events *before* fetching status to avoid missing events
     let event_stream = stream_events(client, namespace_id, &[], &[]).await?;
     let report = get_status(client, namespace_id).await?;

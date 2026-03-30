@@ -157,6 +157,7 @@ pub(crate) async fn pod_launch<V: Vmm + 'static, P: ImageProvider + 'static>(
         net: Some(net_config.clone()),
         serial_console: true,
         balloon,
+        pod_id: Some(*pod_id),
     })?;
 
     // Add container image mount.

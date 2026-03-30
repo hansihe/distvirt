@@ -31,6 +31,7 @@ struct TestContainer {
 /// Returned by `TestContainerBackend::new()`. The test harness uses this to:
 /// - Trigger container exits
 /// - Query container state for assertions
+#[derive(Clone)]
 pub struct BackendHandle {
     exit_tx: async_channel::Sender<ContainerExit>,
 }
