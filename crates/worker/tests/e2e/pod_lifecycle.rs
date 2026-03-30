@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, PodId, WorkerCommand, WorkerEvent, WorkerId};
+use distvirt_worker_protocol::{ContainerConfig, ContainerSpec, NamespaceId, PodId, WorkerCommand, WorkerEvent, WorkerId};
 
 use super::common::*;
 
@@ -14,14 +14,14 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-echo".into(),
+        namespace_id: NamespaceId::new("ns-echo", 0),
         network: test_network_config(),
     })
     .await?;
 
     let event = recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
     assert!(
-        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == "ns-echo"),
+        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id.name() == "ns-echo"),
         "expected NamespaceCreated, got {:?}",
         event
     );
@@ -37,7 +37,7 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
 
     // Launch pod
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-echo".into(),
+        namespace_id: NamespaceId::new("ns-echo", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -67,7 +67,7 @@ async fn test_launch_pod_echo() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::PodRunning { namespace_id, pod_id }
-            if namespace_id == "ns-echo" && *pod_id == PodId(1)),
+            if namespace_id.name() == "ns-echo" && *pod_id == PodId(1)),
         "unexpected event: {:?}",
         event
     );
@@ -106,7 +106,7 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-exit".into(),
+        namespace_id: NamespaceId::new("ns-exit", 0),
         network: test_network_config(),
     })
     .await?;
@@ -122,7 +122,7 @@ async fn test_pod_exit_code() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-exit".into(),
+        namespace_id: NamespaceId::new("ns-exit", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -179,7 +179,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-stop".into(),
+        namespace_id: NamespaceId::new("ns-stop", 0),
         network: test_network_config(),
     })
     .await?;
@@ -195,7 +195,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-stop".into(),
+        namespace_id: NamespaceId::new("ns-stop", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -226,7 +226,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
 
     // Send graceful stop
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-stop".into(),
+        namespace_id: NamespaceId::new("ns-stop", 0),
         pod_id: PodId(1),
         graceful: true,
     })
@@ -240,7 +240,7 @@ async fn test_stop_pod() -> anyhow::Result<()> {
 
     assert!(
         matches!(&event, WorkerEvent::PodExited { namespace_id, pod_id, .. }
-            if namespace_id == "ns-stop" && *pod_id == PodId(1)),
+            if namespace_id.name() == "ns-stop" && *pod_id == PodId(1)),
         "unexpected event: {:?}",
         event
     );
@@ -260,7 +260,7 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-force".into(),
+        namespace_id: NamespaceId::new("ns-force", 0),
         network: test_network_config(),
     })
     .await?;
@@ -276,7 +276,7 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-force".into(),
+        namespace_id: NamespaceId::new("ns-force", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -306,7 +306,7 @@ async fn test_force_stop_pod() -> anyhow::Result<()> {
 
     // Force stop (non-graceful) — aborts the supervisor immediately
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-force".into(),
+        namespace_id: NamespaceId::new("ns-force", 0),
         pod_id: PodId(1),
         graceful: false,
     })
@@ -327,7 +327,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-destroy".into(),
+        namespace_id: NamespaceId::new("ns-destroy", 0),
         network: test_network_config(),
     })
     .await?;
@@ -344,7 +344,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-destroy".into(),
+        namespace_id: NamespaceId::new("ns-destroy", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -374,7 +374,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
 
     // Destroy the namespace — should tear down the running pod
     conn.send_command(&WorkerCommand::DestroyNamespace {
-        namespace_id: "ns-destroy".into(),
+        namespace_id: NamespaceId::new("ns-destroy", 0),
     })
     .await?;
 
@@ -386,7 +386,7 @@ async fn test_destroy_namespace() -> anyhow::Result<()> {
 
     assert!(
         matches!(&event, WorkerEvent::PodExited { namespace_id, pod_id, .. }
-            if namespace_id == "ns-destroy" && *pod_id == PodId(1)),
+            if namespace_id.name() == "ns-destroy" && *pod_id == PodId(1)),
         "unexpected event: {:?}",
         event
     );
@@ -405,7 +405,7 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-fail".into(),
+        namespace_id: NamespaceId::new("ns-fail", 0),
         network: test_network_config(),
     })
     .await?;
@@ -422,7 +422,7 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-fail".into(),
+        namespace_id: NamespaceId::new("ns-fail", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -452,7 +452,7 @@ async fn test_pod_launch_failure() -> anyhow::Result<()> {
 
     assert!(
         matches!(&event, WorkerEvent::PodFailed { namespace_id, pod_id, error }
-            if namespace_id == "ns-fail" && *pod_id == PodId(1) && !error.is_empty()),
+            if namespace_id.name() == "ns-fail" && *pod_id == PodId(1) && !error.is_empty()),
         "unexpected event: {:?}",
         event
     );
@@ -471,7 +471,7 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-env".into(),
+        namespace_id: NamespaceId::new("ns-env", 0),
         network: test_network_config(),
     })
     .await?;
@@ -488,7 +488,7 @@ async fn test_env_and_working_dir() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-env".into(),
+        namespace_id: NamespaceId::new("ns-env", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {

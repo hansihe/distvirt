@@ -3,7 +3,6 @@ use std::net::Ipv4Addr;
 use distvirt_orchestrator::core::GlobalWorkerId;
 use distvirt_orchestrator::sm::WlStatus;
 use distvirt_orchestrator::sm::endpoint::EndpointStatus;
-use distvirt_orchestrator::types::NamespaceId;
 use distvirt_worker_protocol::{EndpointKind, EndpointSpec, WorkerCommand};
 
 use super::test_harness::TestHarness;
@@ -15,7 +14,7 @@ impl TestHarness {
         expected: distvirt_orchestrator::types::NamespaceStatus,
     ) {
         use distvirt_orchestrator::types::NamespaceStatus;
-        let ns_id_typed = distvirt_orchestrator::types::NamespaceId::from(ns_id);
+        let ns_id_typed = self.resolve_ns(ns_id);
         let actual = match self.shell.namespace(&ns_id_typed) {
             None => {
                 panic!(
@@ -40,7 +39,7 @@ impl TestHarness {
 
     pub fn assert_namespace_absent(&self, ns_id: &str) {
         assert!(
-            self.shell.namespace(&NamespaceId::from(ns_id)).is_none(),
+            self.try_resolve_ns(ns_id).and_then(|id| self.shell.namespace(&id)).is_none(),
             "namespace '{}' should be absent but still exists",
             ns_id
         );
@@ -267,7 +266,7 @@ impl TestHarness {
         worker_id: &GlobalWorkerId,
         ns_id: &str,
     ) -> Vec<EndpointSpec> {
-        let ns_id_typed = NamespaceId::from(ns_id);
+        let ns_id_typed = self.resolve_ns(ns_id);
         let commands = self.shell.worker_commands(worker_id);
 
         let mut entries: Vec<EndpointSpec> = Vec::new();

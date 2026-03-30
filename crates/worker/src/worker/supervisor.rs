@@ -1100,7 +1100,7 @@ mod tests {
 
         let log_opener = make_log_opener();
 
-        let ns_id = NamespaceId::from("ns1");
+        let ns_id = NamespaceId::new("ns1", 0);
         let pod_id = POD_ID;
 
         // Run pod_supervisor directly.
@@ -1144,7 +1144,7 @@ mod tests {
                 pod_id,
                 error,
             } => {
-                assert_eq!(namespace_id, "ns1");
+                assert_eq!(namespace_id.name(), "ns1");
                 assert_eq!(pod_id, POD_ID);
                 assert!(
                     error.contains("image not found"),
@@ -1170,7 +1170,7 @@ mod tests {
         let log_opener = make_log_opener();
         let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
 
-        let ns_id = NamespaceId::from("ns1");
+        let ns_id = NamespaceId::new("ns1", 0);
         let pod_id = POD_ID;
 
         tokio::spawn({
@@ -1248,7 +1248,7 @@ mod tests {
                 log_opener,
                 cancel_clone,
                 bg_event_tx,
-                NamespaceId::from("ns1"),
+                NamespaceId::new("ns1", 0),
                 POD_ID,
                 make_pod_network(),
                 make_containers(),
@@ -1289,7 +1289,7 @@ mod tests {
         let log_opener = make_log_opener();
         let (bg_event_tx, mut bg_event_rx) = mpsc::channel(256);
 
-        let ns_id = NamespaceId::from("ns1");
+        let ns_id = NamespaceId::new("ns1", 0);
         let pod_id = POD_ID;
 
         tokio::spawn({
@@ -1330,7 +1330,7 @@ mod tests {
                 namespace_id,
                 pod_id,
             } => {
-                assert_eq!(namespace_id, "ns1");
+                assert_eq!(namespace_id.name(), "ns1");
                 assert_eq!(pod_id, POD_ID);
             }
             other => panic!("expected PodRunning, got {:?}", other),
@@ -1347,7 +1347,7 @@ mod tests {
                 pod_id,
                 exit_code,
             } => {
-                assert_eq!(namespace_id, "ns1");
+                assert_eq!(namespace_id.name(), "ns1");
                 assert_eq!(pod_id, POD_ID);
                 assert_eq!(exit_code, 0);
             }

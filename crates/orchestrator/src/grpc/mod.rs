@@ -13,7 +13,6 @@ use crate::event_bus::EventBusHandle;
 use crate::id_registry::IdRegistryMap;
 use crate::log_bus::LogBusHandle;
 use crate::shell::r#async::ShellHandle;
-use crate::types::NamespaceId;
 
 use conversions::{convert_pod_status_report, convert_proto_patch, convert_proto_spec, convert_status_report, convert_worker_query_info};
 use crate::types::{IpAllocKind, IpAllocResult};
@@ -105,10 +104,12 @@ impl DistvirtClient for DistvirtClientService {
             gateway: spec.network.gateway,
             prefix_len: spec.network.prefix_len,
         };
-        let namespace_id = NamespaceId(req.namespace_id);
+        let namespace_name = req.namespace_id;
         self.handle
-            .create_namespace(namespace_id.clone(), network)
+            .create_namespace(namespace_name.clone(), network)
             .await
+            .map_err(client_error_to_status)?;
+        let namespace_id = self.handle.resolve_namespace(&namespace_name)
             .map_err(client_error_to_status)?;
         let alloc = self.handle
             .update_namespace(namespace_id, spec)
@@ -131,7 +132,7 @@ impl DistvirtClient for DistvirtClientService {
                 .ok_or_else(|| Status::invalid_argument("missing spec"))?,
         )?;
         let alloc = self.handle
-            .update_namespace(NamespaceId(req.namespace_id), spec)
+            .update_namespace(self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?, spec)
             .await
             .map_err(client_error_to_status)?;
         let (workload_ips, service_ips) = alloc_to_proto_ips(&alloc);
@@ -146,7 +147,7 @@ impl DistvirtClient for DistvirtClientService {
         request: Request<proto::PatchNamespaceRequest>,
     ) -> Result<Response<proto::PatchNamespaceResponse>, Status> {
         let req = request.into_inner();
-        let ns_id = NamespaceId(req.namespace_id.clone());
+        let ns_id = self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?;
         let patch = convert_proto_patch(req)?;
         let alloc = self.handle
             .patch_namespace(ns_id, patch)
@@ -165,7 +166,7 @@ impl DistvirtClient for DistvirtClientService {
     ) -> Result<Response<proto::DeleteNamespaceResponse>, Status> {
         let req = request.into_inner();
         self.handle
-            .destroy_namespace(NamespaceId(req.namespace_id))
+            .destroy_namespace(self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?)
             .await
             .map_err(client_error_to_status)?;
         Ok(Response::new(proto::DeleteNamespaceResponse {}))
@@ -178,7 +179,7 @@ impl DistvirtClient for DistvirtClientService {
         let req = request.into_inner();
         let report = self
             .handle
-            .get_namespace_status(NamespaceId(req.namespace_id))
+            .get_namespace_status(self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?)
             .await
             .map_err(client_error_to_status)?;
         Ok(Response::new(proto::GetNamespaceStatusResponse {
@@ -277,7 +278,7 @@ impl DistvirtClient for DistvirtClientService {
         let req = request.into_inner();
         let pods = self
             .handle
-            .list_pods(NamespaceId(req.namespace_id))
+            .list_pods(self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?)
             .await
             .map_err(client_error_to_status)?;
         Ok(Response::new(proto::ListPodsResponse {
@@ -303,7 +304,7 @@ impl DistvirtClient for DistvirtClientService {
         request: Request<proto::StreamLogsRequest>,
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
         let req = request.into_inner();
-        let namespace_id = NamespaceId(req.namespace_id);
+        let namespace_id = self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?;
 
         let container_filter = if req.container_ids.is_empty() {
             None
@@ -379,7 +380,7 @@ impl DistvirtClient for DistvirtClientService {
 
         let result = self
             .handle
-            .connect_network(NamespaceId(req.namespace_id), client_public_key)
+            .connect_network(self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?, client_public_key)
             .await
             .map_err(client_error_to_status)?;
 
@@ -404,7 +405,7 @@ impl DistvirtClient for DistvirtClientService {
             .map_err(|_| Status::invalid_argument("client_public_key must be 32 bytes"))?;
 
         self.handle
-            .disconnect_network(NamespaceId(req.namespace_id), client_public_key)
+            .disconnect_network(self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?, client_public_key)
             .await
             .map_err(client_error_to_status)?;
 
@@ -418,7 +419,7 @@ impl DistvirtClient for DistvirtClientService {
         request: Request<proto::StreamEventsRequest>,
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let req = request.into_inner();
-        let namespace_id = NamespaceId(req.namespace_id);
+        let namespace_id = self.handle.resolve_namespace(&req.namespace_id).map_err(client_error_to_status)?;
 
         let registry = self
             .id_registry_map

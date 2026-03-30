@@ -2,8 +2,8 @@ use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
     ActivatorConfig, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
-    EndpointSpec, PodId, PortConfig, ServiceId, ServicePolicy, WorkerCommand, WorkerEvent,
-    WorkerId,
+    EndpointSpec, NamespaceId, PodId, PortConfig, ServiceId, ServicePolicy, WorkerCommand,
+    WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -18,7 +18,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-suspend".into(),
+        namespace_id: NamespaceId::new("ns-suspend", 0),
         network: test_network_config(),
     })
     .await?;
@@ -38,7 +38,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-suspend".into(),
+        namespace_id: NamespaceId::new("ns-suspend", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -72,7 +72,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
 
     // Suspend the pod
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-suspend".into(),
+        namespace_id: NamespaceId::new("ns-suspend", 0),
         pod_id: PodId(1),
         artifact_id: "snap-1".into(),
         pool_id: "local-default".into(),
@@ -90,7 +90,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
             artifact_id,
             pool_id,
         } => {
-            assert_eq!(namespace_id, "ns-suspend");
+            assert_eq!(namespace_id.name(), "ns-suspend");
             assert_eq!(artifact_id, "snap-1");
             assert_eq!(pool_id, "local-default");
         }
@@ -109,7 +109,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
             pool_id,
             size_bytes,
         } => {
-            assert_eq!(namespace_id, "ns-suspend");
+            assert_eq!(namespace_id.name(), "ns-suspend");
             assert_eq!(artifact_id, "snap-1");
             assert_eq!(pool_id, "local-default");
             assert!(
@@ -143,7 +143,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
             artifact_size_bytes,
             ..
         } => {
-            assert_eq!(namespace_id, "ns-suspend");
+            assert_eq!(namespace_id.name(), "ns-suspend");
             assert_eq!(*pod_id, PodId(1));
             assert_eq!(artifact_id, "snap-1");
             assert!(
@@ -166,7 +166,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-suspend".into(),
+        namespace_id: NamespaceId::new("ns-suspend", 0),
         pod_id: PodId(2),
         artifact_id: "snap-1".into(),
         network: test_pod_network_config(),
@@ -185,7 +185,7 @@ async fn test_suspend_resume_pod() -> anyhow::Result<()> {
 
     // Stop the resumed pod to clean up
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-suspend".into(),
+        namespace_id: NamespaceId::new("ns-suspend", 0),
         pod_id: PodId(2),
         graceful: true,
     })
@@ -231,7 +231,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         network: test_network_config(),
     })
     .await?;
@@ -243,7 +243,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     // Create service at 10.0.0.99 (no activator, simple forwarding) via EndpointSync
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -269,7 +269,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -309,7 +309,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     // Point service at server pod and mark ready via EndpointUpdate
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -340,7 +340,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         pod_id: PodId(2),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
@@ -397,7 +397,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     // --- Suspend the server pod ---
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         pod_id: PodId(1),
         artifact_id: "snap-net".into(),
         pool_id: "local-default".into(),
@@ -411,7 +411,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
-            if namespace_id == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default"),
+            if namespace_id.name() == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default"),
         "unexpected ArtifactWriteStarted: {:?}",
         event
     );
@@ -423,7 +423,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
-            if namespace_id == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default" && *size_bytes > 0),
+            if namespace_id.name() == "ns-susp-net" && artifact_id == "snap-net" && pool_id == "local-default" && *size_bytes > 0),
         "unexpected ArtifactWriteCommitted: {:?}",
         event
     );
@@ -452,7 +452,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         pod_id: PodId(3),
         artifact_id: "snap-net".into(),
         network: test_pod_network_config(),
@@ -470,7 +470,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     // Re-point service at resumed pod (same IP/MAC) and mark ready via EndpointUpdate
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -501,7 +501,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         pod_id: PodId(4),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
@@ -558,7 +558,7 @@ async fn test_suspend_resume_network() -> anyhow::Result<()> {
 
     // Clean up
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-susp-net".into(),
+        namespace_id: NamespaceId::new("ns-susp-net", 0),
         pod_id: PodId(3),
         graceful: true,
     })
@@ -606,7 +606,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         network: test_network_config(),
     })
     .await?;
@@ -618,7 +618,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Create service with TCP activator at 10.0.0.99 via EndpointSync
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -648,7 +648,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -688,7 +688,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Point service at server pod and mark ready via EndpointUpdate
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -723,7 +723,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         pod_id: PodId(2),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
@@ -780,7 +780,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // --- Suspend the server pod ---
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         pod_id: PodId(1),
         artifact_id: "snap-act".into(),
         pool_id: "local-default".into(),
@@ -794,7 +794,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
-            if namespace_id == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default"),
+            if namespace_id.name() == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default"),
         "unexpected ArtifactWriteStarted: {:?}",
         event
     );
@@ -806,7 +806,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
-            if namespace_id == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default" && *size_bytes > 0),
+            if namespace_id.name() == "ns-act-resume" && artifact_id == "snap-act" && pool_id == "local-default" && *size_bytes > 0),
         "unexpected ArtifactWriteCommitted: {:?}",
         event
     );
@@ -828,7 +828,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     // Clear the service backend — pod is suspended, no backend available.
     // The activator will now buffer incoming traffic and signal BackendNeed.
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -859,7 +859,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         pod_id: PodId(4),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
@@ -900,7 +900,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     assert!(
         matches!(&event, WorkerEvent::EndpointDemandTraffic { namespace_id, service_id, .. }
-            if namespace_id == "ns-act-resume" && *service_id == Some(ServiceId(1))),
+            if namespace_id.name() == "ns-act-resume" && *service_id == Some(ServiceId(1))),
         "unexpected event: {:?}",
         event
     );
@@ -916,7 +916,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         pod_id: PodId(3),
         artifact_id: "snap-act".into(),
         network: test_pod_network_config(),
@@ -934,7 +934,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Point service at resumed pod and mark ready — flushes the buffered SYN
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -979,7 +979,7 @@ async fn test_suspend_resume_activation() -> anyhow::Result<()> {
 
     // Clean up
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-act-resume".into(),
+        namespace_id: NamespaceId::new("ns-act-resume", 0),
         pod_id: PodId(3),
         graceful: true,
     })

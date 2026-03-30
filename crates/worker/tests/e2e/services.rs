@@ -5,8 +5,8 @@ use futures_lite::io::AsyncReadExt;
 
 use distvirt_worker_protocol::{
     ActivatorConfig, ContainerConfig, ContainerSpec, EndpointKind, EndpointPodBackend,
-    EndpointSpec, PodId, PortConfig, RegistryEntry, ServiceId, ServicePolicy, WorkerCommand,
-    WorkerEvent, WorkerId,
+    EndpointSpec, NamespaceId, PodId, PortConfig, RegistryEntry, ServiceId, ServicePolicy,
+    WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -20,7 +20,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-dns".into(),
+        namespace_id: NamespaceId::new("ns-dns", 0),
         network: test_network_config(),
     })
     .await?;
@@ -29,7 +29,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
 
     // Sync a DNS registry entry
     conn.send_command(&WorkerCommand::RegistrySync {
-        namespace_id: "ns-dns".into(),
+        namespace_id: NamespaceId::new("ns-dns", 0),
         entries: vec![RegistryEntry {
             name: "myservice".into(),
             ip: Ipv4Addr::new(10, 0, 0, 99),
@@ -41,7 +41,7 @@ async fn test_registry_sync() -> anyhow::Result<()> {
     register_pod_endpoint(&mut conn, "ns-dns", &test_pod_network_config(), WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-dns".into(),
+        namespace_id: NamespaceId::new("ns-dns", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -97,21 +97,21 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-tcp-act".into(),
+        namespace_id: NamespaceId::new("ns-tcp-act", 0),
         network: test_network_config(),
     })
     .await?;
 
     let event = recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
     assert!(
-        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == "ns-tcp-act"),
+        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id.name() == "ns-tcp-act"),
         "expected NamespaceCreated, got {:?}",
         event
     );
 
     // Create a service with TCP activator via EndpointSync
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-tcp-act".into(),
+        namespace_id: NamespaceId::new("ns-tcp-act", 0),
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -141,7 +141,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-tcp-act".into(),
+        namespace_id: NamespaceId::new("ns-tcp-act", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -184,7 +184,7 @@ async fn test_tcp_activator_activation() -> anyhow::Result<()> {
 
     assert!(
         matches!(&event, WorkerEvent::EndpointDemandTraffic { namespace_id, service_id, .. }
-            if namespace_id == "ns-tcp-act" && *service_id == Some(ServiceId(1))),
+            if namespace_id.name() == "ns-tcp-act" && *service_id == Some(ServiceId(1))),
         "unexpected event: {:?}",
         event
     );
@@ -210,7 +210,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-svc-fwd".into(),
+        namespace_id: NamespaceId::new("ns-svc-fwd", 0),
         network: test_network_config(),
     })
     .await?;
@@ -222,7 +222,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
 
     // Create service at 10.0.0.99 (no activator) via EndpointSync
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-svc-fwd".into(),
+        namespace_id: NamespaceId::new("ns-svc-fwd", 0),
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -248,7 +248,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-svc-fwd".into(),
+        namespace_id: NamespaceId::new("ns-svc-fwd", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -296,7 +296,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
 
     // Set the backend and mark service ready via EndpointUpdate
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-svc-fwd".into(),
+        namespace_id: NamespaceId::new("ns-svc-fwd", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -327,7 +327,7 @@ async fn test_service_backend_ready_forward() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-svc-fwd".into(),
+        namespace_id: NamespaceId::new("ns-svc-fwd", 0),
         pod_id: PodId(2),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
@@ -406,7 +406,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-svc-buf".into(),
+        namespace_id: NamespaceId::new("ns-svc-buf", 0),
         network: test_network_config(),
     })
     .await?;
@@ -418,7 +418,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
 
     // Create service with TCP activator via EndpointSync
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-svc-buf".into(),
+        namespace_id: NamespaceId::new("ns-svc-buf", 0),
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -448,7 +448,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-svc-buf".into(),
+        namespace_id: NamespaceId::new("ns-svc-buf", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -504,7 +504,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-svc-buf".into(),
+        namespace_id: NamespaceId::new("ns-svc-buf", 0),
         pod_id: PodId(2),
         network: test_pod_network_config_2(),
         containers: vec![ContainerSpec {
@@ -545,7 +545,7 @@ async fn test_service_backend_buffer_and_flush() -> anyhow::Result<()> {
 
     // Now set the backend and mark ready — buffered SYN should be flushed
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-svc-buf".into(),
+        namespace_id: NamespaceId::new("ns-svc-buf", 0),
         upserted: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -616,7 +616,7 @@ async fn test_destroy_service() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-svc-destroy".into(),
+        namespace_id: NamespaceId::new("ns-svc-destroy", 0),
         network: test_network_config(),
     })
     .await?;
@@ -628,7 +628,7 @@ async fn test_destroy_service() -> anyhow::Result<()> {
 
     // Create service via EndpointSync
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-svc-destroy".into(),
+        namespace_id: NamespaceId::new("ns-svc-destroy", 0),
         endpoints: vec![EndpointSpec {
             ip: Ipv4Addr::new(10, 0, 0, 99),
             kind: EndpointKind::Service {
@@ -646,7 +646,7 @@ async fn test_destroy_service() -> anyhow::Result<()> {
 
     // Destroy the service via EndpointUpdate with removed_ips
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-svc-destroy".into(),
+        namespace_id: NamespaceId::new("ns-svc-destroy", 0),
         upserted: vec![],
         removed_ips: vec![Ipv4Addr::new(10, 0, 0, 99)],
     })

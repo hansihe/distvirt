@@ -221,7 +221,7 @@ fn test_resume_failure_falls_back_to_cold_launch() {
     let svc_ip = h.service_ip("ns1", "web-svc");
     h.worker(&w1)
         .send_event(distvirt_worker_protocol::WorkerEvent::EndpointDemandTraffic {
-            namespace_id: "ns1".into(),
+            namespace_id: h.resolve_ns("ns1"),
             ip: svc_ip,
             service_id: Some(h.proto_service_id("ns1", "web-svc")),
         });

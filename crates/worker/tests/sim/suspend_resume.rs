@@ -1,5 +1,5 @@
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
-use distvirt_worker_protocol::{ArtifactId, PodId, WorkerCommand, WorkerEvent, WorkerId};
+use distvirt_worker_protocol::{ArtifactId, NamespaceId, PodId, WorkerCommand, WorkerEvent, WorkerId};
 
 use super::common::*;
 
@@ -15,7 +15,7 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
 
     // Suspend the pod.
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-1"),
         pool_id: pool_id.clone(),
@@ -44,7 +44,7 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
 
     // Resume the pod.
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-1"),
         network: pod_net.clone(),
@@ -62,7 +62,7 @@ async fn test_sim_suspend_resume() -> anyhow::Result<()> {
 
     // Stop the resumed pod.
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: true,
     })
@@ -91,7 +91,7 @@ async fn test_sim_suspend_then_destroy_namespace() -> anyhow::Result<()> {
 
     // Suspend the pod.
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-2"),
         pool_id: pool_id.clone(),
@@ -106,13 +106,13 @@ async fn test_sim_suspend_then_destroy_namespace() -> anyhow::Result<()> {
 
     // Destroy namespace after suspend.
     conn.send_command(&WorkerCommand::DestroyNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
     })
     .await?;
 
     // Expect NamespaceDestroyed.
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id == "ns-sim")
+        matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id.name() == "ns-sim")
     })
     .await?;
 
@@ -132,7 +132,7 @@ async fn test_sim_resume_unknown_artifact() -> anyhow::Result<()> {
 
     // Resume with a bogus artifact_id that doesn't exist on disk.
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("nonexistent-snap"),
         network: pod_net,
@@ -169,7 +169,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
 
     // First suspend.
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-a"),
         pool_id: pool_id.clone(),
@@ -183,7 +183,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
 
     // First resume.
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-a"),
         network: pod_net.clone(),
@@ -200,7 +200,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
 
     // Second suspend.
     conn.send_command(&WorkerCommand::SuspendPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-b"),
         pool_id: pool_id.clone(),
@@ -216,7 +216,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
 
     // Second resume.
     conn.send_command(&WorkerCommand::ResumePod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         artifact_id: ArtifactId::from("snap-b"),
         network: pod_net.clone(),
@@ -233,7 +233,7 @@ async fn test_sim_re_suspend_after_resume() -> anyhow::Result<()> {
 
     // Clean stop.
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: true,
     })

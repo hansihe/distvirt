@@ -31,7 +31,7 @@ fn test_two_services_one_workload_shared_demand() {
 
     // Activate svc-a → workload launches
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
@@ -41,7 +41,7 @@ fn test_two_services_one_workload_shared_demand() {
 
     // Activate svc-b with sustained demand → workload already running
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_b_ip,
         service_id: Some(svc_b_id),
         active: true,
@@ -56,7 +56,7 @@ fn test_two_services_one_workload_shared_demand() {
     // Idle svc-a → demand drops. Workload stays running because svc-b has
     // sustained demand via EndpointDemandActive.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: h.service_ip("ns", "svc-a"),
         service_id: Some(svc_a_id),
         active: false,
@@ -84,7 +84,7 @@ fn test_service_activation_while_already_running() {
 
     // Activate svc-a
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
@@ -97,7 +97,7 @@ fn test_service_activation_while_already_running() {
 
     // Activate svc-b while already running
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_b_ip,
         service_id: Some(svc_b_id),
     });
@@ -219,7 +219,7 @@ fn test_add_service_to_suspended_workload() {
 
     // Activate → running → idle → suspended
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: web_svc_ip,
         service_id: Some(web_svc_id),
     });
@@ -227,7 +227,7 @@ fn test_add_service_to_suspended_workload() {
     h.assert_workload_running("ns", "web");
 
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: h.service_ip("ns", "web-svc"),
         service_id: Some(web_svc_id),
         active: false,
@@ -275,7 +275,7 @@ fn test_add_service_to_suspended_workload() {
 
     // Activating the new service should resume the workload.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: web_svc_2_ip,
         service_id: Some(web_svc_2_id),
     });
@@ -330,13 +330,13 @@ fn test_remove_service_updates_demand() {
 
     // Activate both services.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });
     h.converge();
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_b_ip,
         service_id: Some(svc_b_id),
     });
@@ -385,7 +385,7 @@ fn test_remove_only_active_service_drops_demand() {
 
     // Activate svc-a only.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_a_ip,
         service_id: Some(svc_a_id),
     });

@@ -342,18 +342,29 @@ impl TestCluster {
     }
 
     // -------------------------------------------------------------------------
+    // Namespace resolution
+    // -------------------------------------------------------------------------
+
+    pub fn resolve_ns(&self, name: &str) -> NamespaceId {
+        self.shell
+            .resolve_namespace(name)
+            .unwrap_or_else(|_| panic!("namespace '{}' not found", name))
+    }
+
+    // -------------------------------------------------------------------------
     // Namespace lifecycle
     // -------------------------------------------------------------------------
 
     pub async fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
         self.specs.insert(ns_id.to_string(), spec.clone());
         self.shell
-            .create_namespace(NamespaceId::from(ns_id), spec.network.clone())
+            .create_namespace(ns_id.to_string(), spec.network.clone())
             .await
             .expect("create_namespace failed");
+        let namespace_id = self.resolve_ns(ns_id);
         let input = NamespaceSpecInput::from_resolved(&spec);
         let alloc = self.shell
-            .update_namespace(NamespaceId::from(ns_id), input)
+            .update_namespace(namespace_id, input)
             .await
             .expect("update_namespace (initial spec) failed");
         self.allocs.insert(ns_id.to_string(), alloc);
@@ -361,17 +372,19 @@ impl TestCluster {
 
     pub async fn delete_namespace(&mut self, ns_id: &str) {
         self.specs.remove(ns_id);
+        let namespace_id = self.resolve_ns(ns_id);
         self.shell
-            .destroy_namespace(NamespaceId::from(ns_id))
+            .destroy_namespace(namespace_id)
             .await
             .expect("destroy_namespace failed");
     }
 
     pub async fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) {
         self.specs.insert(ns_id.to_string(), spec.clone());
+        let namespace_id = self.resolve_ns(ns_id);
         let input = NamespaceSpecInput::from_resolved(&spec);
         let alloc = self.shell
-            .update_namespace(NamespaceId::from(ns_id), input)
+            .update_namespace(namespace_id, input)
             .await
             .expect("update_namespace failed");
         self.allocs.insert(ns_id.to_string(), alloc);
@@ -383,8 +396,9 @@ impl TestCluster {
     // -------------------------------------------------------------------------
 
     pub async fn namespace_status(&self, ns_id: &str) -> NamespaceStatusReport {
+        let namespace_id = self.resolve_ns(ns_id);
         self.shell
-            .get_namespace_status(NamespaceId::from(ns_id))
+            .get_namespace_status(namespace_id)
             .await
             .unwrap_or_else(|e| panic!("namespace '{}' status failed: {:?}", ns_id, e))
     }
@@ -495,10 +509,10 @@ impl TestCluster {
     pub async fn send_activation_traffic(&mut self, ns_id: &str, svc_id: &str) {
         let svc_ip = self.service_ip(ns_id, svc_id);
         let packet = craft_tcp_syn(Ipv4Addr::new(1, 2, 3, 4), svc_ip, 12345, 80);
-        let ns_id_key = NamespaceId::from(ns_id);
+        let ns_id_resolved = self.resolve_ns(ns_id);
         let tx = self
             .gateway_provider
-            .get(&ns_id_key)
+            .get(&ns_id_resolved)
             .unwrap_or_else(|| panic!("no traffic handle for namespace '{}'", ns_id));
         tx.send(packet).await.unwrap();
         self.converge().await;
@@ -512,9 +526,10 @@ impl TestCluster {
         worker_id: &GlobalWorkerId,
     ) {
         let svc_ip = self.service_ip(ns_id, svc_id);
+        let ns_id_resolved = self.resolve_ns(ns_id);
         self.shell
             .inject_namespace_event(
-                NamespaceId::from(ns_id),
+                ns_id_resolved,
                 *worker_id,
                 WorkerNamespaceEventKind::EndpointDemand {
                     ip: svc_ip,
@@ -676,12 +691,8 @@ impl TestCluster {
     }
 
     pub async fn assert_namespace_absent(&self, ns_id: &str) {
-        let result = self
-            .shell
-            .get_namespace_status(NamespaceId::from(ns_id))
-            .await;
         assert!(
-            result.is_err(),
+            self.shell.resolve_namespace(ns_id).is_err(),
             "namespace '{}' should be absent but still exists",
             ns_id
         );

@@ -51,8 +51,13 @@ fn container_spec(image: &str) -> distvirt_worker_protocol::ContainerSpec {
     }
 }
 
-fn ns(name: &str) -> NamespaceId {
-    NamespaceId::from(name)
+/// Resolve a namespace by name from the shell's live state.
+fn resolve_ns(shell: &SyncShell, name: &str) -> NamespaceId {
+    shell
+        .namespace_ids()
+        .find(|id| id.name() == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("namespace '{}' not found", name))
 }
 
 /// Always-on spec: 1 workload "echo" + 1 always-on service "echo-svc".
@@ -110,12 +115,12 @@ fn basic_pod_lifecycle() {
     let mut shell = SyncShell::new(test_timer_config());
     let w1 = shell.add_worker_default();
 
-    shell.create_namespace(ns("test"), default_network());
-    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
+    shell.create_namespace("test", default_network());
+    shell.apply_full_spec(&resolve_ns(&shell, "test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     // The workload should have been created and launched.
     let ns_core = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .expect("namespace should exist");
     let router = ns_core.router();
     let mgmt = ns_core.management();
@@ -152,11 +157,12 @@ fn namespace_create_destroy() {
     let mut shell = SyncShell::new(test_timer_config());
     let _w1 = shell.add_worker_default();
 
-    shell.create_namespace(ns("test"), default_network());
-    assert!(shell.namespace(&ns("test")).is_some());
+    shell.create_namespace("test", default_network());
+    let test_ns = resolve_ns(&shell, "test");
+    assert!(shell.namespace(&test_ns).is_some());
 
-    shell.destroy_namespace(&ns("test"));
-    assert!(shell.namespace(&ns("test")).is_none());
+    shell.destroy_namespace(&test_ns);
+    assert!(shell.namespace(&test_ns).is_none());
 }
 
 #[test]
@@ -164,19 +170,19 @@ fn worker_disconnect_and_recovery() {
     let mut shell = SyncShell::new(test_timer_config());
     let w1 = shell.add_worker_default();
 
-    shell.create_namespace(ns("test"), default_network());
-    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
+    shell.create_namespace("test", default_network());
+    shell.apply_full_spec(&resolve_ns(&shell, "test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     // Verify running.
     let wl_id = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .management()
         .lookup_workload("echo")
         .unwrap();
     assert!(
         shell
-            .namespace(&ns("test"))
+            .namespace(&resolve_ns(&shell, "test"))
             .unwrap()
             .router()
             .get_workload(&wl_id)
@@ -191,7 +197,7 @@ fn worker_disconnect_and_recovery() {
     // Pod displaced (infrastructure loss) — workload immediately reschedules
     // without backoff, but no worker is available so pod stays Pending.
     let wl = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .router()
         .get_workload(&wl_id)
@@ -218,7 +224,7 @@ fn worker_disconnect_and_recovery() {
     shell.drain();
 
     let wl = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .router()
         .get_workload(&wl_id)
@@ -234,11 +240,11 @@ fn launch_hang_triggers_timeout() {
     let mut shell = SyncShell::new(test_timer_config());
     let _w1 = shell.add_worker(MockWorkerConfig::with_launch_hang());
 
-    shell.create_namespace(ns("test"), default_network());
-    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
+    shell.create_namespace("test", default_network());
+    shell.apply_full_spec(&resolve_ns(&shell, "test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     let wl_id = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .management()
         .lookup_workload("echo")
@@ -246,7 +252,7 @@ fn launch_hang_triggers_timeout() {
 
     // Pod should be pending (launched but no PodRunning response).
     let wl = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .router()
         .get_workload(&wl_id)
@@ -259,7 +265,7 @@ fn launch_hang_triggers_timeout() {
 
     let pod_id = wl.pod_id.unwrap();
     let pod = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .router()
         .get_pod(&pod_id)
@@ -276,7 +282,7 @@ fn launch_hang_triggers_timeout() {
 
     // After timeout, the pod should have failed and the workload should be in backoff.
     let wl = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .router()
         .get_workload(&wl_id)
@@ -295,11 +301,11 @@ fn launch_failure_retries() {
     let mut shell = SyncShell::new(test_timer_config());
     let _w1 = shell.add_worker(MockWorkerConfig::with_launch_failure());
 
-    shell.create_namespace(ns("test"), default_network());
-    shell.apply_full_spec(&ns("test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
+    shell.create_namespace("test", default_network());
+    shell.apply_full_spec(&resolve_ns(&shell, "test"), NamespaceSpecInput::from_resolved(&always_on_spec())).unwrap();
 
     let wl_id = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .management()
         .lookup_workload("echo")
@@ -307,7 +313,7 @@ fn launch_failure_retries() {
 
     // Pod should have failed and workload should be in backoff.
     let wl = shell
-        .namespace(&ns("test"))
+        .namespace(&resolve_ns(&shell, "test"))
         .unwrap()
         .router()
         .get_workload(&wl_id)

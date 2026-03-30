@@ -7,14 +7,12 @@ use distvirt_orchestrator::adapter::observability::{
     EndpointEventKind, ObservabilityEvent, PodEventKind, WorkloadEventKind,
 };
 use distvirt_orchestrator::sm::{PodStatus, WlStatus, endpoint::EndpointStatus};
-use distvirt_worker_protocol::NamespaceId;
-
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::{activation_spec, always_on_spec};
 
 /// Subscribe to the event bus and return all historical events for a namespace.
 fn drain_events(cluster: &TestCluster, ns_id: &str) -> Vec<ObservabilityEvent> {
-    let (historical, _rx) = cluster.event_bus.subscribe(&NamespaceId::from(ns_id));
+    let (historical, _rx) = cluster.event_bus.subscribe(&cluster.resolve_ns(ns_id));
     historical
 }
 
@@ -81,7 +79,7 @@ async fn test_always_on_events_e2e() {
     // IdRegistry should resolve "echo" workload.
     let registry = cluster
         .id_registry_map
-        .get(&NamespaceId::from("ns"))
+        .get(&cluster.resolve_ns("ns"))
         .expect("registry should exist for namespace");
 
     // Find the workload ID from any workload event.
@@ -108,7 +106,7 @@ async fn test_activation_events_e2e() {
     cluster.converge().await;
 
     // Subscribe before activation to get live events.
-    let (_historical, mut rx) = cluster.event_bus.subscribe(&NamespaceId::from("ns"));
+    let (_historical, mut rx) = cluster.event_bus.subscribe(&cluster.resolve_ns("ns"));
 
     // Activate via traffic.
     cluster.send_activation_traffic("ns", "web-svc").await;

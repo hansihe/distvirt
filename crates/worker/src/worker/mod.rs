@@ -571,7 +571,7 @@ impl<
                 if let Some(wg) = self.adapter_manager.wireguard() {
                     if let Err(e) = wg
                         .add_peer(
-                            namespace_id.as_ref(),
+                            &namespace_id,
                             peer_public_key,
                             peer_ip,
                             preshared_key,
@@ -1387,7 +1387,7 @@ mod tests {
             ns_token,
         );
 
-        worker.namespaces.insert(NamespaceId::from(ns_id), ns);
+        worker.namespaces.insert(NamespaceId::new(ns_id, 0), ns);
     }
 
     fn make_log_opener() -> LogStreamOpener {
@@ -1429,19 +1429,19 @@ mod tests {
     async fn destroy_namespace_removes_state() {
         let mut w = make_worker();
         inject_namespace(&mut w, "ns1");
-        assert!(w.namespaces.contains_key(&NamespaceId::from("ns1")));
+        assert!(w.namespaces.contains_key(&NamespaceId::new("ns1", 0)));
 
-        w.handle_destroy_namespace(&NamespaceId::from("ns1"))
+        w.handle_destroy_namespace(&NamespaceId::new("ns1", 0))
             .await
             .unwrap();
-        assert!(!w.namespaces.contains_key(&NamespaceId::from("ns1")));
+        assert!(!w.namespaces.contains_key(&NamespaceId::new("ns1", 0)));
     }
 
     #[tokio::test]
     async fn destroy_namespace_noop_for_nonexistent() {
         let mut w = make_worker();
         // Should not error.
-        w.handle_destroy_namespace(&NamespaceId::from("nope"))
+        w.handle_destroy_namespace(&NamespaceId::new("nope", 0))
             .await
             .unwrap();
     }
@@ -1454,7 +1454,7 @@ mod tests {
     async fn stop_pod_errors_on_missing_namespace() {
         let mut w = make_worker();
         let result = w
-            .handle_stop_pod(&NamespaceId::from("nope"), &PodId(11), true)
+            .handle_stop_pod(&NamespaceId::new("nope", 0), &PodId(11), true)
             .await;
         assert!(result.is_err());
     }
@@ -1465,7 +1465,7 @@ mod tests {
         inject_namespace(&mut w, "ns1");
 
         // Stopping a pod that doesn't exist should succeed (no-op).
-        w.handle_stop_pod(&NamespaceId::from("ns1"), &PodId(11), true)
+        w.handle_stop_pod(&NamespaceId::new("ns1", 0), &PodId(11), true)
             .await
             .unwrap();
     }
@@ -1498,7 +1498,7 @@ mod tests {
         let log_opener = make_log_opener();
 
         let cmd = WorkerCommand::RegistrySync {
-            namespace_id: NamespaceId::from("ns1"),
+            namespace_id: NamespaceId::new("ns1", 0),
             entries: vec![RegistryEntry {
                 name: "api".to_string(),
                 ip: Ipv4Addr::new(172, 16, 0, 10),
@@ -1507,7 +1507,7 @@ mod tests {
 
         w.handle_command(cmd, &log_opener).await.unwrap();
 
-        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        let ns = w.namespaces.get(&NamespaceId::new("ns1", 0)).unwrap();
         let map = ns.registry.read().unwrap();
         assert_eq!(map.get("api"), Some(&Ipv4Addr::new(172, 16, 0, 10)));
     }
@@ -1520,11 +1520,11 @@ mod tests {
         let log_opener = make_log_opener();
 
         let cmd = WorkerCommand::DestroyNamespace {
-            namespace_id: NamespaceId::from("ns1"),
+            namespace_id: NamespaceId::new("ns1", 0),
         };
 
         w.handle_command(cmd, &log_opener).await.unwrap();
-        assert!(!w.namespaces.contains_key(&NamespaceId::from("ns1")));
+        assert!(!w.namespaces.contains_key(&NamespaceId::new("ns1", 0)));
     }
 
     // -----------------------------------------------------------------------
@@ -1674,13 +1674,13 @@ mod tests {
                 HashMap::new(),
                 ns_token,
             );
-            w.namespaces.insert(NamespaceId::from("ns1"), ns);
+            w.namespaces.insert(NamespaceId::new("ns1", 0), ns);
         }
 
         let log_opener = make_log_opener();
 
         w.handle_launch_pod(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             PodId(11),
             make_pod_network(),
             make_containers(),
@@ -1692,7 +1692,7 @@ mod tests {
         .unwrap();
 
         // Pod should be registered.
-        let ns = w.namespaces.get(&NamespaceId::from("ns1")).unwrap();
+        let ns = w.namespaces.get(&NamespaceId::new("ns1", 0)).unwrap();
         assert!(ns.pods.contains_key(&PodId(11)));
     }
 }

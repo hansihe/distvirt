@@ -170,7 +170,7 @@ pub struct WorkerConnectedInfo {
 
 /// Information needed to create a namespace in the orchestrator.
 pub struct CreateNamespaceInfo {
-    pub namespace_id: NamespaceId,
+    pub namespace_name: String,
     pub network: distvirt_worker_protocol::NetworkConfig,
 }
 
@@ -259,6 +259,7 @@ pub enum OrchestratorInputNew {
 
 /// Information returned by `create_namespace` for the shell to construct a `NamespaceUnit`.
 pub struct NamespaceCreationInfo {
+    pub namespace_id: NamespaceId,
     pub network: distvirt_worker_protocol::NetworkConfig,
     pub id_registry: crate::id_registry::IdRegistry,
     pub timer_config: crate::adapter::timer::TimerConfig,

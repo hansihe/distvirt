@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    EndpointKind, EndpointPlacement, EndpointSpec, PodId, RegistryEntry, ServiceId, ServicePolicy,
-    WorkerCommand, WorkerEvent, WorkerId,
+    EndpointKind, EndpointPlacement, EndpointSpec, NamespaceId, PodId, RegistryEntry, ServiceId,
+    ServicePolicy, WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -12,7 +12,7 @@ async fn test_sim_registry_sync() -> anyhow::Result<()> {
     let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
@@ -23,7 +23,7 @@ async fn test_sim_registry_sync() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::RegistrySync {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         entries: vec![RegistryEntry {
             name: "myservice".into(),
             ip: Ipv4Addr::new(10, 0, 0, 99),
@@ -41,7 +41,7 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
     let (mut conn, worker_handle, _pool_id) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
@@ -54,7 +54,7 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
     // Sync a service endpoint
     let vip = Ipv4Addr::new(10, 0, 0, 99);
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         endpoints: vec![EndpointSpec {
             ip: vip,
             kind: EndpointKind::Service {
@@ -72,7 +72,7 @@ async fn test_sim_endpoint_lifecycle() -> anyhow::Result<()> {
 
     // Remove the endpoint
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         upserted: vec![],
         removed_ips: vec![vip],
     })
@@ -101,7 +101,7 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
 
     // Step 1: Sync service endpoint with no backend.
     conn.send_command(&WorkerCommand::EndpointSync {
-        namespace_id: ns_id.into(),
+        namespace_id: NamespaceId::new(ns_id, 0),
         endpoints: vec![EndpointSpec {
             ip: vip,
             kind: EndpointKind::Service {
@@ -122,7 +122,7 @@ async fn test_sim_service_with_backend_and_ready() -> anyhow::Result<()> {
 
     // Step 3: Update service endpoint with ready backend.
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: ns_id.into(),
+        namespace_id: NamespaceId::new(ns_id, 0),
         upserted: vec![EndpointSpec {
             ip: vip,
             kind: EndpointKind::Service {

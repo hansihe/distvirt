@@ -28,7 +28,7 @@ pub trait IngressAdapter: Send + Sync {
     /// Create a virtual port for the given namespace.
     async fn create_port(
         &self,
-        namespace_id: &str,
+        namespace_id: &distvirt_worker_protocol::NamespaceId,
     ) -> anyhow::Result<(ChannelPort, AdapterPortHandle)>;
 }
 
@@ -93,7 +93,7 @@ impl AdapterManager {
     /// Create virtual ports for a namespace from all configured adapters.
     pub async fn create_namespace_ports(
         &self,
-        namespace_id: &str,
+        namespace_id: &distvirt_worker_protocol::NamespaceId,
     ) -> Vec<(ChannelPort, AdapterPortHandle)> {
         let mut ports = Vec::new();
         for adapter in &self.adapters {
@@ -148,7 +148,7 @@ impl IngressAdapter for ArcAdapter {
 
     async fn create_port(
         &self,
-        namespace_id: &str,
+        namespace_id: &distvirt_worker_protocol::NamespaceId,
     ) -> anyhow::Result<(ChannelPort, AdapterPortHandle)> {
         self.0.create_port(namespace_id).await
     }

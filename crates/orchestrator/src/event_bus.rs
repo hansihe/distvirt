@@ -127,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_and_subscribe_historical() {
         let bus = EventBusHandle::new(100);
-        let ns = NamespaceId::from("ns1");
+        let ns = NamespaceId::new("ns1", 0);
 
         bus.publish(
             &ns,
@@ -145,7 +145,7 @@ mod tests {
     #[tokio::test]
     async fn test_live_delivery() {
         let bus = EventBusHandle::new(100);
-        let ns = NamespaceId::from("ns1");
+        let ns = NamespaceId::new("ns1", 0);
 
         // Create namespace state.
         bus.publish(
@@ -170,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn test_ring_buffer_eviction() {
         let bus = EventBusHandle::new(2);
-        let ns = NamespaceId::from("ns1");
+        let ns = NamespaceId::new("ns1", 0);
 
         bus.publish(
             &ns,
@@ -197,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_namespace() {
         let bus = EventBusHandle::new(100);
-        let ns = NamespaceId::from("ns1");
+        let ns = NamespaceId::new("ns1", 0);
 
         bus.publish(
             &ns,

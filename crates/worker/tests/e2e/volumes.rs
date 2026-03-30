@@ -1,6 +1,6 @@
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, PodId, VolumeMountSpec, VolumeSpec, VolumeType, WorkerCommand,
-    WorkerEvent, WorkerId,
+    ContainerConfig, ContainerSpec, NamespaceId, PodId, VolumeMountSpec, VolumeSpec, VolumeType,
+    WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -16,14 +16,14 @@ async fn test_empty_dir_volume() -> anyhow::Result<()> {
     let (mut conn, worker_handle) = setup().await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-vol".into(),
+        namespace_id: NamespaceId::new("ns-vol", 0),
         network: test_network_config(),
     })
     .await?;
 
     let event = recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
     assert!(
-        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == "ns-vol"),
+        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id.name() == "ns-vol"),
         "expected NamespaceCreated, got {:?}",
         event
     );
@@ -37,7 +37,7 @@ async fn test_empty_dir_volume() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-vol".into(),
+        namespace_id: NamespaceId::new("ns-vol", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {

@@ -2,7 +2,7 @@ use super::*;
 use crate::types::PressureBand;
 
 fn ns(name: &str) -> NamespaceId {
-    NamespaceId::from(name)
+    NamespaceId::new(name, 0)
 }
 
 #[test]

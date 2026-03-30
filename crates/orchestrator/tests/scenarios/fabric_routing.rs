@@ -120,7 +120,7 @@ fn test_route_miss_activates_dormant_workload() {
 
     // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: wl_ip,
         service_id: None,
     });
@@ -152,7 +152,7 @@ fn test_route_miss_activates_suspended_workload() {
 
     // Low-level: EndpointActivation with no service_id targets the pod IP (not service IP)
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: wl_ip,
         service_id: None,
     });
@@ -182,7 +182,7 @@ fn test_route_miss_ignored_when_already_running() {
     let cmds_before = h.worker(&w1).commands().len();
 
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: wl_ip,
         service_id: None,
     });
@@ -212,7 +212,7 @@ fn test_route_miss_ignored_for_unknown_ip() {
 
     // Low-level: testing with an IP that doesn't match any workload
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: Ipv4Addr::new(172, 16, 0, 99),
         service_id: None,
     });
@@ -237,7 +237,7 @@ fn test_route_miss_demand_leak() {
     // Low-level: testing exact demand leak behavior with endpoint activation interaction
     // Step 1: EndpointActivation (no service_id) activates the workload.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: wl_ip,
         service_id: None,
     });
@@ -246,7 +246,7 @@ fn test_route_miss_demand_leak() {
 
     // Step 2: EndpointActivation with service_id arrives (real traffic hits the service IP).
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
@@ -256,7 +256,7 @@ fn test_route_miss_demand_leak() {
 
     // Step 3: Signal no more demand → start idle timer.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandActive {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: wl_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
         active: false,

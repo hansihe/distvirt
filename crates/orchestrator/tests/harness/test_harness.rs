@@ -70,28 +70,45 @@ impl TestHarness {
     // Namespace lifecycle
     // =========================================================================
 
-    pub fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) -> IpAllocResult {
-        let namespace_id = NamespaceId::from(ns_id);
+    /// Resolve a namespace name to its full `NamespaceId` by scanning existing namespaces.
+    pub fn resolve_ns(&self, name: &str) -> NamespaceId {
         self.shell
-            .create_namespace(namespace_id.clone(), spec.network.clone());
+            .namespace_ids()
+            .find(|id| id.name() == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("namespace '{}' not found", name))
+    }
+
+    /// Try to resolve a namespace name; returns `None` if not found.
+    pub fn try_resolve_ns(&self, name: &str) -> Option<NamespaceId> {
+        self.shell
+            .namespace_ids()
+            .find(|id| id.name() == name)
+            .cloned()
+    }
+
+    pub fn create_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) -> IpAllocResult {
+        self.shell
+            .create_namespace(ns_id, spec.network.clone());
+        let namespace_id = self.resolve_ns(ns_id);
         let input = NamespaceSpecInput::from_resolved(&spec);
         self.shell.apply_full_spec(&namespace_id, input).unwrap()
     }
 
     pub fn update_namespace(&mut self, ns_id: &str, spec: NamespaceSpec) -> IpAllocResult {
-        let namespace_id = NamespaceId::from(ns_id);
+        let namespace_id = self.resolve_ns(ns_id);
         let input = NamespaceSpecInput::from_resolved(&spec);
         self.shell.apply_full_spec(&namespace_id, input).unwrap()
     }
 
     pub fn patch_namespace(&mut self, ns_id: &str, patch: crate::harness::NamespacePatch) -> IpAllocResult {
-        let namespace_id = NamespaceId::from(ns_id);
+        let namespace_id = self.resolve_ns(ns_id);
         let input = NamespacePatchInput::from_resolved(&patch);
         self.shell.apply_patch(&namespace_id, input).unwrap()
     }
 
     pub fn delete_namespace(&mut self, ns_id: &str) {
-        let namespace_id = NamespaceId::from(ns_id);
+        let namespace_id = self.resolve_ns(ns_id);
         self.shell.destroy_namespace(&namespace_id);
     }
 
@@ -117,8 +134,9 @@ impl TestHarness {
     // =========================================================================
 
     pub fn namespace(&self, ns_id: &str) -> &NamespaceUnit {
+        let namespace_id = self.resolve_ns(ns_id);
         self.shell
-            .namespace(&NamespaceId::from(ns_id))
+            .namespace(&namespace_id)
             .unwrap_or_else(|| panic!("namespace '{}' not found", ns_id))
     }
 
@@ -307,7 +325,7 @@ impl TestHarness {
         svc_id: &str,
         worker_id: &GlobalWorkerId,
     ) {
-        let namespace_id = NamespaceId::from(ns_id);
+        let namespace_id = self.resolve_ns(ns_id);
         let svc_ip = self.service_ip(ns_id, svc_id);
         let wl_name = self.workload_for_service(ns_id, svc_id);
 
@@ -339,7 +357,7 @@ impl TestHarness {
         svc_id: &str,
         worker_id: &GlobalWorkerId,
     ) {
-        let namespace_id = NamespaceId::from(ns_id);
+        let namespace_id = self.resolve_ns(ns_id);
         let svc_ip = self.service_ip(ns_id, svc_id);
 
         self.shell.queue_worker_event(
@@ -401,7 +419,7 @@ impl TestHarness {
             .workload_proto_pod_id(ns_id, wl_name)
             .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
         self.worker(worker_id).send_event(WorkerEvent::PodRunning {
-            namespace_id: ns_id.into(),
+            namespace_id: self.resolve_ns(ns_id),
             pod_id,
         });
         self.converge();
@@ -419,7 +437,7 @@ impl TestHarness {
             .workload_proto_pod_id(ns_id, wl_name)
             .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
         self.worker(worker_id).send_event(WorkerEvent::PodExited {
-            namespace_id: ns_id.into(),
+            namespace_id: self.resolve_ns(ns_id),
             pod_id,
             exit_code,
         });
@@ -438,7 +456,7 @@ impl TestHarness {
             .workload_proto_pod_id(ns_id, wl_name)
             .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
         self.worker(worker_id).send_event(WorkerEvent::PodFailed {
-            namespace_id: ns_id.into(),
+            namespace_id: self.resolve_ns(ns_id),
             pod_id,
             error: error.to_string(),
         });
@@ -477,20 +495,20 @@ impl TestHarness {
 
         self.worker(worker_id)
             .send_event(WorkerEvent::ArtifactWriteStarted {
-                namespace_id: ns_id.into(),
+                namespace_id: self.resolve_ns(ns_id),
                 artifact_id: artifact_id.clone(),
                 pool_id: "local".into(),
             });
         self.worker(worker_id)
             .send_event(WorkerEvent::ArtifactWriteCommitted {
-                namespace_id: ns_id.into(),
+                namespace_id: self.resolve_ns(ns_id),
                 artifact_id: artifact_id.clone(),
                 pool_id: "local".into(),
                 size_bytes: 1024,
             });
         self.worker(worker_id)
             .send_event(WorkerEvent::PodSuspended {
-                namespace_id: ns_id.into(),
+                namespace_id: self.resolve_ns(ns_id),
                 pod_id,
                 artifact_id,
                 artifact_size_bytes: 1024,
@@ -530,7 +548,7 @@ impl TestHarness {
             .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
         self.worker(worker_id)
             .send_event(WorkerEvent::PodMemoryConstrained {
-                namespace_id: ns_id.into(),
+                namespace_id: self.resolve_ns(ns_id),
                 pod_id,
                 reason,
             });
@@ -549,7 +567,7 @@ impl TestHarness {
             .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
         self.worker(worker_id)
             .send_event(WorkerEvent::PodMemoryConstraintCleared {
-                namespace_id: ns_id.into(),
+                namespace_id: self.resolve_ns(ns_id),
                 pod_id,
             });
         self.converge();
@@ -568,7 +586,7 @@ impl TestHarness {
             .unwrap_or_else(|| panic!("workload '{}/{}' has no pod_id", ns_id, wl_name));
         self.worker(worker_id)
             .send_event(WorkerEvent::PodOomKill {
-                namespace_id: ns_id.into(),
+                namespace_id: self.resolve_ns(ns_id),
                 pod_id,
                 count,
             });

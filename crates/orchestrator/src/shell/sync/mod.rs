@@ -397,16 +397,17 @@ impl SyncShell {
 
     pub fn create_namespace(
         &mut self,
-        namespace_id: NamespaceId,
+        namespace_name: impl Into<String>,
         network: distvirt_worker_protocol::NetworkConfig,
     ) {
         let (result, output) = self.core.create_namespace(CreateNamespaceInfo {
-            namespace_id: namespace_id.clone(),
+            namespace_name: namespace_name.into(),
             network,
         });
         self.route_orchestrator_output(output);
 
         if let Ok(creation_info) = result {
+            let namespace_id = creation_info.namespace_id.clone();
             // Construct the NamespaceUnit.
             let ns = NamespaceUnit::new(
                 namespace_id.clone(),

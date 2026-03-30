@@ -9,7 +9,7 @@ use crate::sm::{ServiceSm, ServiceSpec, WorkerInfo, WorkloadId, WorkloadSm};
 use crate::types::NamespaceId;
 
 fn ns(name: &str) -> NamespaceId {
-    NamespaceId::from(name)
+    NamespaceId::new(name, 0)
 }
 
 fn test_proto_worker_id(gid: GlobalWorkerId) -> distvirt_worker_protocol::WorkerId {

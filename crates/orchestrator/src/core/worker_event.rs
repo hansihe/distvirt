@@ -255,7 +255,7 @@ fn ns_event(
     kind: WorkerNamespaceEventKind,
 ) -> ClassifiedWorkerEvent {
     ClassifiedWorkerEvent::Namespace {
-        namespace_id: NamespaceId::from(proto_namespace_id.as_ref()),
+        namespace_id: proto_namespace_id.clone(),
         event: OrchestratorToNamespace::WorkerEvent(WorkerNamespaceEvent {
             worker_id,
             event: kind,
@@ -270,12 +270,12 @@ mod tests {
     #[test]
     fn pod_running_classifies_as_namespace() {
         let event = WorkerEvent::PodRunning {
-            namespace_id: distvirt_worker_protocol::NamespaceId::from("ns1"),
+            namespace_id: distvirt_worker_protocol::NamespaceId::new("ns1", 0),
             pod_id: distvirt_worker_protocol::PodId::from(1u64),
         };
         match classify(GlobalWorkerId::from(1), event) {
             ClassifiedWorkerEvent::Namespace { namespace_id, .. } => {
-                assert_eq!(namespace_id, NamespaceId::from("ns1"));
+                assert_eq!(namespace_id, NamespaceId::new("ns1", 0));
             }
             _ => panic!("expected Namespace"),
         }
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn artifact_write_classifies_as_scheduler() {
         let event = WorkerEvent::ArtifactWriteStarted {
-            namespace_id: distvirt_worker_protocol::NamespaceId::from("ns1"),
+            namespace_id: distvirt_worker_protocol::NamespaceId::new("ns1", 0),
             artifact_id: distvirt_worker_protocol::ArtifactId::from("1"),
             pool_id: distvirt_worker_protocol::PoolId::from("p1"),
         };

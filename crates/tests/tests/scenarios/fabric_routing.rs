@@ -2,8 +2,6 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use distvirt_orchestrator::core::{EndpointDemandSignal, WorkerNamespaceEventKind};
-use distvirt_orchestrator::types::NamespaceId;
-
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::activation_spec;
 
@@ -25,7 +23,7 @@ async fn test_route_miss_activates_dormant_workload_e2e() {
     cluster
         .shell
         .inject_namespace_event(
-            NamespaceId::from("ns"),
+            cluster.resolve_ns("ns"),
             w1,
             WorkerNamespaceEventKind::EndpointDemand {
                 ip: Ipv4Addr::new(172, 16, 0, 10),
@@ -64,7 +62,7 @@ async fn test_route_miss_activates_suspended_workload_e2e() {
     cluster
         .shell
         .inject_namespace_event(
-            NamespaceId::from("ns"),
+            cluster.resolve_ns("ns"),
             w1,
             WorkerNamespaceEventKind::EndpointDemand {
                 ip: Ipv4Addr::new(172, 16, 0, 10),

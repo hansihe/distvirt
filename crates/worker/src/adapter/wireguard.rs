@@ -38,6 +38,15 @@ struct PeerState {
 struct NamespaceChannel {
     adapter_tx: mpsc::Sender<Vec<u8>>,
     _egress_task: JoinHandle<()>,
+    /// Incarnation ID from the orchestrator — used to guard against stale
+    /// cleanup removing a newer channel for the same namespace name.
+    id: u64,
+}
+
+/// Request to remove a namespace channel, sent from `DropGuard::drop`.
+struct CleanupRequest {
+    namespace_name: String,
+    id: u64,
 }
 
 /// Shared mutable state for the WireGuard adapter.
@@ -59,8 +68,10 @@ pub struct WireGuardAdapter {
     state: Arc<RwLock<WireGuardState>>,
     udp_socket: Arc<UdpSocket>,
     public_key: [u8; 32],
+    cleanup_tx: mpsc::Sender<CleanupRequest>,
     _udp_recv_task: JoinHandle<()>,
     _timer_task: JoinHandle<()>,
+    _cleanup_task: JoinHandle<()>,
 }
 
 impl WireGuardAdapter {
@@ -100,12 +111,20 @@ impl WireGuardAdapter {
             Arc::clone(&udp_socket),
         ));
 
+        let (cleanup_tx, cleanup_rx) = mpsc::channel(64);
+        let cleanup_task = tokio::spawn(Self::cleanup_loop(
+            Arc::clone(&state),
+            cleanup_rx,
+        ));
+
         Ok(WireGuardAdapter {
             state,
             udp_socket,
             public_key: public_key_bytes,
+            cleanup_tx,
             _udp_recv_task: udp_recv_task,
             _timer_task: timer_task,
+            _cleanup_task: cleanup_task,
         })
     }
 
@@ -125,7 +144,7 @@ impl WireGuardAdapter {
     /// Add a WireGuard peer mapped to a namespace.
     pub async fn add_peer(
         &self,
-        namespace_id: &str,
+        namespace_id: &distvirt_worker_protocol::NamespaceId,
         public_key: [u8; 32],
         peer_ip: Ipv4Addr,
         preshared_key: Option<[u8; 32]>,
@@ -149,7 +168,7 @@ impl WireGuardAdapter {
 
         let peer = Arc::new(PeerState {
             tunn: Mutex::new(tunn),
-            namespace_id: namespace_id.to_string(),
+            namespace_id: namespace_id.name.clone(),
             peer_ip,
             endpoint: RwLock::new(None),
         });
@@ -158,7 +177,7 @@ impl WireGuardAdapter {
             "wireguard: added peer pubkey={} ip={} namespace={}",
             hex::encode(public_key),
             peer_ip,
-            namespace_id,
+            namespace_id.name,
         );
 
         state.peers_by_key.insert(public_key, peer);
@@ -476,6 +495,39 @@ impl WireGuardAdapter {
         }
     }
 
+    /// Cleanup loop: process namespace channel removal requests from DropGuards.
+    ///
+    /// By funnelling removals through a channel instead of spawning async tasks
+    /// from `Drop`, cleanup is ordered and can check the incarnation ID to avoid
+    /// removing a newer channel that replaced the one being dropped.
+    async fn cleanup_loop(
+        state: Arc<RwLock<WireGuardState>>,
+        mut cleanup_rx: mpsc::Receiver<CleanupRequest>,
+    ) {
+        while let Some(req) = cleanup_rx.recv().await {
+            let mut s = state.write().await;
+            if let Some(ch) = s.namespace_channels.get(&req.namespace_name) {
+                if ch.id == req.id {
+                    if let Some(ch) = s.namespace_channels.remove(&req.namespace_name) {
+                        ch._egress_task.abort();
+                        log::info!(
+                            "wireguard: removed namespace channel for '{}' (id={})",
+                            req.namespace_name,
+                            req.id,
+                        );
+                    }
+                } else {
+                    log::debug!(
+                        "wireguard: skipping stale cleanup for '{}' (requested id={}, current id={})",
+                        req.namespace_name,
+                        req.id,
+                        ch.id,
+                    );
+                }
+            }
+        }
+    }
+
     /// Egress task: read frames from the fabric and encrypt+send to peers.
     async fn egress_loop(
         state: Arc<RwLock<WireGuardState>>,
@@ -641,17 +693,19 @@ impl IngressAdapter for WireGuardAdapter {
 
     async fn create_port(
         &self,
-        namespace_id: &str,
+        namespace_id: &distvirt_worker_protocol::NamespaceId,
     ) -> anyhow::Result<(ChannelPort, AdapterPortHandle)> {
         let (port, adapter_tx, adapter_rx) = ChannelPort::new(256);
 
-        let ns_id = namespace_id.to_string();
+        let ns_id = namespace_id.name.clone();
         let egress_task = tokio::spawn(Self::egress_loop(
             Arc::clone(&self.state),
             Arc::clone(&self.udp_socket),
             adapter_rx,
             ns_id.clone(),
         ));
+
+        let ns_incarnation = namespace_id.id;
 
         // Store the namespace channel in state.
         {
@@ -661,14 +715,16 @@ impl IngressAdapter for WireGuardAdapter {
                 NamespaceChannel {
                     adapter_tx,
                     _egress_task: egress_task,
+                    id: ns_incarnation,
                 },
             );
         }
 
-        // Create a drop guard that removes the namespace channel.
+        // Create a drop guard that sends a cleanup request on drop.
         let drop_guard = DropGuard {
-            state: Arc::clone(&self.state),
-            namespace_id: ns_id,
+            cleanup_tx: self.cleanup_tx.clone(),
+            namespace_name: ns_id,
+            id: ns_incarnation,
         };
 
         let handle = AdapterPortHandle {
@@ -679,26 +735,24 @@ impl IngressAdapter for WireGuardAdapter {
     }
 }
 
-/// Drop guard that removes a namespace channel when the adapter port is dropped.
+/// Drop guard that sends a cleanup request when the adapter port is dropped.
+///
+/// Instead of spawning an async task from `Drop` (which races with re-creation),
+/// this sends a `CleanupRequest` on a channel. The cleanup loop checks the
+/// incarnation ID before removing, preventing stale cleanup from affecting a
+/// newer namespace channel.
 struct DropGuard {
-    state: Arc<RwLock<WireGuardState>>,
-    namespace_id: String,
+    cleanup_tx: mpsc::Sender<CleanupRequest>,
+    namespace_name: String,
+    id: u64,
 }
 
 impl Drop for DropGuard {
     fn drop(&mut self) {
-        let state = self.state.clone();
-        let ns_id = self.namespace_id.clone();
-        // Best-effort async cleanup from Drop.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let mut s = state.write().await;
-                if let Some(ch) = s.namespace_channels.remove(&ns_id) {
-                    ch._egress_task.abort();
-                    log::info!("wireguard: removed namespace channel for '{}'", ns_id);
-                }
-            });
-        }
+        let _ = self.cleanup_tx.try_send(CleanupRequest {
+            namespace_name: self.namespace_name.clone(),
+            id: self.id,
+        });
     }
 }
 
@@ -718,6 +772,7 @@ mod tests {
     use super::super::IngressAdapter;
     use super::*;
     use crate::fabric::port::FramePort;
+    use distvirt_worker_protocol::NamespaceId;
     use crate::packet::FABRIC_HDR_SZ;
     use boringtun::noise::{Tunn, TunnResult};
     use boringtun::x25519::{PublicKey, StaticSecret};
@@ -837,7 +892,7 @@ mod tests {
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
 
         let result = adapter
-            .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await;
         assert!(result.is_ok());
     }
@@ -848,7 +903,7 @@ mod tests {
         let client_pub = pubkey_bytes(&CLIENT_PRIVATE_KEY);
 
         adapter
-            .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add_peer failed");
 
@@ -871,12 +926,12 @@ mod tests {
         let pub2 = pubkey_bytes(&CLIENT2_PRIVATE_KEY);
 
         adapter
-            .add_peer("ns1", pub1, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), pub1, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add peer 1 failed");
 
         adapter
-            .add_peer("ns1", pub2, Ipv4Addr::new(10, 0, 0, 3), None)
+            .add_peer(&NamespaceId::new("ns1", 0), pub2, Ipv4Addr::new(10, 0, 0, 3), None)
             .await
             .expect("add peer 2 failed");
 
@@ -891,12 +946,12 @@ mod tests {
         let pub2 = pubkey_bytes(&CLIENT2_PRIVATE_KEY);
 
         adapter
-            .add_peer("ns1", pub1, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), pub1, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add peer ns1 failed");
 
         adapter
-            .add_peer("ns2", pub2, Ipv4Addr::new(10, 0, 0, 3), None)
+            .add_peer(&NamespaceId::new("ns2", 0), pub2, Ipv4Addr::new(10, 0, 0, 3), None)
             .await
             .expect("add peer ns2 failed");
 
@@ -919,7 +974,7 @@ mod tests {
     async fn test_create_port() {
         let adapter = make_adapter().await;
         let (_port, _handle) = adapter
-            .create_port("ns1")
+            .create_port(&NamespaceId::new("ns1", 0))
             .await
             .expect("create_port failed");
 
@@ -939,11 +994,11 @@ mod tests {
 
         // Create port + add peer.
         let (_port, _handle) = adapter
-            .create_port("ns1")
+            .create_port(&NamespaceId::new("ns1", 0))
             .await
             .expect("create_port failed");
         adapter
-            .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add_peer failed");
 
@@ -974,11 +1029,11 @@ mod tests {
         let port = adapter_port(&adapter);
 
         let (fabric_port, _handle) = adapter
-            .create_port("ns1")
+            .create_port(&NamespaceId::new("ns1", 0))
             .await
             .expect("create_port failed");
         adapter
-            .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add_peer failed");
 
@@ -1037,11 +1092,11 @@ mod tests {
         let port = adapter_port(&adapter);
 
         let (fabric_port, _handle) = adapter
-            .create_port("ns1")
+            .create_port(&NamespaceId::new("ns1", 0))
             .await
             .expect("create_port failed");
         adapter
-            .add_peer("ns1", client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
+            .add_peer(&NamespaceId::new("ns1", 0), client_pub, Ipv4Addr::new(10, 0, 0, 2), None)
             .await
             .expect("add_peer failed");
 

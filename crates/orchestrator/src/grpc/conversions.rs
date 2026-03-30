@@ -414,7 +414,7 @@ pub(super) fn convert_status_report(report: NamespaceStatusReport) -> proto::Nam
     }
 
     proto::NamespaceStatusReport {
-        namespace_id: report.namespace_id.0,
+        namespace_id: report.namespace_id.name.clone(),
         state: convert_namespace_state(&report.status),
         workloads,
         services,

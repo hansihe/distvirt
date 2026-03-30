@@ -36,6 +36,11 @@ pub struct OrchestratorCore {
 
     /// Known namespace IDs (for fan-out on worker connect/disconnect).
     namespace_ids: HashSet<NamespaceId>,
+    /// Namespace name → NamespaceId mapping for duplicate detection.
+    namespace_names: HashMap<String, NamespaceId>,
+
+    /// Monotonically increasing counter for assigning unique namespace IDs.
+    next_namespace_id: u64,
 
     /// Segment ID allocator.
     next_segment_id: u16,
@@ -63,6 +68,8 @@ impl OrchestratorCore {
             timer_config,
             connected_workers: HashMap::new(),
             namespace_ids: HashSet::new(),
+            namespace_names: HashMap::new(),
+            next_namespace_id: 1,
             next_segment_id: 1, // segment 0 is reserved
             active_segment_ids: BTreeSet::new(),
             namespace_segments: HashMap::new(),
@@ -223,12 +230,16 @@ impl OrchestratorCore {
         &mut self,
         info: CreateNamespaceInfo,
     ) -> (Result<NamespaceCreationInfo, ClientError>, OrchestratorOutput) {
-        if self.namespace_ids.contains(&info.namespace_id) {
+        if self.namespace_names.contains_key(&info.namespace_name) {
             return (
                 Err(ClientError::NamespaceAlreadyExists),
                 OrchestratorOutput::default(),
             );
         }
+
+        // Assign a unique namespace ID.
+        let namespace_id = NamespaceId::new(info.namespace_name.clone(), self.next_namespace_id);
+        self.next_namespace_id += 1;
 
         let mut output = OrchestratorOutput::default();
 
@@ -236,20 +247,22 @@ impl OrchestratorCore {
         let mut network = info.network;
         network.segment_id = Some(segment_id);
         self.namespace_segments
-            .insert(info.namespace_id.clone(), segment_id);
+            .insert(namespace_id.clone(), segment_id);
         self.namespace_networks
-            .insert(info.namespace_id.clone(), network.clone());
-        self.namespace_ids.insert(info.namespace_id.clone());
+            .insert(namespace_id.clone(), network.clone());
+        self.namespace_ids.insert(namespace_id.clone());
+        self.namespace_names
+            .insert(info.namespace_name, namespace_id.clone());
 
         let ws_effects =
             self.worker_state
                 .process(WorkerStateCoreEvent::RegisterNamespaceSegment {
-                    namespace_id: info.namespace_id.clone(),
+                    namespace_id: namespace_id.clone(),
                     segment_id,
                 });
         self.route_worker_state_effects(ws_effects, &mut output);
 
-        let registry = self.id_registry_map.get_or_create(&info.namespace_id);
+        let registry = self.id_registry_map.get_or_create(&namespace_id);
 
         // Build connected worker summaries and direct CreateNamespace commands.
         let connected_workers: Vec<ConnectedWorkerSummary> = self
@@ -267,7 +280,7 @@ impl OrchestratorCore {
             output.direct_worker_commands.push(DirectWorkerCommand {
                 worker_id: summary.worker_id,
                 command: distvirt_worker_protocol::WorkerCommand::CreateNamespace {
-                    namespace_id: info.namespace_id.clone(),
+                    namespace_id: namespace_id.clone(),
                     network: network.clone(),
                 },
             });
@@ -276,12 +289,13 @@ impl OrchestratorCore {
                 self.worker_state
                     .process(WorkerStateCoreEvent::NamespaceAssigned {
                         worker_id: summary.worker_id,
-                        namespace_id: info.namespace_id.clone(),
+                        namespace_id: namespace_id.clone(),
                     });
             self.route_worker_state_effects(ws_effects, &mut output);
         }
 
         let creation_info = NamespaceCreationInfo {
+            namespace_id,
             network,
             id_registry: registry,
             timer_config: self.timer_config.clone(),
@@ -304,6 +318,7 @@ impl OrchestratorCore {
         if !self.namespace_ids.remove(namespace_id) {
             return (Err(ClientError::NamespaceNotFound), output);
         }
+        self.namespace_names.remove(&namespace_id.name);
 
         if let Some(segment_id) = self.namespace_segments.remove(namespace_id) {
             self.free_segment_id(segment_id);

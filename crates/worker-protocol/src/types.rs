@@ -55,7 +55,35 @@ macro_rules! define_u64_id_newtype {
     };
 }
 
-define_string_id_newtype!(NamespaceId);
+/// Composite namespace identifier: a human-readable name plus a unique
+/// incarnation ID assigned by the orchestrator. Two `NamespaceId` values
+/// with the same `name` but different `id` values represent different
+/// lifecycle incarnations of the same logical namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NamespaceId {
+    pub name: String,
+    pub id: u64,
+}
+
+impl NamespaceId {
+    pub fn new(name: impl Into<String>, id: u64) -> Self {
+        NamespaceId {
+            name: name.into(),
+            id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl fmt::Display for NamespaceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.name, self.id)
+    }
+}
+
 define_string_id_newtype!(PoolId);
 define_string_id_newtype!(ArtifactId);
 

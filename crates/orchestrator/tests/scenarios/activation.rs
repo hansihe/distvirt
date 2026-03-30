@@ -59,7 +59,7 @@ fn test_activation_pending_condition_lifecycle() {
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1)
         .send_event(WorkerEvent::EndpointDemandTraffic {
-            namespace_id: "ns".into(),
+            namespace_id: h.resolve_ns("ns"),
             ip: svc_ip,
             service_id: Some(h.proto_service_id("ns", "web-svc")),
         });
@@ -75,7 +75,7 @@ fn test_activation_pending_condition_lifecycle() {
         .workload_proto_pod_id("ns", "web")
         .expect("expected pod_id");
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         pod_id,
     });
     h.converge();
@@ -92,7 +92,7 @@ fn test_activation_pending_condition_lifecycle() {
 
     // Re-activate — ResumePod is also hung, so condition should reappear.
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
@@ -121,7 +121,7 @@ fn test_activation_pending_in_status_report() {
     // Send activation manually so we can observe mid-flow.
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
@@ -139,7 +139,7 @@ fn test_activation_pending_in_status_report() {
         .workload_proto_pod_id("ns", "web")
         .expect("expected pod_id");
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         pod_id,
     });
     h.converge();

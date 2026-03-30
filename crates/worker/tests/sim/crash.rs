@@ -65,7 +65,7 @@ async fn test_sim_worker_health_after_crash() -> anyhow::Result<()> {
 
     // The RunUntilSignaled pod is running; stop it gracefully.
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(2),
         graceful: true,
     })

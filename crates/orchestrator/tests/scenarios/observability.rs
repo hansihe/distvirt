@@ -7,7 +7,7 @@ use distvirt_orchestrator::adapter::observability::{
     EndpointEventKind, ObservabilityEvent, PodEventKind, WorkloadEventKind,
 };
 use distvirt_orchestrator::sm::{PodStatus, WlStatus, endpoint::EndpointStatus};
-use distvirt_worker_protocol::{MemoryConstraintReason, NamespaceId};
+use distvirt_worker_protocol::MemoryConstraintReason;
 
 use distvirt_orchestrator::shell::sync::MockWorkerConfig;
 
@@ -16,16 +16,18 @@ use crate::harness::TestHarness;
 
 /// Drain all events currently in the event bus for a namespace.
 fn drain_events(h: &TestHarness, ns_id: &str) -> Vec<ObservabilityEvent> {
-    let (historical, _rx) = h.shell.event_bus().subscribe(&NamespaceId::from(ns_id));
+    let namespace_id = h.resolve_ns(ns_id);
+    let (historical, _rx) = h.shell.event_bus().subscribe(&namespace_id);
     historical
 }
 
 /// Check that the IdRegistry resolves a workload name for the given namespace.
 fn assert_registry_has_workload(h: &TestHarness, ns_id: &str, wl_name: &str) {
+    let namespace_id = h.resolve_ns(ns_id);
     let registry = h
         .shell
         .id_registry_map()
-        .get(&NamespaceId::from(ns_id))
+        .get(&namespace_id)
         .expect("namespace should have a registry");
     let ns = h.namespace(ns_id);
     let wl_id = ns.management().lookup_workload(wl_name).unwrap();
@@ -123,7 +125,8 @@ fn test_activation_cycle_events() {
     h.assert_workload_dormant("ns", "web");
 
     // Subscribe to events *before* activation so we capture the full cycle.
-    let (pre_events, mut rx) = h.shell.event_bus().subscribe(&NamespaceId::from("ns"));
+    let ns_resolved = h.resolve_ns("ns");
+    let (pre_events, mut rx) = h.shell.event_bus().subscribe(&ns_resolved);
     // Pre-events should be empty or minimal (no lifecycle yet for dormant workload).
     drop(pre_events);
 
@@ -235,7 +238,7 @@ fn test_activation_cycle_events() {
     let registry = h
         .shell
         .id_registry_map()
-        .get(&NamespaceId::from("ns"))
+        .get(&h.resolve_ns("ns"))
         .unwrap();
     let ns = h.namespace("ns");
     let svc_id = ns.management().lookup_service("web-svc").unwrap();
@@ -255,7 +258,7 @@ fn test_memory_constraint_events() {
     h.assert_workload_running("ns", "echo");
 
     // Subscribe to events before injecting memory events.
-    let (_pre, mut rx) = h.shell.event_bus().subscribe(&NamespaceId::from("ns"));
+    let (_pre, mut rx) = h.shell.event_bus().subscribe(&h.resolve_ns("ns"));
 
     // 1. Inject PodMemoryConstrained (balloon exhausted).
     h.inject_pod_memory_constrained(
@@ -331,7 +334,7 @@ fn test_memory_constraint_deflation_stalled() {
     h.create_namespace("ns", always_on_spec());
     h.assert_workload_running("ns", "echo");
 
-    let (_pre, mut rx) = h.shell.event_bus().subscribe(&NamespaceId::from("ns"));
+    let (_pre, mut rx) = h.shell.event_bus().subscribe(&h.resolve_ns("ns"));
 
     // Inject DeflationStalled variant.
     h.inject_pod_memory_constrained(

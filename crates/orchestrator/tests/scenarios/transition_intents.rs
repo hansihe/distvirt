@@ -26,7 +26,7 @@ fn test_demand_during_suspend_immediate_resume() {
     // Inject demand (EndpointActivation) while suspending
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
@@ -75,13 +75,16 @@ fn test_force_deactivate_during_launch() {
         .workload_proto_pod_id("ns", "echo")
         .expect("expected pod_id");
 
+    // Capture namespace ID before deleting.
+    let ns_id = h.resolve_ns("ns");
+
     // Delete namespace to force demand down
     h.delete_namespace("ns");
     h.converge();
 
     // Low-level: inject PodRunning (from the previous launch)
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
+        namespace_id: ns_id,
         pod_id,
     });
     h.converge();
@@ -120,7 +123,7 @@ fn test_demand_up_during_resume() {
     // Low-level: activate via svc-a → triggers resume (but handler hangs on ResumePod)
     let svc_a_ip = h.service_ip("ns", "svc-a");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_a_ip,
         service_id: Some(h.proto_service_id("ns", "svc-a")),
     });
@@ -130,7 +133,7 @@ fn test_demand_up_during_resume() {
     // Low-level: activate svc-b too (second demand while resuming)
     let svc_b_ip = h.service_ip("ns", "svc-b");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_b_ip,
         service_id: Some(h.proto_service_id("ns", "svc-b")),
     });

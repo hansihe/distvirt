@@ -384,7 +384,7 @@ mod tests {
         let addr_b = mgr_b.transport().local_addr().unwrap();
 
         let segment_id = 42u16;
-        let ns_id = NamespaceId::from("test-ns");
+        let ns_id = NamespaceId::new("test-ns", 0);
 
         // Create fabrics for each side.
         let fabric_a = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
@@ -442,7 +442,7 @@ mod tests {
         let addr_b = mgr_b.transport().local_addr().unwrap();
 
         let segment_id = 42u16;
-        let ns_id = NamespaceId::from("test-ns");
+        let ns_id = NamespaceId::new("test-ns", 0);
 
         let fabric_a = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let fabric_b = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
@@ -502,7 +502,7 @@ mod tests {
             .unwrap();
 
         let segment_id = 10u16;
-        let ns_id = NamespaceId::from("test-ns");
+        let ns_id = NamespaceId::new("test-ns", 0);
         let fabric = Arc::new(Fabric::<FabricPort>::new(Ipv4Addr::new(10, 0, 0, 0), 24));
 
         mgr.on_namespace_created(&ns_id, segment_id, &fabric);

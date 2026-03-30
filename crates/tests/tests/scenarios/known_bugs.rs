@@ -1,8 +1,6 @@
 use std::time::Duration;
 
 use distvirt_orchestrator::core::{EndpointDemandSignal, WorkerNamespaceEventKind};
-use distvirt_orchestrator::types::*;
-
 use crate::harness::TestCluster;
 use crate::harness::spec_builders::activation_spec;
 
@@ -32,7 +30,7 @@ async fn test_endpoint_flow_status_via_service_id() {
     cluster
         .shell
         .inject_namespace_event(
-            NamespaceId::from("ns"),
+            cluster.resolve_ns("ns"),
             w1,
             WorkerNamespaceEventKind::EndpointDemand {
                 ip: service_ip,

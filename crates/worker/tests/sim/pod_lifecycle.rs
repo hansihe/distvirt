@@ -30,14 +30,14 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
 
     // Create namespace
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
 
     let event = recv_event_timeout(&mut conn, EVENT_TIMEOUT).await?;
     assert!(
-        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == "ns-sim"),
+        matches!(&event, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id.name() == "ns-sim"),
         "expected NamespaceCreated, got {:?}",
         event
     );
@@ -53,7 +53,7 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
 
     // Launch pod
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -83,7 +83,7 @@ async fn test_sim_pod_lifecycle() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::PodRunning { namespace_id, pod_id }
-            if namespace_id == "ns-sim" && *pod_id == PodId(1)),
+            if namespace_id.name() == "ns-sim" && *pod_id == PodId(1)),
         "unexpected event: {:?}",
         event
     );
@@ -111,7 +111,7 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
         setup_with_behavior(ContainerBehavior::ExitImmediately(42)).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
@@ -130,7 +130,7 @@ async fn test_sim_pod_exit_code() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -173,7 +173,7 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
@@ -192,7 +192,7 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -221,7 +221,7 @@ async fn test_sim_stop_pod_graceful() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: true,
     })
@@ -248,7 +248,7 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
@@ -267,7 +267,7 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -296,7 +296,7 @@ async fn test_sim_stop_pod_force() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: false,
     })
@@ -314,7 +314,7 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
         setup_with_behavior(ContainerBehavior::RunUntilSignaled).await?;
 
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         network: test_network_config(),
     })
     .await?;
@@ -333,7 +333,7 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: test_pod_network_config(),
         containers: vec![ContainerSpec {
@@ -362,7 +362,7 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
     .await?;
 
     conn.send_command(&WorkerCommand::DestroyNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
     })
     .await?;
 
@@ -381,7 +381,7 @@ async fn test_sim_destroy_namespace() -> anyhow::Result<()> {
     })
     .await?;
     assert!(
-        matches!(&event, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id == "ns-sim"),
+        matches!(&event, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id.name() == "ns-sim"),
         "expected NamespaceDestroyed for ns-sim, got {:?}",
         event
     );
@@ -404,7 +404,7 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
     // Register and launch both pods without waiting between them
     register_pod_endpoint(&mut conn, "ns-sim", &net1, WorkerId(1)).await?;
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: net1,
         containers: vec![default_container_spec()],
@@ -415,7 +415,7 @@ async fn test_sim_multiple_pods_same_namespace() -> anyhow::Result<()> {
 
     register_pod_endpoint(&mut conn, "ns-sim", &net2, WorkerId(1)).await?;
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(2),
         network: net2,
         containers: vec![default_container_spec()],
@@ -470,14 +470,14 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
 
     // Destroy ns-a only
     conn.send_command(&WorkerCommand::DestroyNamespace {
-        namespace_id: "ns-a".into(),
+        namespace_id: NamespaceId::new("ns-a", 0),
     })
     .await?;
 
     // Expect pod termination for ns-a
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodExited { namespace_id, .. } | WorkerEvent::PodFailed { namespace_id, .. }
-            if namespace_id == "ns-a")
+            if namespace_id.name() == "ns-a")
     })
     .await?;
 
@@ -485,13 +485,13 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
     recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id == "ns-a"),
+        |e| matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id.name() == "ns-a"),
     )
     .await?;
 
     // ns-b pod should still be running — stop it gracefully
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-b".into(),
+        namespace_id: NamespaceId::new("ns-b", 0),
         pod_id: PodId(2),
         graceful: true,
     })
@@ -500,7 +500,7 @@ async fn test_sim_multiple_namespaces() -> anyhow::Result<()> {
     recv_until(
         &mut conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::PodExited { namespace_id, .. } if namespace_id == "ns-b"),
+        |e| matches!(e, WorkerEvent::PodExited { namespace_id, .. } if namespace_id.name() == "ns-b"),
     )
     .await?;
 
@@ -519,7 +519,7 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
     register_pod_endpoint(&mut conn, "ns-sim", &pod_net, WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: pod_net,
         containers: vec![default_container_spec()],
@@ -530,7 +530,7 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
 
     // Immediately destroy the namespace before waiting for PodRunning
     conn.send_command(&WorkerCommand::DestroyNamespace {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
     })
     .await?;
 
@@ -544,7 +544,7 @@ async fn test_sim_rapid_create_destroy() -> anyhow::Result<()> {
     .await?;
 
     recv_until(&mut conn, EVENT_TIMEOUT, |e| {
-        matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id == "ns-sim")
+        matches!(e, WorkerEvent::NamespaceDestroyed { namespace_id } if namespace_id.name() == "ns-sim")
     })
     .await?;
 
@@ -563,7 +563,7 @@ async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
     register_pod_endpoint(&mut conn, "ns-sim", &pod_net, WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         network: pod_net,
         containers: vec![default_container_spec()],
@@ -574,7 +574,7 @@ async fn test_sim_stop_during_launch() -> anyhow::Result<()> {
 
     // Immediately stop before waiting for PodRunning
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: true,
     })
@@ -607,7 +607,7 @@ async fn test_sim_double_stop() -> anyhow::Result<()> {
 
     // First stop
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: true,
     })
@@ -620,7 +620,7 @@ async fn test_sim_double_stop() -> anyhow::Result<()> {
 
     // Second stop — should be silently ignored, no panic
     conn.send_command(&WorkerCommand::StopPod {
-        namespace_id: "ns-sim".into(),
+        namespace_id: NamespaceId::new("ns-sim", 0),
         pod_id: PodId(1),
         graceful: true,
     })
@@ -644,7 +644,7 @@ async fn test_sim_commands_after_shutdown() -> anyhow::Result<()> {
     // We tolerate send failures since the worker may have closed its half.
     let _ = conn
         .send_command(&WorkerCommand::CreateNamespace {
-            namespace_id: "ns-extra".into(),
+            namespace_id: NamespaceId::new("ns-extra", 0),
             network: test_network_config(),
         })
         .await;

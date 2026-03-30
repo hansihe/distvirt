@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, NetworkConfig, PodId, PodNetworkConfig, PoolId, PoolInfo,
-    WorkerCommand, WorkerEvent, WorkerId,
+    ContainerConfig, ContainerSpec, NamespaceId, NetworkConfig, PodId, PodNetworkConfig, PoolId,
+    PoolInfo, WorkerCommand, WorkerEvent, WorkerId,
 };
 
 use super::common::*;
@@ -52,7 +52,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     // --- Create namespace on worker A ---
     conn_a
         .send_command(&WorkerCommand::CreateNamespace {
-            namespace_id: "ns-shared".into(),
+            namespace_id: NamespaceId::new("ns-shared", 0),
             network: network.clone(),
         })
         .await?;
@@ -67,7 +67,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
 
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
-            namespace_id: "ns-shared".into(),
+            namespace_id: NamespaceId::new("ns-shared", 0),
             pod_id: PodId(1),
             network: pod_network.clone(),
             containers: vec![ContainerSpec {
@@ -101,7 +101,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     // --- Suspend pod on worker A into the shared pool ---
     conn_a
         .send_command(&WorkerCommand::SuspendPod {
-            namespace_id: "ns-shared".into(),
+            namespace_id: NamespaceId::new("ns-shared", 0),
             pod_id: PodId(1),
             artifact_id: "snap-shared".into(),
             pool_id: shared_pool_id.clone(),
@@ -115,7 +115,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteStarted { namespace_id, artifact_id, pool_id }
-            if namespace_id == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared"),
+            if namespace_id.name() == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared"),
         "unexpected ArtifactWriteStarted: {:?}",
         event
     );
@@ -127,7 +127,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(&event, WorkerEvent::ArtifactWriteCommitted { namespace_id, artifact_id, pool_id, size_bytes }
-            if namespace_id == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared" && *size_bytes > 0),
+            if namespace_id.name() == "ns-shared" && artifact_id == "snap-shared" && pool_id.as_ref() == "shared" && *size_bytes > 0),
         "unexpected ArtifactWriteCommitted: {:?}",
         event
     );
@@ -166,7 +166,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     // --- Create namespace on worker B ---
     conn_b
         .send_command(&WorkerCommand::CreateNamespace {
-            namespace_id: "ns-shared".into(),
+            namespace_id: NamespaceId::new("ns-shared", 0),
             network: network.clone(),
         })
         .await?;
@@ -181,7 +181,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
 
     conn_b
         .send_command(&WorkerCommand::ResumePod {
-            namespace_id: "ns-shared".into(),
+            namespace_id: NamespaceId::new("ns-shared", 0),
             pod_id: PodId(2),
             artifact_id: "snap-shared".into(),
             network: pod_network,
@@ -200,7 +200,7 @@ async fn test_cross_worker_shared_pool_resume() -> anyhow::Result<()> {
     // --- Stop pod on worker B ---
     conn_b
         .send_command(&WorkerCommand::StopPod {
-            namespace_id: "ns-shared".into(),
+            namespace_id: NamespaceId::new("ns-shared", 0),
             pod_id: PodId(2),
             graceful: true,
         })

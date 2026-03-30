@@ -97,7 +97,7 @@ fn test_worker_disconnect_during_resume() {
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1)
         .send_event(distvirt_worker_protocol::WorkerEvent::EndpointDemandTraffic {
-            namespace_id: "ns".into(),
+            namespace_id: h.resolve_ns("ns"),
             ip: svc_ip,
             service_id: Some(h.proto_service_id("ns", "web-svc")),
         });

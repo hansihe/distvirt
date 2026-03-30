@@ -348,7 +348,7 @@ mod tests {
         seq: u64,
     ) -> LogChunk {
         LogChunk {
-            namespace_id: NamespaceId::from(ns),
+            namespace_id: NamespaceId::new(ns, 0),
             pod_id: PodId::from(pod),
             container_id: container.to_string(),
             workload_name: None,
@@ -368,7 +368,7 @@ mod tests {
         bus.publish(make_chunk("ns2", 2, "main", b"other namespace"), None);
 
         // Subscribe to ns1.
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         assert_eq!(historical.len(), 2);
         assert_eq!(historical[0].data, b"hello ");
         assert_eq!(historical[1].data, b"world");
@@ -382,7 +382,7 @@ mod tests {
         bus.publish(make_chunk("ns1", 1, "main", b"before"), None);
 
         // Subscribe.
-        let (_historical, mut rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (_historical, mut rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
 
         // Publish after subscribing.
         bus.publish(make_chunk("ns1", 1, "main", b"live"), None);
@@ -399,7 +399,7 @@ mod tests {
         bus.publish(make_chunk("ns1", 1, "main", b"67890"), None); // 5 bytes, total 10
         bus.publish(make_chunk("ns1", 1, "main", b"abcde"), None); // 5 bytes, evicts first
 
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         assert_eq!(historical.len(), 2);
         assert_eq!(historical[0].data, b"67890");
         assert_eq!(historical[1].data, b"abcde");
@@ -413,7 +413,7 @@ mod tests {
         bus.publish(make_chunk("ns1", 1, "main", b"init"), None);
 
         // Subscribe.
-        let (_historical, rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (_historical, rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
 
         // Publish more than the channel can hold — should not block.
         let send_count = SUBSCRIBER_CHANNEL_CAPACITY + 100;
@@ -438,7 +438,7 @@ mod tests {
         bus.publish(make_chunk("ns1", 1, "main", b"init"), None);
 
         // Subscribe.
-        let (_historical, mut rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (_historical, mut rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
 
         // Fill the channel beyond capacity.
         let send_count = SUBSCRIBER_CHANNEL_CAPACITY + 100;
@@ -467,7 +467,7 @@ mod tests {
 
         // Subscribe with filter for pod 1.
         let (historical, _rx) = bus.subscribe(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             Some(&[PodId::from(1)]),
             None,
         );
@@ -484,7 +484,7 @@ mod tests {
 
         // Filter to just the "main" container.
         let (historical, _rx) = bus.subscribe(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             None,
             Some(&["main".to_string()]),
         );
@@ -493,7 +493,7 @@ mod tests {
 
         // Filter to just the "sidecar" container.
         let (historical, _rx) = bus.subscribe(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             None,
             Some(&["sidecar".to_string()]),
         );
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(historical[0].data, b"from sidecar");
 
         // No container filter returns both.
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         assert_eq!(historical.len(), 2);
     }
 
@@ -510,9 +510,9 @@ mod tests {
         let bus = LogBusHandle::new(1024);
 
         bus.publish(make_chunk("ns1", 1, "main", b"data"), None);
-        bus.remove_namespace(&NamespaceId::from("ns1"));
+        bus.remove_namespace(&NamespaceId::new("ns1", 0));
 
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         assert!(historical.is_empty());
     }
 
@@ -525,7 +525,7 @@ mod tests {
             Some("my-app".to_string()),
         );
 
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         assert_eq!(historical.len(), 1);
         assert_eq!(historical[0].workload_name.as_deref(), Some("my-app"));
     }
@@ -542,7 +542,7 @@ mod tests {
             Some("my-app".to_string()),
         );
 
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         // First chunk won't have workload_name (was published before backfill).
         assert_eq!(historical[0].workload_name, None);
         // Second chunk has it because publish stamps it from the topic's metadata.
@@ -569,7 +569,7 @@ mod tests {
         );
 
         let (historical, _rx) =
-            bus.subscribe_by_workload(&NamespaceId::from("ns1"), "my-app", None);
+            bus.subscribe_by_workload(&NamespaceId::new("ns1", 0), "my-app", None);
         assert_eq!(historical.len(), 2);
         let data: Vec<&[u8]> = historical.iter().map(|c| c.data.as_slice()).collect();
         assert!(data.contains(&b"pod1-data".as_slice()));
@@ -588,7 +588,7 @@ mod tests {
 
         // Subscribe by workload.
         let (_historical, mut rx) =
-            bus.subscribe_by_workload(&NamespaceId::from("ns1"), "my-app", None);
+            bus.subscribe_by_workload(&NamespaceId::new("ns1", 0), "my-app", None);
 
         // Publish to a NEW pod for the same workload — should be auto-registered.
         bus.publish(
@@ -616,7 +616,7 @@ mod tests {
 
         // Subscribe by workload — registers standing subscription.
         let (_historical, mut rx) =
-            bus.subscribe_by_workload(&NamespaceId::from("ns1"), "my-app", None);
+            bus.subscribe_by_workload(&NamespaceId::new("ns1", 0), "my-app", None);
 
         // New pod's log stream opens before registry is populated.
         // First chunk arrives with workload_name=None.
@@ -650,7 +650,7 @@ mod tests {
         );
 
         let (historical, _rx) = bus.subscribe_by_workload(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             "my-app",
             Some(&["main".to_string()]),
         );
@@ -664,13 +664,13 @@ mod tests {
 
         bus.publish(make_chunk("ns1", 1, "main", b"data"), None);
         bus.retire_topic(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             &PodId::from(1u64),
             "main",
         );
 
         // Retired topic is still queryable.
-        let (historical, _rx) = bus.subscribe(&NamespaceId::from("ns1"), None, None);
+        let (historical, _rx) = bus.subscribe(&NamespaceId::new("ns1", 0), None, None);
         assert_eq!(historical.len(), 1);
         assert_eq!(historical[0].data, b"data");
     }
@@ -681,7 +681,7 @@ mod tests {
 
         bus.publish(make_chunk("ns1", 1, "main", b"data"), None);
         bus.retire_topic(
-            &NamespaceId::from("ns1"),
+            &NamespaceId::new("ns1", 0),
             &PodId::from(1u64),
             "main",
         );
@@ -692,7 +692,7 @@ mod tests {
         // Verify topic is no longer retired (check internal state).
         let inner = bus.inner.lock().unwrap();
         let key = (
-            NamespaceId::from("ns1"),
+            NamespaceId::new("ns1", 0),
             PodId::from(1u64),
             "main".to_string(),
         );
@@ -709,9 +709,9 @@ mod tests {
         );
 
         let (_historical, _rx) =
-            bus.subscribe_by_workload(&NamespaceId::from("ns1"), "my-app", None);
+            bus.subscribe_by_workload(&NamespaceId::new("ns1", 0), "my-app", None);
 
-        bus.remove_namespace(&NamespaceId::from("ns1"));
+        bus.remove_namespace(&NamespaceId::new("ns1", 0));
 
         let inner = bus.inner.lock().unwrap();
         assert!(inner.topics.is_empty());

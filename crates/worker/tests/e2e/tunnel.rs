@@ -2,8 +2,8 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use distvirt_worker_protocol::{
-    ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig,
-    OrchestratorConnection, PodId, PodNetworkConfig, WorkerAccepted, WorkerCommand,
+    ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NamespaceId,
+    NetworkConfig, OrchestratorConnection, PodId, PodNetworkConfig, WorkerAccepted, WorkerCommand,
     WorkerConnection, WorkerEvent, WorkerHello, WorkerId, WorkerPeerInfo, WorkerReady,
 };
 
@@ -135,7 +135,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     // --- Create namespaces with same segment_id ---
     conn_a
         .send_command(&WorkerCommand::CreateNamespace {
-            namespace_id: "ns-tunnel".into(),
+            namespace_id: NamespaceId::new("ns-tunnel", 0),
             network: NetworkConfig {
                 subnet: Ipv4Addr::new(10, 0, 0, 0),
                 gateway: Ipv4Addr::new(10, 0, 0, 1),
@@ -147,7 +147,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
 
     conn_b
         .send_command(&WorkerCommand::CreateNamespace {
-            namespace_id: "ns-tunnel".into(),
+            namespace_id: NamespaceId::new("ns-tunnel", 0),
             network: NetworkConfig {
                 subnet: Ipv4Addr::new(10, 0, 0, 0),
                 gateway: Ipv4Addr::new(10, 0, 0, 1),
@@ -195,7 +195,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
 
     conn_a
         .send_command(&WorkerCommand::EndpointSync {
-            namespace_id: "ns-tunnel".into(),
+            namespace_id: NamespaceId::new("ns-tunnel", 0),
             endpoints: vec![EndpointSpec {
                 ip: pod_b_ip,
                 kind: EndpointKind::Pod {
@@ -209,7 +209,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
 
     conn_b
         .send_command(&WorkerCommand::EndpointSync {
-            namespace_id: "ns-tunnel".into(),
+            namespace_id: NamespaceId::new("ns-tunnel", 0),
             endpoints: vec![EndpointSpec {
                 ip: pod_a_ip,
                 kind: EndpointKind::Pod {
@@ -233,7 +233,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     // --- Launch pod-B: a long-running process so the fabric has a destination ---
     conn_b
         .send_command(&WorkerCommand::LaunchPod {
-            namespace_id: "ns-tunnel".into(),
+            namespace_id: NamespaceId::new("ns-tunnel", 0),
             pod_id: PodId(2),
             network: PodNetworkConfig {
                 ip: pod_b_ip,
@@ -280,7 +280,7 @@ async fn test_cross_worker_tunnel_ping() -> anyhow::Result<()> {
     // --- Launch pod-A: ping pod-B's IP through the tunnel ---
     conn_a
         .send_command(&WorkerCommand::LaunchPod {
-            namespace_id: "ns-tunnel".into(),
+            namespace_id: NamespaceId::new("ns-tunnel", 0),
             pod_id: PodId(1),
             network: PodNetworkConfig {
                 ip: pod_a_ip,

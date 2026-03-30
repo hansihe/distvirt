@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub use distvirt_worker_protocol::NamespaceId;
 use distvirt_worker_protocol::{
     ContainerConfig, ContainerSpec, EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig,
     OrchestratorConnection, PodId, PodNetworkConfig, PoolId, WorkerAccepted, WorkerCommand,
@@ -161,7 +162,7 @@ pub async fn create_namespace(
     network: NetworkConfig,
 ) -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::CreateNamespace {
-        namespace_id: ns_id.into(),
+        namespace_id: NamespaceId::new(ns_id, 0),
         network,
     })
     .await?;
@@ -169,7 +170,7 @@ pub async fn create_namespace(
     recv_until(
         conn,
         EVENT_TIMEOUT,
-        |e| matches!(e, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id == ns_id),
+        |e| matches!(e, WorkerEvent::NamespaceCreated { namespace_id } if namespace_id.name() == ns_id),
     )
     .await?;
 
@@ -185,7 +186,7 @@ pub async fn launch_pod(
     register_pod_endpoint(conn, ns_id, pod_net, WorkerId(1)).await?;
 
     conn.send_command(&WorkerCommand::LaunchPod {
-        namespace_id: ns_id.into(),
+        namespace_id: NamespaceId::new(ns_id, 0),
         pod_id,
         network: pod_net.clone(),
         containers: vec![ContainerSpec {
@@ -210,7 +211,7 @@ pub async fn launch_pod(
 
     recv_until(conn, EVENT_TIMEOUT, |e| {
         matches!(e, WorkerEvent::PodRunning { namespace_id, pod_id: pid }
-            if namespace_id == ns_id && *pid == pod_id)
+            if namespace_id.name() == ns_id && *pid == pod_id)
     })
     .await?;
 
@@ -271,7 +272,7 @@ pub async fn register_pod_endpoint(
     worker_id: WorkerId,
 ) -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: namespace_id.into(),
+        namespace_id: NamespaceId::new(namespace_id, 0),
         upserted: vec![EndpointSpec {
             ip: pod_network.ip,
             kind: EndpointKind::Pod {

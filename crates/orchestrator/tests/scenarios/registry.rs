@@ -1,5 +1,3 @@
-use std::net::Ipv4Addr;
-
 use distvirt_worker_protocol::WorkerCommand;
 
 use crate::harness::mock_worker::MockWorkerConfig;

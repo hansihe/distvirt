@@ -202,7 +202,7 @@ fn test_delete_during_resume() {
     // Low-level: need to trigger resume without asserting Running (it hangs)
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
@@ -250,7 +250,7 @@ fn test_spec_change_during_resume() {
     // Low-level: need to trigger resume without asserting Running (it hangs)
     let svc_ip = h.service_ip("ns", "web-svc");
     h.worker(&w1).send_event(WorkerEvent::EndpointDemandTraffic {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         ip: svc_ip,
         service_id: Some(h.proto_service_id("ns", "web-svc")),
     });
@@ -272,7 +272,7 @@ fn test_spec_change_during_resume() {
 
     // Complete the resume.
     h.worker(&w1).send_event(WorkerEvent::PodRunning {
-        namespace_id: "ns".into(),
+        namespace_id: h.resolve_ns("ns"),
         pod_id: pod_id.clone(),
     });
     h.converge();

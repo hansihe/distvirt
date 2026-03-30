@@ -196,7 +196,7 @@ impl NamespaceState {
 
         // Create adapter virtual ports and plug them into the fabric.
         let adapter_ports_result = adapter_manager
-            .create_namespace_ports(namespace_id.as_ref())
+            .create_namespace_ports(namespace_id)
             .await;
         let mut adapter_handles = Vec::new();
         let mut adapter_tasks = Vec::new();
@@ -682,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn registry_sync_populates_entries() {
         let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
+        let ns_id = NamespaceId::new("ns1", 0);
 
         let entries = vec![
             RegistryEntry {
@@ -706,7 +706,7 @@ mod tests {
     #[tokio::test]
     async fn registry_sync_replaces_on_resync() {
         let (mut ns, _token) = make_namespace();
-        let ns_id = NamespaceId::from("ns1");
+        let ns_id = NamespaceId::new("ns1", 0);
 
         let entries1 = vec![RegistryEntry {
             name: "api".to_string(),

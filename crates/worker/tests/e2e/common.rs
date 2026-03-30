@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use futures_lite::io::AsyncReadExt;
 
+pub use distvirt_worker_protocol::NamespaceId;
 use distvirt_worker_protocol::{
     EndpointKind, EndpointPlacement, EndpointSpec, NetworkConfig, OrchestratorConnection,
     PodNetworkConfig, PoolInfo, WorkerAccepted, WorkerCommand, WorkerConnection, WorkerEvent,
@@ -299,7 +300,7 @@ pub async fn register_pod_endpoint(
     worker_id: WorkerId,
 ) -> anyhow::Result<()> {
     conn.send_command(&WorkerCommand::EndpointUpdate {
-        namespace_id: namespace_id.into(),
+        namespace_id: NamespaceId::new(namespace_id, 0),
         upserted: vec![EndpointSpec {
             ip: pod_network.ip,
             kind: EndpointKind::Pod {

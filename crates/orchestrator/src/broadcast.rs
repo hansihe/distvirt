@@ -45,7 +45,7 @@ mod tests {
 
     fn dummy_cmd(_wid: &WorkerId) -> WorkerCommand {
         WorkerCommand::DestroyNamespace {
-            namespace_id: NamespaceId::from("test-ns"),
+            namespace_id: NamespaceId::new("test-ns", 0),
         }
     }
 
@@ -100,7 +100,7 @@ mod tests {
             &wid(1),
             &mut out,
             WorkerCommand::DestroyNamespace {
-                namespace_id: NamespaceId::from("test-ns"),
+                namespace_id: NamespaceId::new("test-ns", 0),
             },
         );
         assert_eq!(out.worker_commands.len(), 1);

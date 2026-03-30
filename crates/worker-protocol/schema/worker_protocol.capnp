@@ -20,6 +20,12 @@ struct MacAddr {
   b5 @5 :UInt8;
 }
 
+# Composite namespace identifier: human-readable name + unique incarnation ID.
+struct NamespaceId {
+  name @0 :Text;
+  id @1 :UInt64;
+}
+
 # --- Config Structs ---
 
 # Network configuration for a namespace's fabric segment.
@@ -393,7 +399,7 @@ struct WorkerReady {
 # and TUN egress. The worker acknowledges with WorkerEvent.namespaceCreated
 # when the fabric segment is ready to host pods.
 struct CreateNamespaceCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   network @1 :NetworkConfig;
 }
 
@@ -402,7 +408,7 @@ struct CreateNamespaceCmd {
 # All pods in the namespace are cancelled (with a graceful shutdown window),
 # all services and routes are removed, and the fabric segment is destroyed.
 struct DestroyNamespaceCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
 }
 
 # Full-state replacement of the DNS registry for a namespace.
@@ -411,7 +417,7 @@ struct DestroyNamespaceCmd {
 # Sent when the worker first joins a namespace, or when the orchestrator
 # wants to force reconciliation.
 struct RegistrySyncCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   entries @1 :List(RegistryEntry);
 }
 
@@ -419,7 +425,7 @@ struct RegistrySyncCmd {
 #
 # The worker applies additions and removals to its local registry.
 struct RegistryUpdateCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   added @1 :List(RegistryEntry);
   removed @2 :List(Text);
 }
@@ -447,7 +453,7 @@ struct ResourceRequirements {
 }
 
 struct LaunchPodCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   network @2 :PodNetworkConfig;
   containers @3 :List(ContainerSpec);
@@ -467,7 +473,7 @@ struct LaunchPodCmd {
 # and cleaned up. The exit code is 0 for graceful shutdown, or the
 # process exit code for force-kill.
 struct StopPodCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   graceful @2 :Bool;
   # true = graceful shutdown with timeout, false = immediate kill.
@@ -481,7 +487,7 @@ struct StopPodCmd {
 # In local mode (single worker), the routing table is typically empty
 # since all pods are local.
 struct FabricRouteSyncCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   routes @1 :List(FabricRouteEntry);
 }
 
@@ -492,7 +498,7 @@ struct FabricRouteSyncCmd {
 # suspended, the orchestrator updates the entry from remoteWorker
 # to placeholder.
 struct FabricRouteUpdateCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   added @1 :List(FabricRouteEntry);
   removedIps @2 :List(Ipv4Addr);
 }
@@ -505,7 +511,7 @@ struct FabricRouteUpdateCmd {
 #
 # Services are projected to all workers participating in a namespace.
 struct CreateServiceCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   serviceId @1 :Text;
   ip @2 :Ipv4Addr;
   # The service's virtual IP on the fabric.
@@ -524,7 +530,7 @@ struct CreateServiceCmd {
 # Setting hasBackend to false returns the service to the no-backend state
 # (scale-to-zero). Any subsequent traffic triggers activation again.
 struct UpdateServiceBackendCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   serviceId @1 :Text;
   hasBackend @2 :Bool;
   backend @3 :ServiceBackend;
@@ -536,7 +542,7 @@ struct UpdateServiceBackendCmd {
 # when readiness is achieved (container started, health check passed,
 # etc.) -- this is orchestrator policy, not a worker concern.
 struct ServiceReadyCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   serviceId @1 :Text;
 }
 
@@ -544,7 +550,7 @@ struct ServiceReadyCmd {
 #
 # Any buffered frames are dropped. The service IP is no longer reachable.
 struct DestroyServiceCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   serviceId @1 :Text;
 }
 
@@ -554,7 +560,7 @@ struct DestroyServiceCmd {
 # peers can map to the same namespace. The adapter handles L3-L2
 # translation so the peer appears as a host on the fabric.
 struct AddWireGuardPeerCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   peerPublicKey @1 :Data;
   # 32-byte X25519 public key of the peer.
   peerIp @2 :Ipv4Addr;
@@ -582,7 +588,7 @@ struct RemoveWireGuardPeerCmd {
 # If the pod exits or crashes before the suspend completes, the worker
 # emits PodFailed (not PodSuspendFailed). No snapshot artifact is created.
 struct SuspendPodCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   snapshotId @2 :Text;
   # Artifact ID for this snapshot (assigned by orchestrator).
@@ -601,7 +607,7 @@ struct SuspendPodCmd {
 # VM restore error, etc.), emits WorkerEvent.podFailed. The orchestrator
 # may fall back to a cold launch via LaunchPod.
 struct ResumePodCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   snapshotId @2 :Text;
   # Artifact ID of the snapshot to restore from.
@@ -709,25 +715,25 @@ struct EndpointSpec {
 }
 
 struct EndpointSyncCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   endpoints @1 :List(EndpointSpec);
 }
 
 struct EndpointUpdateCmd {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   upserted @1 :List(EndpointSpec);
   removedIps @2 :List(Ipv4Addr);
 }
 
 struct EndpointDemandTrafficEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   ip @1 :Ipv4Addr;
   hasServiceId @2 :Bool;
   serviceId @3 :Text;
 }
 
 struct EndpointDemandActiveEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   ip @1 :Ipv4Addr;
   active @2 :Bool;
   hasServiceId @3 :Bool;
@@ -740,18 +746,18 @@ enum MemoryConstraintReason {
 }
 
 struct PodMemoryConstrainedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   reason @2 :MemoryConstraintReason;
 }
 
 struct PodMemoryConstraintClearedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
 }
 
 struct PodOomKillEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   count @2 :UInt64;
 }
@@ -812,7 +818,7 @@ struct WorkerCommand {
 # The L2 switch, smoltcp gateway, and DNS registry are initialized.
 # Sent in response to WorkerCommand.createNamespace.
 struct NamespaceCreatedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
 }
 
 # The namespace's gateway exited unexpectedly.
@@ -820,7 +826,7 @@ struct NamespaceCreatedEvt {
 # All pods in the namespace are cancelled. The orchestrator should
 # consider the namespace dead on this worker.
 struct NamespaceFailedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   error @1 :Text;
 }
 
@@ -830,7 +836,7 @@ struct NamespaceFailedEvt {
 # removed, and the fabric segment destroyed. Sent in response to
 # WorkerCommand.destroyNamespace.
 struct NamespaceDestroyedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
 }
 
 # The pod's VM is booted and all containers are started.
@@ -838,7 +844,7 @@ struct NamespaceDestroyedEvt {
 # The pod is on the fabric and reachable at its assigned IP/MAC.
 # Sent in response to WorkerCommand.launchPod.
 struct PodRunningEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
 }
 
@@ -846,7 +852,7 @@ struct PodRunningEvt {
 #
 # The exit code is from the main container (first in the containers list).
 struct PodExitedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   exitCode @2 :Int32;
 }
@@ -856,7 +862,7 @@ struct PodExitedEvt {
 # Possible causes: image pull failed, VM failed to boot, network setup
 # failed, etc. The worker has cleaned up any partial state.
 struct PodFailedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   error @2 :Text;
   # Human-readable error description.
@@ -866,7 +872,7 @@ struct PodFailedEvt {
 #
 # The pod continues running; only log delivery is affected.
 struct PodLogStreamErrorEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   containerId @2 :Text;
   phase @3 :Text;
@@ -879,7 +885,7 @@ struct PodLogStreamErrorEvt {
 # The VM has been killed. The snapshot can be used to resume the pod
 # later via WorkerCommand.resumePod.
 struct PodSuspendedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   snapshotId @2 :Text;
   # Artifact ID of the snapshot.
@@ -896,7 +902,7 @@ struct PodSuspendedEvt {
 # killed) or may be in an undefined state. The orchestrator should stop
 # the pod if it needs to recover.
 struct PodSuspendFailedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   error @2 :Text;
 }
@@ -980,7 +986,7 @@ struct WorkerConditionEvt {
 # The orchestrator records the placement as in-progress (Writing status)
 # so that other workers don't attempt to read a half-written artifact.
 struct ArtifactWriteStartedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   artifactId @1 :Text;
   poolId @2 :Text;
 }
@@ -991,7 +997,7 @@ struct ArtifactWriteStartedEvt {
 # The orchestrator transitions the placement from Writing to Ready,
 # making it available for resume operations.
 struct ArtifactWriteCommittedEvt {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   artifactId @1 :Text;
   poolId @2 :Text;
   sizeBytes @3 :UInt64;
@@ -1059,7 +1065,7 @@ struct PressureUpdateEvt {
 # as the first message, then writes raw output bytes. The orchestrator decides
 # what to do with the data (stream to CLI, store, discard).
 struct LogStreamHeader {
-  namespaceId @0 :Text;
+  namespaceId @0 :NamespaceId;
   podId @1 :Text;
   containerId @2 :Text;
 }

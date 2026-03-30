@@ -314,7 +314,7 @@ fn test_reactivation_cancels_shortened_idle_timer() {
         "ns",
         "web-svc",
         WorkerEvent::EndpointDemandActive {
-            namespace_id: "ns".into(),
+            namespace_id: h.resolve_ns("ns"),
             ip: h.service_ip("ns", "web-svc"),
             service_id: Some(h.proto_service_id("ns", "web-svc")),
             active: true,

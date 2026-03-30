@@ -10,7 +10,7 @@ mod worker_reader;
 mod worker_writer;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use distvirt_common::ActivityTracker;
@@ -57,7 +57,7 @@ enum ShellCommand {
         conn: OrchestratorConnection,
     },
     CreateNamespace {
-        namespace_id: NamespaceId,
+        namespace_name: String,
         network: distvirt_worker_protocol::NetworkConfig,
         response: oneshot::Sender<Result<(), ClientError>>,
     },
@@ -119,13 +119,29 @@ enum ShellCommand {
 // Shell handle
 // =============================================================================
 
+/// Shared index from namespace name → full `NamespaceId`.
+///
+/// Updated by the shell on create/destroy. Read by the handle (gRPC layer)
+/// to resolve client-supplied name strings to composite IDs.
+type NameIndex = Arc<RwLock<HashMap<String, NamespaceId>>>;
+
 #[derive(Clone)]
 pub struct ShellHandle {
     tx: mpsc::Sender<ShellEvent>,
     activity: Arc<ActivityTracker>,
+    name_index: NameIndex,
 }
 
 impl ShellHandle {
+    /// Resolve a namespace name to its full composite `NamespaceId`.
+    pub fn resolve_namespace(&self, name: &str) -> Result<NamespaceId, ClientError> {
+        let index = self.name_index.read().unwrap();
+        index
+            .get(name)
+            .cloned()
+            .ok_or(ClientError::NamespaceNotFound)
+    }
+
     pub fn worker_connection(&self, conn: OrchestratorConnection) {
         let _ = self
             .tx
@@ -134,14 +150,14 @@ impl ShellHandle {
 
     pub async fn create_namespace(
         &self,
-        namespace_id: NamespaceId,
+        namespace_name: String,
         network: distvirt_worker_protocol::NetworkConfig,
     ) -> Result<(), ClientError> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ShellEvent::Command(ShellCommand::CreateNamespace {
-                namespace_id,
+                namespace_name,
                 network,
                 response: tx,
             }))
@@ -354,6 +370,7 @@ struct WorkerSlot {
 struct Shell {
     orchestrator: OrchestratorCore,
     namespaces: HashMap<NamespaceId, NamespaceUnit>,
+    name_index: NameIndex,
 
     next_worker_id: u64,
     workers: HashMap<GlobalWorkerId, WorkerSlot>,
@@ -438,18 +455,19 @@ impl Shell {
                     }
                 }
                 ShellCommand::CreateNamespace {
-                    namespace_id,
+                    namespace_name,
                     network,
                     response,
                 } => {
                     let (result, output) = self.orchestrator.create_namespace(CreateNamespaceInfo {
-                        namespace_id: namespace_id.clone(),
+                        namespace_name: namespace_name.clone(),
                         network,
                     });
                     self.route_orchestrator_output(output).await;
 
                     let client_result = match result {
                         Ok(creation_info) => {
+                            let namespace_id = creation_info.namespace_id.clone();
                             let ns = NamespaceUnit::new(
                                 namespace_id.clone(),
                                 creation_info.timer_config,
@@ -457,6 +475,7 @@ impl Shell {
                                 creation_info.id_registry,
                             );
                             self.namespaces.insert(namespace_id.clone(), ns);
+                            self.name_index.write().unwrap().insert(namespace_name, namespace_id.clone());
 
                             // Send WorkerConnected to the new namespace for each connected worker.
                             for summary in creation_info.connected_workers {
@@ -486,6 +505,7 @@ impl Shell {
                     response,
                 } => {
                     self.namespaces.remove(&namespace_id);
+                    self.name_index.write().unwrap().remove(&namespace_id.name);
                     let (result, output) = self.orchestrator.destroy_namespace(&namespace_id);
                     self.route_orchestrator_output(output).await;
                     self.log_bus.remove_namespace(&namespace_id);
@@ -1035,9 +1055,12 @@ pub fn spawn(
     let event_bus = EventBusHandle::new(1024);
     let id_registry_map = IdRegistryMap::new();
 
+    let name_index: NameIndex = Arc::new(RwLock::new(HashMap::new()));
+
     let shell = Shell {
         orchestrator: OrchestratorCore::new(timer_config, id_registry_map.clone()),
         namespaces: HashMap::new(),
+        name_index: name_index.clone(),
         next_worker_id: 0,
         workers: HashMap::new(),
         start: Instant::now(),
@@ -1053,5 +1076,5 @@ pub fn spawn(
     };
 
     let handle = tokio::spawn(shell.run());
-    (ShellHandle { tx, activity }, log_bus, event_bus, id_registry_map, handle)
+    (ShellHandle { tx, activity, name_index }, log_bus, event_bus, id_registry_map, handle)
 }
