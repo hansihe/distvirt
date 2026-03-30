@@ -42,7 +42,7 @@ use distvirt_worker::sim_traffic::SimGatewayProvider;
 use distvirt_worker::vmm::guest_sim::ContainerBehavior;
 use distvirt_worker::vmm::test_vmm::TestVmm;
 use distvirt_worker::vmm::Vmm;
-use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection};
+use distvirt_worker_protocol::{OrchestratorConnection, WorkerConnection, WorkerHello, WorkerCapabilities, WorkerReady};
 use tokio::task::JoinHandle;
 
 use container_registry::ContainerRegistry;
@@ -196,6 +196,77 @@ impl TestCluster {
         self.converge().await;
 
         // Find the new worker ID.
+        let after: Vec<GlobalWorkerId> = self
+            .shell
+            .list_workers()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
+
+        let worker_id = after
+            .iter()
+            .find(|id| !before.contains(id))
+            .copied()
+            .expect("no new worker found after connection");
+
+        self.worker_handles.push((worker_id, worker_handle));
+        worker_id
+    }
+
+    /// Add a worker that completes the protocol handshake but never processes
+    /// commands. It will never send `NamespaceCreated`, so any scheduler grants
+    /// for it will stay in the namespace's `deferred_grants` list.
+    pub async fn add_ephemeral_worker(&mut self) -> GlobalWorkerId {
+        let before: Vec<GlobalWorkerId> = self
+            .shell
+            .list_workers()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|w| w.worker_id)
+            .collect();
+
+        let (orch_half, worker_half) = tokio::io::duplex(64 * 1024);
+
+        // Spawn a minimal worker that completes the handshake then hangs.
+        let worker_handle: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let mut conn = WorkerConnection::accept(worker_half).await?;
+            conn.send_hello(&WorkerHello {
+                auth_token: "test-secret".to_string(),
+                capabilities: WorkerCapabilities {
+                    has_kvm: false,
+                    has_containerd: false,
+                    available_adapters: vec![],
+                    max_pods: 10,
+                    available_memory_mb: 1024,
+                    public_endpoint: String::new(),
+                    pools: vec![],
+                },
+            })
+            .await?;
+            conn.recv_accepted().await?;
+            conn.send_ready(&WorkerReady {
+                tunnel_listen_port: None,
+                tunnel_public_key: None,
+                transfer_listen_port: None,
+                wireguard_listen_port: None,
+                wireguard_public_key: None,
+            })
+            .await?;
+            // Hold connection open but never process commands.
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+
+        let orch_conn = OrchestratorConnection::connect(orch_half)
+            .await
+            .expect("orchestrator connect failed");
+
+        self.shell.worker_connection(orch_conn);
+        self.converge().await;
+
         let after: Vec<GlobalWorkerId> = self
             .shell
             .list_workers()

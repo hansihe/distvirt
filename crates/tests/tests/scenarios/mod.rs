@@ -15,3 +15,4 @@ mod spec_reconciliation;
 mod suspend_resume;
 mod transition_races;
 mod volumes;
+mod worker_failover;

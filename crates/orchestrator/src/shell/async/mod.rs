@@ -740,6 +740,18 @@ impl Shell {
 
         let reader_handle = worker_reader::spawn(global_id, reader, self.self_tx.clone());
 
+        // Insert the worker slot BEFORE routing orchestrator output, so that
+        // direct_worker_commands (e.g. CreateNamespace) can reach the new worker.
+        self.workers.insert(
+            global_id,
+            WorkerSlot {
+                writer: writer_hdl,
+                reader_handle,
+                writer_handle,
+                driver,
+            },
+        );
+
         let now = self.now();
         let output = self.orchestrator.worker_connected(
             WorkerConnectedInfo {
@@ -753,16 +765,6 @@ impl Shell {
         );
         self.route_orchestrator_output(output).await;
 
-        self.workers.insert(
-            global_id,
-            WorkerSlot {
-                writer: writer_hdl,
-                reader_handle,
-                writer_handle,
-                driver,
-            },
-        );
-
         Ok(())
     }
 
@@ -774,6 +776,11 @@ impl Shell {
         for direct in output.direct_worker_commands {
             if let Some(slot) = self.workers.get(&direct.worker_id) {
                 slot.writer.send(direct.command).await;
+            } else {
+                log::warn!(
+                    "direct command for worker {:?} dropped (no slot): {:?}",
+                    direct.worker_id, std::mem::discriminant(&direct.command)
+                );
             }
         }
 
@@ -788,6 +795,11 @@ impl Shell {
         for (worker_id, cmd) in output.worker_commands {
             if let Some(slot) = self.workers.get(&worker_id) {
                 slot.writer.send(cmd).await;
+            } else {
+                log::warn!(
+                    "worker command for worker {:?} dropped (no slot): {:?}",
+                    worker_id, std::mem::discriminant(&cmd)
+                );
             }
         }
 
@@ -796,6 +808,11 @@ impl Shell {
             if let Some(ns) = self.namespaces.get_mut(&ns_id) {
                 let ns_output = ns.process(msg, now);
                 self.route_namespace_output_inner(&ns_id, ns_output).await;
+            } else {
+                log::warn!(
+                    "namespace message for {:?} dropped (namespace not found): {:?}",
+                    ns_id, std::mem::discriminant(&msg)
+                );
             }
         }
     }
@@ -858,6 +875,11 @@ impl Shell {
         for direct in output.direct_worker_commands {
             if let Some(slot) = self.workers.get(&direct.worker_id) {
                 slot.writer.send(direct.command).await;
+            } else {
+                log::warn!(
+                    "direct command for worker {:?} dropped (no slot, no-recurse): {:?}",
+                    direct.worker_id, std::mem::discriminant(&direct.command)
+                );
             }
         }
 
@@ -872,6 +894,11 @@ impl Shell {
         for (worker_id, cmd) in output.worker_commands {
             if let Some(slot) = self.workers.get(&worker_id) {
                 slot.writer.send(cmd).await;
+            } else {
+                log::warn!(
+                    "worker command for worker {:?} dropped (no slot, no-recurse): {:?}",
+                    worker_id, std::mem::discriminant(&cmd)
+                );
             }
         }
 
@@ -908,6 +935,11 @@ impl Shell {
                 debug_assert!(
                     ns_output.to_orchestrator.is_empty(),
                     "scheduler decisions should not produce new scheduler messages"
+                );
+            } else {
+                log::warn!(
+                    "namespace message for {:?} dropped (namespace not found, no-recurse): {:?}",
+                    ns_id, std::mem::discriminant(&msg)
                 );
             }
         }

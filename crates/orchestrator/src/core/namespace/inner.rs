@@ -124,6 +124,10 @@ pub struct Namespace {
     pending_workers: HashMap<GlobalWorkerId, PendingWorker>,
     active_workers: HashMap<GlobalWorkerId, ActiveWorkerInfo>,
     deferred_grants: Vec<(PodId, GlobalWorkerId)>,
+    /// Worker commands buffered until the worker completes namespace setup (NamespaceCreated).
+    /// The Worker port exists in the router (created at WorkerConnected), but the worker
+    /// isn't ready to process commands until NamespaceCreated.
+    buffered_worker_commands: HashMap<GlobalWorkerId, Vec<distvirt_worker_protocol::WorkerCommand>>,
     /// Artifact ID allocator (for suspend operations).
     next_artifact_counter: u64,
 }
@@ -169,6 +173,7 @@ impl Namespace {
             pending_workers: HashMap::new(),
             active_workers: HashMap::new(),
             deferred_grants: Vec::new(),
+            buffered_worker_commands: HashMap::new(),
             next_artifact_counter: 0,
         }
     }
@@ -242,28 +247,52 @@ impl Namespace {
                 proto_worker_id: _,
                 info,
             } => {
-                // Stage as pending — no router changes yet.
+                // Create the Worker port immediately so that any grants
+                // can be applied and the Pod SM connects via PodPlacement.
+                // If the worker dies before NamespaceCreated, destroying
+                // the port triggers Pod SM displacement.
+                self.router.create_worker(worker_id);
+                self.router.set_worker_info(worker_id, info.clone());
                 self.pending_workers
                     .insert(worker_id, PendingWorker { info });
+
+                // Apply any grants that arrived before WorkerConnected
+                // (due to ordering: Grant is pushed before WorkerConnected
+                // in orchestrator output).
+                let deferred: Vec<PodId> = self
+                    .deferred_grants
+                    .iter()
+                    .filter(|(_, w)| *w == worker_id)
+                    .map(|(p, _)| *p)
+                    .collect();
+                self.deferred_grants.retain(|(_, w)| *w != worker_id);
+                for pod_id in deferred {
+                    self.apply_grant(worker_id, pod_id);
+                }
             }
 
             OrchestratorToNamespace::WorkerDisconnected { worker_id } => {
                 let was_active = self.active_workers.remove(&worker_id).is_some();
+                let was_pending = self.pending_workers.remove(&worker_id).is_some();
                 self.deferred_grants.retain(|(_, w)| *w != worker_id);
+                self.buffered_worker_commands.remove(&worker_id);
 
-                if was_active {
+                if was_active || was_pending {
                     // Clean up WorkerToPod edge tracking.
                     if let Some(pods) = self.worker_pod_edges.remove(&worker_id) {
                         for pod_id in pods {
                             self.pod_worker.remove(&pod_id);
                         }
                     }
-                    self.adapters
-                        .endpoint_demand
-                        .remove_worker(&mut self.router, &worker_id);
+                    if was_active {
+                        self.adapters
+                            .endpoint_demand
+                            .remove_worker(&mut self.router, &worker_id);
+                    }
+                    // Destroying the Worker port triggers WorkerAssignment edge
+                    // removal → Pod SM: WorkerInput(None) → Displaced.
                     self.router.destroy_worker(worker_id);
                 }
-                self.pending_workers.remove(&worker_id);
             }
 
             OrchestratorToNamespace::WorkerEvent(wne) => {
@@ -276,15 +305,20 @@ impl Namespace {
                     pod_id,
                     worker_id,
                 } => {
-                    if self.active_workers.contains_key(&worker_id) {
+                    if self.active_workers.contains_key(&worker_id)
+                        || self.pending_workers.contains_key(&worker_id)
+                    {
+                        // Worker port exists in router — apply immediately.
                         log::info!(
-                            "namespace {:?}: grant pod={:?} worker={:?} (worker active, applying immediately)",
+                            "namespace {:?}: grant pod={:?} worker={:?} (worker port exists, applying)",
                             self.namespace_id, pod_id, worker_id
                         );
                         self.apply_grant(worker_id, pod_id);
                     } else {
+                        // Grant arrived before WorkerConnected (ordering gap).
+                        // Will be applied when WorkerConnected is processed.
                         log::info!(
-                            "namespace {:?}: grant pod={:?} worker={:?} (worker not active, deferring)",
+                            "namespace {:?}: grant pod={:?} worker={:?} (worker not yet known, deferring)",
                             self.namespace_id, pod_id, worker_id
                         );
                         self.deferred_grants.push((pod_id, worker_id));
@@ -334,6 +368,15 @@ impl Namespace {
                     );
                 }
                 self.deferred_grants.retain(|(_, w)| *w != worker_id);
+                self.buffered_worker_commands.remove(&worker_id);
+                // Destroy the Worker port (created at WorkerConnected).
+                // This displaces any pods that were granted to this worker.
+                if let Some(pods) = self.worker_pod_edges.remove(&worker_id) {
+                    for pod_id in pods {
+                        self.pod_worker.remove(&pod_id);
+                    }
+                }
+                self.router.destroy_worker(worker_id);
             }
             _ => {
                 // Worker must be active to process remaining events.
@@ -350,6 +393,7 @@ impl Namespace {
     }
 
     /// Promote a pending worker to active after namespace creation confirmed.
+    /// The Worker port was already created in the router at WorkerConnected time.
     fn handle_namespace_created(
         &mut self,
         worker_id: GlobalWorkerId,
@@ -360,8 +404,7 @@ impl Namespace {
             None => return,
         };
 
-        // Create router worker port.
-        self.router.create_worker(worker_id);
+        // Worker port already exists in router (created at WorkerConnected).
         self.active_workers.insert(
             worker_id,
             ActiveWorkerInfo {
@@ -425,23 +468,12 @@ impl Namespace {
             }
         }
 
-        // Activate worker in router.
-        self.router.set_worker_info(worker_id, pending.info);
-
-        // Apply any scheduler grants that arrived before this worker was registered.
-        let deferred: Vec<PodId> = self
-            .deferred_grants
-            .iter()
-            .filter(|(_, w)| *w == worker_id)
-            .map(|(p, _)| *p)
-            .collect();
-        self.deferred_grants.retain(|(_, w)| *w != worker_id);
-        log::info!(
-            "namespace {:?}: handle_namespace_created worker={:?}, deferred_grants={:?}",
-            self.namespace_id, worker_id, deferred
-        );
-        for pod_id in deferred {
-            self.apply_grant(worker_id, pod_id);
+        // Flush buffered worker commands (Launch/Resume that arrived before
+        // the worker completed namespace setup).
+        if let Some(commands) = self.buffered_worker_commands.remove(&worker_id) {
+            for cmd in commands {
+                effects.worker_commands.push((worker_id, cmd));
+            }
         }
     }
 
@@ -998,7 +1030,15 @@ impl Namespace {
                         self.namespace_id, pod_id, worker_id
                     );
                     let cmd = self.build_launch_command(&proto_pod_id(pod_id), &spec);
-                    effects.worker_commands.push((worker_id, cmd));
+                    if self.active_workers.contains_key(&worker_id) {
+                        effects.worker_commands.push((worker_id, cmd));
+                    } else {
+                        // Worker not ready yet — buffer until NamespaceCreated.
+                        self.buffered_worker_commands
+                            .entry(worker_id)
+                            .or_default()
+                            .push(cmd);
+                    }
                 }
                 PodAssignmentAction::Resume {
                     worker_id,
@@ -1013,7 +1053,14 @@ impl Namespace {
                         &proto_artifact_id,
                         &spec,
                     );
-                    effects.worker_commands.push((worker_id, cmd));
+                    if self.active_workers.contains_key(&worker_id) {
+                        effects.worker_commands.push((worker_id, cmd));
+                    } else {
+                        self.buffered_worker_commands
+                            .entry(worker_id)
+                            .or_default()
+                            .push(cmd);
+                    }
                 }
                 PodAssignmentAction::Stop { worker_id, pod_id } => {
                     let cmd = distvirt_worker_protocol::WorkerCommand::StopPod {
