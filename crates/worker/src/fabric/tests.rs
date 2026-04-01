@@ -1880,3 +1880,110 @@ async fn flush_populates_nat_for_return_traffic() {
         "return traffic dst should be unchanged"
     );
 }
+
+/// Adapter (WireGuard peer) endpoints must also receive SNAT-rewritten return traffic.
+/// Regression test: previously only LocalPod endpoints performed the NAT lookup,
+/// so return traffic via WireGuard peers kept the backend IP as source.
+#[tokio::test]
+async fn service_nat_snat_rewrites_return_traffic_to_adapter() {
+    const ADAPTER_CLIENT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 254);
+
+    let fabric = make_test_fabric();
+
+    // Create a service with backend, mark ready.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(
+            &mut st,
+            ServiceId(56),
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            ServiceId(56),
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
+        st.mark_service_ready(ServiceId(56));
+    }
+
+    // Add adapter port first to get its port_id, then create the WireGuard peer
+    // endpoint with that id.
+    let (port0, handle0) = make_test_port();
+    let (adapter_port_id, _task0) = fabric.add_port_raw(port0);
+    {
+        let tables = fabric.tables();
+        let mut et = tables.endpoint_table.lock().unwrap();
+        let mut noop = |_: ServiceId, _: &ServicePolicy, _: Ipv4Addr| ServiceProcessor::passthrough();
+        et.apply_endpoint_sync(
+            vec![EndpointSpec {
+                ip: ADAPTER_CLIENT_IP,
+                kind: EndpointKind::WireGuardPeer {
+                    placement: Some(EndpointPlacement {
+                        worker_id: OWN_WORKER,
+                    }),
+                },
+            }],
+            OWN_WORKER,
+            &mut noop,
+            Some(adapter_port_id),
+        );
+    }
+
+    // Create pod endpoint for the backend.
+    let (port1, handle1) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_id1, _task1) = fabric.add_port_raw_with_ip(port1, POD_IP);
+
+    // Step 1: Send forward traffic (adapter client → service) to install NAT entry.
+    let syn_frame = make_tcp_frame(
+        ADAPTER_CLIENT_IP.octets(),
+        SVC_IP.octets(),
+        12345,
+        80,
+        0x02, // SYN
+    );
+    handle0.inject_tx.send(syn_frame).await.unwrap();
+
+    // Drain the DNAT'd frame from port 1 (backend).
+    let dnat_frame = try_recv(&handle1).await;
+    assert!(
+        dnat_frame.is_some(),
+        "DNAT'd frame should arrive at backend"
+    );
+
+    // Step 2: Send return traffic (backend → adapter client) — should be SNAT'd.
+    let syn_ack_frame = make_tcp_frame(
+        POD_IP.octets(),
+        ADAPTER_CLIENT_IP.octets(),
+        80,
+        12345,
+        0x12, // SYN+ACK
+    );
+    handle1.inject_tx.send(syn_ack_frame).await.unwrap();
+
+    // Frame should arrive at adapter port with SNAT applied.
+    let received = try_recv(&handle0).await;
+    assert!(
+        received.is_some(),
+        "return frame should arrive at adapter (WireGuard) port"
+    );
+    let received = received.unwrap();
+
+    let fp = FabricPacket::new(&received).unwrap();
+    assert_eq!(
+        fp.ipv4_src(),
+        SVC_IP,
+        "src IP should be SNAT'd to service IP for adapter endpoints"
+    );
+    assert_eq!(
+        fp.ipv4_dst(),
+        ADAPTER_CLIENT_IP,
+        "dst IP should be unchanged"
+    );
+}

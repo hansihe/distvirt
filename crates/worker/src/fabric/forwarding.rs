@@ -309,10 +309,42 @@ async fn dispatch_frame<P: FramePort>(
                         .get(&port_id)
                         .cloned()
                 };
-                if let Some(port) = port {
-                    log::debug!("fabric: {hdr} -> adapter({port_id})");
-                    if let Err(e) = port.send_frame(pkt).await {
-                        log::warn!("fabric: adapter send to port {} failed: {}", port_id, e);
+                if let Some(dst_port) = port {
+                    // Check NAT table for SNAT (return traffic from backend to client via adapter).
+                    let nat_match = {
+                        let ip_pkt = fp.ip_packet();
+                        let protocol = ip_packet_protocol(ip_pkt);
+                        let ports = ip_packet_transport_ports(ip_pkt);
+
+                        if let Some(proto) = protocol {
+                            let (s_port, d_port) = ports.unwrap_or((0, 0));
+                            let key = NatFlowKey {
+                                src_ip,
+                                dst_ip,
+                                protocol: proto,
+                                src_port: s_port,
+                                dst_port: d_port,
+                            };
+                            let mut nat = ctx.inner.nat_table.lock().expect("poisoned");
+                            nat.lookup(&key).map(|e| e.service_ip)
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(svc_ip) = nat_match {
+                        let backend_ip = src_ip;
+                        log::debug!("fabric: {hdr} -> SNAT(adapter({port_id}), src {backend_ip} -> {svc_ip})");
+                        let mut rewritten = pkt.to_vec();
+                        rewrite_ipv4_src(&mut rewritten, backend_ip, svc_ip);
+                        if let Err(e) = dst_port.send_frame(&rewritten).await {
+                            log::warn!("fabric: SNAT adapter send error: {}", e);
+                        }
+                    } else {
+                        log::debug!("fabric: {hdr} -> adapter({port_id})");
+                        if let Err(e) = dst_port.send_frame(pkt).await {
+                            log::warn!("fabric: adapter send to port {} failed: {}", port_id, e);
+                        }
                     }
                 } else {
                     log::debug!("fabric: {hdr} -> drop(no adapter {port_id})");
