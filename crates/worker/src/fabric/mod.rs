@@ -2,13 +2,13 @@ pub(crate) mod endpoint;
 pub(crate) mod flow;
 mod forwarding;
 pub(crate) mod gateway;
-pub(crate) mod nat;
+pub(crate) mod conntrack;
 pub(crate) mod port;
 pub(crate) mod tunnel;
 
 // Lock ordering (acquire in this order to prevent deadlocks):
 //   1. endpoint_table
-//   2. nat_table
+//   2. conntrack
 //   3. ports
 //   4. tunnel_ports
 // Most paths only hold one lock at a time.
@@ -99,7 +99,7 @@ impl<P: FramePort> Fabric<P> {
                 inner: Arc::new(FabricContextInner {
                     ports: Mutex::new(HashMap::new()),
                     endpoint_table: Mutex::new(EndpointTable::new()),
-                    nat_table: Mutex::new(nat::NatTable::new()),
+                    conntrack: Mutex::new(conntrack::ConntrackTable::new()),
                     gateway_tx: OnceLock::new(),
                     event_tx: OnceLock::new(),
                     subnet,
@@ -226,8 +226,8 @@ impl<P: FramePort> Fabric<P> {
                 loop {
                     interval.tick().await;
                     {
-                        let mut nat = inner.nat_table.lock().expect("poisoned");
-                        nat.gc(std::time::Duration::from_secs(300));
+                        let mut ct = inner.conntrack.lock().expect("poisoned");
+                        ct.gc(std::time::Duration::from_secs(300));
                     }
                     // GC flow trackers and emit status changes for expired flows.
                     let flow_changes = {
@@ -335,9 +335,9 @@ impl<P: FramePort> Fabric<P> {
             }
         };
 
-        // Insert NAT entries for all flushed frames.
+        // Insert conntrack entries for all flushed frames.
         {
-            let mut nat = self.ctx.inner.nat_table.lock().expect("poisoned");
+            let mut ct = self.ctx.inner.conntrack.lock().expect("poisoned");
             for frame in &frames {
                 if let Some(fp) = FabricPacket::new(frame) {
                     let ip = fp.ip_packet();
@@ -345,19 +345,19 @@ impl<P: FramePort> Fabric<P> {
                         let protocol = ip_packet_protocol(ip).unwrap_or(0);
                         let (src_port, dst_port_val) =
                             ip_packet_transport_ports(ip).unwrap_or((0, 0));
-                        let reverse_key = nat::NatFlowKey {
+                        let reverse_key = conntrack::ConntrackKey {
                             src_ip: backend_ip,
                             dst_ip: src_ip,
                             protocol,
                             src_port: dst_port_val,
                             dst_port: src_port,
                         };
-                        let nat_entry = nat::NatEntry {
+                        let entry = conntrack::ConntrackEntry {
                             service_ip,
                             backend_ip,
                             last_seen: std::time::Instant::now(),
                         };
-                        nat.insert(reverse_key, nat_entry);
+                        ct.insert(reverse_key, entry);
                     }
                 }
             }

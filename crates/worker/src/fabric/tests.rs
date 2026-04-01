@@ -1880,3 +1880,145 @@ async fn flush_populates_nat_for_return_traffic() {
         "return traffic dst should be unchanged"
     );
 }
+
+/// Conntrack reverse-DNAT must work when the client is behind a LocalAdapter
+/// (e.g. WireGuard ingress), not just a LocalPod.
+#[tokio::test]
+async fn conntrack_reverse_dnat_for_adapter_destination() {
+    let fabric = make_test_fabric();
+
+    // Adapter port for the client (WireGuard peer).
+    let (adapter_port, adapter_handle) = make_test_port();
+    let (adapter_port_id, _adapter_task) = fabric.add_port_raw(adapter_port);
+
+    // Create service with backend, mark ready.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+
+        // Create adapter endpoint for CLIENT_IP.
+        st.apply_endpoint_sync(
+            vec![
+                EndpointSpec {
+                    ip: CLIENT_IP,
+                    kind: EndpointKind::WireGuardPeer {
+                        placement: Some(EndpointPlacement {
+                            worker_id: OWN_WORKER,
+                        }),
+                    },
+                },
+                EndpointSpec {
+                    ip: SVC_IP,
+                    kind: EndpointKind::Service {
+                        service_id: ServiceId(70),
+                        policy: default_service_policy(),
+                        backend: Some(EndpointPodBackend {
+                            pod_ip: POD_IP,
+                            placement: None,
+                            ready: false,
+                        }),
+                    },
+                },
+            ],
+            OWN_WORKER,
+            &mut passthrough_processor,
+            Some(adapter_port_id),
+        );
+        st.mark_service_ready(ServiceId(70));
+    }
+
+    // Backend pod port.
+    let (pod_port, pod_handle) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_pod_id, _pod_task) = fabric.add_port_raw_with_ip(pod_port, POD_IP);
+
+    // Step 1: Forward traffic (adapter client → service) to install conntrack entry.
+    let syn = make_tcp_frame(CLIENT_IP.octets(), SVC_IP.octets(), 12345, 80, 0x02);
+    adapter_handle.inject_tx.send(syn).await.unwrap();
+
+    // Drain DNAT'd frame from pod port.
+    let dnat_frame = try_recv(&pod_handle).await;
+    assert!(dnat_frame.is_some(), "DNAT'd frame should arrive at backend");
+
+    // Step 2: Return traffic (pod → client) should be reverse-DNAT'd.
+    let syn_ack = make_tcp_frame(POD_IP.octets(), CLIENT_IP.octets(), 80, 12345, 0x12);
+    pod_handle.inject_tx.send(syn_ack).await.unwrap();
+
+    let received = try_recv(&adapter_handle).await;
+    assert!(
+        received.is_some(),
+        "return frame should arrive at adapter port"
+    );
+    let received = received.unwrap();
+    let fp = FabricPacket::new(&received).unwrap();
+    assert_eq!(
+        fp.ipv4_src(),
+        SVC_IP,
+        "src should be reverse-DNAT'd to service IP, not backend pod IP"
+    );
+    assert_eq!(fp.ipv4_dst(), CLIENT_IP, "dst should be unchanged");
+}
+
+/// Conntrack reverse-DNAT must work when the client is external (traffic
+/// exits via gateway), not just when routed to a local port.
+#[tokio::test]
+async fn conntrack_reverse_dnat_for_gateway_destination() {
+    let fabric = make_test_fabric();
+
+    let (gw_tx, mut gw_rx) = tokio_mpsc::channel(64);
+    let (_ingress_tx, ingress_rx) = tokio_mpsc::channel(64);
+    fabric.set_gateway(gw_tx, ingress_rx);
+
+    // Create service with backend, mark ready.
+    {
+        let tables = fabric.tables();
+        let mut st = tables.endpoint_table.lock().unwrap();
+        table_create_service(
+            &mut st,
+            ServiceId(71),
+            SVC_IP,
+            default_service_policy(),
+            &mut passthrough_processor,
+        );
+        table_update_backend(
+            &mut st,
+            ServiceId(71),
+            SVC_IP,
+            default_service_policy(),
+            Some(POD_IP),
+            &mut passthrough_processor,
+        );
+        st.mark_service_ready(ServiceId(71));
+    }
+
+    // Backend pod port.
+    let (pod_port, pod_handle) = make_test_port();
+    create_local_pod_endpoint(&fabric, POD_IP);
+    let (_pod_id, _pod_task) = fabric.add_port_raw_with_ip(pod_port, POD_IP);
+
+    // External client port (injects via gateway ingress).
+    // Step 1: Forward traffic (external client → service) via gateway ingress.
+    let syn = make_tcp_frame(EXTERNAL_IP.octets(), SVC_IP.octets(), 54321, 80, 0x02);
+    _ingress_tx.send(syn).await.unwrap();
+
+    // Drain DNAT'd frame from pod port.
+    let dnat_frame = try_recv(&pod_handle).await;
+    assert!(dnat_frame.is_some(), "DNAT'd frame should arrive at backend");
+
+    // Step 2: Return traffic (pod → external client) should be reverse-DNAT'd
+    // and forwarded to gateway.
+    let syn_ack = make_tcp_frame(POD_IP.octets(), EXTERNAL_IP.octets(), 80, 54321, 0x12);
+    pod_handle.inject_tx.send(syn_ack).await.unwrap();
+
+    let gw_frame_data = tokio::time::timeout(std::time::Duration::from_millis(100), gw_rx.recv())
+        .await
+        .expect("timeout waiting for gateway frame")
+        .expect("gateway channel closed");
+    let fp = FabricPacket::new(&gw_frame_data).unwrap();
+    assert_eq!(
+        fp.ipv4_src(),
+        SVC_IP,
+        "src should be reverse-DNAT'd to service IP, not backend pod IP"
+    );
+    assert_eq!(fp.ipv4_dst(), EXTERNAL_IP, "dst should be unchanged");
+}

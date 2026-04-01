@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::endpoint::EndpointAction;
-use super::nat::{NatEntry, NatFlowKey};
+use super::conntrack::{ConntrackEntry, ConntrackKey};
 use super::port::{FramePort, PortId};
 use super::{FabricEvent, SharedPort, handle_log_action};
 use crate::packet::{
@@ -54,7 +54,7 @@ impl fmt::Display for PktHeader<'_> {
 pub(crate) struct FabricContextInner<P: FramePort> {
     pub(crate) ports: Mutex<HashMap<PortId, SharedPort<P>>>,
     pub(crate) endpoint_table: Mutex<super::EndpointTable>,
-    pub(crate) nat_table: Mutex<super::nat::NatTable>,
+    pub(crate) conntrack: Mutex<super::conntrack::ConntrackTable>,
     pub(crate) gateway_tx: OnceLock<mpsc::Sender<Vec<u8>>>,
     pub(crate) event_tx: OnceLock<mpsc::Sender<FabricEvent>>,
     pub(crate) subnet: Ipv4Addr,
@@ -138,9 +138,9 @@ enum FrameSource {
     Internal,
 }
 
-/// Insert a reverse NAT entry so return traffic from the backend can be
-/// SNATted back to the service VIP.
-fn insert_reverse_nat<P: FramePort>(
+/// Insert a conntrack entry so return traffic from the backend gets
+/// reverse-DNAT'd back to the service VIP.
+fn insert_conntrack_entry<P: FramePort>(
     rewritten: &[u8],
     service_ip: Ipv4Addr,
     pod_ip: Ipv4Addr,
@@ -150,23 +150,23 @@ fn insert_reverse_nat<P: FramePort>(
         let ip_pkt = fp_rw.ip_packet();
         let protocol = ip_packet_protocol(ip_pkt).unwrap_or(0);
         let (src_port, dst_port_val) = ip_packet_transport_ports(ip_pkt).unwrap_or((0, 0));
-        let reverse_key = NatFlowKey {
+        let reverse_key = ConntrackKey {
             src_ip: pod_ip,
             dst_ip: fp_rw.ipv4_src(),
             protocol,
             src_port: dst_port_val,
             dst_port: src_port,
         };
-        let nat_entry = NatEntry {
+        let entry = ConntrackEntry {
             service_ip,
             backend_ip: pod_ip,
             last_seen: std::time::Instant::now(),
         };
         ctx.inner
-            .nat_table
+            .conntrack
             .lock()
             .expect("poisoned")
-            .insert(reverse_key, nat_entry);
+            .insert(reverse_key, entry);
     }
 }
 
@@ -181,6 +181,41 @@ async fn dispatch_frame<P: FramePort>(
     let mut owned_packet: Option<Vec<u8>> = None;
     let mut skip_flow_tracking = false;
 
+    // Layer 1: Conntrack reverse-DNAT.
+    // If this packet is return traffic from a DNAT'd backend, rewrite src
+    // from the backend pod IP back to the service VIP. This runs before
+    // entity dispatch so all destination types (pod, adapter, gateway, tunnel)
+    // see the correct source IP.
+    if let Some(fp) = FabricPacket::new(packet) {
+        let src_ip = fp.ipv4_src();
+        let dst_ip = fp.ipv4_dst();
+        let ip_pkt = fp.ip_packet();
+        if let Some(protocol) = ip_packet_protocol(ip_pkt) {
+            let (s_port, d_port) = ip_packet_transport_ports(ip_pkt).unwrap_or((0, 0));
+            let key = ConntrackKey {
+                src_ip,
+                dst_ip,
+                protocol,
+                src_port: s_port,
+                dst_port: d_port,
+            };
+            let svc_ip = {
+                let mut ct = ctx.inner.conntrack.lock().expect("poisoned");
+                ct.lookup(&key).map(|e| e.service_ip)
+            };
+            if let Some(svc_ip) = svc_ip {
+                log::debug!(
+                    "fabric: conntrack reverse-DNAT: src {} -> {} (dst {})",
+                    src_ip, svc_ip, dst_ip
+                );
+                let mut rewritten = packet.to_vec();
+                rewrite_ipv4_src(&mut rewritten, src_ip, svc_ip);
+                owned_packet = Some(rewritten);
+            }
+        }
+    }
+
+    // Layer 2: Entity dispatch loop.
     for _iteration in 0..2 {
         let pkt = owned_packet.as_deref().unwrap_or(packet);
 
@@ -192,7 +227,6 @@ async fn dispatch_frame<P: FramePort>(
 
         // 2. Extract dst_ip.
         let dst_ip = fp.ipv4_dst();
-        let src_ip = fp.ipv4_src();
 
         // 3. Endpoint table lookup (services + routes).
         let (ep_action, should_activate, flow_change) = {
@@ -219,7 +253,7 @@ async fn dispatch_frame<P: FramePort>(
                 log::debug!("fabric: {hdr} -> DNAT({service_ip} -> {pod_ip})");
                 let mut rewritten = pkt.to_vec();
                 rewrite_ipv4_dst(&mut rewritten, service_ip, pod_ip);
-                insert_reverse_nat(&rewritten, service_ip, pod_ip, ctx);
+                insert_conntrack_entry(&rewritten, service_ip, pod_ip, ctx);
 
                 // Loop back for a second dispatch pass to route the
                 // rewritten packet through the normal path.
@@ -329,41 +363,9 @@ async fn dispatch_frame<P: FramePort>(
                         .cloned()
                 };
                 if let Some(dst_port) = dst_port {
-                    // Check NAT table for SNAT (return traffic from backend to client).
-                    let nat_match = {
-                        let ip_pkt = fp.ip_packet();
-                        let protocol = ip_packet_protocol(ip_pkt);
-                        let ports = ip_packet_transport_ports(ip_pkt);
-
-                        if let Some(proto) = protocol {
-                            let (s_port, d_port) = ports.unwrap_or((0, 0));
-                            let key = NatFlowKey {
-                                src_ip,
-                                dst_ip,
-                                protocol: proto,
-                                src_port: s_port,
-                                dst_port: d_port,
-                            };
-                            let mut nat = ctx.inner.nat_table.lock().expect("poisoned");
-                            nat.lookup(&key).map(|e| e.service_ip)
-                        } else {
-                            None
-                        }
-                    };
-
-                    if let Some(svc_ip) = nat_match {
-                        let backend_ip = src_ip;
-                        log::debug!("fabric: {hdr} -> SNAT(pod({port_id}), src {backend_ip} -> {svc_ip})");
-                        let mut rewritten = pkt.to_vec();
-                        rewrite_ipv4_src(&mut rewritten, backend_ip, svc_ip);
-                        if let Err(e) = dst_port.send_frame(&rewritten).await {
-                            log::warn!("fabric: SNAT send error: {}", e);
-                        }
-                    } else {
-                        log::debug!("fabric: {hdr} -> pod({port_id})");
-                        if let Err(e) = dst_port.send_frame(pkt).await {
-                            log::warn!("fabric: deliver_to_port error: {}", e);
-                        }
+                    log::debug!("fabric: {hdr} -> pod({port_id})");
+                    if let Err(e) = dst_port.send_frame(pkt).await {
+                        log::warn!("fabric: deliver_to_port error: {}", e);
                     }
                 } else {
                     log::debug!("fabric: {hdr} -> drop(pod {port_id} not found)");
@@ -487,7 +489,7 @@ pub(super) async fn dispatch_action<P: FramePort>(
             if let Some((service_ip, backend_ip)) = nat_info {
                 let mut rewritten = raw_frame.clone();
                 rewrite_ipv4_dst(&mut rewritten, service_ip, backend_ip);
-                insert_reverse_nat(&rewritten, service_ip, backend_ip, ctx);
+                insert_conntrack_entry(&rewritten, service_ip, backend_ip, ctx);
                 Box::pin(dispatch_frame(&rewritten, FrameSource::Internal, ctx)).await;
             } else {
                 log::warn!(
