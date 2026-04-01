@@ -210,7 +210,7 @@ impl<C: WorkloadCtx> SmHandler<C> for WorkloadSm {
                             .activation
                             .as_ref()
                             .map(|a| a.idle_timeout)
-                            .unwrap_or(std::time::Duration::ZERO);
+                            .unwrap_or(std::time::Duration::from_secs(30));
                         ctx.set_endpoint_config(Some(endpoint::EndpointConfig {
                             kind: endpoint::EndpointKind::Workload,
                             workload: ctx.id(),
