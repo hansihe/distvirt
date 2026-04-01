@@ -179,6 +179,7 @@ impl FabricGateway<ChannelEgress> {
     /// Returns `(gateway, fabric_egress_tx, fabric_ingress_rx, internet_rx, internet_tx)`.
     pub fn new_channel(
         registry: DnsRegistry,
+        namespace_name: String,
         pod_gateway_ip: [u8; 4],
         pod_prefix_len: u8,
     ) -> anyhow::Result<(
@@ -190,7 +191,7 @@ impl FabricGateway<ChannelEgress> {
     )> {
         let (channel_egress, internet_rx, internet_tx) = ChannelEgress::new(CHANNEL_BUF);
         let (gw, egress_tx, ingress_rx) =
-            Self::new_with_egress(channel_egress, registry, pod_gateway_ip, pod_prefix_len)?;
+            Self::new_with_egress(channel_egress, registry, namespace_name, pod_gateway_ip, pod_prefix_len)?;
         log::info!(
             "gateway: created channel egress with smoltcp interface at {}.{}.{}.{}/{}",
             pod_gateway_ip[0],
@@ -207,11 +208,12 @@ impl<E: EgressPort> FabricGateway<E> {
     pub fn new_with_egress(
         egress: E,
         registry: DnsRegistry,
+        namespace_name: String,
         pod_gateway_ip: [u8; 4],
         pod_prefix_len: u8,
     ) -> anyhow::Result<(Self, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)> {
         // Create DNS forwarder sub-component.
-        let dns = DnsForwarder::new(registry)?;
+        let dns = DnsForwarder::new(registry, namespace_name)?;
 
         // Create smoltcp interface with gateway IP.
         let boot_time = Instant::now();

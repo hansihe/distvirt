@@ -147,11 +147,27 @@ fn synthesize_nxdomain_response(query: &[u8]) -> Vec<u8> {
 
 /// Convenience: parse the QNAME from a query, look it up in the registry,
 /// and return a synthesized A-record response if found.
-pub fn try_resolve(registry: &DnsRegistry, query: &[u8]) -> Option<Vec<u8>> {
+///
+/// Tries an exact match first, then strips `.<namespace_name>.dv.local`
+/// suffix so that `<name>.<ns>.dv.local` resolves within the namespace.
+pub fn try_resolve(registry: &DnsRegistry, query: &[u8], namespace_name: &str) -> Option<Vec<u8>> {
     let name = parse_qname(query)?;
     let map = registry.read().ok()?;
-    let ip = map.get(&name)?;
-    Some(synthesize_a_response(query, *ip))
+
+    // Exact match first.
+    if let Some(ip) = map.get(&name) {
+        return Some(synthesize_a_response(query, *ip));
+    }
+
+    // Try stripping `.<namespace_name>.dv.local` suffix.
+    let suffix = format!(".{}.dv.local", namespace_name);
+    if let Some(bare) = name.strip_suffix(&suffix) {
+        if let Some(ip) = map.get(bare) {
+            return Some(synthesize_a_response(query, *ip));
+        }
+    }
+
+    None
 }
 
 /// Find the byte offset just past the QNAME (i.e. the zero terminator + 1).
@@ -184,6 +200,7 @@ pub(crate) struct DnsLookupResult {
 /// forwards unresolved queries to upstream nameservers via hickory-resolver.
 pub(crate) struct DnsForwarder {
     registry: DnsRegistry,
+    namespace_name: String,
     resolver: TokioResolver,
     result_tx: mpsc::Sender<DnsLookupResult>,
     result_rx: mpsc::Receiver<DnsLookupResult>,
@@ -191,12 +208,13 @@ pub(crate) struct DnsForwarder {
 
 impl DnsForwarder {
     /// Create a new DNS forwarder using system-configured resolvers.
-    pub fn new(registry: DnsRegistry) -> anyhow::Result<Self> {
+    pub fn new(registry: DnsRegistry, namespace_name: String) -> anyhow::Result<Self> {
         let resolver = TokioResolver::builder_tokio()?.build();
         let (result_tx, result_rx) = mpsc::channel(64);
 
         Ok(DnsForwarder {
             registry,
+            namespace_name,
             resolver,
             result_tx,
             result_rx,
@@ -224,7 +242,7 @@ impl DnsForwarder {
             log::info!("gateway: DNS query id={} from {}", query_id, endpoint);
 
             // Try local registry first.
-            if let Some(response) = try_resolve(&self.registry, &query) {
+            if let Some(response) = try_resolve(&self.registry, &query, &self.namespace_name) {
                 log::info!("gateway: DNS query id={} resolved locally", query_id);
                 if let Err(e) = sock.send_slice(&response, endpoint) {
                     log::warn!("gateway: DNS local response send: {:?}", e);
@@ -400,7 +418,7 @@ mod tests {
         }
 
         let query = make_dns_query(0xABCD, "db");
-        let resp = try_resolve(&registry, &query);
+        let resp = try_resolve(&registry, &query, "my-ns");
         assert!(resp.is_some());
 
         let resp = resp.unwrap();
@@ -409,16 +427,45 @@ mod tests {
     }
 
     #[test]
+    fn try_resolve_qualified_name() {
+        let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut map = registry.write().expect("poisoned");
+            map.insert("db".to_string(), Ipv4Addr::new(172, 16, 0, 3));
+        }
+
+        let query = make_dns_query(0xABCD, "db.my-ns.dv.local");
+        let resp = try_resolve(&registry, &query, "my-ns");
+        assert!(resp.is_some());
+
+        let resp = resp.unwrap();
+        let len = resp.len();
+        assert_eq!(&resp[len - 4..], &[172, 16, 0, 3]);
+    }
+
+    #[test]
+    fn try_resolve_qualified_wrong_namespace() {
+        let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut map = registry.write().expect("poisoned");
+            map.insert("db".to_string(), Ipv4Addr::new(172, 16, 0, 3));
+        }
+
+        let query = make_dns_query(0xABCD, "db.other-ns.dv.local");
+        assert!(try_resolve(&registry, &query, "my-ns").is_none());
+    }
+
+    #[test]
     fn try_resolve_not_found() {
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
         let query = make_dns_query(0x0001, "unknown");
-        assert!(try_resolve(&registry, &query).is_none());
+        assert!(try_resolve(&registry, &query, "my-ns").is_none());
     }
 
     #[test]
     fn try_resolve_empty_registry() {
         let registry: DnsRegistry = Arc::new(RwLock::new(HashMap::new()));
         let query = make_dns_query(0x0001, "db");
-        assert!(try_resolve(&registry, &query).is_none());
+        assert!(try_resolve(&registry, &query, "my-ns").is_none());
     }
 }

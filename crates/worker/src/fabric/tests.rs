@@ -1707,7 +1707,7 @@ async fn gateway_dns_local_resolve() {
     let prefix_len = 24;
 
     let (gateway, fabric_egress_tx, fabric_ingress_rx, _internet_rx, _internet_tx) =
-        FabricGateway::new_channel(registry, gw_ip, prefix_len).unwrap();
+        FabricGateway::new_channel(registry, "test-ns".to_string(), gw_ip, prefix_len).unwrap();
 
     // Create fabric with gateway_ip = 10.0.0.1 (must match gw_ip for routing).
     let fabric: Fabric<TestPort> = Fabric::new(Ipv4Addr::new(10, 0, 0, 1), prefix_len);
@@ -1776,7 +1776,7 @@ async fn gateway_subnet_filter_drops_external_dst() {
     let prefix_len = 24;
 
     let (gateway, _fabric_egress_tx, mut fab_rx, _internet_rx, inet_tx) =
-        FabricGateway::new_channel(registry, gw_ip, prefix_len).unwrap();
+        FabricGateway::new_channel(registry, "test-ns".to_string(), gw_ip, prefix_len).unwrap();
 
     let gw_handle = tokio::spawn(async move { gateway.run().await });
 

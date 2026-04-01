@@ -118,6 +118,7 @@ impl NamespaceState {
         let (gateway, egress_tx, ingress_rx) = FabricGateway::new_with_egress(
             egress,
             Arc::clone(&registry),
+            namespace_id.name().to_string(),
             pod_gateway_ip,
             network.prefix_len,
         )
