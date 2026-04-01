@@ -171,17 +171,21 @@ impl TunDevice {
     /// Read a single IP packet from the utun device.
     ///
     /// Strips the 4-byte protocol header that macOS prepends.
-    pub async fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize> {
-        // We need space for the 4-byte header + the caller's buffer.
-        let mut raw_buf = vec![0u8; buf.len() + 4];
+    /// `scratch` is a caller-provided reusable buffer that avoids per-packet
+    /// heap allocation. It is resized once on first call and reused thereafter.
+    pub async fn read_packet(&self, buf: &mut [u8], scratch: &mut Vec<u8>) -> io::Result<usize> {
+        let needed = buf.len() + 4;
+        if scratch.len() < needed {
+            scratch.resize(needed, 0);
+        }
         loop {
             let mut guard = self.async_fd.readable().await?;
             match guard.try_io(|fd| {
                 let n = unsafe {
                     libc::read(
                         fd.as_raw_fd(),
-                        raw_buf.as_mut_ptr() as *mut libc::c_void,
-                        raw_buf.len(),
+                        scratch.as_mut_ptr() as *mut libc::c_void,
+                        scratch.len(),
                     )
                 };
                 if n < 0 {
@@ -197,7 +201,7 @@ impl TunDevice {
                         continue;
                     }
                     let payload_len = n - 4;
-                    buf[..payload_len].copy_from_slice(&raw_buf[4..n]);
+                    buf[..payload_len].copy_from_slice(&scratch[4..n]);
                     return Ok(payload_len);
                 }
                 Err(_would_block) => continue,
@@ -208,21 +212,22 @@ impl TunDevice {
     /// Write a single IP packet to the utun device.
     ///
     /// Prepends the 4-byte AF_INET header that macOS expects.
+    /// Uses `writev` with two iovecs to avoid allocating a combined buffer.
     pub async fn write_packet(&self, buf: &[u8]) -> io::Result<usize> {
-        let mut raw_buf = Vec::with_capacity(4 + buf.len());
-        raw_buf.extend_from_slice(&AF_INET_HDR);
-        raw_buf.extend_from_slice(buf);
-
         loop {
             let mut guard = self.async_fd.writable().await?;
             match guard.try_io(|fd| {
-                let n = unsafe {
-                    libc::write(
-                        fd.as_raw_fd(),
-                        raw_buf.as_ptr() as *const libc::c_void,
-                        raw_buf.len(),
-                    )
-                };
+                let iovs = [
+                    libc::iovec {
+                        iov_base: AF_INET_HDR.as_ptr() as *mut libc::c_void,
+                        iov_len: 4,
+                    },
+                    libc::iovec {
+                        iov_base: buf.as_ptr() as *mut libc::c_void,
+                        iov_len: buf.len(),
+                    },
+                ];
+                let n = unsafe { libc::writev(fd.as_raw_fd(), iovs.as_ptr(), 2) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
                 } else {

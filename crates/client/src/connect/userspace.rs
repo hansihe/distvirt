@@ -14,8 +14,9 @@ use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot, Notify};
 
-use super::{ConnectInfo, ProvisionedTunnel};
-use crate::connection::Client;
+use boringtun::noise::Tunn;
+
+use super::wg_ops::{self, WgDecapAction, WgEncapAction};
 
 // ── Channel-backed smoltcp device ──────────────────────────────────────────
 
@@ -194,22 +195,24 @@ struct Inner {
 ///
 /// No root privileges required. Spawns a background tokio task for
 /// WireGuard packet forwarding and smoltcp polling.
-///
-/// Create via [`ProvisionedTunnel::into_userspace`].
 pub struct UserspaceNetwork {
     inner: Arc<Inner>,
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
-    provisioned: ProvisionedTunnel,
 }
 
-impl ProvisionedTunnel {
-    /// Materialize this tunnel as a userspace network using smoltcp.
+impl UserspaceNetwork {
+    /// Create a userspace network from pre-built WireGuard components.
     ///
     /// No OS privileges required. Spawns a background task that runs
     /// the WireGuard crypto and smoltcp IP stack.
-    pub async fn into_userspace(self) -> anyhow::Result<UserspaceNetwork> {
-        let (tunn, udp) = self.create_wg_tunnel().await?;
-
+    pub async fn new(
+        tunn: Tunn,
+        udp: tokio::net::UdpSocket,
+        endpoint: SocketAddr,
+        client_ip: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+        prefix_len: u8,
+    ) -> anyhow::Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let inner = Arc::new(Inner {
@@ -220,10 +223,10 @@ impl ProvisionedTunnel {
         let task = tokio::spawn(poll_loop(
             tunn,
             udp,
-            self.endpoint,
-            self.client_ip,
-            self.gateway_ip,
-            self.prefix_len,
+            endpoint,
+            client_ip,
+            gateway_ip,
+            prefix_len,
             cmd_rx,
             Arc::clone(&inner),
         ));
@@ -231,22 +234,11 @@ impl ProvisionedTunnel {
         Ok(UserspaceNetwork {
             inner,
             task: Some(task),
-            provisioned: self,
         })
     }
 }
 
 impl UserspaceNetwork {
-    /// Connection metadata.
-    pub fn info(&self) -> ConnectInfo {
-        self.provisioned.info()
-    }
-
-    /// The client's WireGuard public key.
-    pub fn public_key(&self) -> &[u8; 32] {
-        self.provisioned.public_key()
-    }
-
     /// Resolve a hostname to an IPv4 address using the namespace's DNS server.
     pub async fn resolve(&self, name: &str) -> anyhow::Result<Ipv4Addr> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -319,16 +311,9 @@ impl UserspaceNetwork {
         })
     }
 
-    /// Shut down the tunnel gracefully and disconnect from the namespace via gRPC.
-    ///
-    /// Sends a shutdown command to the poll loop, allowing it to drain
-    /// pending TX data before exiting. Falls back to abort on send failure.
-    pub async fn disconnect(
-        mut self,
-        client: &mut Client,
-        namespace_id: &str,
-    ) -> anyhow::Result<()> {
-        let public_key = *self.provisioned.public_key();
+    /// Shut down the poll loop gracefully. Does not perform gRPC disconnect —
+    /// the caller should call `ProvisionedTunnel::disconnect()` separately.
+    pub async fn shutdown(mut self) {
         if let Some(task) = self.task.take() {
             // Request graceful shutdown; fall back to abort if channel is closed.
             if self.inner.cmd_tx.send(Command::Shutdown).is_ok() {
@@ -339,7 +324,6 @@ impl UserspaceNetwork {
                 let _ = task.await;
             }
         }
-        super::disconnect(client, namespace_id, &public_key).await
     }
 }
 
@@ -565,6 +549,7 @@ fn smol_endpoint_to_socketaddr(ep: IpEndpoint) -> Option<SocketAddr> {
 async fn poll_loop(
     tunn: boringtun::noise::Tunn,
     udp: tokio::net::UdpSocket,
+
     endpoint: SocketAddr,
     client_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
@@ -572,8 +557,6 @@ async fn poll_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     inner: Arc<Inner>,
 ) -> anyhow::Result<()> {
-    use boringtun::noise::TunnResult;
-
     let mut tunn = tunn;
     let epoch = std::time::Instant::now();
 
@@ -607,6 +590,7 @@ async fn poll_loop(
     let mut udp_buf = vec![0u8; 65536];
     let mut enc_buf = vec![0u8; 65536];
     let mut dec_buf = vec![0u8; 65536];
+    let mut cont_buf = vec![0u8; 65536];
     let mut timer_buf = vec![0u8; 65536];
 
     let mut wg_timer = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -702,48 +686,42 @@ async fn poll_loop(
                 let (n, src) = result?;
                 let datagram = &udp_buf[..n];
 
-                let result = tunn.decapsulate(Some(src.ip()), datagram, &mut dec_buf);
+                let mut to_send: Vec<Vec<u8>> = Vec::new();
+                let result = wg_ops::decapsulate(
+                    &mut tunn,
+                    Some(src.ip()),
+                    datagram,
+                    &mut dec_buf,
+                    &mut cont_buf,
+                    &mut |data| to_send.push(data.to_vec()),
+                );
+
+                for data in &to_send {
+                    udp.send_to(data, endpoint).await?;
+                }
 
                 match result {
-                    TunnResult::WriteToTunnelV4(ip_packet, _) => {
+                    WgDecapAction::WriteToTunnel(ip_packet) => {
                         device.rx_queue.push_back(ip_packet.to_vec());
                     }
-                    TunnResult::WriteToNetwork(data) => {
-                        let data = data.to_vec();
-                        udp.send_to(&data, endpoint).await?;
-                        // Handshake continuation.
-                        loop {
-                            let cont = tunn.decapsulate(None, &[], &mut dec_buf);
-                            match cont {
-                                TunnResult::Done => break,
-                                TunnResult::WriteToNetwork(data) => {
-                                    let data = data.to_vec();
-                                    udp.send_to(&data, endpoint).await?;
-                                }
-                                _ => break,
-                            }
-                        }
-                    }
-                    TunnResult::Done => {}
-                    TunnResult::Err(e) => {
+                    WgDecapAction::Nothing => {}
+                    WgDecapAction::Error(e) => {
                         log::warn!("wg decapsulate error: {:?}", e);
                     }
-                    _ => {}
                 }
             }
 
             // WireGuard timer tick.
             _ = wg_timer.tick() => {
-                let result = tunn.update_timers(&mut timer_buf);
-                match result {
-                    TunnResult::WriteToNetwork(data) => {
+                match wg_ops::timer_tick(&mut tunn, &mut timer_buf) {
+                    WgEncapAction::SendToNetwork(data) => {
                         let data = data.to_vec();
                         udp.send_to(&data, endpoint).await?;
                     }
-                    TunnResult::Err(e) => {
+                    WgEncapAction::Error(e) => {
                         log::warn!("wg timer error: {:?}", e);
                     }
-                    _ => {}
+                    WgEncapAction::Nothing => {}
                 }
             }
 
@@ -767,13 +745,13 @@ async fn poll_loop(
                 if !a.is_empty() {
                     match socket.send_slice(a) {
                         Ok(n) => sent += n,
-                        Err(_) => {}
+                        Err(e) => log::warn!("tcp send_slice error: {}", e),
                     }
                 }
                 if sent == a.len() && !b.is_empty() {
                     match socket.send_slice(b) {
                         Ok(n) => sent += n,
-                        Err(_) => {}
+                        Err(e) => log::warn!("tcp send_slice error: {}", e),
                     }
                 }
                 if sent > 0 {
@@ -819,7 +797,10 @@ async fn poll_loop(
                         Ok(()) => {
                             s.send_queue.pop_front();
                         }
-                        Err(_) => break,
+                        Err(e) => {
+                            log::warn!("udp send_slice error: {}", e);
+                            break;
+                        }
                     }
                 } else {
                     break;
@@ -884,7 +865,7 @@ async fn poll_loop(
                             waker.wake();
                         }
                     }
-                    Err(_) => {}
+                    Err(e) => log::warn!("tcp recv error: {}", e),
                 }
             }
 
@@ -949,7 +930,10 @@ async fn poll_loop(
                             s.recv_queue.push_back((data.to_vec(), addr));
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        log::warn!("udp recv error: {}", e);
+                        break;
+                    }
                 }
             }
 
@@ -963,15 +947,14 @@ async fn poll_loop(
         // ── Drain tx_queue: encrypt and send via WireGuard ─────────────────
 
         for pkt in device.tx_queue.drain(..) {
-            let result = tunn.encapsulate(&pkt, &mut enc_buf);
-            match result {
-                TunnResult::WriteToNetwork(data) => {
+            match wg_ops::encapsulate(&mut tunn, &pkt, &mut enc_buf) {
+                WgEncapAction::SendToNetwork(data) => {
                     udp.send_to(data, endpoint).await?;
                 }
-                TunnResult::Err(e) => {
+                WgEncapAction::Error(e) => {
                     log::warn!("wg encapsulate error: {:?}", e);
                 }
-                _ => {}
+                WgEncapAction::Nothing => {}
             }
         }
 

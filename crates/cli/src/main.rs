@@ -105,6 +105,15 @@ enum InternalCommands {
         /// Subnet CIDR
         #[arg(long)]
         subnet: String,
+        /// DNS domain for split-DNS resolver
+        #[arg(long)]
+        dns_domain: String,
+        /// Gateway IP address (DNS server)
+        #[arg(long)]
+        gateway_ip: String,
+        /// Log level forwarded from the parent process
+        #[arg(long)]
+        log_level: Option<log::LevelFilter>,
     },
 }
 
@@ -303,6 +312,28 @@ enum ContextCommands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Internal commands init their own logger and return early — handle
+    // them before the general logger init to avoid double-init panics.
+    if let Commands::Internal {
+        command:
+            InternalCommands::SetupTun {
+                socket,
+                nonce,
+                client_ip,
+                prefix_len,
+                subnet,
+                dns_domain,
+                gateway_ip,
+                log_level,
+            },
+    } = cli.command
+    {
+        env_logger::Builder::new()
+            .filter_level(log_level.unwrap_or(log::LevelFilter::Warn))
+            .init();
+        return commands::internal::setup_tun(socket, nonce, client_ip, prefix_len, subnet, dns_domain, gateway_ip);
+    }
+
     let default_level = if cli.verbose {
         log::LevelFilter::Debug
     } else {
@@ -315,19 +346,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        // Internal commands — privileged helpers, no gRPC needed
-        Commands::Internal {
-            command:
-                InternalCommands::SetupTun {
-                    socket,
-                    nonce,
-                    client_ip,
-                    prefix_len,
-                    subnet,
-                },
-        } => {
-            return commands::internal::setup_tun(socket, nonce, client_ip, prefix_len, subnet);
-        }
 
         // Auth commands — no gRPC needed
         Commands::Auth(AuthCommands::Login { server, token }) => {
@@ -613,7 +631,7 @@ async fn main() -> anyhow::Result<()> {
                     let spec = EntityRefSpec::new("connect")
                         .accept_namespace();
                     let resolved = entity_ref::parse_and_resolve(&target, &spec, None)?;
-                    commands::connect::connect(client, &params, resolved.namespace(), config)
+                    commands::connect::connect(client, resolved.namespace(), config)
                         .await?;
                 }
                 Commands::Task(TaskCommands::Disconnect { target }) => {

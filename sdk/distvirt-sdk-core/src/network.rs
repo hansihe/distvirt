@@ -18,6 +18,7 @@ use crate::ApiError;
 pub struct PyUserspaceNetwork {
     network: Arc<Mutex<Option<connect::userspace::UserspaceNetwork>>>,
     namespace_id: String,
+    public_key: [u8; 32],
     client_ip: String,
     subnet: String,
 }
@@ -33,22 +34,35 @@ impl PyUserspaceNetwork {
     ) -> PyResult<Bound<'py, PyAny>> {
         let mut grpc_client = client.take_client_ref()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let tunnel = connect::ProvisionedTunnel::connect(&mut grpc_client, &namespace_id)
+            let provisioned = connect::ProvisionedTunnel::connect(&mut grpc_client, &namespace_id)
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
 
-            let info = tunnel.info();
+            let info = provisioned.info();
             let client_ip = info.client_ip.to_string();
             let subnet = info.subnet.clone();
+            let public_key = *provisioned.public_key();
 
-            let network = tunnel
-                .into_userspace()
+            let (tunn, udp) = provisioned
+                .create_wg_tunnel()
                 .await
                 .map_err(|e| ApiError::new_err(format!("{e}")))?;
+
+            let network = connect::userspace::UserspaceNetwork::new(
+                tunn,
+                udp,
+                provisioned.endpoint(),
+                provisioned.client_ip(),
+                provisioned.gateway_ip(),
+                provisioned.prefix_len(),
+            )
+            .await
+            .map_err(|e| ApiError::new_err(format!("{e}")))?;
 
             Ok(PyUserspaceNetwork {
                 network: Arc::new(Mutex::new(Some(network))),
                 namespace_id,
+                public_key,
                 client_ip,
                 subnet,
             })
@@ -132,16 +146,18 @@ impl PyUserspaceNetwork {
         let network = Arc::clone(&self.network);
         let mut grpc_client = client.take_client_ref()?;
         let namespace_id = self.namespace_id.clone();
+        let public_key = self.public_key;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let net = {
                 let mut guard = network.lock().await;
                 guard.take()
             };
             if let Some(net) = net {
-                net.disconnect(&mut grpc_client, &namespace_id)
-                    .await
-                    .map_err(|e| ApiError::new_err(format!("{e}")))?;
+                net.shutdown().await;
             }
+            connect::disconnect_by_key(&mut grpc_client, &namespace_id, &public_key)
+                .await
+                .map_err(|e| ApiError::new_err(format!("{e}")))?;
             Ok(())
         })
     }

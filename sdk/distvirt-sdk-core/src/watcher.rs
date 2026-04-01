@@ -113,6 +113,32 @@ fn state_change_to_data(change: &StateChange) -> StateChangeData {
             ("pod_id", Str(pod_id.clone())),
             ("workload_id", Str(workload_id.clone())),
         ],
+        StateChange::PodMemoryConstrained {
+            pod_id,
+            workload_id,
+        } => vec![
+            ("type", StaticStr("pod_memory_constrained")),
+            ("pod_id", Str(pod_id.clone())),
+            ("workload_id", Str(workload_id.clone())),
+        ],
+        StateChange::PodMemoryConstraintCleared {
+            pod_id,
+            workload_id,
+        } => vec![
+            ("type", StaticStr("pod_memory_constraint_cleared")),
+            ("pod_id", Str(pod_id.clone())),
+            ("workload_id", Str(workload_id.clone())),
+        ],
+        StateChange::PodOomKill {
+            pod_id,
+            workload_id,
+            count,
+        } => vec![
+            ("type", StaticStr("pod_oom_kill")),
+            ("pod_id", Str(pod_id.clone())),
+            ("workload_id", Str(workload_id.clone())),
+            ("count", U32(*count as u32)),
+        ],
         StateChange::Endpoint {
             endpoint_id,
             service_id,

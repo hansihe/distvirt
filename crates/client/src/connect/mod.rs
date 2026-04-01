@@ -1,7 +1,7 @@
 pub mod kernel;
 pub mod userspace;
-pub mod fd_pass;
 pub mod platform;
+pub mod wg_ops;
 mod wireguard;
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -24,6 +24,43 @@ pub struct ConnectInfo {
     pub endpoint: SocketAddr,
 }
 
+/// Network configuration for a WireGuard tunnel, independent of key material.
+pub struct TunnelConfig {
+    pub server_public_key: PublicKey,
+    pub client_ip: Ipv4Addr,
+    pub gateway_ip: Ipv4Addr,
+    pub subnet: String,
+    pub prefix_len: u8,
+    pub endpoint: SocketAddr,
+}
+
+impl TunnelConfig {
+    /// The client IP address assigned by the server.
+    pub fn client_ip(&self) -> Ipv4Addr {
+        self.client_ip
+    }
+
+    /// The subnet prefix length.
+    pub fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
+
+    /// The subnet CIDR string (e.g. "10.0.0.0/24").
+    pub fn subnet(&self) -> &str {
+        &self.subnet
+    }
+
+    /// The gateway IP address.
+    pub fn gateway_ip(&self) -> Ipv4Addr {
+        self.gateway_ip
+    }
+
+    /// The WireGuard endpoint address.
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+}
+
 /// A provisioned WireGuard tunnel, ready to be materialized as
 /// either a kernel TUN tunnel or a userspace smoltcp tunnel.
 ///
@@ -32,12 +69,7 @@ pub struct ConnectInfo {
 pub struct ProvisionedTunnel {
     private_key: StaticSecret,
     public_key: PublicKey,
-    server_public_key: PublicKey,
-    client_ip: Ipv4Addr,
-    gateway_ip: Ipv4Addr,
-    subnet: String,
-    prefix_len: u8,
-    endpoint: SocketAddr,
+    pub config: TunnelConfig,
 }
 
 impl ProvisionedTunnel {
@@ -86,12 +118,14 @@ impl ProvisionedTunnel {
         Ok(ProvisionedTunnel {
             private_key,
             public_key,
-            server_public_key: PublicKey::from(server_public_key_bytes),
-            client_ip,
-            gateway_ip,
-            subnet: subnet.clone(),
-            prefix_len,
-            endpoint,
+            config: TunnelConfig {
+                server_public_key: PublicKey::from(server_public_key_bytes),
+                client_ip,
+                gateway_ip,
+                subnet: subnet.clone(),
+                prefix_len,
+                endpoint,
+            },
         })
     }
 
@@ -102,30 +136,35 @@ impl ProvisionedTunnel {
 
     /// The client IP address assigned by the server.
     pub fn client_ip(&self) -> Ipv4Addr {
-        self.client_ip
+        self.config.client_ip
     }
 
     /// The subnet prefix length.
     pub fn prefix_len(&self) -> u8 {
-        self.prefix_len
+        self.config.prefix_len
     }
 
     /// The subnet CIDR string (e.g. "10.0.0.0/24").
     pub fn subnet(&self) -> &str {
-        &self.subnet
+        &self.config.subnet
     }
 
-    /// Connection metadata.
+    /// The gateway IP address.
     pub fn gateway_ip(&self) -> Ipv4Addr {
-        self.gateway_ip
+        self.config.gateway_ip
+    }
+
+    /// The WireGuard endpoint address.
+    pub fn endpoint(&self) -> SocketAddr {
+        self.config.endpoint
     }
 
     pub fn info(&self) -> ConnectInfo {
         ConnectInfo {
-            client_ip: self.client_ip,
-            gateway_ip: self.gateway_ip,
-            subnet: self.subnet.clone(),
-            endpoint: self.endpoint,
+            client_ip: self.config.client_ip,
+            gateway_ip: self.config.gateway_ip,
+            subnet: self.config.subnet.clone(),
+            endpoint: self.config.endpoint,
         }
     }
 
@@ -133,7 +172,7 @@ impl ProvisionedTunnel {
     /// provisioned parameters.
     pub fn to_wg_quick_config(&self) -> String {
         let private_key_b64 = BASE64.encode(self.private_key.to_bytes());
-        let server_pub_b64 = BASE64.encode(self.server_public_key.as_bytes());
+        let server_pub_b64 = BASE64.encode(self.config.server_public_key.as_bytes());
         format!(
             "[Interface]\n\
              PrivateKey = {}\n\
@@ -144,16 +183,23 @@ impl ProvisionedTunnel {
              Endpoint = {}\n\
              AllowedIPs = {}\n\
              PersistentKeepalive = 25\n",
-            private_key_b64, self.client_ip, self.prefix_len, server_pub_b64, self.endpoint, self.subnet
+            private_key_b64, self.config.client_ip, self.config.prefix_len,
+            server_pub_b64, self.config.endpoint, self.config.subnet
         )
+    }
+
+    /// Disconnect from the namespace via gRPC. Consumes self — call this
+    /// only when tearing down the server-side tunnel state.
+    pub async fn disconnect(self, client: &mut Client, namespace_id: &str) -> anyhow::Result<()> {
+        disconnect_by_key(client, namespace_id, self.public_key()).await
     }
 
     /// Create the boringtun Tunn and bind a UDP socket.
     /// Shared setup used by both kernel and userspace paths.
-    async fn create_wg_tunnel(&self) -> anyhow::Result<(Tunn, UdpSocket)> {
+    pub async fn create_wg_tunnel(&self) -> anyhow::Result<(Tunn, UdpSocket)> {
         let tunn = Tunn::new(
             self.private_key.clone(),
-            self.server_public_key,
+            self.config.server_public_key,
             None,
             Some(25), // persistent keepalive
             0,
@@ -173,8 +219,8 @@ pub async fn wg_quick_config(
     Ok(provisioned.to_wg_quick_config())
 }
 
-/// Disconnect from the namespace via gRPC.
-pub async fn disconnect(
+/// Disconnect from the namespace via gRPC using a raw public key.
+pub async fn disconnect_by_key(
     client: &mut Client,
     namespace_id: &str,
     public_key: &[u8; 32],

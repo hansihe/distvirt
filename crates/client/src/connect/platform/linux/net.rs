@@ -4,6 +4,7 @@ use super::super::run_cmd;
 pub fn configure_interface(
     device_name: &str,
     client_ip: &str,
+    _gateway_ip: &str,
     prefix_len: u8,
 ) -> anyhow::Result<()> {
     run_cmd(
@@ -28,4 +29,14 @@ pub fn add_route(subnet: &str, device_name: &str) -> anyhow::Result<()> {
 /// Remove route (best-effort).
 pub fn remove_route(subnet: &str, device_name: &str) -> anyhow::Result<()> {
     run_cmd("ip", &["route", "del", subnet, "dev", device_name])
+}
+
+/// Configure split-DNS resolver. Not yet implemented on Linux.
+pub fn configure_dns(_service_id: &str, _dns_server: &str, _domain: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Remove split-DNS resolver. Not yet implemented on Linux.
+pub fn remove_dns(_service_id: &str) -> anyhow::Result<()> {
+    Ok(())
 }

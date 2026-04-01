@@ -1,55 +1,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use boringtun::noise::{Tunn, TunnResult};
+use boringtun::noise::Tunn;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 use super::platform::TunDevice;
+use super::wg_ops::{self, WgDecapAction, WgEncapAction, describe_ip_packet};
 
 const MAX_PACKET_SIZE: usize = 65536;
-
-/// Format a brief description of an IP packet for logging.
-fn describe_ip_packet(pkt: &[u8]) -> String {
-    if pkt.len() < 20 {
-        return format!("{} bytes (runt)", pkt.len());
-    }
-    let proto = pkt[9];
-    let src = std::net::Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
-    let dst = std::net::Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
-    let proto_name = match proto {
-        1 => "ICMP",
-        6 => "TCP",
-        17 => "UDP",
-        _ => "??",
-    };
-    let ihl = (pkt[0] & 0x0f) as usize * 4;
-    let ports = if (proto == 6 || proto == 17) && pkt.len() >= ihl + 4 {
-        let sp = u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]);
-        let dp = u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]);
-        format!(" {}→{}", sp, dp)
-    } else {
-        String::new()
-    };
-    format!(
-        "{} {} → {}{} ({} bytes)",
-        proto_name,
-        src,
-        dst,
-        ports,
-        pkt.len()
-    )
-}
-
-fn describe_tunn_result(result: &TunnResult) -> String {
-    match result {
-        TunnResult::Done => "Done".to_string(),
-        TunnResult::Err(e) => format!("Err({:?})", e),
-        TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
-        TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
-        TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
-    }
-}
 
 /// Run the WireGuard packet forwarding loop.
 ///
@@ -74,29 +33,27 @@ pub(crate) async fn run_tunnel(
         async move {
             let mut tun_buf = vec![0u8; MAX_PACKET_SIZE];
             let mut enc_buf = vec![0u8; MAX_PACKET_SIZE];
+            let mut scratch = Vec::new();
             loop {
-                let n = tun.read_packet(&mut tun_buf).await?;
+                let n = tun.read_packet(&mut tun_buf, &mut scratch).await?;
                 let ip_packet = &tun_buf[..n];
                 log::trace!("tun ▶ wg: {}", describe_ip_packet(ip_packet));
 
                 let result = {
                     let mut t = tunn.lock().await;
-                    t.encapsulate(ip_packet, &mut enc_buf)
+                    wg_ops::encapsulate(&mut t, ip_packet, &mut enc_buf)
                 };
 
                 match result {
-                    TunnResult::WriteToNetwork(data) => {
+                    WgEncapAction::SendToNetwork(data) => {
                         log::trace!("wg ▶ udp: {} bytes encrypted → {}", data.len(), endpoint);
                         udp.send_to(data, endpoint).await?;
                     }
-                    TunnResult::Err(e) => {
+                    WgEncapAction::Error(e) => {
                         log::warn!("wg encapsulate error: {:?}", e);
                     }
-                    other => {
-                        log::warn!(
-                            "wg encapsulate unexpected: {}",
-                            describe_tunn_result(&other)
-                        );
+                    WgEncapAction::Nothing => {
+                        log::warn!("wg encapsulate: unexpected Nothing result");
                     }
                 }
             }
@@ -113,54 +70,41 @@ pub(crate) async fn run_tunnel(
         async move {
             let mut recv_buf = vec![0u8; MAX_PACKET_SIZE];
             let mut dec_buf = vec![0u8; MAX_PACKET_SIZE];
+            let mut cont_buf = vec![0u8; MAX_PACKET_SIZE];
             loop {
                 let (n, src) = udp.recv_from(&mut recv_buf).await?;
                 let datagram = &recv_buf[..n];
 
                 log::trace!("udp ◀ {}: {} bytes", src, n);
+
+                // Collect handshake continuation packets to send after releasing the lock.
+                let mut to_send: Vec<Vec<u8>> = Vec::new();
                 let result = {
                     let mut t = tunn.lock().await;
-                    t.decapsulate(Some(src.ip()), datagram, &mut dec_buf)
+                    wg_ops::decapsulate(
+                        &mut t,
+                        Some(src.ip()),
+                        datagram,
+                        &mut dec_buf,
+                        &mut cont_buf,
+                        &mut |data| to_send.push(data.to_vec()),
+                    )
                 };
 
+                // Send any handshake continuation packets.
+                for data in &to_send {
+                    log::debug!("wg ◀ handshake: sending {} bytes", data.len());
+                    udp.send_to(data, endpoint).await?;
+                }
+
                 match result {
-                    TunnResult::Done => {
-                        log::trace!("wg ◀ decapsulate: Done (no data)");
-                    }
-                    TunnResult::Err(e) => {
-                        log::warn!("wg decapsulate error: {:?}", e);
-                    }
-                    TunnResult::WriteToNetwork(data) => {
-                        log::debug!("wg ◀ handshake response, sending {} bytes", data.len());
-                        let data = data.to_vec();
-                        udp.send_to(&data, endpoint).await?;
-                        // Handshake continuation loop.
-                        let mut cont_buf = vec![0u8; MAX_PACKET_SIZE];
-                        loop {
-                            let cont = {
-                                let mut t = tunn.lock().await;
-                                t.decapsulate(None, &[], &mut cont_buf)
-                            };
-                            match cont {
-                                TunnResult::Done => break,
-                                TunnResult::WriteToNetwork(data) => {
-                                    log::debug!(
-                                        "wg ◀ handshake continuation: sending {} bytes",
-                                        data.len()
-                                    );
-                                    let data = data.to_vec();
-                                    udp.send_to(&data, endpoint).await?;
-                                }
-                                _ => break,
-                            }
-                        }
-                    }
-                    TunnResult::WriteToTunnelV4(ip_packet, _) => {
+                    WgDecapAction::WriteToTunnel(ip_packet) => {
                         log::trace!("wg ◀ tun: {}", describe_ip_packet(ip_packet));
                         tun.write_packet(ip_packet).await?;
                     }
-                    TunnResult::WriteToTunnelV6(_, _) => {
-                        log::debug!("wg ◀ dropping IPv6 packet");
+                    WgDecapAction::Nothing => {}
+                    WgDecapAction::Error(e) => {
+                        log::warn!("wg decapsulate error: {:?}", e);
                     }
                 }
             }
@@ -182,16 +126,12 @@ pub(crate) async fn run_tunnel(
                 interval.tick().await;
                 let (result, stats) = {
                     let mut t = tunn.lock().await;
-                    let r = t.update_timers(&mut timer_buf);
+                    let r = wg_ops::timer_tick(&mut t, &mut timer_buf);
                     let s = t.stats();
                     (r, s)
                 };
                 match result {
-                    TunnResult::Done => {}
-                    TunnResult::Err(e) => {
-                        log::warn!("wg timer error: {:?}", e);
-                    }
-                    TunnResult::WriteToNetwork(data) => {
+                    WgEncapAction::SendToNetwork(data) => {
                         log::debug!(
                             "wg timer: sending {} bytes (handshake init / keepalive)",
                             data.len()
@@ -199,7 +139,10 @@ pub(crate) async fn run_tunnel(
                         let data = data.to_vec();
                         udp.send_to(&data, endpoint).await?;
                     }
-                    _ => {}
+                    WgEncapAction::Error(e) => {
+                        log::warn!("wg timer error: {:?}", e);
+                    }
+                    WgEncapAction::Nothing => {}
                 }
 
                 // Check handshake status.

@@ -1262,6 +1262,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tabled",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

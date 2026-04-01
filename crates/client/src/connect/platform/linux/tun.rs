@@ -102,7 +102,11 @@ impl TunDevice {
     }
 
     /// Read a single IP packet from the TUN device.
-    pub async fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize> {
+    ///
+    /// `_scratch` is accepted for API compatibility with macOS (where it avoids
+    /// per-packet allocation for the protocol header). On Linux it is unused
+    /// since the kernel delivers raw IP packets directly.
+    pub async fn read_packet(&self, buf: &mut [u8], _scratch: &mut Vec<u8>) -> io::Result<usize> {
         loop {
             let mut guard = self.async_fd.readable().await?;
             match guard.try_io(|fd| {

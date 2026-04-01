@@ -151,9 +151,10 @@ pub fn send_msg(sock: &OwnedFd, fd: Option<RawFd>, payload: &[u8]) -> anyhow::Re
 
 /// Receive a length-prefixed message that may contain a file descriptor via `SCM_RIGHTS`.
 ///
-/// Returns `(payload_bytes, optional_fd)`.  The caller's buffer must be large
-/// enough for the payload (the 4-byte length prefix is consumed internally).
-pub fn recv_fd(sock: &OwnedFd, buf: &mut [u8]) -> anyhow::Result<(usize, Option<OwnedFd>)> {
+/// Returns `None` on clean EOF (first recvmsg returns 0 bytes before any header
+/// data is read). Returns `Some((payload_bytes, optional_fd))` on success.
+/// The caller's buffer must be large enough for the payload.
+pub fn recv_fd(sock: &OwnedFd, buf: &mut [u8]) -> anyhow::Result<Option<(usize, Option<OwnedFd>)>> {
     let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
 
     // Read the 4-byte length prefix (may require multiple reads on SOCK_STREAM).
@@ -184,6 +185,10 @@ pub fn recv_fd(sock: &OwnedFd, buf: &mut [u8]) -> anyhow::Result<(usize, Option<
             bail!("recvmsg: {}", std::io::Error::last_os_error());
         }
         if n == 0 {
+            if header_read == 0 {
+                // Clean EOF — no data was read at all.
+                return Ok(None);
+            }
             bail!("connection closed before length header was received");
         }
 
@@ -239,7 +244,7 @@ pub fn recv_fd(sock: &OwnedFd, buf: &mut [u8]) -> anyhow::Result<(usize, Option<
         payload_read += n as usize;
     }
 
-    Ok((payload_len, received_fd))
+    Ok(Some((payload_len, received_fd)))
 }
 
 /// Helper: set up the parent side — create temp dir, bind listener, return

@@ -5,6 +5,8 @@
 
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
 use anyhow::Context;
 
 /// Arguments passed to the privileged helper.
@@ -14,6 +16,9 @@ pub struct SetupTunArgs {
     pub client_ip: String,
     pub prefix_len: u8,
     pub subnet: String,
+    pub dns_domain: String,
+    pub gateway_ip: String,
+    pub log_level: Option<String>,
 }
 
 /// Launch the privileged helper, wait for it to finish, and return its exit status.
@@ -25,7 +30,8 @@ pub fn launch_privileged_helper(args: &SetupTunArgs) -> anyhow::Result<std::proc
     let exe = std::env::current_exe().context("cannot determine own executable path")?;
     let exe_str = exe.to_string_lossy();
 
-    let helper_args = [
+    let prefix_len_str = args.prefix_len.to_string();
+    let mut helper_args: Vec<&str> = vec![
         "internal",
         "setup-tun",
         "--socket",
@@ -35,10 +41,19 @@ pub fn launch_privileged_helper(args: &SetupTunArgs) -> anyhow::Result<std::proc
         "--client-ip",
         &args.client_ip,
         "--prefix-len",
-        &args.prefix_len.to_string(),
+        &prefix_len_str,
         "--subnet",
         &args.subnet,
+        "--dns-domain",
+        &args.dns_domain,
+        "--gateway-ip",
+        &args.gateway_ip,
     ];
+
+    if let Some(ref level) = args.log_level {
+        helper_args.push("--log-level");
+        helper_args.push(level);
+    }
 
     launch_platform(&exe_str, &helper_args)
 }
@@ -57,13 +72,28 @@ fn launch_platform(exe: &str, args: &[&str]) -> anyhow::Result<std::process::Exi
         escaped
     );
 
-    let status = Command::new("osascript")
+    // Use .output() instead of .status() so osascript does not inherit our
+    // terminal stdio.  The auth dialog is GUI-based and doesn't need the
+    // terminal; keeping osascript detached from our tty prevents it from
+    // disturbing terminal state (e.g. signal disposition, foreground pgrp)
+    // which would break Ctrl-C after escalation completes.
+    // We also place it in its own process group to avoid signal
+    // cross-contamination (Ctrl-C during the dialog shouldn't kill us).
+    let output = Command::new("osascript")
         .arg("-e")
         .arg(&script)
-        .status()
+        .process_group(0)
+        .output()
         .context("failed to launch osascript")?;
 
-    Ok(status)
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            eprintln!("osascript: {}", stderr.trim());
+        }
+    }
+
+    Ok(output.status)
 }
 
 #[cfg(target_os = "linux")]
