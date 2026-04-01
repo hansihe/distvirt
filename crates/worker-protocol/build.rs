@@ -1,7 +1,7 @@
-fn main() {
-    capnpc::CompilerCommand::new()
-        .src_prefix("schema")
-        .file("schema/worker_protocol.capnp")
-        .run()
-        .expect("capnp schema compilation failed");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    prost_build::compile_protos(
+        &["proto/distvirt/worker/v1/worker_protocol.proto"],
+        &["proto/"],
+    )?;
+    Ok(())
 }

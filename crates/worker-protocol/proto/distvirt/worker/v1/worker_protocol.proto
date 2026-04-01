@@ -1,0 +1,545 @@
+syntax = "proto3";
+package distvirt.worker.v1;
+
+// --- Composite Types ---
+
+message NamespaceId {
+  string name = 1;
+  uint64 id = 2;
+}
+
+// --- Config Structs ---
+
+message NetworkConfig {
+  uint32 subnet = 1;
+  uint32 gateway = 2;
+  uint32 prefix_len = 3;
+  optional uint32 segment_id = 4;
+}
+
+message PodNetworkConfig {
+  uint32 ip = 1;
+  bytes mac = 2; // 6 bytes
+  uint32 gateway = 3;
+  string netmask = 4;
+}
+
+message ContainerConfig {
+  // Optional lists: presence means override, absence means use image default.
+  // Use wrapper to distinguish "not set" from "empty list".
+  OptionalStringList command = 1;
+  OptionalStringList args = 2;
+  repeated string env = 3;
+  string working_dir = 4;
+  string user = 5;
+  // fields 6,7 reserved
+  reserved 6, 7;
+  string hostname = 8;
+  bool capture_output = 9;
+  bool stdin = 10;
+  repeated VolumeMountSpec volume_mounts = 11;
+}
+
+// Wrapper to distinguish "not set" (None) from "empty list" (Some([])).
+message OptionalStringList {
+  repeated string values = 1;
+}
+
+message VolumeMountSpec {
+  string name = 1;
+  string mount_path = 2;
+}
+
+message VolumeSpec {
+  string name = 1;
+  oneof kind {
+    EmptyDir empty_dir = 2;
+    ConfigData config_data = 3;
+  }
+
+  message EmptyDir {
+    uint64 size_mb = 1;
+  }
+  message ConfigData {
+    repeated ConfigDataFile files = 1;
+  }
+}
+
+message ConfigDataFile {
+  string path = 1;
+  string content = 2;
+  uint32 mode = 3;
+}
+
+message ContainerSpec {
+  string container_id = 1;
+  string image_ref = 2;
+  ContainerConfig config = 3;
+}
+
+message RegistryEntry {
+  string name = 1;
+  uint32 ip = 2;
+}
+
+message BufferPolicy {
+  uint32 buffer_frames = 1;
+  uint32 timeout_ms = 2;
+}
+
+message ResourceValues {
+  uint64 memory_mib = 1;
+  uint32 vcpus = 2;
+}
+
+message ResourceRequirements {
+  optional ResourceValues requests = 1;
+  optional ResourceValues limits = 2;
+}
+
+// --- Service / Fabric Types ---
+
+message ServicePolicy {
+  uint32 buffer_frames = 1;
+  uint32 timeout_ms = 2;
+  repeated PortConfig ports = 3;
+}
+
+message PortConfig {
+  uint32 port = 1;
+  uint32 target_port = 2;
+  optional ActivatorConfig activator = 3;
+}
+
+message ActivatorConfig {
+  oneof kind {
+    TcpActivator tcp = 1;
+    Http2Activator http2 = 2;
+  }
+
+  message TcpActivator {
+    uint32 max_flows = 1;
+  }
+  message Http2Activator {}
+}
+
+message ServiceBackend {
+  uint32 pod_ip = 1;
+}
+
+// --- Endpoint Types ---
+
+message EndpointPlacement {
+  uint64 worker_id = 1;
+}
+
+message EndpointPodBackend {
+  uint32 pod_ip = 1;
+  optional EndpointPlacement placement = 2;
+  bool ready = 3;
+}
+
+message EndpointSpec {
+  uint32 ip = 1;
+  oneof kind {
+    ServiceEndpoint service = 2;
+    PodEndpoint pod = 3;
+    WireGuardPeerEndpoint wireguard_peer = 4;
+  }
+
+  message ServiceEndpoint {
+    string service_id = 1;
+    ServicePolicy policy = 2;
+    optional EndpointPodBackend backend = 3;
+  }
+  message PodEndpoint {
+    optional EndpointPlacement placement = 1;
+  }
+  message WireGuardPeerEndpoint {
+    optional EndpointPlacement placement = 1;
+  }
+}
+
+// --- Handshake Messages ---
+
+message WorkerHello {
+  string auth_token = 1;
+  WorkerCapabilities capabilities = 2;
+}
+
+message PoolInfo {
+  string pool_id = 1;
+  string path = 2;
+  uint64 capacity_bytes = 3;
+  uint64 available_bytes = 4;
+}
+
+message WorkerCapabilities {
+  bool has_kvm = 1;
+  bool has_containerd = 2;
+  repeated string available_adapters = 3;
+  uint32 max_pods = 4;
+  uint64 available_memory_mb = 5;
+  string public_endpoint = 6;
+  optional uint32 tunnel_listen_port = 7;
+  optional bytes tunnel_public_key = 8; // 32 bytes
+  repeated PoolInfo pools = 9;
+}
+
+message WorkerAccepted {
+  uint64 worker_id = 1;
+  repeated AdapterConfig adapters = 2;
+  bool tunnel_encrypted = 3;
+  repeated PoolInfo pools = 4;
+}
+
+message AdapterConfig {
+  oneof kind {
+    WireGuard wireguard = 1;
+    ReverseProxy reverse_proxy = 2;
+    OsRouting os_routing = 3;
+  }
+
+  message WireGuard {
+    uint32 listen_port = 1;
+  }
+  message ReverseProxy {
+    uint32 listen_port = 1;
+    bytes tls_cert = 2;
+    bytes tls_key = 3;
+  }
+  message OsRouting {
+    string interface = 1;
+  }
+}
+
+message WorkerReady {
+  optional uint32 tunnel_listen_port = 1;
+  optional bytes tunnel_public_key = 2; // 32 bytes
+  optional uint32 transfer_listen_port = 3;
+  optional uint32 wireguard_listen_port = 4;
+  optional bytes wireguard_public_key = 5; // 32 bytes
+}
+
+// --- Worker Peer / Tunnel Types ---
+
+message WorkerPeerInfo {
+  uint64 worker_id = 1;
+  string endpoint = 2;
+  bytes public_key = 3; // 32 bytes
+  repeated uint32 segments = 4;
+}
+
+message TunnelStatusEvt {
+  uint64 peer_worker_id = 1;
+  oneof status {
+    Connected connected = 2;
+    Disconnected disconnected = 3;
+    HandshakeFailed handshake_failed = 4;
+  }
+
+  message Connected {}
+  message Disconnected {
+    string error = 1;
+  }
+  message HandshakeFailed {
+    string error = 1;
+  }
+}
+
+// --- Commands (orchestrator -> worker) ---
+
+message WorkerCommand {
+  oneof command {
+    CreateNamespaceCmd create_namespace = 1;
+    DestroyNamespaceCmd destroy_namespace = 2;
+    RegistrySyncCmd registry_sync = 3;
+    RegistryUpdateCmd registry_update = 4;
+    LaunchPodCmd launch_pod = 5;
+    StopPodCmd stop_pod = 6;
+    AddWireGuardPeerCmd add_wireguard_peer = 7;
+    RemoveWireGuardPeerCmd remove_wireguard_peer = 8;
+    SuspendPodCmd suspend_pod = 9;
+    ResumePodCmd resume_pod = 10;
+    DeleteArtifactCmd delete_artifact = 11;
+    ShutdownCmd shutdown = 12;
+    WorkerRegistrySyncCmd worker_registry_sync = 13;
+    TransferArtifactCmd transfer_artifact = 14;
+    EndpointSyncCmd endpoint_sync = 15;
+    EndpointUpdateCmd endpoint_update = 16;
+  }
+}
+
+message CreateNamespaceCmd {
+  NamespaceId namespace_id = 1;
+  NetworkConfig network = 2;
+}
+
+message DestroyNamespaceCmd {
+  NamespaceId namespace_id = 1;
+}
+
+message RegistrySyncCmd {
+  NamespaceId namespace_id = 1;
+  repeated RegistryEntry entries = 2;
+}
+
+message RegistryUpdateCmd {
+  NamespaceId namespace_id = 1;
+  repeated RegistryEntry added = 2;
+  repeated string removed = 3;
+}
+
+message LaunchPodCmd {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  PodNetworkConfig network = 3;
+  repeated ContainerSpec containers = 4;
+  optional ResourceRequirements resources = 5;
+  repeated VolumeSpec volumes = 6;
+}
+
+message StopPodCmd {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  bool graceful = 3;
+}
+
+message AddWireGuardPeerCmd {
+  NamespaceId namespace_id = 1;
+  bytes peer_public_key = 2; // 32 bytes
+  uint32 peer_ip = 3;
+  optional bytes preshared_key = 4; // 32 bytes
+}
+
+message RemoveWireGuardPeerCmd {
+  bytes peer_public_key = 1; // 32 bytes
+}
+
+message SuspendPodCmd {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string artifact_id = 3;
+  string pool_id = 4;
+}
+
+message ResumePodCmd {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string artifact_id = 3;
+  PodNetworkConfig network = 4;
+  string pool_id = 5;
+}
+
+message DeleteArtifactCmd {
+  string artifact_id = 1;
+  string pool_id = 2;
+}
+
+message ShutdownCmd {}
+
+message WorkerRegistrySyncCmd {
+  repeated WorkerPeerInfo workers = 1;
+}
+
+message TransferArtifactCmd {
+  uint64 transfer_id = 1;
+  string source_artifact_id = 2;
+  string source_pool_id = 3;
+  string dest_artifact_id = 4;
+  string dest_pool_id = 5;
+  string dest_endpoint = 6; // empty string = local copy
+}
+
+message EndpointSyncCmd {
+  NamespaceId namespace_id = 1;
+  repeated EndpointSpec endpoints = 2;
+}
+
+message EndpointUpdateCmd {
+  NamespaceId namespace_id = 1;
+  repeated EndpointSpec upserted = 2;
+  repeated uint32 removed_ips = 3;
+}
+
+// --- Events (worker -> orchestrator) ---
+
+message WorkerEvent {
+  oneof event {
+    NamespaceCreatedEvt namespace_created = 1;
+    NamespaceFailedEvt namespace_failed = 2;
+    NamespaceDestroyedEvt namespace_destroyed = 3;
+    PodRunningEvt pod_running = 4;
+    PodExitedEvt pod_exited = 5;
+    PodFailedEvt pod_failed = 6;
+    ShuttingDownEvt shutting_down = 7;
+    PodLogStreamErrorEvt pod_log_stream_error = 8;
+    PodSuspendedEvt pod_suspended = 9;
+    PodSuspendFailedEvt pod_suspend_failed = 10;
+    TunnelStatusEvt tunnel_status = 11;
+    WorkerConditionEvt worker_condition = 12;
+    PoolCapacityUpdateEvt pool_capacity_update = 13;
+    ArtifactWriteStartedEvt artifact_write_started = 14;
+    ArtifactWriteCommittedEvt artifact_write_committed = 15;
+    ArtifactTransferReceivedEvt artifact_transfer_received = 16;
+    TransferFailedEvt transfer_failed = 17;
+    PressureUpdateEvt pressure_update = 18;
+    EndpointDemandTrafficEvt endpoint_demand_traffic = 19;
+    EndpointDemandActiveEvt endpoint_demand_active = 20;
+    PodMemoryConstrainedEvt pod_memory_constrained = 21;
+    PodMemoryConstraintClearedEvt pod_memory_constraint_cleared = 22;
+    PodOomKillEvt pod_oom_kill = 23;
+  }
+}
+
+message NamespaceCreatedEvt {
+  NamespaceId namespace_id = 1;
+}
+
+message NamespaceFailedEvt {
+  NamespaceId namespace_id = 1;
+  string error = 2;
+}
+
+message NamespaceDestroyedEvt {
+  NamespaceId namespace_id = 1;
+}
+
+message PodRunningEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+}
+
+message PodExitedEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  int32 exit_code = 3;
+}
+
+message PodFailedEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string error = 3;
+}
+
+message ShuttingDownEvt {}
+
+message PodLogStreamErrorEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string container_id = 3;
+  string phase = 4;
+  string error = 5;
+}
+
+message PodSuspendedEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string artifact_id = 3;
+  uint64 artifact_size_bytes = 4;
+  string pool_id = 5;
+}
+
+message PodSuspendFailedEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string error = 3;
+}
+
+message WorkerConditionEvt {
+  string key = 1;
+  bool active = 2;
+  string message = 3;
+}
+
+message PoolCapacityUpdateEvt {
+  repeated PoolInfo pools = 1;
+}
+
+message ArtifactWriteStartedEvt {
+  NamespaceId namespace_id = 1;
+  string artifact_id = 2;
+  string pool_id = 3;
+}
+
+message ArtifactWriteCommittedEvt {
+  NamespaceId namespace_id = 1;
+  string artifact_id = 2;
+  string pool_id = 3;
+  uint64 size_bytes = 4;
+}
+
+message ArtifactTransferReceivedEvt {
+  uint64 transfer_id = 1;
+  string source_artifact_id = 2;
+  string source_pool_id = 3;
+  string dest_artifact_id = 4;
+  string dest_pool_id = 5;
+  uint64 size_bytes = 6;
+}
+
+message TransferFailedEvt {
+  uint64 transfer_id = 1;
+  string source_artifact_id = 2;
+  string source_pool_id = 3;
+  string dest_artifact_id = 4;
+  string dest_pool_id = 5;
+  string error = 6;
+}
+
+message PsiMetrics {
+  double some_avg10 = 1;
+  double some_avg60 = 2;
+  double full_avg10 = 3;
+  double full_avg60 = 4;
+}
+
+message PressureUpdateEvt {
+  PsiMetrics cpu = 1;
+  PsiMetrics memory = 2;
+  PsiMetrics io = 3;
+}
+
+message EndpointDemandTrafficEvt {
+  NamespaceId namespace_id = 1;
+  uint32 ip = 2;
+  optional uint64 service_id = 3;
+}
+
+message EndpointDemandActiveEvt {
+  NamespaceId namespace_id = 1;
+  uint32 ip = 2;
+  optional uint64 service_id = 3;
+  bool active = 4;
+}
+
+enum MemoryConstraintReason {
+  MEMORY_CONSTRAINT_REASON_UNSPECIFIED = 0;
+  MEMORY_CONSTRAINT_REASON_BALLOON_EXHAUSTED = 1;
+  MEMORY_CONSTRAINT_REASON_DEFLATION_STALLED = 2;
+}
+
+message PodMemoryConstrainedEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  MemoryConstraintReason reason = 3;
+}
+
+message PodMemoryConstraintClearedEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+}
+
+message PodOomKillEvt {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  uint64 count = 3;
+}
+
+// --- Log Stream ---
+
+message LogStreamHeader {
+  NamespaceId namespace_id = 1;
+  uint64 pod_id = 2;
+  string container_id = 3;
+}

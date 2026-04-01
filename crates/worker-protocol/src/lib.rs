@@ -12,7 +12,7 @@
 //! - **TCP/TLS** — remote workers connecting to a central orchestrator (distributed mode)
 //!
 //! The transport is a **yamux**-multiplexed bidirectional connection. The primary control
-//! stream carries length-prefixed Cap'n Proto messages ([`WorkerCommand`] and
+//! stream carries length-prefixed Protocol Buffer messages ([`WorkerCommand`] and
 //! [`WorkerEvent`]). Additional yamux streams carry out-of-band data like container log
 //! output.
 //!
@@ -147,8 +147,8 @@ pub mod connection;
 pub mod convert;
 pub mod types;
 
-pub mod worker_protocol_capnp {
-    include!(concat!(env!("OUT_DIR"), "/worker_protocol_capnp.rs"));
+pub(crate) mod proto {
+    include!(concat!(env!("OUT_DIR"), "/distvirt.worker.v1.rs"));
 }
 
 pub use connection::{

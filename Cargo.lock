@@ -502,24 +502,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "capnp"
-version = "0.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982cc37b8f646c753f3b0a24d4d40ca2eac8a9c2b9ea6fff524be67ddc184cb"
-dependencies = [
- "embedded-io 0.7.1",
-]
-
-[[package]]
-name = "capnpc"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b52f7b8318dacc4f2fb117015d3b1e2f40301f791fe97735759b0fd606e51f07"
-dependencies = [
- "capnp",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1438,10 +1420,10 @@ name = "distvirt-worker-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "capnp",
- "capnpc",
  "futures-lite",
  "log",
+ "prost",
+ "prost-build",
  "serde",
  "tokio",
  "tokio-util",
@@ -1474,12 +1456,6 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
-
-[[package]]
-name = "embedded-io"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "encoding_rs"

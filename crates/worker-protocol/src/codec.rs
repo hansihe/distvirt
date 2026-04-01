@@ -1,27 +1,26 @@
-//! Length-prefixed Cap'n Proto codec for the control stream.
+//! Length-prefixed Protocol Buffer codec for the control stream.
 //!
 //! All messages on the yamux control stream are framed as
-//! `[u32 LE length][capnp message bytes]`. Log streams use the same framing
+//! `[u32 LE length][protobuf message bytes]`. Log streams use the same framing
 //! for the initial [`LogStreamHeader`](crate::LogStreamHeader), then raw bytes.
 
 use anyhow::{Context, bail};
-use capnp::message::{self, ReaderOptions};
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
+use prost::Message;
 
 use crate::convert;
 use crate::types::*;
-use crate::worker_protocol_capnp as schema;
+use crate::proto;
 
 /// Maximum message size: 16 MiB.
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
-/// Send a capnp message with length-prefix framing.
-async fn send_capnp_msg<W: AsyncWriteExt + Unpin>(
+/// Send a protobuf message with length-prefix framing.
+async fn send_proto_msg<W: AsyncWriteExt + Unpin, M: Message>(
     writer: &mut W,
-    msg: &message::Builder<message::HeapAllocator>,
+    msg: &M,
 ) -> anyhow::Result<()> {
-    let mut payload = Vec::new();
-    capnp::serialize::write_message(&mut payload, msg).context("serialize capnp message")?;
+    let payload = msg.encode_to_vec();
     let len = (payload.len() as u32).to_le_bytes();
     writer.write_all(&len).await.context("write length")?;
     writer.write_all(&payload).await.context("write payload")?;
@@ -29,10 +28,10 @@ async fn send_capnp_msg<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Receive a capnp message with length-prefix framing.
-async fn recv_capnp_msg<R: AsyncReadExt + Unpin>(
+/// Receive a protobuf message with length-prefix framing.
+async fn recv_proto_msg<R: AsyncReadExt + Unpin, M: Message + Default>(
     reader: &mut R,
-) -> anyhow::Result<message::Reader<capnp::serialize::OwnedSegments>> {
+) -> anyhow::Result<M> {
     let mut len_buf = [0u8; 4];
     reader
         .read_exact(&mut len_buf)
@@ -48,153 +47,117 @@ async fn recv_capnp_msg<R: AsyncReadExt + Unpin>(
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.context("read payload")?;
-    let msg = capnp::serialize::read_message(&mut buf.as_slice(), ReaderOptions::new())
-        .context("deserialize capnp message")?;
-    Ok(msg)
+    M::decode(buf.as_slice()).context("decode protobuf message")
 }
 
 // --- WorkerCommand ---
 
-/// Send a [`WorkerCommand`] as a length-prefixed capnp message.
+/// Send a [`WorkerCommand`] as a length-prefixed protobuf message.
 pub async fn send_worker_command<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     cmd: &WorkerCommand,
 ) -> anyhow::Result<()> {
-    let mut msg = message::Builder::new_default();
-    convert::write_worker_command(msg.init_root::<schema::worker_command::Builder<'_>>(), cmd);
-    send_capnp_msg(writer, &msg).await
+    let proto_msg = convert::worker_command_to_proto(cmd);
+    send_proto_msg(writer, &proto_msg).await
 }
 
-/// Receive a [`WorkerCommand`] from a length-prefixed capnp message.
+/// Receive a [`WorkerCommand`] from a length-prefixed protobuf message.
 pub async fn recv_worker_command<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<WorkerCommand> {
-    let msg = recv_capnp_msg(reader).await?;
-    let root = msg
-        .get_root::<schema::worker_command::Reader<'_>>()
-        .context("read WorkerCommand root")?;
-    convert::read_worker_command(root).context("decode WorkerCommand")
+    let proto_msg: proto::WorkerCommand = recv_proto_msg(reader).await?;
+    convert::worker_command_from_proto(proto_msg).context("decode WorkerCommand")
 }
 
 // --- WorkerEvent ---
 
-/// Send a [`WorkerEvent`] as a length-prefixed capnp message.
+/// Send a [`WorkerEvent`] as a length-prefixed protobuf message.
 pub async fn send_worker_event<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     event: &WorkerEvent,
 ) -> anyhow::Result<()> {
-    let mut msg = message::Builder::new_default();
-    convert::write_worker_event(msg.init_root::<schema::worker_event::Builder<'_>>(), event);
-    send_capnp_msg(writer, &msg).await
+    let proto_msg = convert::worker_event_to_proto(event);
+    send_proto_msg(writer, &proto_msg).await
 }
 
-/// Receive a [`WorkerEvent`] from a length-prefixed capnp message.
+/// Receive a [`WorkerEvent`] from a length-prefixed protobuf message.
 pub async fn recv_worker_event<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<WorkerEvent> {
-    let msg = recv_capnp_msg(reader).await?;
-    let root = msg
-        .get_root::<schema::worker_event::Reader<'_>>()
-        .context("read WorkerEvent root")?;
-    convert::read_worker_event(root).context("decode WorkerEvent")
+    let proto_msg: proto::WorkerEvent = recv_proto_msg(reader).await?;
+    convert::worker_event_from_proto(proto_msg).context("decode WorkerEvent")
 }
 
 // --- LogStreamHeader ---
 
-/// Send a [`LogStreamHeader`] as a length-prefixed capnp message.
+/// Send a [`LogStreamHeader`] as a length-prefixed protobuf message.
 pub async fn send_log_header<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     header: &LogStreamHeader,
 ) -> anyhow::Result<()> {
-    let mut msg = message::Builder::new_default();
-    convert::write_log_stream_header(
-        &mut msg.init_root::<schema::log_stream_header::Builder<'_>>(),
-        header,
-    );
-    send_capnp_msg(writer, &msg).await
+    let proto_msg = convert::log_stream_header_to_proto(header);
+    send_proto_msg(writer, &proto_msg).await
 }
 
-/// Receive a [`LogStreamHeader`] from a length-prefixed capnp message.
+/// Receive a [`LogStreamHeader`] from a length-prefixed protobuf message.
 pub async fn recv_log_header<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<LogStreamHeader> {
-    let msg = recv_capnp_msg(reader).await?;
-    let root = msg
-        .get_root::<schema::log_stream_header::Reader<'_>>()
-        .context("read LogStreamHeader root")?;
-    convert::read_log_stream_header(root).context("decode LogStreamHeader")
+    let proto_msg: proto::LogStreamHeader = recv_proto_msg(reader).await?;
+    convert::log_stream_header_from_proto(proto_msg).context("decode LogStreamHeader")
 }
 
 // --- Handshake Messages ---
 
-/// Send a [`WorkerHello`] as a length-prefixed capnp message.
+/// Send a [`WorkerHello`] as a length-prefixed protobuf message.
 pub async fn send_worker_hello<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     hello: &WorkerHello,
 ) -> anyhow::Result<()> {
-    let mut msg = message::Builder::new_default();
-    convert::write_worker_hello(
-        &mut msg.init_root::<schema::worker_hello::Builder<'_>>(),
-        hello,
-    );
-    send_capnp_msg(writer, &msg).await
+    let proto_msg = convert::worker_hello_to_proto(hello);
+    send_proto_msg(writer, &proto_msg).await
 }
 
-/// Receive a [`WorkerHello`] from a length-prefixed capnp message.
+/// Receive a [`WorkerHello`] from a length-prefixed protobuf message.
 pub async fn recv_worker_hello<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<WorkerHello> {
-    let msg = recv_capnp_msg(reader).await?;
-    let root = msg
-        .get_root::<schema::worker_hello::Reader<'_>>()
-        .context("read WorkerHello root")?;
-    convert::read_worker_hello(root).context("decode WorkerHello")
+    let proto_msg: proto::WorkerHello = recv_proto_msg(reader).await?;
+    convert::worker_hello_from_proto(proto_msg).context("decode WorkerHello")
 }
 
-/// Send a [`WorkerAccepted`] as a length-prefixed capnp message.
+/// Send a [`WorkerAccepted`] as a length-prefixed protobuf message.
 pub async fn send_worker_accepted<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     accepted: &WorkerAccepted,
 ) -> anyhow::Result<()> {
-    let mut msg = message::Builder::new_default();
-    convert::write_worker_accepted(
-        &mut msg.init_root::<schema::worker_accepted::Builder<'_>>(),
-        accepted,
-    );
-    send_capnp_msg(writer, &msg).await
+    let proto_msg = convert::worker_accepted_to_proto(accepted);
+    send_proto_msg(writer, &proto_msg).await
 }
 
-/// Receive a [`WorkerAccepted`] from a length-prefixed capnp message.
+/// Receive a [`WorkerAccepted`] from a length-prefixed protobuf message.
 pub async fn recv_worker_accepted<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<WorkerAccepted> {
-    let msg = recv_capnp_msg(reader).await?;
-    let root = msg
-        .get_root::<schema::worker_accepted::Reader<'_>>()
-        .context("read WorkerAccepted root")?;
-    convert::read_worker_accepted(root).context("decode WorkerAccepted")
+    let proto_msg: proto::WorkerAccepted = recv_proto_msg(reader).await?;
+    convert::worker_accepted_from_proto(proto_msg).context("decode WorkerAccepted")
 }
 
-/// Send a [`WorkerReady`] as a length-prefixed capnp message.
+/// Send a [`WorkerReady`] as a length-prefixed protobuf message.
 pub async fn send_worker_ready<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     ready: &WorkerReady,
 ) -> anyhow::Result<()> {
-    let mut msg = message::Builder::new_default();
-    convert::write_worker_ready(
-        &mut msg.init_root::<schema::worker_ready::Builder<'_>>(),
-        ready,
-    );
-    send_capnp_msg(writer, &msg).await
+    let proto_msg = convert::worker_ready_to_proto(ready);
+    send_proto_msg(writer, &proto_msg).await
 }
 
-/// Receive a [`WorkerReady`] from a length-prefixed capnp message.
+/// Receive a [`WorkerReady`] from a length-prefixed protobuf message.
 pub async fn recv_worker_ready<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> anyhow::Result<WorkerReady> {
-    let msg = recv_capnp_msg(reader).await?;
-    let root = msg.get_root::<schema::worker_ready::Reader<'_>>()?;
-    Ok(convert::read_worker_ready(root))
+    let proto_msg: proto::WorkerReady = recv_proto_msg(reader).await?;
+    Ok(convert::worker_ready_from_proto(proto_msg))
 }
 
 // --- Log Data Frames ---
