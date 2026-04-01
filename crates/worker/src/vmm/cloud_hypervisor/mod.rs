@@ -390,6 +390,11 @@ impl VmBuilder for CloudHypervisorBuilder {
             log::info!("cloud-hypervisor: disk config: {}", disks);
         }
 
+        // Drain stdout/stderr before making API calls to avoid pipe deadlock.
+        let (exit_rx, exit_monitor) = spawn_exit_monitor(&spawned.child);
+        let serial_task = spawned.serial_stdout.map(spawn_serial_task);
+        let stderr_task = spawned.stderr.map(spawn_stderr_task);
+
         // --- Create and boot VM ---
         let api = ApiClient::new(spawned.api_socket.clone());
         api.request("PUT", "/api/v1/vm.create", Some(&built.config_json))
@@ -404,10 +409,6 @@ impl VmBuilder for CloudHypervisorBuilder {
             (Some(tap), Some(net)) => Some(tap_to_fabric_port(tap, net.guest_mac)?),
             _ => None,
         };
-
-        let (exit_rx, exit_monitor) = spawn_exit_monitor(&spawned.child);
-        let serial_task = spawned.serial_stdout.map(spawn_serial_task);
-        let stderr_task = spawned.stderr.map(spawn_stderr_task);
 
         // --- Build snapshot metadata ---
         let volume_drives: Vec<SnapshotVolumeDrive> = additional_drives
@@ -606,6 +607,14 @@ impl Vmm for CloudHypervisor {
         )
         .await?;
 
+        // Drain stdout/stderr before making API calls to avoid pipe deadlock:
+        // CH can write enough output during vm.restore to fill the OS pipe
+        // buffer, blocking CH until someone reads — while we block waiting for
+        // the API response.
+        let (exit_rx, exit_monitor) = spawn_exit_monitor(&spawned.child);
+        let serial_task = spawned.serial_stdout.map(spawn_serial_task);
+        let stderr_task = spawned.stderr.map(spawn_stderr_task);
+
         let api = ApiClient::new(spawned.api_socket.clone());
         let source_url = format!("file://{}", tmpdir.path().display());
         api.request(
@@ -623,10 +632,6 @@ impl Vmm for CloudHypervisor {
             (Some(tap), Some(net_cfg)) => Some(tap_to_fabric_port(tap, net_cfg.guest_mac)?),
             _ => None,
         };
-
-        let (exit_rx, exit_monitor) = spawn_exit_monitor(&spawned.child);
-        let serial_task = spawned.serial_stdout.map(spawn_serial_task);
-        let stderr_task = spawned.stderr.map(spawn_stderr_task);
 
         log::info!(
             "VM restored from snapshot at {}",
